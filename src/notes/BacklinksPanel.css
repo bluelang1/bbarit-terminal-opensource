@@ -1,0 +1,92 @@
+/* BacklinksPanel Styles */
+
+.backlinks-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bp-bg);
+  color: var(--bp-text);
+}
+
+.backlinks-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--bp-text) 15%, transparent);
+  flex-shrink: 0;
+}
+
+.backlinks-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.backlinks-panel-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bp-accent) 20%, transparent);
+  color: var(--bp-accent);
+}
+
+.backlinks-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.backlinks-panel-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+.backlinks-panel-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  margin: 2px 0;
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+  transition: background 0.05s;
+}
+
+.backlinks-panel-item:hover {
+  background: color-mix(in srgb, var(--bp-accent) 10%, transparent);
+}
+
+.backlinks-panel-item-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  opacity: 0.6;
+}
+
+.backlinks-panel-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.backlinks-panel-item-title {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backlinks-panel-item-excerpt {
+  font-size: 11px;
+  opacity: 0.6;
+  line-height: 1.4;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

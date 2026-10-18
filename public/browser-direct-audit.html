@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BBARIT WebView Direct Audit</title>
+    <style>
+      body { font: 16px system-ui, sans-serif; margin: 24px; }
+      #spacer { height: 1800px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <input id="q" aria-label="query">
+      <button id="btn" type="button">Click</button>
+      <textarea id="ta"></textarea>
+      <select id="sel"><option value="a">A</option><option value="b">B</option></select>
+      <input id="range" type="range" min="0" max="100" value="0">
+      <input id="cb" type="checkbox">
+      <div id="editable" contenteditable="true"></div>
+      <div id="spacer"></div>
+    </main>
+    <script>
+      const marker = new URLSearchParams(location.search).get('marker') || 'bbarit-webview-direct';
+      window.__audit = { marker, clicks: 0, events: [] };
+      const log = (name) => window.__audit.events.push(name);
+      document.getElementById('btn').addEventListener('click', () => {
+        window.__audit.clicks += 1;
+        log('button-click');
+      });
+      document.getElementById('q').addEventListener('input', () => log('input-q'));
+      document.getElementById('ta').addEventListener('input', () => log('input-ta'));
+      document.getElementById('sel').addEventListener('change', () => log('select-change'));
+      document.getElementById('range').addEventListener('input', () => log('range-input'));
+      document.getElementById('cb').addEventListener('change', () => log('checkbox-change'));
+    </script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+# Windows: force the static C runtime (/MT) for all crates.
+#
+# Why: esaxx-rs (a C++ build dep of `tokenizers`) hardcodes `cc::Build::static_crt(true)`,
+# so it is always compiled with /MT (static CRT). Other cc-built native deps such as
+# surrealdb-librocksdb-sys (rocksdb), libsqlite3-sys, etc. default to /MD (dynamic CRT).
+# Linking /MT and /MD objects together fails with LNK2038 'RuntimeLibrary' mismatch /
+# LNK1319. Forcing +crt-static makes every C/C++ dep and the Rust std use the static
+# release CRT, so they all agree. Bonus: the shipped .exe no longer needs the VC++
+# redistributable installed on the user's machine.
+#
+# Scoped to the Windows MSVC target only — macOS builds are unaffected.
+# 추가 플래그 (2026-07-06, cef-embed 이식):
+# - /pdbpagesize:8192 — cef 래퍼가 붙으면 octo_ui.pdb가 4GB 한계(LNK1318)를 넘는다.
+# - debuginfo=1(라인테이블) — PDB·타겟 용량 절감, 백트레이스 라인은 유지.
+# 주의: RUSTFLAGS 환경변수를 세팅하면 이 파일 전체가 무시된다(cargo 규칙) —
+# crt-static까지 날아가 LNK2038 CRT 충돌이 재발한다. 빌드 스크립트에서 RUSTFLAGS 금지.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/pdbpagesize:8192",
+    "-C", "debuginfo=1",
+]

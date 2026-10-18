@@ -1,0 +1,35 @@
+{
+  "skills": [
+    {
+      "id": "nextjs-landing-hero-blueprint",
+      "name": "Next.js Landing Hero Blueprint",
+      "description": "Create a production-ready hero section with CTA, proof points, and responsive layout.",
+      "emoji": "🚀",
+      "command": "Design and implement a responsive Next.js hero section with strong CTA and conversion-focused copy.",
+      "cliType": "codex",
+      "category": "frontend",
+      "tags": [
+        "nextjs",
+        "landing",
+        "ui",
+        "conversion"
+      ],
+      "builtIn": false
+    },
+    {
+      "id": "motion-stagger-reveal",
+      "name": "Motion Stagger Reveal",
+      "description": "Add staged reveal animation to cards using lightweight JS timing.",
+      "emoji": "🎬",
+      "command": "Implement staggered reveal animations for card grids with performant requestAnimationFrame timing.",
+      "cliType": "claude",
+      "category": "frontend",
+      "tags": [
+        "animation",
+        "performance",
+        "landing"
+      ],
+      "builtIn": false
+    }
+  ]
+}

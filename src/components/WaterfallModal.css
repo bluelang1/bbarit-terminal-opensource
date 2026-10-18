@@ -1,0 +1,274 @@
+/* WaterfallModal.css — Waterfall Workflow start modal */
+
+/* Toolbar button highlight */
+.waterfall-toolbar-btn {
+  color: #4fc3f7 !important;
+  position: relative;
+}
+.waterfall-toolbar-btn::after {
+  content: '';
+  position: absolute;
+  bottom: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #4fc3f7;
+}
+.waterfall-toolbar-btn.active {
+  color: #fff !important;
+  background: rgba(79, 195, 247, 0.2) !important;
+}
+
+.waterfall-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+}
+
+.waterfall-modal {
+  width: 480px;
+  max-width: 92vw;
+  max-height: 85vh;
+  border-radius: var(--brutal-radius);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.waterfall-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.waterfall-modal-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.waterfall-modal-body {
+  padding: 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.waterfall-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.waterfall-field label {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.7;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.waterfall-field textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 10px 12px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.05s;
+}
+
+.waterfall-field textarea:focus {
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.waterfall-field textarea::placeholder {
+  opacity: 0.35;
+}
+
+.waterfall-cli-selector {
+  display: flex;
+  gap: 8px;
+}
+
+.waterfall-cli-btn {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.05s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.waterfall-cli-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.waterfall-cli-btn.selected {
+  border-color: rgba(79, 195, 247, 0.5);
+  background: rgba(79, 195, 247, 0.12);
+}
+
+/* Phase flow preview */
+.waterfall-flow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  border-radius: var(--brutal-radius);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+}
+
+.waterfall-flow-step {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: var(--brutal-radius);
+  background: rgba(255, 255, 255, 0.06);
+  white-space: nowrap;
+}
+
+.waterfall-flow-arrow {
+  opacity: 0.3;
+  font-size: 14px;
+}
+
+/* Footer */
+.waterfall-modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.waterfall-btn-cancel {
+  padding: 8px 16px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.waterfall-btn-cancel:hover {
+  opacity: 1;
+}
+
+.waterfall-btn-start {
+  padding: 8px 20px;
+  border-radius: var(--brutal-radius);
+  border: none;
+  background: #4fc3f7;
+  color: #000;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.05s;
+}
+
+.waterfall-btn-start:hover {
+  opacity: 0.85;
+}
+
+.waterfall-btn-start:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Phase status bar (shown in terminal header during workflow) */
+.waterfall-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 11px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.waterfall-status-phase {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--brutal-radius);
+  font-weight: 600;
+}
+
+.waterfall-status-phase.active {
+  background: rgba(79, 195, 247, 0.15);
+}
+
+.waterfall-status-phase.done {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+
+.waterfall-status-phase.pending {
+  opacity: 0.3;
+}
+
+.waterfall-next-btn {
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid rgba(79, 195, 247, 0.4);
+  background: rgba(79, 195, 247, 0.1);
+  color: #4fc3f7;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.05s;
+}
+
+.waterfall-next-btn:hover {
+  background: rgba(79, 195, 247, 0.2);
+}
+
+/* Template list items */
+.waterfall-template-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--brutal-radius);
+  font-size: 13px;
+  transition: background 0.04s;
+}
+
+.waterfall-template-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}

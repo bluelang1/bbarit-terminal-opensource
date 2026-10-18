@@ -1,0 +1,104 @@
+/* SimilarNotesPanel Styles */
+
+.similar-notes-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--snp-bg);
+  color: var(--snp-text);
+}
+
+.similar-notes-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--snp-text) 15%, transparent);
+  flex-shrink: 0;
+}
+
+.similar-notes-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.similar-notes-panel-count {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--snp-accent) 20%, transparent);
+  color: var(--snp-accent);
+}
+
+.similar-notes-panel-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.similar-notes-panel-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+.similar-notes-panel-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  margin: 2px 0;
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+  transition: background 0.05s;
+}
+
+.similar-notes-panel-item:hover {
+  background: color-mix(in srgb, var(--snp-accent) 10%, transparent);
+}
+
+.similar-notes-panel-item-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  opacity: 0.6;
+}
+
+.similar-notes-panel-item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.similar-notes-panel-item-title {
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.similar-notes-panel-item-excerpt {
+  font-size: 11px;
+  opacity: 0.6;
+  line-height: 1.4;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.similar-notes-panel-item-score {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--snp-accent) 15%, transparent);
+  color: var(--snp-accent);
+  margin-top: 2px;
+  line-height: 1.4;
+}

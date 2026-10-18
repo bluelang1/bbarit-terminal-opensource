@@ -1,0 +1,1289 @@
+.scrum-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1310;
+  background: color-mix(in srgb, var(--bg-color) 55%, #000000 45%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: scrum-overlay-in 0.06s ease-out;
+}
+
+@keyframes scrum-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.scrum-overlay.closing {
+  opacity: 0;
+  transition: opacity 0.05s ease;
+}
+
+.scrum-modal {
+  width: min(1280px, calc(100vw - 32px));
+  max-height: min(92vh, 960px);
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 93%, #000000 7%);
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.44);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.scrum-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+}
+
+.scrum-header-icon {
+  color: color-mix(in srgb, var(--accent-color) 76%, #ffffff 24%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.scrum-header-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-color);
+}
+
+.scrum-header-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--text-color) 86%, var(--bg-color) 14%);
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+}
+
+.scrum-header-close:hover {
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--text-color) 10%, transparent);
+}
+
+.scrum-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr;
+  gap: 14px;
+  flex: 1;
+  padding: 14px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scrum-left,
+.scrum-right {
+  border: 1px solid color-mix(in srgb, var(--text-color) 8%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 12px;
+  background: color-mix(in srgb, var(--bg-color) 82%, #000000 18%);
+}
+
+.scrum-left {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: static;
+  max-height: none;
+  overflow: auto;
+  padding: 14px;
+  padding-right: 6px;
+}
+
+.scrum-right {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  padding-right: 6px;
+}
+
+.scrum-stage-flow {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg-color) 70%, #000000 30%);
+}
+
+.scrum-stats-board {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 8px;
+  background: color-mix(in srgb, var(--bg-color) 72%, #000000 28%);
+}
+
+.scrum-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scrum-stat-card {
+  border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 80%, #000000 20%);
+  padding: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 64px;
+}
+
+.scrum-stat-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+}
+
+.scrum-stat-value {
+  font-size: 14px;
+  font-weight: 800;
+  color: color-mix(in srgb, var(--text-color) 95%, transparent);
+  line-height: 1.1;
+}
+
+.scrum-stat-value.success {
+  color: #86efac;
+}
+
+.scrum-stat-value.error {
+  color: #fda4af;
+}
+
+.scrum-stat-meta {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 64%, transparent);
+  line-height: 1.3;
+}
+
+.scrum-stats-owner-row {
+  margin-top: 7px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.scrum-stats-owner-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 74%, transparent);
+  margin-right: 4px;
+}
+
+.scrum-stats-owner-chip {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 14%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 82%, #000000 18%);
+  color: color-mix(in srgb, var(--text-color) 88%, transparent);
+  padding: 2px 7px;
+}
+
+.scrum-stats-owner-chip.joint {
+  border-color: color-mix(in srgb, #38bdf8 35%, transparent);
+  background: color-mix(in srgb, #38bdf8 14%, transparent);
+}
+
+.scrum-stats-owner-chip.codex {
+  border-color: color-mix(in srgb, #74b9d4 35%, transparent);
+  background: color-mix(in srgb, #74b9d4 14%, transparent);
+}
+
+.scrum-stats-owner-chip.claude {
+  border-color: color-mix(in srgb, #d4a574 35%, transparent);
+  background: color-mix(in srgb, #d4a574 14%, transparent);
+}
+
+.scrum-stats-owner-chip.kimi {
+  border-color: color-mix(in srgb, #7dd3fc 35%, transparent);
+  background: color-mix(in srgb, #7dd3fc 14%, transparent);
+}
+
+.scrum-stats-owner-chip.ollama {
+  border-color: color-mix(in srgb, #34d399 35%, transparent);
+  background: color-mix(in srgb, #34d399 14%, transparent);
+}
+
+.scrum-live-board {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-radius: var(--brutal-radius);
+  padding: 9px;
+  background: linear-gradient(
+    145deg,
+    color-mix(in srgb, var(--accent-color) 16%, var(--bg-color) 84%),
+    color-mix(in srgb, var(--bg-color) 68%, #000000 32%)
+  );
+  border: 1px solid color-mix(in srgb, var(--accent-color) 30%, transparent);
+}
+
+.scrum-live-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.scrum-live-badge {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--brutal-radius);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+}
+
+.scrum-live-badge.idle {
+  background: color-mix(in srgb, var(--text-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--text-color) 30%, transparent);
+}
+
+.scrum-live-badge.ready {
+  background: color-mix(in srgb, #22c55e 16%, transparent);
+  border-color: color-mix(in srgb, #22c55e 40%, transparent);
+  color: #bbf7d0;
+}
+
+.scrum-live-badge.generating {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  border-color: color-mix(in srgb, #f59e0b 44%, transparent);
+  color: #fde68a;
+}
+
+.scrum-live-badge.running {
+  background: color-mix(in srgb, #38bdf8 16%, transparent);
+  border-color: color-mix(in srgb, #38bdf8 40%, transparent);
+  color: #bae6fd;
+}
+
+.scrum-live-badge.error {
+  background: color-mix(in srgb, #ef4444 16%, transparent);
+  border-color: color-mix(in srgb, #ef4444 40%, transparent);
+  color: #fecaca;
+}
+
+.scrum-live-message {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 88%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 72%, #000000 28%);
+  padding: 6px 7px;
+}
+
+.scrum-live-track {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.scrum-live-node {
+  min-width: 120px;
+  max-width: 150px;
+  border-radius: var(--brutal-radius);
+  padding: 5px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 76%, #000000 24%);
+}
+
+.scrum-live-node.done {
+  border-color: color-mix(in srgb, #22c55e 42%, transparent);
+  background: color-mix(in srgb, #22c55e 15%, transparent);
+}
+
+.scrum-live-node.active {
+  border-color: color-mix(in srgb, var(--accent-color) 60%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 22%, transparent);
+}
+
+.scrum-live-node-id {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+}
+
+.scrum-live-node-title {
+  font-size: 10px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--text-color) 90%, transparent);
+  line-height: 1.25;
+}
+
+.scrum-live-current {
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 75%, #000000 25%);
+  padding: 7px;
+}
+
+.scrum-live-current-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 76%, transparent);
+  margin-bottom: 3px;
+}
+
+.scrum-live-current-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 90%, transparent);
+}
+
+.scrum-stage-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 92%, transparent);
+  margin-bottom: 6px;
+}
+
+.scrum-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.scrum-stage-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.scrum-stage-id {
+  min-width: 24px;
+  height: 18px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+  color: color-mix(in srgb, var(--text-color) 92%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 18px;
+}
+
+.scrum-stage-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.scrum-stage-head {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-color);
+}
+
+.scrum-stage-detail {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 82%, transparent);
+}
+
+.scrum-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--text-color) 96%, transparent);
+}
+
+.scrum-project-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.scrum-project-btn {
+  border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 74%, #000000 26%);
+  color: color-mix(in srgb, var(--text-color) 92%, transparent);
+  text-align: left;
+  padding: 8px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.scrum-project-btn.active {
+  border-color: color-mix(in srgb, var(--accent-color) 66%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 18%, var(--bg-color) 82%);
+}
+
+.scrum-project-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scrum-project-summary {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 74%, transparent);
+  line-height: 1.3;
+  min-height: 24px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.scrum-project-status {
+  align-self: flex-start;
+  border-radius: var(--brutal-radius);
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid transparent;
+}
+
+.scrum-project-status.idle {
+  background: color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-color: color-mix(in srgb, var(--text-color) 24%, transparent);
+}
+
+.scrum-project-status.ready {
+  background: color-mix(in srgb, #22c55e 18%, transparent);
+  border-color: color-mix(in srgb, #22c55e 42%, transparent);
+  color: #bbf7d0;
+}
+
+.scrum-project-status.running {
+  background: color-mix(in srgb, #38bdf8 18%, transparent);
+  border-color: color-mix(in srgb, #38bdf8 44%, transparent);
+  color: #bae6fd;
+}
+
+.scrum-project-status.generating {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  border-color: color-mix(in srgb, #f59e0b 46%, transparent);
+  color: #fde68a;
+}
+
+.scrum-project-status.error {
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  border-color: color-mix(in srgb, #ef4444 44%, transparent);
+  color: #fecaca;
+}
+
+.scrum-select,
+.scrum-input,
+.scrum-textarea {
+  width: 100%;
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 24%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 86%, var(--text-color) 14%);
+  color: color-mix(in srgb, var(--text-color) 96%, var(--bg-color) 4%);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.scrum-select {
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 30px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23cfcfcf' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+
+.scrum-select option {
+  background: color-mix(in srgb, var(--bg-color) 90%, #000 10%);
+  color: color-mix(in srgb, var(--text-color) 96%, var(--bg-color) 4%);
+}
+
+.scrum-select:focus,
+.scrum-input:focus,
+.scrum-textarea:focus,
+.scrum-range:focus {
+  border-color: color-mix(in srgb, var(--accent-color) 72%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-color) 34%, transparent);
+}
+
+.scrum-textarea {
+  resize: vertical;
+  min-height: 58px;
+}
+
+.scrum-textarea::placeholder {
+  color: color-mix(in srgb, var(--text-color) 66%, var(--bg-color) 34%);
+  opacity: 1;
+}
+
+.scrum-ai-strict {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 84%, transparent);
+}
+
+.scrum-ai-strict input {
+  width: 16px;
+  height: 16px;
+  accent-color: color-mix(in srgb, var(--accent-color) 85%, white 15%);
+}
+
+.scrum-mode-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scrum-role-block {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 72%, #000000 28%);
+  padding: 8px;
+}
+
+.scrum-role-line {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.scrum-role-title {
+  font-size: 10px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+}
+
+.scrum-role-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.scrum-worktype-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scrum-worktype-btn {
+  border: 1px solid color-mix(in srgb, var(--text-color) 14%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 68%, #000000 32%);
+  color: color-mix(in srgb, var(--text-color) 86%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 5px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scrum-worktype-btn.active {
+  border-color: color-mix(in srgb, var(--accent-color) 66%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+  color: var(--text-color);
+}
+
+.scrum-worktype-selected {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--brutal-radius);
+  padding: 1px 6px;
+  background: color-mix(in srgb, #22c55e 24%, transparent);
+  border: 1px solid color-mix(in srgb, #22c55e 44%, transparent);
+  color: #bbf7d0;
+}
+
+.scrum-worktype-help {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 65%, transparent);
+  line-height: 1.35;
+  margin-top: -2px;
+}
+
+.scrum-worktype-summary {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 84%, transparent);
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  background: color-mix(in srgb, var(--bg-color) 74%, #000000 26%);
+  padding: 6px 8px;
+}
+
+.scrum-linear-block {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 74%, #000000 26%);
+  padding: 7px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scrum-linear-open {
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 50%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  color: color-mix(in srgb, var(--text-color) 94%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.scrum-linear-inline-link {
+  border: none;
+  background: transparent;
+  color: color-mix(in srgb, var(--accent-color) 78%, var(--text-color) 22%);
+  text-decoration: underline;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.scrum-mode-btn {
+  border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 65%, #000000 35%);
+  color: color-mix(in srgb, var(--text-color) 85%, transparent);
+  font-size: 11px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  height: 30px;
+}
+
+.scrum-mode-btn.active {
+  border-color: color-mix(in srgb, var(--accent-color) 68%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+  color: var(--text-color);
+}
+
+.scrum-range {
+  width: 100%;
+}
+
+.scrum-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.scrum-generate-btn,
+.scrum-launch-btn {
+  flex: 1;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--text-color) 14%, transparent);
+  border-radius: var(--brutal-radius);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.scrum-stop-btn {
+  flex: 1;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, #ef4444 46%, transparent);
+  border-radius: var(--brutal-radius);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  background: color-mix(in srgb, #ef4444 18%, transparent);
+  color: #fecaca;
+}
+
+.scrum-stop-btn:hover {
+  background: color-mix(in srgb, #ef4444 26%, transparent);
+}
+
+.scrum-generate-btn {
+  background: color-mix(in srgb, var(--bg-color) 60%, #000000 40%);
+  color: var(--text-color);
+}
+
+.scrum-launch-btn {
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-color) 80%, white 20%),
+    color-mix(in srgb, var(--accent-color) 63%, black 37%)
+  );
+  color: #ffffff;
+}
+
+.scrum-generate-btn:disabled,
+.scrum-launch-btn:disabled {
+  opacity: 1;
+  color: color-mix(in srgb, var(--text-color) 72%, var(--bg-color) 28%);
+  background: color-mix(in srgb, var(--text-color) 16%, var(--bg-color) 84%);
+  border-color: color-mix(in srgb, var(--text-color) 22%, var(--bg-color) 78%);
+  cursor: default;
+}
+
+.scrum-launch-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #fca5a5;
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+  border: 1px solid color-mix(in srgb, #ef4444 35%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 6px 8px;
+}
+
+.scrum-launch-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scrum-recovery-btn {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 56%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 20%, var(--bg-color) 80%);
+  color: color-mix(in srgb, var(--text-color) 94%, white 6%);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.scrum-recovery-btn:hover {
+  background: color-mix(in srgb, var(--accent-color) 30%, var(--bg-color) 70%);
+}
+
+.scrum-empty {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--text-color) 80%, transparent);
+  line-height: 1.45;
+  padding: 8px;
+}
+
+.scrum-plan-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--text-color) 88%, transparent);
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 65%, #000000 35%);
+}
+
+.scrum-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  max-height: 380px;
+  padding-right: 2px;
+}
+
+.scrum-task-card {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--bg-color) 73%, #000000 27%);
+}
+
+.scrum-task-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.scrum-task-index {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 68%, transparent);
+}
+
+.scrum-owner {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--brutal-radius);
+  padding: 3px 8px;
+  border: 1px solid transparent;
+}
+
+.scrum-owner.joint {
+  background: color-mix(in srgb, #38bdf8 16%, transparent);
+  border-color: color-mix(in srgb, #38bdf8 40%, transparent);
+}
+
+.scrum-owner.codex {
+  background: color-mix(in srgb, #74b9d4 15%, transparent);
+  border-color: color-mix(in srgb, #74b9d4 40%, transparent);
+}
+
+.scrum-owner.claude {
+  background: color-mix(in srgb, #d4a574 14%, transparent);
+  border-color: color-mix(in srgb, #d4a574 40%, transparent);
+}
+
+.scrum-owner.kimi {
+  background: color-mix(in srgb, #7dd3fc 16%, transparent);
+  border-color: color-mix(in srgb, #7dd3fc 42%, transparent);
+}
+
+.scrum-owner.ollama {
+  background: color-mix(in srgb, #34d399 16%, transparent);
+  border-color: color-mix(in srgb, #34d399 42%, transparent);
+}
+
+.scrum-task-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-color);
+  margin-bottom: 5px;
+}
+
+.scrum-task-line {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 78%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  line-height: 1.35;
+}
+
+.scrum-history {
+  border-top: 1px dashed color-mix(in srgb, var(--text-color) 15%, transparent);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scrum-run-log {
+  border-top: 1px dashed color-mix(in srgb, var(--text-color) 15%, transparent);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scrum-activity {
+  border-top: 1px dashed color-mix(in srgb, var(--text-color) 15%, transparent);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.scrum-activity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: min(56vh, 560px);
+  min-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.scrum-activity-card {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-left-width: 3px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 74%, #000000 26%);
+  padding: 6px 8px;
+}
+
+.scrum-activity-card.joint {
+  border-left-color: #38bdf8;
+}
+
+.scrum-activity-card.codex {
+  border-left-color: #74b9d4;
+}
+
+.scrum-activity-card.claude {
+  border-left-color: #d4a574;
+}
+
+.scrum-activity-card.kimi {
+  border-left-color: #7dd3fc;
+}
+
+.scrum-activity-card.ollama {
+  border-left-color: #34d399;
+}
+
+.scrum-activity-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.scrum-activity-owner {
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--brutal-radius);
+  padding: 2px 7px;
+  border: 1px solid transparent;
+}
+
+.scrum-activity-owner.joint {
+  background: color-mix(in srgb, #38bdf8 14%, transparent);
+  border-color: color-mix(in srgb, #38bdf8 34%, transparent);
+}
+
+.scrum-activity-owner.codex {
+  background: color-mix(in srgb, #74b9d4 14%, transparent);
+  border-color: color-mix(in srgb, #74b9d4 34%, transparent);
+}
+
+.scrum-activity-owner.claude {
+  background: color-mix(in srgb, #d4a574 14%, transparent);
+  border-color: color-mix(in srgb, #d4a574 34%, transparent);
+}
+
+.scrum-activity-owner.kimi {
+  background: color-mix(in srgb, #7dd3fc 14%, transparent);
+  border-color: color-mix(in srgb, #7dd3fc 36%, transparent);
+}
+
+.scrum-activity-owner.ollama {
+  background: color-mix(in srgb, #34d399 14%, transparent);
+  border-color: color-mix(in srgb, #34d399 36%, transparent);
+}
+
+.scrum-activity-type {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 66%, transparent);
+  text-transform: uppercase;
+}
+
+.scrum-activity-type.error {
+  color: #fca5a5;
+}
+
+.scrum-activity-type.success {
+  color: #86efac;
+}
+
+.scrum-activity-time {
+  margin-left: auto;
+  font-size: 10px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  color: color-mix(in srgb, var(--text-color) 58%, transparent);
+}
+
+.scrum-activity-msg {
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--text-color) 92%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.scrum-feed-cap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+}
+
+.scrum-feed-cap-btn {
+  border: 1px solid color-mix(in srgb, var(--accent-color) 44%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  color: color-mix(in srgb, var(--text-color) 92%, transparent);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.scrum-docs {
+  border-top: 1px dashed color-mix(in srgb, var(--text-color) 15%, transparent);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scrum-doc-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.scrum-doc-item {
+  border: 1px solid color-mix(in srgb, var(--text-color) 14%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 72%, #000000 28%);
+  color: color-mix(in srgb, var(--text-color) 88%, transparent);
+  font-size: 10px;
+  min-height: 28px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.scrum-doc-item.active {
+  border-color: color-mix(in srgb, var(--accent-color) 64%, transparent);
+  background: color-mix(in srgb, var(--accent-color) 20%, transparent);
+}
+
+.scrum-doc-preview {
+  border: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--bg-color) 74%, #000000 26%);
+  color: color-mix(in srgb, var(--text-color) 88%, transparent);
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 8px;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.scrum-doc-open-btn {
+  align-self: flex-start;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 50%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 20%, transparent);
+  color: color-mix(in srgb, var(--text-color) 94%, transparent);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.scrum-run-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.scrum-run-row {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--brutal-radius);
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.scrum-run-row.status {
+  background: color-mix(in srgb, var(--bg-color) 75%, #000 25%);
+}
+
+.scrum-run-row.success {
+  background: color-mix(in srgb, #22c55e 14%, transparent);
+}
+
+.scrum-run-row.error {
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+}
+
+.scrum-run-row.stopped {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+}
+
+.scrum-run-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 80%, #fff 20%);
+}
+
+.scrum-run-row.success .scrum-run-dot {
+  background: #22c55e;
+}
+
+.scrum-run-row.error .scrum-run-dot {
+  background: #ef4444;
+}
+
+.scrum-run-row.stopped .scrum-run-dot {
+  background: #f59e0b;
+}
+
+.scrum-run-msg {
+  color: color-mix(in srgb, var(--text-color) 90%, transparent);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.scrum-run-time {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--text-color) 62%, transparent);
+}
+
+.scrum-history-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: color-mix(in srgb, var(--text-color) 90%, transparent);
+}
+
+.scrum-history-empty,
+.scrum-history-item {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 82%, transparent);
+}
+
+.scrum-history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.scrum-history-mode {
+  padding: 2px 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  color: color-mix(in srgb, var(--text-color) 85%, transparent);
+  font-weight: 700;
+}
+
+.scrum-history-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 960px) {
+  .scrum-modal {
+    width: calc(100vw - 18px);
+    max-height: 94vh;
+  }
+
+  .scrum-content {
+    grid-template-rows: minmax(200px, 38%) minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .scrum-task-list {
+    max-height: 260px;
+  }
+
+  .scrum-run-log-list {
+    max-height: 180px;
+  }
+
+  .scrum-project-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .scrum-role-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scrum-stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .scrum-activity-list {
+    max-height: min(48vh, 420px);
+    min-height: 190px;
+  }
+
+  .scrum-right {
+    overflow: auto;
+    padding-right: 2px;
+  }
+}
+
+/* OctoTown toggle switch */
+.scrum-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.scrum-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.scrum-toggle-slider {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--text-color) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--text-color) 18%, transparent);
+  transition: background 0.2s, border-color 0.06s;
+}
+
+.scrum-toggle-slider::before {
+  content: '';
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  left: 2px;
+  top: 2px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--text-color) 70%, transparent);
+  transition: transform 0.06s;
+}
+
+.scrum-toggle input:checked + .scrum-toggle-slider {
+  background: color-mix(in srgb, var(--accent-color) 50%, transparent);
+  border-color: color-mix(in srgb, var(--accent-color) 70%, transparent);
+}
+
+.scrum-toggle input:checked + .scrum-toggle-slider::before {
+  transform: translateX(16px);
+  background: color-mix(in srgb, var(--accent-color) 90%, white 10%);
+}
+
+.scrum-toggle input:disabled + .scrum-toggle-slider {
+  opacity: 0.45;
+  cursor: default;
+}

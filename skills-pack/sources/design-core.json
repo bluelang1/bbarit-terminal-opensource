@@ -1,0 +1,36 @@
+{
+  "skills": [
+    {
+      "id": "design-system-foundation-checklist",
+      "name": "Design System Foundation Checklist",
+      "description": "Build a practical plan for spacing, typography, and component hierarchy.",
+      "emoji": "🧭",
+      "command": "Create a design system foundation checklist including token strategy, spacing scale, typography rules, and component priorities.",
+      "cliType": "claude",
+      "category": "docs",
+      "tags": [
+        "design-system",
+        "tokens",
+        "ui",
+        "planning"
+      ],
+      "builtIn": false
+    },
+    {
+      "id": "figma-to-nextjs-handoff",
+      "name": "Figma to Next.js Handoff",
+      "description": "Generate implementation notes that map design artifacts to Next.js components.",
+      "emoji": "🧩",
+      "command": "Produce an implementation handoff mapping each key Figma frame to reusable Next.js components and CSS variables.",
+      "cliType": "codex",
+      "category": "frontend",
+      "tags": [
+        "figma",
+        "handoff",
+        "nextjs",
+        "design"
+      ],
+      "builtIn": false
+    }
+  ]
+}

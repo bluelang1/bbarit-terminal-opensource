@@ -1,0 +1,458 @@
+.marketing-panel {
+  --marketing-border: color-mix(in srgb, var(--marketing-text) 18%, transparent);
+  --marketing-soft: color-mix(in srgb, var(--marketing-bg) 82%, var(--marketing-text) 18%);
+  --marketing-ink-soft: color-mix(in srgb, var(--marketing-text) 62%, transparent);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 7px 8px;
+  gap: 7px;
+  color: var(--marketing-text);
+  background: color-mix(in srgb, var(--marketing-bg) 94%, black 6%);
+}
+
+.marketing-panel-head,
+.marketing-tabs,
+.marketing-button-row,
+.marketing-action-list,
+.marketing-inline-stats,
+.marketing-automation-head,
+.marketing-bar-label {
+  display: flex;
+  align-items: center;
+}
+
+.marketing-panel-head {
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.marketing-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--marketing-accent);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.marketing-panel-subtitle {
+  margin-top: 2px;
+  font-size: 9px;
+  line-height: 1.25;
+  color: var(--marketing-ink-soft);
+}
+
+.marketing-tabs {
+  gap: 4px;
+}
+
+.marketing-tab,
+.marketing-icon-button,
+.marketing-row > button,
+.marketing-button-row button,
+.marketing-wide-button,
+.marketing-action-list button,
+.marketing-automation-head button {
+  border: 1px solid var(--marketing-border);
+  background: color-mix(in srgb, var(--marketing-bg) 88%, black 12%);
+  color: var(--marketing-text);
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+  transition: border-color 0.08s, background 0.08s, opacity 0.08s;
+}
+
+.marketing-tab,
+.marketing-icon-button,
+.marketing-row > button,
+.marketing-automation-head button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.marketing-tab {
+  flex: 1 1 0;
+}
+
+.marketing-tab:hover,
+.marketing-icon-button:hover,
+.marketing-row > button:hover,
+.marketing-button-row button:hover,
+.marketing-wide-button:hover,
+.marketing-action-list button:hover,
+.marketing-automation-head button:hover {
+  border-color: color-mix(in srgb, var(--marketing-accent) 54%, transparent);
+  background: color-mix(in srgb, var(--marketing-accent) 13%, var(--marketing-bg) 87%);
+}
+
+.marketing-tab.active {
+  border-color: color-mix(in srgb, var(--marketing-accent) 72%, transparent);
+  background: color-mix(in srgb, var(--marketing-accent) 24%, transparent);
+  color: color-mix(in srgb, var(--marketing-accent) 82%, var(--marketing-text) 18%);
+}
+
+.marketing-toast {
+  padding: 5px 8px;
+  border: 1px solid color-mix(in srgb, var(--marketing-accent) 46%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-accent) 14%, transparent);
+  font-size: 10px;
+}
+
+.marketing-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-right: 2px;
+}
+
+.marketing-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.marketing-metric,
+.marketing-section,
+.marketing-report {
+  border: 1px solid var(--marketing-border);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-bg) 90%, black 10%);
+}
+
+.marketing-metric {
+  padding: 8px;
+  min-width: 0;
+}
+
+.marketing-metric span,
+.marketing-metric em,
+.marketing-section span,
+.marketing-row span,
+.marketing-row em,
+.marketing-report span {
+  color: var(--marketing-ink-soft);
+}
+
+.marketing-metric span {
+  display: block;
+  font-size: 9px;
+}
+
+.marketing-metric strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.marketing-metric em {
+  display: block;
+  margin-top: 4px;
+  font-size: 9px;
+  font-style: normal;
+}
+
+.marketing-metric.compact {
+  padding: 6px;
+}
+
+.marketing-metric.compact strong {
+  font-size: 13px;
+}
+
+.marketing-section {
+  padding: 8px;
+}
+
+.marketing-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 7px;
+  font-size: 11px;
+  font-weight: 750;
+  color: color-mix(in srgb, var(--marketing-accent) 82%, var(--marketing-text) 18%);
+}
+
+.marketing-bars,
+.marketing-list,
+.marketing-journey,
+.marketing-grid-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.marketing-bar-label {
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.marketing-bar-track {
+  height: 7px;
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-bg) 78%, var(--marketing-text) 22%);
+}
+
+.marketing-bar-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--marketing-accent), color-mix(in srgb, #2dd4bf 60%, var(--marketing-accent) 40%));
+}
+
+.marketing-action-list {
+  flex-direction: column;
+  gap: 5px;
+}
+
+.marketing-action-list button,
+.marketing-button-row button,
+.marketing-wide-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 5px 8px;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.marketing-action-list button,
+.marketing-wide-button {
+  width: 100%;
+}
+
+.marketing-button-row {
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 7px;
+}
+
+.marketing-grid-form input,
+.marketing-grid-form select,
+.marketing-section textarea,
+.marketing-search input,
+.marketing-form-preview input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--marketing-border);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-bg) 82%, black 18%);
+  color: var(--marketing-text);
+  font: inherit;
+  font-size: 10.5px;
+  outline: none;
+}
+
+.marketing-grid-form input,
+.marketing-grid-form select,
+.marketing-search input,
+.marketing-form-preview input {
+  height: 28px;
+  padding: 0 8px;
+}
+
+.marketing-section textarea {
+  min-height: 72px;
+  padding: 7px 8px;
+  resize: vertical;
+}
+
+.marketing-grid-form button {
+  height: 28px;
+}
+
+.marketing-search {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 7px;
+  padding: 0 8px;
+  border: 1px solid var(--marketing-border);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-bg) 84%, black 16%);
+}
+
+.marketing-search input {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.marketing-row,
+.marketing-report {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.marketing-row {
+  min-height: 54px;
+}
+
+.marketing-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 7px 8px;
+  border: 1px solid var(--marketing-border);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-bg) 88%, black 12%);
+  text-align: left;
+}
+
+.marketing-row-button {
+  width: auto !important;
+  height: auto !important;
+  align-items: stretch !important;
+  color: var(--marketing-text) !important;
+}
+
+.marketing-row.selected .marketing-row-main {
+  border-color: color-mix(in srgb, var(--marketing-accent) 62%, transparent);
+}
+
+.marketing-row strong,
+.marketing-report strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.marketing-row span,
+.marketing-row em,
+.marketing-report span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 9.5px;
+  font-style: normal;
+}
+
+.marketing-email-preview,
+.marketing-form-preview {
+  border: 1px solid color-mix(in srgb, var(--marketing-accent) 28%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 10px;
+  background: #f7f9fb;
+  color: #172033;
+}
+
+.marketing-email-subject {
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.marketing-email-preheader {
+  margin-top: 3px;
+  color: #5f6f87;
+  font-size: 10px;
+}
+
+.marketing-email-preview p {
+  margin: 8px 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.marketing-email-preview button,
+.marketing-form-preview button {
+  border: 0;
+  border-radius: var(--brutal-radius);
+  background: #2563eb;
+  color: white;
+  padding: 7px 10px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.marketing-automation-head {
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.marketing-automation-head span {
+  font-size: 9.5px;
+}
+
+.marketing-step {
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+
+.marketing-step span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-accent) 18%, transparent);
+  color: color-mix(in srgb, var(--marketing-accent) 84%, var(--marketing-text) 16%);
+  font-weight: 800;
+}
+
+.marketing-inline-stats {
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.marketing-inline-stats span {
+  padding: 3px 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--marketing-text) 8%, transparent);
+  font-size: 9px;
+}
+
+.marketing-form-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.marketing-form-preview h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.marketing-form-preview span {
+  color: #516078;
+  font-size: 10px;
+}
+
+.marketing-report {
+  flex-direction: column;
+  padding: 8px;
+}
+
+.marketing-report-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 7px;
+}

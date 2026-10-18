@@ -1,0 +1,76 @@
+/* SidebarTabs Styles */
+
+.sidebar-tabs {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--st-bg);
+  color: var(--st-text);
+}
+
+.sidebar-tabs-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--st-text) 10%, transparent);
+  background: color-mix(in srgb, var(--st-bg) 82%, black 18%);
+  flex-shrink: 0;
+}
+
+.sidebar-tabs-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 6px 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--st-text);
+  border-radius: var(--brutal-radius);
+  font-size: 10px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  opacity: 0.45;
+  transition: opacity 0.16s, border-color 0.16s, background 0.16s;
+}
+
+.sidebar-tabs-button:hover {
+  opacity: 0.85;
+  background: color-mix(in srgb, var(--st-text) 8%, transparent);
+}
+
+.sidebar-tabs-button:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--st-accent);
+  outline-offset: -2px;
+}
+
+.sidebar-tabs-button.active {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--st-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--st-accent) 15%, transparent);
+  color: color-mix(in srgb, var(--st-accent) 82%, var(--st-text) 18%);
+}
+
+.sidebar-tabs-label {
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 84px;
+  line-height: 1;
+}
+
+.sidebar-tabs-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}

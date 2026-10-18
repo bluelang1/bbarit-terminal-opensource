@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "bbarit browser bridge",
+  "version": "0.1.0",
+  "description": "Lets the bbarit coding agent control this browser (navigate, click, type, read, screenshot).",
+  "permissions": ["tabs", "scripting", "activeTab", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "bbarit browser bridge" }
+}

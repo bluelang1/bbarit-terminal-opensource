@@ -1,0 +1,1264 @@
+/* XlsxEditor.css — spreadsheet editor styles (xe- prefix) */
+
+.xlsx-editor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-size: 12px;
+
+  /* Design tokens — --xe-bg / --xe-text / --xe-accent are injected inline as a
+     fixed MS365-style Office palette (white surface, Excel green accent);
+     everything below is derived from them. */
+  --xe-accent: #107C41;
+  --xe-radius: 6px;
+  --xe-radius-sm: 4px;
+  --xe-ctrl-h: 28px;
+
+  --xe-surface: color-mix(in srgb, var(--xe-bg, #111827) 94%, var(--xe-text, #fff) 6%);
+  --xe-surface-2: color-mix(in srgb, var(--xe-bg, #111827) 88%, var(--xe-text, #fff) 12%);
+  --xe-header-bg: color-mix(in srgb, var(--xe-bg, #111827) 93%, var(--xe-text, #fff) 7%);
+
+  --xe-border: color-mix(in srgb, var(--xe-text, #fff) 14%, transparent);
+  --xe-border-soft: color-mix(in srgb, var(--xe-text, #fff) 9%, transparent);
+  --xe-border-strong: color-mix(in srgb, var(--xe-text, #fff) 24%, transparent);
+  --xe-grid-line: color-mix(in srgb, var(--xe-text, #fff) 8%, transparent);
+
+  --xe-hover: color-mix(in srgb, var(--xe-text, #fff) 8%, transparent);
+  --xe-muted: color-mix(in srgb, var(--xe-text, #fff) 60%, transparent);
+
+  --xe-popover: var(--xe-bg, #ffffff);
+  --xe-shadow: 0 6px 24px color-mix(in srgb, #000 18%, transparent);
+
+  --xe-accent-line: color-mix(in srgb, var(--xe-accent) 48%, transparent);
+  --xe-accent-soft: color-mix(in srgb, var(--xe-accent) 12%, transparent);
+  --xe-accent-fill: color-mix(in srgb, var(--xe-accent) 18%, transparent);
+  --xe-accent-border: color-mix(in srgb, var(--xe-accent) 40%, transparent);
+  --xe-focus-ring: 0 0 0 2px color-mix(in srgb, var(--xe-accent) 45%, transparent);
+}
+
+/* === Office ribbon === */
+.xe-ribbon {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--xe-border);
+  background: var(--xe-surface);
+  flex-shrink: 0;
+}
+.xe-ribbon-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 8px;
+  height: 32px;
+  border-bottom: 1px solid var(--xe-border-soft);
+  overflow-x: auto;
+}
+.xe-ribbon-tabs::-webkit-scrollbar { height: 3px; }
+.xe-ribbon-tabs::-webkit-scrollbar-thumb { background: var(--xe-border-strong); border-radius: 2px; }
+.xe-ribbon-tab {
+  position: relative;
+  height: 32px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--xe-muted);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s, background 0.12s;
+}
+.xe-ribbon-tab:hover {
+  background: var(--xe-hover);
+  color: var(--xe-text, inherit);
+}
+.xe-ribbon-tab.active {
+  color: var(--xe-accent);
+  font-weight: 600;
+}
+.xe-ribbon-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--xe-accent);
+}
+.xe-ribbon-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--xe-focus-ring);
+  border-radius: var(--xe-radius-sm);
+}
+.xe-ribbon-stat {
+  display: inline-flex;
+  align-items: center;
+  height: var(--xe-ctrl-h);
+  padding: 0 9px;
+  border: 1px solid var(--xe-border);
+  border-radius: var(--xe-radius);
+  background: var(--xe-surface-2);
+  font-size: 11px;
+  color: var(--xe-muted);
+  white-space: nowrap;
+}
+
+/* === Top Toolbar — MS Office ribbon: controls on top, group caption underneath === */
+.xe-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+  /* 좁은 편집기 페인에서 가로 스크롤(스크롤바 숨김)은 볼드 같은 핵심 버튼을
+     화면 밖으로 사라지게 했다 — 여러 줄로 감싸 항상 전부 보이게 한다. */
+  flex-wrap: wrap;
+  row-gap: 6px;
+  min-height: 72px;
+  overflow: visible;
+}
+.xe-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+.xe-toolbar-group[data-group] {
+  position: relative;
+  /* 라벨 공간을 그룹 안에 확보 — 줄바꿈돼도 다음 줄과 겹치지 않는다. */
+  padding-bottom: 13px;
+}
+.xe-toolbar-group[data-group]::after {
+  content: attr(data-group);
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9px;
+  letter-spacing: 0.3px;
+  color: var(--xe-muted);
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* Separator spans both the control row and the caption row, like Office */
+.xe-toolbar-sep {
+  width: 1px;
+  align-self: center;
+  height: 42px;
+  background: var(--xe-border);
+  margin: 0 9px;
+  flex-shrink: 0;
+}
+
+/* Buttons */
+.xe-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--xe-ctrl-h);
+  min-width: var(--xe-ctrl-h);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--xe-radius);
+  color: inherit;
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 12px;
+  gap: 6px;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.xe-btn:hover {
+  background: var(--xe-hover);
+}
+.xe-btn:active {
+  background: color-mix(in srgb, var(--xe-text, #fff) 12%, transparent);
+}
+.xe-btn.active {
+  background: var(--xe-accent-fill);
+  border-color: var(--xe-accent-border);
+  color: var(--xe-text, inherit);
+}
+.xe-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.xe-btn:disabled:hover {
+  background: transparent;
+}
+.xe-btn-primary {
+  background: var(--xe-accent-fill);
+  border-color: var(--xe-accent-border);
+}
+.xe-btn-primary:hover {
+  background: color-mix(in srgb, var(--xe-accent) 28%, transparent);
+}
+
+/* Color picker button — icon over a 3px current-color bar (hidden native input) */
+.xe-color-btn {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  width: var(--xe-ctrl-h);
+  height: var(--xe-ctrl-h);
+  padding-top: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--xe-radius);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.xe-color-btn:hover {
+  background: var(--xe-hover);
+}
+.xe-color-btn:focus-within {
+  outline: none;
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-color-bar {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px var(--xe-border);
+}
+.xe-color-btn input[type="color"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+/* Formula bar */
+.xe-formula-bar {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--xe-border);
+  background: var(--xe-surface);
+  flex-shrink: 0;
+  position: relative;
+}
+/* One bordered body wrapping ref box + fx + pick + input + apply */
+.xe-formula-shell {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  height: 30px;
+  padding: 0 3px 0 0;
+  border: 1px solid var(--xe-border);
+  border-radius: var(--xe-radius);
+  background: var(--xe-surface-2);
+  overflow: hidden;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.xe-formula-shell:focus-within {
+  border-color: var(--xe-accent-border);
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-cell-ref {
+  width: 72px;
+  height: 100%;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0 4px;
+  flex-shrink: 0;
+  outline: none;
+}
+.xe-formula-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--xe-border);
+  flex-shrink: 0;
+}
+.xe-formula-fx-btn,
+.xe-ref-pick-btn {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin: 0 2px;
+  border: 1px solid transparent;
+  border-radius: var(--xe-radius-sm);
+  background: transparent;
+  color: var(--xe-muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.xe-formula-fx-btn {
+  width: 28px;
+  font-style: italic;
+  font-size: 13px;
+}
+.xe-ref-pick-btn {
+  width: 26px;
+}
+.xe-formula-fx-btn:hover,
+.xe-ref-pick-btn:hover:not(:disabled) {
+  background: var(--xe-accent-soft);
+  color: var(--xe-text, inherit);
+}
+.xe-formula-fx-btn.active,
+.xe-ref-pick-btn.active {
+  background: var(--xe-accent-fill);
+  border-color: var(--xe-accent-border);
+  color: var(--xe-text, inherit);
+}
+.xe-formula-fx-btn:focus-visible,
+.xe-ref-pick-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-ref-pick-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.xe-formula-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  padding: 0 8px;
+  font-size: 12px;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  outline: none;
+}
+.xe-formula-input::placeholder {
+  color: var(--xe-muted);
+}
+.xe-apply-formula-btn {
+  height: 24px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid var(--xe-accent-border);
+  border-radius: var(--xe-radius-sm);
+  background: var(--xe-accent-fill);
+  color: var(--xe-text, inherit);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.xe-apply-formula-btn:hover {
+  background: color-mix(in srgb, var(--xe-accent) 28%, transparent);
+}
+.xe-apply-formula-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-formula-picker {
+  position: absolute;
+  left: 88px;
+  top: calc(100% + 4px);
+  z-index: 30;
+  width: min(540px, calc(100vw - 160px));
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--xe-accent-border);
+  border-radius: var(--xe-radius);
+  background: var(--xe-popover, #111827);
+  box-shadow: var(--xe-shadow);
+}
+.xe-formula-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.xe-formula-picker-head span {
+  color: var(--xe-muted);
+  font-size: 11px;
+}
+.xe-formula-search {
+  height: var(--xe-ctrl-h);
+  padding: 0 8px;
+  border-radius: var(--xe-radius);
+  border: 1px solid var(--xe-border);
+  background: var(--xe-surface-2);
+  color: inherit;
+  outline: none;
+  font-size: 12px;
+}
+.xe-formula-search:focus-visible {
+  border-color: var(--xe-accent-border);
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-formula-list {
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+  padding-right: 2px;
+}
+.xe-formula-item {
+  display: grid;
+  grid-template-columns: minmax(230px, 1fr) minmax(180px, 1fr);
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--xe-border-soft);
+  border-radius: var(--xe-radius-sm);
+  background: var(--xe-surface-2);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.xe-formula-item:hover {
+  background: var(--xe-accent-soft);
+  border-color: var(--xe-accent-border);
+}
+.xe-formula-item-main {
+  display: grid;
+  gap: 3px;
+}
+.xe-formula-item strong {
+  font-size: 12px;
+}
+.xe-formula-item code,
+.xe-formula-item em {
+  overflow: hidden;
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.xe-formula-item code {
+  color: var(--xe-muted);
+}
+.xe-formula-item em {
+  color: var(--xe-accent);
+}
+.xe-formula-item > span:last-child {
+  align-self: center;
+  color: var(--xe-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.xe-formula-picker-foot,
+.xe-formula-pick-hint {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--xe-muted);
+}
+.xe-formula-pick-hint {
+  position: absolute;
+  right: 10px;
+  top: calc(100% + 6px);
+  z-index: 29;
+  padding: 6px 8px;
+  border: 1px solid var(--xe-accent-border);
+  border-radius: var(--xe-radius);
+  background: var(--xe-popover, rgba(12, 28, 44, 0.92));
+  box-shadow: var(--xe-shadow);
+}
+
+/* === Search/Replace Bar === */
+.xe-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--xe-border);
+  background: var(--xe-surface);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.xe-search-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.xe-search-input {
+  width: 160px;
+  height: var(--xe-ctrl-h);
+  background: var(--xe-surface-2);
+  border: 1px solid var(--xe-border);
+  border-radius: var(--xe-radius);
+  color: inherit;
+  padding: 0 8px;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.xe-search-input:focus-visible {
+  border-color: var(--xe-accent-border);
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-search-count {
+  font-size: 10px;
+  color: var(--xe-muted);
+  min-width: 40px;
+  text-align: center;
+}
+
+/* === Spreadsheet Grid === */
+.xe-grid-wrap {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+  background: var(--xe-bg, transparent);
+}
+.xe-grid {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: fixed;
+  min-width: 100%;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Corner cell */
+.xe-corner {
+  position: sticky;
+  top: 0;
+  left: 0;
+  z-index: 4;
+  width: 42px;
+  min-width: 42px;
+  background: var(--xe-header-bg);
+  border-right: 1px solid var(--xe-border);
+  border-bottom: 1px solid var(--xe-border);
+  cursor: pointer;
+}
+.xe-corner:hover {
+  background: var(--xe-surface-2);
+}
+
+/* Column header */
+.xe-col-hdr {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--xe-header-bg);
+  border-right: 1px solid var(--xe-border-soft);
+  border-bottom: 1px solid var(--xe-border);
+  padding: 5px 4px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--xe-muted);
+  user-select: none;
+  cursor: pointer;
+  min-width: 80px;
+  position: relative;
+  height: 28px;
+  overflow: visible;
+  padding-right: 10px;
+}
+.xe-col-hdr:hover {
+  background: var(--xe-accent-soft);
+  color: var(--xe-text, inherit);
+}
+.xe-col-hdr.selected {
+  background: color-mix(in srgb, var(--xe-accent) 14%, var(--xe-header-bg));
+  color: var(--xe-accent);
+  border-bottom: 2px solid var(--xe-accent);
+}
+
+/* Column resize handle */
+.xe-col-resize {
+  position: absolute;
+  right: -5px;
+  top: 0;
+  width: 12px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 12;
+}
+.xe-col-resize:hover {
+  background: var(--xe-accent-line);
+}
+
+/* Filter icon in column header */
+.xe-filter-icon {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  opacity: 0.6;
+}
+.xe-filter-icon:hover {
+  opacity: 1;
+}
+
+/* Row header */
+.xe-row-hdr {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  background: var(--xe-header-bg);
+  border-right: 1px solid var(--xe-border);
+  border-bottom: 1px solid var(--xe-grid-line);
+  padding: 2px 6px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--xe-muted);
+  user-select: none;
+  cursor: pointer;
+  width: 48px;
+  min-width: 48px;
+}
+.xe-row-hdr:hover {
+  background: var(--xe-accent-soft);
+  color: var(--xe-text, inherit);
+}
+.xe-row-hdr.selected {
+  background: color-mix(in srgb, var(--xe-accent) 14%, var(--xe-header-bg));
+  color: var(--xe-accent);
+  border-right: 2px solid var(--xe-accent);
+}
+
+/* Row resize handle */
+.xe-row-resize {
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 100%;
+  height: 5px;
+  cursor: row-resize;
+  z-index: 5;
+}
+
+/* Data cell */
+.xe-cell {
+  border-right: 1px solid var(--xe-grid-line);
+  border-bottom: 1px solid var(--xe-grid-line);
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: cell;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-height: 22px;
+  outline: none;
+  position: relative;
+}
+.xe-cell:hover {
+  background: var(--xe-hover);
+}
+.xe-cell.selected {
+  outline: 1.5px solid var(--xe-accent);
+  outline-offset: -1px;
+  background: var(--xe-accent-soft);
+  z-index: 1;
+}
+.xe-cell.in-range {
+  background: var(--xe-accent-soft);
+}
+.xe-cell.in-autofill {
+  background: rgba(100,200,100,0.12);
+  outline: 1px dashed rgba(100,200,100,0.5);
+  outline-offset: -1px;
+}
+.xe-cell.search-highlight {
+  background: rgba(255,200,50,0.2) !important;
+}
+.xe-cell.editing {
+  padding: 0;
+  overflow: visible;
+}
+
+/* Auto-fill handle */
+.xe-autofill-handle {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  background: var(--xe-accent);
+  border: 1px solid color-mix(in srgb, var(--xe-bg, #000) 55%, transparent);
+  cursor: crosshair;
+  z-index: 2;
+  border-radius: 2px;
+}
+.xe-autofill-handle:hover {
+  transform: scale(1.3);
+}
+
+/* Cell input when editing */
+.xe-cell-input {
+  width: 100%;
+  height: 100%;
+  min-height: 22px;
+  background: var(--xe-bg, #1a1a1a);
+  border: 2px solid var(--xe-accent);
+  border-radius: 0;
+  color: inherit;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 4px;
+  outline: none;
+  box-sizing: border-box;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* === Sheet Tabs === */
+.xe-sheet-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 0 4px;
+  border-top: 1px solid var(--xe-border);
+  background: var(--xe-surface);
+  flex-shrink: 0;
+  overflow-x: auto;
+  min-height: 30px;
+}
+.xe-sheet-tabs::-webkit-scrollbar { height: 4px; }
+.xe-sheet-tabs::-webkit-scrollbar-thumb { background: var(--xe-border-strong); border-radius: 2px; }
+.xe-sheet-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 14px;
+  font-size: 11px;
+  cursor: pointer;
+  color: var(--xe-muted);
+  white-space: nowrap;
+  user-select: none;
+  transition: background 0.12s, color 0.12s;
+}
+.xe-sheet-tab:hover {
+  background: var(--xe-hover);
+  color: var(--xe-text, inherit);
+}
+.xe-sheet-tab.active {
+  color: var(--xe-text, inherit);
+  font-weight: 600;
+  background: var(--xe-accent-soft);
+}
+.xe-sheet-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--xe-accent);
+}
+.xe-sheet-tab-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xe-sheet-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: transparent;
+  color: var(--xe-muted);
+  border-radius: 2px;
+  padding: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.xe-sheet-tab:hover .xe-sheet-tab-close {
+  opacity: 1;
+}
+.xe-sheet-tab-close:hover {
+  background: var(--xe-border-strong);
+  color: var(--xe-text, inherit);
+}
+.xe-sheet-tab-add {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  cursor: pointer;
+  color: var(--xe-muted);
+  transition: color 0.12s, background 0.12s;
+  border-radius: var(--xe-radius-sm);
+}
+.xe-sheet-tab-add:hover {
+  color: var(--xe-text, inherit);
+  background: var(--xe-hover);
+}
+
+/* Renaming input */
+.xe-sheet-rename {
+  background: var(--xe-bg, rgba(0,0,0,0.3));
+  border: 1px solid var(--xe-accent-border);
+  border-radius: var(--xe-radius-sm);
+  color: inherit;
+  font-size: 11px;
+  padding: 1px 4px;
+  width: 80px;
+  outline: none;
+}
+.xe-sheet-rename:focus {
+  box-shadow: var(--xe-focus-ring);
+}
+
+/* === Bottom Status Bar (single 24px row) === */
+.xe-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  padding: 0 10px;
+  border-top: 1px solid var(--xe-border);
+  background: var(--xe-surface);
+  font-size: 11px;
+  flex-shrink: 0;
+  color: var(--xe-text, inherit);
+  overflow: hidden;
+}
+.xe-status-left,
+.xe-status-center,
+.xe-status-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.xe-status-center {
+  margin: 0 auto;
+  gap: 12px;
+  color: var(--xe-muted);
+  overflow: hidden;
+}
+.xe-status-right {
+  color: var(--xe-muted);
+  flex-shrink: 0;
+}
+.xe-status-bar span {
+  white-space: nowrap;
+}
+.xe-status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 9px;
+  background: var(--xe-surface-2);
+  border: 1px solid var(--xe-border);
+  color: var(--xe-text, inherit);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+.xe-status-pill.filetype {
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--xe-muted);
+}
+.xe-status-pill.accent {
+  background: var(--xe-accent-soft);
+  border-color: var(--xe-accent-border);
+  color: var(--xe-text, inherit);
+  font-weight: 600;
+}
+.xe-status-pill.dirty {
+  background: color-mix(in srgb, #f59e0b 18%, transparent);
+  border-color: color-mix(in srgb, #f59e0b 45%, transparent);
+  /* Dark amber — the old #ffd9a0 was near-invisible on the light Office chrome. */
+  color: #92400e;
+  font-weight: 600;
+}
+
+/* === Format toolbar (select/alignment) === */
+.xe-fmt-select {
+  height: var(--xe-ctrl-h);
+  background: var(--xe-surface-2);
+  border: 1px solid var(--xe-border);
+  border-radius: var(--xe-radius);
+  color: inherit;
+  font-size: 11px;
+  padding: 0 6px;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.xe-fmt-select:hover {
+  border-color: var(--xe-border-strong);
+}
+.xe-fmt-select:focus-visible {
+  border-color: var(--xe-accent-border);
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-fmt-select option {
+  /* Match the light Office chrome — dark dropdown items looked alien here. */
+  background: var(--xe-surface-2, #ffffff);
+  color: var(--xe-text, #242424);
+}
+
+/* Loading overlay */
+.xe-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0.5;
+}
+
+/* === Context menu === */
+.xe-ctx-menu {
+  position: fixed;
+  z-index: 100;
+  background: var(--xe-popover, #2c2c3a);
+  border: 1px solid var(--xe-border-strong);
+  border-radius: var(--xe-radius);
+  padding: 4px;
+  min-width: 190px;
+  max-height: 360px;
+  overflow-y: auto;
+  box-shadow: var(--xe-shadow);
+  color: var(--xe-text, #e8e8f0);
+}
+.xe-ctx-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--xe-radius-sm);
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.xe-ctx-menu button:hover {
+  background: var(--xe-accent-fill);
+}
+.xe-ctx-menu button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.xe-ctx-menu button:disabled:hover {
+  background: none;
+}
+.xe-ctx-sep {
+  height: 1px;
+  background: var(--xe-border);
+  margin: 4px 6px;
+}
+
+/* === Number Format Dropdown === */
+.xe-numfmt-btn {
+  min-width: 60px;
+}
+.xe-numfmt-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 50;
+  margin-top: 4px;
+  background: var(--xe-popover, #2c2c3a);
+  border: 1px solid var(--xe-border-strong);
+  border-radius: var(--xe-radius);
+  padding: 4px;
+  min-width: 130px;
+  box-shadow: var(--xe-shadow);
+}
+.xe-numfmt-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--xe-radius-sm);
+  color: var(--xe-text, #e8e8f0);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.xe-numfmt-item:hover {
+  background: var(--xe-accent-fill);
+}
+.xe-numfmt-item.active {
+  background: var(--xe-accent-soft);
+  font-weight: 600;
+}
+
+/* === Border Dropdown === */
+.xe-border-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 50;
+  margin-top: 4px;
+  background: var(--xe-popover, #2c2c3a);
+  border: 1px solid var(--xe-border-strong);
+  border-radius: var(--xe-radius);
+  padding: 4px;
+  min-width: 150px;
+  box-shadow: var(--xe-shadow);
+}
+.xe-border-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  border-radius: var(--xe-radius-sm);
+  color: var(--xe-text, #e8e8f0);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.xe-border-item:hover {
+  background: var(--xe-accent-fill);
+}
+
+/* Virtualization spacer rows carry only height; no visible chrome. */
+.xe-spacer-row td {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+/* Column-virtualization spacers carry only width; no visible chrome. */
+.xe-spacer-col {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+/* === Filter Dropdown === */
+.xe-filter-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 50;
+  margin-top: 4px;
+  background: var(--xe-popover, #2c2c3a);
+  border: 1px solid var(--xe-border-strong);
+  border-radius: var(--xe-radius);
+  padding: 8px;
+  min-width: 190px;
+  max-height: 300px;
+  box-shadow: var(--xe-shadow);
+  color: var(--xe-text, #e8e8f0);
+}
+.xe-filter-list {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.xe-filter-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  cursor: pointer;
+  color: inherit;
+  border-radius: var(--xe-radius-sm);
+}
+.xe-filter-item:hover {
+  background: var(--xe-hover);
+}
+.xe-filter-item input[type="checkbox"] {
+  accent-color: var(--xe-accent);
+}
+.xe-filter-actions {
+  display: flex;
+  gap: 4px;
+  border-top: 1px solid var(--xe-border);
+  padding-top: 6px;
+}
+
+/* === Responsive === */
+@media (max-width: 600px) {
+  .xe-toolbar { gap: 2px; padding: 4px; }
+  .xe-toolbar-sep { margin: 0 5px; }
+  .xe-toolbar-group { gap: 2px; }
+  .xe-btn { padding: 0 6px; }
+  .xe-formula-bar { padding: 4px; }
+  .xe-formula-input { font-size: 11px; }
+  .xe-search-bar { flex-wrap: wrap; gap: 4px; padding: 4px; }
+}
+@media (max-width: 400px) {
+  .xe-toolbar { padding: 4px 3px; }
+  .xe-btn { padding: 0 5px; font-size: 11px; }
+}
+
+/* === Save toast === */
+.xe-save-toast {
+  position: absolute;
+  bottom: 44px;
+  right: 16px;
+  z-index: 50;
+  padding: 8px 14px;
+  border-radius: var(--xe-radius, 2px);
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+  pointer-events: none;
+  animation: xe-save-toast-in 0.16s ease-out;
+}
+.xe-save-toast-ok {
+  background: rgba(34,160,94,0.95);
+  border: 1px solid rgba(120,240,170,0.5);
+}
+.xe-save-toast-error {
+  background: rgba(200,50,55,0.95);
+  border: 1px solid rgba(255,140,140,0.5);
+}
+@keyframes xe-save-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* === Load error screen === */
+.xe-load-error {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  text-align: center;
+}
+.xe-load-error-title {
+  font-size: 16px;
+  font-weight: 700;
+  /* Readable on the light Office chrome (was pastel #ff9a9a on white). */
+  color: #b91c1c;
+}
+.xe-load-error-msg {
+  font-size: 13px;
+  opacity: 0.85;
+  max-width: 420px;
+}
+.xe-load-error-detail {
+  font-size: 11px;
+  font-family: var(--mono, monospace);
+  opacity: 0.6;
+  max-width: 460px;
+  word-break: break-all;
+}
+.xe-load-error-hint {
+  font-size: 11px;
+  opacity: 0.45;
+  word-break: break-all;
+}
+
+/* === Conditional formatting dropdown (Home > Styles) === */
+.xe-cf-dropdown {
+  min-width: 190px;
+}
+.xe-cf-form {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 4px;
+}
+.xe-cf-form-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--xe-muted);
+  white-space: nowrap;
+}
+.xe-cf-input {
+  height: 26px;
+  background: var(--xe-surface-2);
+  border: 1px solid var(--xe-border);
+  border-radius: var(--xe-radius-sm);
+  color: inherit;
+  padding: 0 7px;
+  font-size: 12px;
+  outline: none;
+}
+.xe-cf-input:focus-visible {
+  border-color: var(--xe-accent-border);
+  box-shadow: var(--xe-focus-ring);
+}
+.xe-cf-form-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+/* === Formula autocomplete (cell editor) === */
+.xe-fn-suggest {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 60;
+  margin-top: 2px;
+  min-width: 230px;
+  background: var(--xe-popover, #ffffff);
+  border: 1px solid var(--xe-border-strong);
+  border-radius: var(--xe-radius);
+  padding: 3px;
+  box-shadow: var(--xe-shadow);
+  display: flex;
+  flex-direction: column;
+}
+.xe-fn-suggest-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  text-align: left;
+  padding: 4px 8px;
+  border-radius: var(--xe-radius-sm);
+  cursor: pointer;
+}
+.xe-fn-suggest-item:hover {
+  background: var(--xe-hover);
+}
+.xe-fn-suggest-item.active {
+  background: var(--xe-accent-soft);
+}
+.xe-fn-suggest-name {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.xe-fn-suggest-hint {
+  font-size: 10px;
+  color: var(--xe-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}

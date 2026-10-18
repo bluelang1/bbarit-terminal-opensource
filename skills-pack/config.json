@@ -1,0 +1,25 @@
+{
+  "schemaVersion": "1.0.0",
+  "baseUrl": "https://raw.githubusercontent.com/ORG/skills-pack-repo/main/skills-pack/dist",
+  "outputDir": "dist",
+  "packs": [
+    {
+      "name": "nextjs-landing",
+      "version": "1.0.0",
+      "description": "Next.js landing page and animation starter pack",
+      "sources": [
+        "sources/nextjs-landing.json"
+      ],
+      "output": "packs/nextjs-landing-v1.json"
+    },
+    {
+      "name": "design-core",
+      "version": "1.0.0",
+      "description": "Design workflow and prototyping starter pack",
+      "sources": [
+        "sources/design-core.json"
+      ],
+      "output": "packs/design-core-v1.json"
+    }
+  ]
+}

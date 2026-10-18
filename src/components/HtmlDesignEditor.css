@@ -1,0 +1,473 @@
+/**
+ * HtmlDesignEditor.css
+ *
+ * Styles for WYSIWYG HTML editor (design + source).
+ * Uses `he-` prefix to avoid conflicts.
+ */
+
+/* ─────────────── Root ─────────────── */
+.he-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #1a1a1a;
+  color: #ccc;
+}
+
+/* ─────────────── Toolbar ─────────────── */
+.he-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.15);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.he-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.he-toolbar-sep {
+  width: 1px;
+  height: 18px;
+  background: rgba(255,255,255,0.1);
+  margin: 0 4px;
+}
+.he-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--brutal-radius);
+  color: inherit;
+  cursor: pointer;
+  padding: 3px 6px;
+  font-size: 11px;
+  gap: 3px;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.05s;
+  line-height: 1;
+}
+.he-btn:hover {
+  background: rgba(255,255,255,0.08);
+}
+.he-btn.active {
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.2);
+}
+.he-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* ─────────────── Format Toolbar ─────────────── */
+.he-format-toolbar {
+  padding: 2px 8px;
+  gap: 2px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.he-fmt-btn {
+  padding: 3px 5px;
+}
+.he-fmt-btn.active {
+  background: rgba(100,180,255,0.2);
+  border-color: rgba(100,180,255,0.35);
+  color: #7cbfff;
+}
+
+/* ─── Link/Image URL Input ─── */
+.he-link-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.he-link-input {
+  background: rgba(255,255,255,0.08);
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: var(--brutal-radius);
+  color: inherit;
+  font-size: 11px;
+  padding: 2px 6px;
+  width: 220px;
+  outline: none;
+}
+.he-link-input:focus {
+  border-color: rgba(100,180,255,0.4);
+}
+
+/* ─────────────── Split Body ─────────────── */
+.he-split-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ─────────────── Preview/Design Pane ─────────────── */
+.he-preview-pane {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  background: #2a2a2a;
+  border-right: 1px solid rgba(255,255,255,0.08);
+  padding: 8px;
+}
+.he-preview-frame-wrapper {
+  width: 100%;
+  height: 100%;
+  transition: max-width 0.3s ease;
+}
+.he-preview-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: #fff;
+  border-radius: var(--brutal-radius);
+}
+
+/* ─────────────── Source Pane ─────────────── */
+.he-source-pane {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+}
+.he-source-pane > * {
+  flex: 1;
+  min-width: 0;
+}
+.he-source-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
+/* ─────────────── Bottom Bar ─────────────── */
+.he-bottom-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 8px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.15);
+  font-size: 10px;
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+.he-bottom-bar-spacer {
+  flex: 1;
+}
+
+/* ─────────────── Import Modal ─────────────── */
+.he-modal-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.he-modal {
+  background: #1e1e1e;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: var(--brutal-radius);
+  padding: 16px;
+  width: 90%;
+  max-width: 600px;
+  max-height: 80%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.he-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0;
+}
+.he-modal-body {
+  flex: 1;
+  overflow: auto;
+}
+.he-modal-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+/* ─────────────── Codex Image Panel ─────────────── */
+.he-codex-image-panel {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(220px, 360px);
+  gap: 8px;
+  padding: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  background: rgba(0,0,0,0.18);
+  flex-shrink: 0;
+}
+.he-codex-image-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.he-segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--brutal-radius);
+  background: rgba(255,255,255,0.04);
+  flex-shrink: 0;
+}
+.he-segment {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--brutal-radius);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.he-segment:hover {
+  background: rgba(255,255,255,0.08);
+}
+.he-segment.active {
+  background: rgba(100,180,255,0.2);
+  color: #8fc7ff;
+}
+.he-segment:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.he-codex-image-input {
+  min-width: 0;
+  flex: 1;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: var(--brutal-radius);
+  background: rgba(255,255,255,0.07);
+  color: inherit;
+  outline: none;
+  font-size: 12px;
+}
+.he-codex-image-input:focus {
+  border-color: rgba(100,180,255,0.45);
+}
+.he-codex-image-send {
+  min-width: 30px;
+  height: 28px;
+}
+.he-codex-image-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255,255,255,0.25);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: he-spin 0.8s linear infinite;
+}
+.he-codex-image-error {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid rgba(255,90,90,0.28);
+  border-radius: var(--brutal-radius);
+  background: rgba(255,80,80,0.1);
+  color: #ffaaa6;
+  font-size: 11px;
+}
+.he-codex-image-error span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.he-codex-image-history {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.he-codex-image-history-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 18px;
+  font-size: 10px;
+  opacity: 0.72;
+}
+.he-codex-image-history-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.he-codex-image-strip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.he-codex-image-thumb {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.13);
+  border-radius: var(--brutal-radius);
+  background: rgba(255,255,255,0.05);
+  overflow: hidden;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.he-codex-image-thumb:hover,
+.he-codex-image-thumb.active {
+  border-color: rgba(100,180,255,0.55);
+}
+.he-codex-image-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.he-codex-image-thumb-meta {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--brutal-radius);
+  background: rgba(0,0,0,0.68);
+  color: #fff;
+}
+.he-codex-image-empty {
+  display: flex;
+  align-items: center;
+  height: 46px;
+  color: inherit;
+  opacity: 0.45;
+  font-size: 11px;
+}
+.he-codex-image-insert {
+  height: 28px;
+}
+
+@keyframes he-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─────────────── Light Theme ─────────────── */
+.he-root.he-light {
+  background: #f5f5f5;
+  color: #333;
+}
+.he-root.he-light .he-toolbar {
+  background: rgba(0,0,0,0.04);
+  border-bottom-color: rgba(0,0,0,0.1);
+}
+.he-root.he-light .he-btn:hover {
+  background: rgba(0,0,0,0.06);
+}
+.he-root.he-light .he-btn.active {
+  background: rgba(0,0,0,0.1);
+  border-color: rgba(0,0,0,0.15);
+}
+.he-root.he-light .he-fmt-btn.active {
+  background: rgba(30,120,255,0.12);
+  border-color: rgba(30,120,255,0.3);
+  color: #1a6fd4;
+}
+.he-root.he-light .he-link-input {
+  background: rgba(0,0,0,0.05);
+  border-color: rgba(0,0,0,0.15);
+}
+.he-root.he-light .he-link-input:focus {
+  border-color: rgba(30,120,255,0.4);
+}
+.he-root.he-light .he-preview-pane {
+  background: #e8e8e8;
+  border-right-color: rgba(0,0,0,0.08);
+}
+.he-root.he-light .he-source-pane .he-source-textarea {
+  background: #fff;
+  color: #333;
+}
+.he-root.he-light .he-bottom-bar {
+  background: rgba(0,0,0,0.04);
+  border-top-color: rgba(0,0,0,0.08);
+}
+.he-root.he-light .he-toolbar-sep {
+  background: rgba(0,0,0,0.1);
+}
+.he-root.he-light .he-modal {
+  background: #fff;
+  border-color: rgba(0,0,0,0.12);
+}
+.he-root.he-light .he-codex-image-panel {
+  background: rgba(0,0,0,0.04);
+  border-bottom-color: rgba(0,0,0,0.08);
+}
+.he-root.he-light .he-segmented {
+  background: rgba(0,0,0,0.04);
+  border-color: rgba(0,0,0,0.12);
+}
+.he-root.he-light .he-segment:hover {
+  background: rgba(0,0,0,0.06);
+}
+.he-root.he-light .he-segment.active {
+  background: rgba(30,120,255,0.12);
+  color: #1a6fd4;
+}
+.he-root.he-light .he-codex-image-input {
+  background: #fff;
+  border-color: rgba(0,0,0,0.14);
+}
+.he-root.he-light .he-codex-image-thumb {
+  background: rgba(0,0,0,0.04);
+  border-color: rgba(0,0,0,0.14);
+}
+.he-root.he-light .he-codex-image-thumb:hover,
+.he-root.he-light .he-codex-image-thumb.active {
+  border-color: rgba(30,120,255,0.45);
+}
+
+@media (max-width: 820px) {
+  .he-codex-image-panel {
+    grid-template-columns: 1fr;
+  }
+  .he-codex-image-controls {
+    flex-wrap: wrap;
+  }
+  .he-codex-image-input {
+    flex-basis: 100%;
+  }
+}

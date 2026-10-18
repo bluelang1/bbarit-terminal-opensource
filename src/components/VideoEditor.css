@@ -1,0 +1,373 @@
+/* VideoEditor — 타임라인 기반 영상 에디터 */
+
+.video-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  outline: none;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ── 프리뷰 ─────────────────────────────── */
+
+.ve-preview {
+  position: relative;
+  flex: 1;
+  min-height: 120px;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.ve-preview video {
+  max-width: 100%;
+  max-height: 100%;
+  outline: none;
+  cursor: pointer;
+}
+
+.ve-loading {
+  position: absolute;
+  font-size: 12px;
+  opacity: 0.6;
+  color: #fff;
+}
+
+.ve-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+/* ── 툴바 ─────────────────────────────── */
+
+.ve-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid rgba(128, 128, 128, 0.25);
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+  flex-shrink: 0;
+}
+
+.ve-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.3);
+  border-radius: var(--brutal-radius);
+  background: rgba(128, 128, 128, 0.08);
+  color: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ve-btn:hover:not(:disabled) {
+  background: rgba(128, 128, 128, 0.2);
+}
+
+.ve-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ve-btn-play {
+  padding: 4px 10px;
+}
+
+.ve-btn-icon {
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+}
+
+.ve-btn-export {
+  color: #fff;
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.ve-time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin: 0 6px;
+  white-space: nowrap;
+}
+
+.ve-time-total {
+  opacity: 0.5;
+}
+
+.ve-toolbar-sep {
+  width: 1px;
+  height: 18px;
+  background: rgba(128, 128, 128, 0.3);
+  margin: 0 4px;
+}
+
+.ve-toolbar-spacer {
+  flex: 1;
+}
+
+/* ── 내보내기 진행/결과 ─────────────────── */
+
+.ve-export-bar {
+  position: relative;
+  height: 22px;
+  flex-shrink: 0;
+  background: rgba(128, 128, 128, 0.12);
+  overflow: hidden;
+}
+
+.ve-export-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  opacity: 0.35;
+  transition: width 0.3s ease;
+}
+
+.ve-export-label {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.ve-export-msg {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 11.5px;
+  flex-shrink: 0;
+  word-break: break-all;
+}
+
+.ve-export-msg.ok {
+  background: rgba(60, 180, 110, 0.15);
+}
+
+.ve-export-msg.err {
+  background: rgba(220, 70, 70, 0.15);
+  white-space: pre-wrap;
+}
+
+/* ── 타임라인 ───────────────────────────── */
+
+.ve-timeline-scroll {
+  height: 132px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.ve-timeline {
+  position: relative;
+  height: 100%;
+  cursor: crosshair;
+}
+
+.ve-ruler {
+  position: relative;
+  height: 22px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.25);
+}
+
+.ve-ruler-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid rgba(128, 128, 128, 0.35);
+  padding-left: 4px;
+  font-size: 9.5px;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+  pointer-events: none;
+}
+
+.ve-track {
+  position: relative;
+  height: 92px;
+  margin-top: 8px;
+  background:
+    repeating-linear-gradient(
+      to right,
+      rgba(128, 128, 128, 0.06) 0,
+      rgba(128, 128, 128, 0.06) 1px,
+      transparent 1px,
+      transparent 24px
+    );
+}
+
+.ve-clip {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border: 1.5px solid rgba(128, 128, 128, 0.5);
+  border-radius: var(--brutal-radius);
+  background-color: rgba(80, 110, 160, 0.35);
+  background-size: auto 100%;
+  background-repeat: repeat-x;
+  overflow: hidden;
+  cursor: grab;
+  box-sizing: border-box;
+}
+
+.ve-clip.active {
+  outline: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.ve-clip.selected {
+  border-width: 2px;
+  z-index: 2;
+}
+
+.ve-clip-label {
+  position: absolute;
+  inset: auto 0 0 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 6px;
+  font-size: 10px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  pointer-events: none;
+}
+
+.ve-clip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ve-clip-dur {
+  flex-shrink: 0;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+.ve-clip-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+
+.ve-clip-handle.l { left: 0; }
+.ve-clip-handle.r { right: 0; }
+
+.ve-clip-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 26px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: var(--brutal-radius);
+}
+
+.ve-clip-handle.l::after { left: 2px; }
+.ve-clip-handle.r::after { right: 2px; }
+
+/* ── 플레이헤드 ─────────────────────────── */
+
+.ve-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.ve-playhead-cap {
+  position: absolute;
+  top: 0;
+  left: -5px;
+  width: 10px;
+  height: 10px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.ve-playhead-line {
+  position: absolute;
+  top: 8px;
+  bottom: 0;
+  left: -0.5px;
+  width: 1.5px;
+}
+
+/* ── ffmpeg 안내 모달 ───────────────────── */
+
+.ve-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-editor {
+  position: relative;
+}
+
+.ve-modal {
+  width: min(440px, 90%);
+  padding: 18px 20px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  border-radius: var(--brutal-radius);
+  background: var(--modal-bg, #1d1f24);
+  color: #eee;
+}
+
+.ve-modal h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.ve-modal p {
+  margin: 0 0 10px;
+  font-size: 12px;
+  opacity: 0.85;
+  line-height: 1.5;
+}
+
+.ve-modal pre {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--brutal-radius);
+  overflow-x: auto;
+}
+
+.ve-modal-hint {
+  font-size: 11px !important;
+  opacity: 0.6 !important;
+}
+
+.ve-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

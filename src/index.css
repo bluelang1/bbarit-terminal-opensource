@@ -1,0 +1,171 @@
+/* Global baseline styles.
+ * Keep this file minimal: the UI theme lives in `App.css` and is driven by CSS variables.
+ */
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+}
+
+:root {
+  color-scheme: dark;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  --ui-control-h: 36px;
+  --ui-control-h-dense: 32px;
+  --ui-control-h-compact: 28px;
+  --ui-radius: 0;
+  --ui-border: color-mix(in srgb, var(--text-color, #cdd6f4) 38%, #000 18%);
+  --ui-panel-bg: color-mix(in srgb, var(--bg-color, #1e1e2e) 88%, #000 12%);
+  --ui-panel-bg-raised: color-mix(in srgb, var(--bg-color, #1e1e2e) 78%, var(--text-color, #cdd6f4) 8%);
+  --ui-muted: color-mix(in srgb, var(--text-color, #cdd6f4) 68%, transparent);
+  --ui-primary: var(--accent-color, #e11d48);
+  --ui-primary-ink: #fff7f9;
+  --ui-danger: #ff7b72;
+  --ui-success: #3fb950;
+  --ui-shadow: 3px 3px 0 color-mix(in srgb, #000 72%, transparent);
+}
+
+button,
+[role="button"],
+input[type="button"],
+input[type="submit"],
+input[type="reset"] {
+  border-radius: 0 !important;
+}
+
+.ui-panel {
+  border: 2px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel-bg);
+  box-shadow: var(--ui-shadow);
+}
+
+.ui-empty-state {
+  width: min(520px, calc(100% - 32px));
+  margin: auto;
+  padding: 24px;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--text-color, #cdd6f4);
+}
+
+.ui-empty-state strong {
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.ui-empty-state p,
+.ui-empty-state span {
+  max-width: 58ch;
+  color: var(--ui-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.ui-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ui-button,
+.ui-icon-button {
+  min-height: var(--ui-control-h-dense);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 2px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: var(--ui-panel-bg-raised);
+  color: var(--text-color, #cdd6f4);
+  box-shadow: 2px 2px 0 color-mix(in srgb, #000 70%, transparent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ui-button {
+  padding: 0 12px;
+}
+
+.ui-icon-button {
+  width: var(--ui-control-h-dense);
+  padding: 0;
+}
+
+.ui-button:hover:not(:disabled),
+.ui-icon-button:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  border-color: var(--ui-primary);
+  background: color-mix(in srgb, var(--ui-primary) 18%, var(--ui-panel-bg-raised) 82%);
+  box-shadow: 4px 4px 0 color-mix(in srgb, #000 74%, transparent);
+}
+
+.ui-button:active:not(:disabled),
+.ui-icon-button:active:not(:disabled) {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0 color-mix(in srgb, #000 74%, transparent);
+}
+
+.ui-button:disabled,
+.ui-icon-button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
+}
+
+.ui-button-primary {
+  border-color: color-mix(in srgb, var(--ui-primary) 82%, #000 18%);
+  background: var(--ui-primary);
+  color: var(--ui-primary-ink);
+}
+
+.ui-button-danger {
+  border-color: color-mix(in srgb, var(--ui-danger) 76%, #000 24%);
+  background: color-mix(in srgb, var(--ui-danger) 18%, var(--ui-panel-bg-raised) 82%);
+  color: color-mix(in srgb, var(--ui-danger) 88%, white 12%);
+}
+
+.light-theme .ui-button:not(.ui-button-primary):not(.ui-button-danger),
+.light-theme .ui-icon-button:not(.ui-button-primary):not(.ui-button-danger) {
+  border-color: color-mix(in srgb, var(--text-color, #1f2937) 62%, #000 18%);
+  background: color-mix(in srgb, #ffffff 92%, var(--bg-color, #f6f3ea) 8%);
+  color: color-mix(in srgb, var(--text-color, #1f2937) 92%, #000 8%);
+}
+
+.light-theme .ui-button-primary {
+  border-color: color-mix(in srgb, var(--ui-primary) 58%, #000 42%);
+  background: color-mix(in srgb, var(--ui-primary) 58%, #000 42%);
+  color: #fff7f9;
+}
+
+.light-theme .ui-button-danger {
+  border-color: color-mix(in srgb, var(--ui-danger) 54%, #000 46%);
+  background: color-mix(in srgb, var(--ui-danger) 18%, #ffffff 82%);
+  color: color-mix(in srgb, var(--ui-danger) 48%, #000 52%);
+}
+
+.ui-status-chip {
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius);
+  background: color-mix(in srgb, var(--text-color, #cdd6f4) 8%, transparent);
+  color: var(--ui-muted);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+

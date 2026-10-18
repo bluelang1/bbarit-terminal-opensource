@@ -1,0 +1,25 @@
+# gitleaks config for BBARIT Terminal.
+#
+# Extends the default ruleset. Run a working-tree scan before committing:
+#   gitleaks detect --source . --no-git        # staged/working tree
+#   gitleaks detect --source .                 # full git history
+#
+# Real signing secrets (Apple app-specific password, P12 password) MUST live
+# outside the repo in ~/key/signing.env (chmod 600) and be sourced at build
+# time — never committed. See CLAUDE.md "Apple 코드 서명 & 공증".
+#
+# NOTE: the passwords were committed in earlier history — rotate them
+# (regenerate the Apple app-specific password + re-export the P12 with a new
+# password) so the leaked values in git history become useless.
+[extend]
+useDefault = true
+
+# Allowlist BBARIT-internal identifiers the generic-api-key heuristic
+# false-positives on. Add reviewed exceptions here (regexes match the secret
+# text, not the file). Keep this list short and justified.
+[[allowlists]]
+description = "BBARIT non-secret identifiers (bridge ports, app id, tauri pubkey)"
+regexTarget = "match"
+regexes = [
+  '''com\.octo\.terminal''',
+]

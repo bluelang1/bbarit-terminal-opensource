@@ -1,0 +1,42 @@
+{
+  "name": "agent-browser-cli",
+  "version": "0.1.0",
+  "description": "Standalone CLI browser runner for code agents: open, inspect, screenshot, and verify any local web project.",
+  "type": "module",
+  "bin": {
+    "agent-browser": "bin/agent-browser.mjs",
+    "bbarit-browser": "bin/bbarit-browser-control.mjs"
+  },
+  "scripts": {
+    "check": "node --check bin/agent-browser.mjs",
+    "check:bbarit": "node --check bin/bbarit-browser-control.mjs",
+    "bbarit": "node bin/bbarit-browser-control.mjs",
+    "bbarit:open": "node bin/bbarit-browser-control.mjs open",
+    "doctor": "node bin/agent-browser.mjs doctor",
+    "smoke": "node bin/agent-browser.mjs smoke",
+    "start": "node bin/agent-browser.mjs"
+  },
+  "keywords": [
+    "browser",
+    "cli",
+    "playwright",
+    "automation",
+    "testing",
+    "agents"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1",
+    "playwright-core": "^1.61.1"
+  },
+  "files": [
+    "bin",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
+}

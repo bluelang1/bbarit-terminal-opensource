@@ -1,0 +1,239 @@
+/* Agent Terminal Page - standalone window for a single agent */
+
+.agent-term-page {
+  width: 100vw;
+  height: 100vh;
+  background: var(--bg-color, #0f1a24);
+  color: var(--text-color, #b8c5d0);
+  font-family: var(--font-family, 'Fira Code', monospace);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.agent-term-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: color-mix(in srgb, var(--bg-color) 90%, #000000 10%);
+  border-bottom: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  -webkit-app-region: drag;
+  flex-shrink: 0;
+}
+
+.agent-term-header button {
+  -webkit-app-region: no-drag;
+}
+
+.agent-term-icon {
+  color: color-mix(in srgb, var(--accent-color) 80%, white 20%);
+  display: inline-flex;
+}
+
+.agent-term-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-color);
+}
+
+.agent-term-cli {
+  font-size: 9px;
+  color: color-mix(in srgb, var(--text-color) 45%, transparent);
+  padding: 1px 6px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--text-color) 6%, transparent);
+  flex-shrink: 0;
+}
+
+.agent-term-task {
+  font-size: 10px;
+  color: color-mix(in srgb, var(--accent-color) 80%, white 20%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  padding: 1px 6px;
+  border-left: 2px solid color-mix(in srgb, var(--accent-color) 30%, transparent);
+}
+
+.agent-term-close {
+  margin-left: auto;
+  background: none;
+  border: none;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in srgb, var(--text-color) 50%, transparent);
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+}
+
+.agent-term-close:hover {
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--text-color) 10%, transparent);
+}
+
+.agent-term-container {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+
+.agent-term-container > * {
+  position: absolute;
+  inset: 0;
+}
+
+.agent-term-missing {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.agent-term-empty {
+  width: min(420px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.agent-term-empty.ui-panel {
+  width: min(460px, calc(100% - 32px));
+  padding: 24px;
+  border: 2px solid var(--ui-border, color-mix(in srgb, var(--text-color) 38%, #000 18%));
+  border-radius: 0;
+  background: var(--ui-panel-bg, color-mix(in srgb, var(--bg-color) 88%, #000 12%));
+  box-shadow: var(--ui-shadow, 3px 3px 0 color-mix(in srgb, #000 72%, transparent));
+}
+
+.agent-term-empty strong {
+  font-size: 16px;
+  line-height: 1.35;
+  color: var(--text-color);
+}
+
+.agent-term-empty p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+}
+
+.agent-term-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.agent-term-empty-actions button {
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 58%, var(--text-color) 20%);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--accent-color) 18%, transparent);
+  color: var(--text-color);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.agent-term-empty-actions button:hover {
+  background: color-mix(in srgb, var(--accent-color) 28%, transparent);
+}
+
+.agent-term-empty-actions .ui-button {
+  min-height: var(--ui-control-h, 36px);
+  border: 2px solid var(--ui-border, color-mix(in srgb, var(--text-color) 38%, #000 18%));
+  border-radius: 0;
+  background: var(--ui-panel-bg-raised, color-mix(in srgb, var(--bg-color) 78%, var(--text-color) 8%));
+  color: var(--text-color);
+  box-shadow: 2px 2px 0 color-mix(in srgb, #000 70%, transparent);
+}
+
+.agent-term-empty-actions .ui-button-primary {
+  border-color: color-mix(in srgb, var(--accent-color) 82%, #000 18%);
+  background: var(--accent-color);
+  color: #fff7f9;
+}
+
+.agent-term-missing.light-theme .agent-term-empty-actions .ui-button {
+  border-color: color-mix(in srgb, var(--text-color) 62%, #000 18%);
+  background: color-mix(in srgb, #ffffff 92%, var(--bg-color) 8%);
+  color: color-mix(in srgb, var(--text-color) 92%, #000 8%);
+}
+
+.agent-term-missing.light-theme .agent-term-empty-actions .ui-button-primary {
+  border-color: color-mix(in srgb, var(--accent-color) 58%, #000 42%);
+  background: color-mix(in srgb, var(--accent-color) 58%, #000 42%);
+  color: #fff7f9;
+}
+
+/* In-window document view (Cmd/Ctrl+click on a path in the terminal) */
+.agent-term-doc {
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-color);
+}
+
+.agent-term-doc-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--bg-color) 90%, #000000 10%);
+  border-bottom: 1px solid color-mix(in srgb, var(--text-color) 10%, transparent);
+  flex-shrink: 0;
+}
+
+.agent-term-doc-bar button {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--text-color) 20%, transparent);
+  border-radius: 4px;
+  color: var(--text-color);
+  font-size: 11px;
+  padding: 2px 8px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.agent-term-doc-bar button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text-color) 10%, transparent);
+}
+
+.agent-term-doc-bar button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.agent-term-doc-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--text-color) 75%, transparent);
+}
+
+.agent-term-doc-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.agent-term-doc-message {
+  padding: 16px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--text-color) 70%, transparent);
+  word-break: break-all;
+}

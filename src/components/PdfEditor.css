@@ -1,0 +1,652 @@
+.pdf-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+
+  /* Derived tokens — all chrome colors resolve from --pe-bg / --pe-text /
+     --pe-accent injected on this element, so light and dark themes both work. */
+  --pe-line: color-mix(in srgb, var(--pe-text, #fff) 12%, transparent);
+  --pe-line-strong: color-mix(in srgb, var(--pe-text, #fff) 22%, transparent);
+  --pe-hover: color-mix(in srgb, var(--pe-text, #fff) 9%, transparent);
+  --pe-surface: color-mix(in srgb, var(--pe-text, #fff) 5%, transparent);
+  --pe-accent-soft: color-mix(in srgb, var(--pe-accent, #185ABD) 16%, transparent);
+  --pe-accent-line: color-mix(in srgb, var(--pe-accent, #185ABD) 34%, transparent);
+  --pe-accent-ring: color-mix(in srgb, var(--pe-accent, #185ABD) 60%, transparent);
+  --pe-muted: color-mix(in srgb, var(--pe-text, #fff) 62%, transparent);
+  --pe-radius: 6px;
+}
+
+/* === Top toolbar (single row) === */
+.pe-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  height: 40px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--pe-line);
+  background: color-mix(in srgb, var(--pe-bg, #000) 92%, #000 8%);
+}
+.pe-toolbar::-webkit-scrollbar { display: none; }
+.pe-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.pe-toolbar-right {
+  margin-left: auto;
+}
+.pe-toolbar-sep {
+  width: 1px;
+  height: 22px;
+  background: var(--pe-line);
+  margin: 0 6px;
+  flex-shrink: 0;
+}
+
+/* === Buttons === */
+.pe-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--pe-radius);
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  gap: 4px;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, transform 0.04s;
+}
+.pe-btn:hover { background: var(--pe-hover); }
+.pe-btn:active { transform: translateY(1px); }
+.pe-btn.active {
+  background: var(--pe-accent-soft);
+  border-color: var(--pe-accent-line);
+  color: var(--pe-text, inherit);
+}
+.pe-btn:focus-visible {
+  outline: none;
+  border-color: var(--pe-accent-ring);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.pe-btn:disabled:active { transform: none; }
+.pe-btn-primary {
+  background: var(--pe-accent-soft);
+  border-color: var(--pe-accent-line);
+  color: var(--pe-text, inherit);
+}
+.pe-btn-primary:hover {
+  background: color-mix(in srgb, var(--pe-accent, #185ABD) 28%, transparent);
+}
+
+/* === Color picker button === */
+.pe-color-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--pe-line);
+  border-radius: var(--pe-radius);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.12s;
+}
+.pe-color-btn:focus-within {
+  border-color: var(--pe-accent-ring);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-color-swatch {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--pe-text, #000) 22%, transparent);
+}
+.pe-color-btn input[type="color"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  cursor: pointer;
+}
+.pe-range {
+  width: 74px;
+  height: 3px;
+  accent-color: var(--pe-accent, #64b4ff);
+}
+.pe-range-value {
+  font-size: 11px;
+  color: var(--pe-muted);
+  min-width: 30px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* === Find bar === */
+.pe-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--pe-line);
+  background: color-mix(in srgb, var(--pe-bg, #000) 88%, #000 12%);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.pe-find-icon { opacity: 0.6; flex-shrink: 0; }
+.pe-find-input {
+  height: 28px;
+  background: var(--pe-surface);
+  color: inherit;
+  border: 1px solid var(--pe-line);
+  border-radius: var(--pe-radius);
+  padding: 0 8px;
+  font-size: 12px;
+  outline: none;
+  width: 200px;
+  transition: border-color 0.12s;
+}
+.pe-find-input:focus {
+  border-color: var(--pe-accent-ring);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-find-count {
+  min-width: 42px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--pe-muted);
+  font-variant-numeric: tabular-nums;
+}
+.pe-find-nav { padding: 0 6px; }
+.pe-find-close { margin-left: 4px; }
+
+/* === Body === */
+.pe-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.pe-document {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+/* === Thumbnail sidebar === */
+.pe-thumbs {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 8px;
+  width: 148px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--pe-line);
+  background: color-mix(in srgb, var(--pe-bg, #000) 94%, #000 6%);
+}
+.pe-thumb {
+  position: relative;
+  cursor: pointer;
+  border-radius: var(--pe-radius);
+  padding: 4px;
+  border: 1px solid transparent;
+  transition: border-color 0.12s, background 0.12s;
+}
+.pe-thumb:hover { background: var(--pe-hover); }
+.pe-thumb.active {
+  border-color: var(--pe-accent-line);
+  background: var(--pe-accent-soft);
+}
+.pe-thumb-frame {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid var(--pe-line);
+  border-radius: 3px;
+  overflow: hidden;
+  min-height: 70px;
+}
+.pe-thumb-frame canvas { display: block; max-width: 100%; height: auto !important; }
+.pe-thumb-blank,
+.pe-thumb-ph {
+  width: 112px;
+  height: 150px;
+  background: #fff;
+}
+.pe-thumb-ph { background: color-mix(in srgb, var(--pe-text, #888) 8%, #fff); }
+.pe-thumb-num {
+  text-align: center;
+  font-size: 10px;
+  color: var(--pe-muted);
+  margin-top: 3px;
+  font-variant-numeric: tabular-nums;
+}
+.pe-thumb-actions {
+  display: none;
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  gap: 2px;
+  padding: 3px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--pe-bg, #1e1e1e) 82%, #000 18%);
+  border: 1px solid var(--pe-line-strong);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+}
+.pe-thumb:hover .pe-thumb-actions { display: flex; }
+.pe-thumb-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--pe-text, #fff);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.pe-thumb-actions button:hover { background: var(--pe-hover); }
+.pe-thumb-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+/* === Canvas area === */
+.pe-canvas-wrap {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow: auto;
+  background: color-mix(in srgb, var(--pe-text, #808080) 8%, transparent);
+  position: relative;
+  padding: 20px;
+}
+.pe-page-container {
+  position: relative;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  background: #fff;
+  line-height: 0;
+}
+.pe-page-container canvas { display: block; }
+.pe-blank-page { background: #fff; }
+
+/* Annotation overlay — above react-pdf's TextLayer (z:2) and AnnotationLayer (z:3) */
+.pe-annotation-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+.pe-annotation-layer.pe-interactive { pointer-events: auto; }
+.pe-annotation-layer.pe-crosshair,
+.pe-annotation-layer.pe-drawing { cursor: crosshair; }
+
+/* Shape SVG layer */
+.pe-shape-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 5;
+}
+.pe-shape-layer * { pointer-events: auto; }
+
+/* Text box (clean, transparent — outline only when selected) */
+.pe-text-annotation {
+  position: absolute;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 12px;
+  cursor: move;
+  min-width: 48px;
+  min-height: 18px;
+  user-select: none;
+  pointer-events: auto;
+  max-width: 320px;
+  word-wrap: break-word;
+}
+.pe-text-annotation:hover {
+  border-color: color-mix(in srgb, var(--pe-accent, #185ABD) 40%, transparent);
+}
+.pe-text-annotation.pe-selected {
+  border-color: var(--pe-accent-line);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+  background: color-mix(in srgb, var(--pe-bg, #fff) 8%, transparent);
+}
+.pe-text-annotation textarea {
+  width: 100%;
+  min-height: 18px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: inherit;
+  font-size: inherit;
+  font-family: inherit;
+  resize: both;
+  padding: 0;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+  pointer-events: auto;
+}
+
+/* Highlight */
+.pe-highlight-annotation {
+  position: absolute;
+  pointer-events: auto;
+  cursor: pointer;
+  border-radius: 1px;
+}
+.pe-highlight-annotation.pe-selected {
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+
+/* Image stamp */
+.pe-image-annotation {
+  position: absolute;
+  pointer-events: auto;
+  cursor: move;
+  border: 1px solid transparent;
+}
+.pe-image-annotation img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  pointer-events: none;
+}
+.pe-image-annotation.pe-selected {
+  border-color: var(--pe-accent-line);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-resize-handle {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--pe-accent, #185ABD);
+  border: 1px solid #fff;
+  cursor: nwse-resize;
+}
+
+/* Drawing canvas */
+.pe-draw-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 4;
+}
+.pe-draw-canvas.pe-active { pointer-events: auto; cursor: crosshair; }
+
+/* === Annotation panel === */
+.pe-props-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-left: 1px solid var(--pe-line);
+  background: color-mix(in srgb, var(--pe-bg, #000) 94%, #000 6%);
+  width: 180px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.pe-panel-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pe-muted);
+  font-weight: 700;
+}
+.pe-panel-empty { color: var(--pe-muted); opacity: 0.7; font-size: 10px; }
+.pe-annotation-list { display: flex; flex-direction: column; gap: 2px; }
+.pe-annotation-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 6px;
+  border-radius: var(--pe-radius);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.pe-annotation-item:hover { background: var(--pe-hover); }
+.pe-annotation-item.pe-selected {
+  background: var(--pe-accent-soft);
+  border: 1px solid var(--pe-accent-line);
+}
+.pe-annotation-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.pe-annotation-delete {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.5;
+  padding: 0 2px;
+}
+.pe-annotation-delete:hover { opacity: 1; color: #ff6666; }
+
+/* === Bottom status bar (single 24px row) === */
+.pe-bottom-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 24px;
+  padding: 0 10px;
+  border-top: 1px solid var(--pe-line);
+  background: color-mix(in srgb, var(--pe-bg, #000) 92%, #000 8%);
+  font-size: 11px;
+  color: var(--pe-muted);
+  flex-shrink: 0;
+}
+.pe-status-left,
+.pe-status-center,
+.pe-status-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.pe-status-center { flex: 1; justify-content: center; }
+.pe-status-right { justify-content: flex-end; }
+.pe-status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--pe-accent-soft);
+  color: color-mix(in srgb, var(--pe-accent, #185ABD) 85%, var(--pe-text, #fff));
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.pe-save-state { font-size: 11px; }
+.pe-save-state.is-modified {
+  color: color-mix(in srgb, var(--pe-accent, #f59e0b) 70%, var(--pe-text, #fff));
+}
+.pe-status-name {
+  color: var(--pe-muted);
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+.pe-page-btn,
+.pe-zoom-btn,
+.pe-zoom-level {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 18px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.pe-page-btn { width: 20px; }
+.pe-zoom-btn { width: 20px; }
+.pe-zoom-level {
+  min-width: 42px;
+  padding: 0 4px;
+  font-variant-numeric: tabular-nums;
+}
+.pe-page-btn:hover,
+.pe-zoom-btn:hover,
+.pe-zoom-level:hover { background: var(--pe-hover); }
+.pe-page-btn:focus-visible,
+.pe-zoom-btn:focus-visible,
+.pe-zoom-level:focus-visible {
+  outline: none;
+  border-color: var(--pe-accent-ring);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-page-btn:disabled,
+.pe-zoom-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.pe-page-input {
+  width: 40px;
+  text-align: center;
+  background: var(--pe-surface);
+  border: 1px solid var(--pe-line);
+  border-radius: 4px;
+  color: inherit;
+  font-size: 11px;
+  padding: 1px 4px;
+  outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.pe-page-input:focus {
+  border-color: var(--pe-accent-ring);
+  box-shadow: 0 0 0 2px var(--pe-accent-ring);
+}
+.pe-page-total { font-size: 11px; color: var(--pe-muted); }
+
+/* === Loading === */
+.pe-loading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 200px;
+  opacity: 0.7;
+  font-size: 13px;
+  padding: 20px;
+  text-align: center;
+}
+.pe-loading-error { color: #ff6b6b; }
+.pe-loading-detail { font-size: 10px; opacity: 0.6; max-width: 400px; word-break: break-all; }
+
+/* === Save toast === */
+.pe-save-toast {
+  position: absolute;
+  bottom: 34px;
+  right: 20px;
+  z-index: 60;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.4);
+  animation: pe-toast-in 0.18s ease-out;
+}
+.pe-save-toast-ok {
+  background: rgba(22, 101, 52, 0.92);
+  color: #dcfce7;
+  border: 1px solid rgba(34, 197, 94, 0.5);
+}
+.pe-save-toast-err {
+  background: rgba(153, 27, 27, 0.92);
+  color: #fee2e2;
+  border: 1px solid rgba(248, 113, 113, 0.5);
+}
+@keyframes pe-toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* === Signature modal === */
+.pe-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+}
+.pe-modal {
+  background: color-mix(in srgb, var(--pe-bg, #1e1e1e) 88%, #000 12%);
+  border: 1px solid var(--pe-line-strong);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pe-modal-title { font-size: 13px; font-weight: 600; }
+.pe-sign-canvas {
+  background: #fff;
+  border: 1px solid var(--pe-line-strong);
+  border-radius: 6px;
+  cursor: crosshair;
+}
+.pe-modal-actions { display: flex; align-items: center; gap: 6px; }
+
+/* === Responsive === */
+@media (max-width: 720px) {
+  .pe-thumbs { width: 108px; }
+  .pe-props-panel { display: none; }
+}
+@media (max-width: 520px) {
+  .pe-toolbar-sep { margin: 0 3px; }
+  .pe-thumbs { display: none; }
+}

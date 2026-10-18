@@ -1,0 +1,22 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "BBARIT Terminal Source",
+  "identifier": "com.bbarit.terminal.source",
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "signingIdentity": "-",
+      "providerShortName": null
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "signCommand": null
+    }
+  }
+}

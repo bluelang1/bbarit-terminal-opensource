@@ -1,0 +1,118 @@
+{
+  "source_license_files": [
+    {
+      "license_file": "licenses/MinishLab-semble-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/MinishLab/semble/8ee6463efbb1ff755c339e965c7298b7afd7db5b/LICENSE",
+      "repository": "MinishLab/semble",
+      "revision": "8ee6463efbb1ff755c339e965c7298b7afd7db5b",
+      "sha256": "d1aa11c9413f6732a492cbe8b57f9fc5d9bc7a5f1575f420619d099b3358dc12",
+      "bytes": 1074
+    },
+    {
+      "license_file": "licenses/FiraCode-OFL.txt",
+      "source_url": "https://raw.githubusercontent.com/tonsky/FiraCode/ecd367b040ad92a28b64fa93135775f7e2417b37/LICENSE",
+      "repository": "tonsky/FiraCode",
+      "revision": "ecd367b040ad92a28b64fa93135775f7e2417b37",
+      "sha256": "1d41e10031ab125302780a05ec4c91d218e47db0c7e37cf315cce5e608cdc25c",
+      "bytes": 4389
+    },
+    {
+      "license_file": "licenses/JetBrainsMono-OFL.txt",
+      "source_url": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/19371302b95d218af43299bce79ddbddd0bc364d/OFL.txt",
+      "repository": "JetBrains/JetBrainsMono",
+      "revision": "19371302b95d218af43299bce79ddbddd0bc364d",
+      "sha256": "a76abf002c49097d146e86740a3105a5d00450b1592e820a1109a8c5680cd697",
+      "bytes": 4399
+    },
+    {
+      "license_file": "licenses/D2Coding-OFL.txt",
+      "source_url": "https://raw.githubusercontent.com/naver/d2codingfont/b0dc372e28d7abdba7f3cba854855ceffbd490a8/OFL.txt",
+      "repository": "naver/d2codingfont",
+      "revision": "b0dc372e28d7abdba7f3cba854855ceffbd490a8",
+      "sha256": "1807e8dec4d65f474cbf9be39f5e2254ecb81702babc320749e272ea66ffcc69",
+      "bytes": 4511
+    },
+    {
+      "license_file": "licenses/D2Coding-NOTICE.md",
+      "source_url": "https://raw.githubusercontent.com/naver/d2codingfont/b0dc372e28d7abdba7f3cba854855ceffbd490a8/LICENSE.md",
+      "repository": "naver/d2codingfont",
+      "revision": "b0dc372e28d7abdba7f3cba854855ceffbd490a8",
+      "sha256": "265a120b5cab26c2683f52eb42e7b17eb493b1034e9f251191d45b3277219d60",
+      "bytes": 4406
+    },
+    {
+      "license_file": "licenses/Hack-LICENSE.txt",
+      "source_url": "https://raw.githubusercontent.com/source-foundry/Hack/a737c121cabb337fdfe655d8c7304729f351e30f/LICENSE.md",
+      "repository": "source-foundry/Hack",
+      "revision": "a737c121cabb337fdfe655d8c7304729f351e30f",
+      "sha256": "1f61bb7c790c59b4b0ecdf304628b94e42ae4c8020094a8c3da73381ab212623",
+      "bytes": 3744
+    },
+    {
+      "license_file": "licenses/CascadiaCode-LICENSE.txt",
+      "source_url": "https://raw.githubusercontent.com/microsoft/cascadia-code/56bcca3f2c1e4cb19458954f0e2bb4635960df91/LICENSE",
+      "repository": "microsoft/cascadia-code",
+      "revision": "56bcca3f2c1e4cb19458954f0e2bb4635960df91",
+      "sha256": "51882cd3cdba4e16f220f44ddb08a635c38c44ea6e0975db2574f4be6f958238",
+      "bytes": 4489
+    },
+    {
+      "license_file": "licenses/Hermes-Agent-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/NousResearch/hermes-agent/627ce0355641449599ed1bef9425bb61e9020d14/LICENSE",
+      "repository": "NousResearch/hermes-agent",
+      "revision": "627ce0355641449599ed1bef9425bb61e9020d14",
+      "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6",
+      "bytes": 1070
+    },
+    {
+      "license_file": "licenses/Hermes-humanizer-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/NousResearch/hermes-agent/627ce0355641449599ed1bef9425bb61e9020d14/skills/creative/humanizer/LICENSE",
+      "repository": "NousResearch/hermes-agent",
+      "revision": "627ce0355641449599ed1bef9425bb61e9020d14",
+      "sha256": "4ac4810254ab36d45419141aeb8e69bf50652cfafe5b2dab947d06d44e5cbf96",
+      "bytes": 1066
+    },
+    {
+      "license_file": "licenses/Hermes-powerpoint-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/NousResearch/hermes-agent/627ce0355641449599ed1bef9425bb61e9020d14/skills/productivity/powerpoint/LICENSE",
+      "repository": "NousResearch/hermes-agent",
+      "revision": "627ce0355641449599ed1bef9425bb61e9020d14",
+      "sha256": "8aa3c7717d57a68490c31eef4b57b6887e892f0566ff866078ebd76113d357e2",
+      "bytes": 1070
+    },
+    {
+      "license_file": "licenses/OpenClaw-Agent-Skills-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/openclaw/agent-skills/e7c3d643c2410418a2d0a969bee3c1404001cc45/LICENSE",
+      "repository": "openclaw/agent-skills",
+      "revision": "e7c3d643c2410418a2d0a969bee3c1404001cc45",
+      "sha256": "6ae2daf92d73e912aef033d56ce374df997ae0ad1d88ca9ef76f0c11123aae27",
+      "bytes": 1065
+    },
+    {
+      "license_file": "licenses/OpenJarvis-Apache-2.0.txt",
+      "source_url": "https://raw.githubusercontent.com/open-jarvis/OpenJarvis/2817faa5fe9dbf0612f56be46f77d7c5c38e271c/LICENSE",
+      "repository": "open-jarvis/OpenJarvis",
+      "revision": "2817faa5fe9dbf0612f56be46f77d7c5c38e271c",
+      "sha256": "ac617ecddb7ffeb27a239c6c9c8145212306baa90e23ee694849bf3cefb10743",
+      "bytes": 10773
+    },
+    {
+      "license_file": "licenses/MengTo-Skills-MIT.txt",
+      "source_url": "https://raw.githubusercontent.com/MengTo/Skills/25f872a94e3bbee85ecacba4041fa52c21cb0e44/LICENSE",
+      "repository": "MengTo/Skills",
+      "revision": "25f872a94e3bbee85ecacba4041fa52c21cb0e44",
+      "sha256": "b2a071ba22fefd803f4e9d1f5c777dd79c62d191695586a1a73fd4d0ebd051c6",
+      "bytes": 1064
+    },
+    {
+      "license_file": "licenses/SurrealDB-2.6.2-BSL.txt",
+      "repository": "surrealdb/surrealdb",
+      "revision": "v2.6.2",
+      "source_url": "https://crates.io/crates/surrealdb/2.6.2",
+      "sha256": "dd98c688e54be8b85ad79e603f5112449b9789dfc031db94eb5c7dc843702aef",
+      "bytes": 4565,
+      "evidence": "License from the exact Cargo-resolved 2.6.2 crate in the local registry."
+    }
+  ],
+  "note": "Pinned upstream license evidence. Original skill-import revisions were not recorded; no claim of source snapshot equivalence is made."
+}

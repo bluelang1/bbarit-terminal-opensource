@@ -1,0 +1,137 @@
+/**
+ * MermaidFileEditor.css
+ *
+ * Structural styles for the Mermaid split editor. Theme colours stay inline
+ * (driven by the `style` prop); only layout, the error-line highlight and
+ * the template menu live here.
+ */
+
+.mm-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+}
+
+/* ─── Toolbar ─── */
+.mm-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+/* ─── Template dropdown ─── */
+.mm-template-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.mm-template-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+}
+.mm-template-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 41;
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+  padding: 4px;
+  border-radius: var(--brutal-radius);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+}
+.mm-template-item {
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--brutal-radius);
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.mm-template-item:hover {
+  background: rgba(127, 127, 127, 0.18);
+}
+
+/* ─── Split body ─── */
+.mm-split-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.mm-source {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+.mm-source .cm-theme,
+.mm-source .cm-editor {
+  height: 100%;
+}
+.mm-divider {
+  flex: 0 0 5px;
+  cursor: col-resize;
+}
+.mm-divider:hover {
+  background: rgba(120, 160, 255, 0.4) !important;
+}
+
+/* ─── Error-line highlight in CodeMirror ─── */
+.cm-mermaid-error-line {
+  background: rgba(239, 68, 68, 0.16);
+}
+
+/* ─── Preview ─── */
+.mm-preview {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.mm-error {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.08);
+  border-bottom: 1px solid rgba(239, 68, 68, 0.15);
+  flex-shrink: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.mm-preview-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  flex-shrink: 0;
+}
+.mm-zoom-label {
+  font-size: 11px;
+  min-width: 40px;
+  text-align: center;
+}
+.mm-preview-viewport {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  cursor: grab;
+}
+.mm-preview-viewport:active {
+  cursor: grabbing;
+}
+.mm-preview-canvas {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  transform-origin: center center;
+}

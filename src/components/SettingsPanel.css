@@ -1,0 +1,1730 @@
+/* Settings panel overlay */
+.settings-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 11000;
+}
+
+/* Settings panel container */
+.settings-panel {
+  width: min(1120px, 94vw);
+  height: min(88vh, 860px);
+  /* Fallback for WebKit versions that don't support color-mix(). */
+  background: var(--settings-bg);
+  background: color-mix(in srgb, var(--settings-bg) 98%, white 2%);
+  border: 1px solid var(--settings-accent);
+  border-radius: var(--brutal-radius);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* Header */
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--settings-accent);
+  /* Fallback for WebKit versions that don't support color-mix(). */
+  background: var(--settings-bg);
+  background: color-mix(in srgb, var(--settings-bg) 90%, var(--settings-accent) 10%);
+}
+
+.settings-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--settings-text);
+}
+
+.settings-close {
+  background: transparent;
+  border: none;
+  color: var(--settings-text);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: var(--brutal-radius);
+  opacity: 0.7;
+  transition: all 0.06s;
+}
+
+.settings-close:hover {
+  background: color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  opacity: 1;
+}
+
+/* Category bar */
+/* Tabs */
+.settings-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 190px;
+  padding: 12px;
+  background: var(--settings-bg);
+  border-right: 1px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  flex-shrink: 0;
+  overflow-y: auto;
+}
+
+.settings-tab {
+  width: 100%;
+  min-height: 34px;
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.06s;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+
+.settings-tab-icon {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.settings-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.settings-tab:hover {
+  /* Fallback for WebKit versions that don't support color-mix(). */
+  background: transparent;
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+  opacity: 0.8;
+}
+
+.settings-tab.active {
+  /* Fallback for WebKit versions that don't support color-mix(). */
+  background: transparent;
+  background: color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border-color: var(--settings-accent);
+  opacity: 1;
+}
+
+/* Content area */
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+/* Settings group */
+.settings-group {
+  /* Fallback for WebKit versions that don't support color-mix(). */
+  background: var(--settings-bg);
+  background: color-mix(in srgb, var(--settings-bg) 95%, white 5%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 16px;
+}
+
+.settings-group h3 {
+  margin: 0 0 16px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--settings-accent);
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Settings icon */
+.settings-icon {
+  width: 18px;
+  height: 18px;
+  filter: brightness(0) invert(1);
+  opacity: 0.9;
+}
+
+/* Setting item */
+.setting-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+
+.setting-item:last-child {
+  margin-bottom: 0;
+}
+
+.setting-item label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--settings-text);
+}
+
+.setting-item select,
+.setting-item input[type="number"],
+.setting-item input[type="text"],
+.setting-item input[type="password"],
+.setting-item textarea {
+  width: 100%;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--settings-bg) 85%, var(--settings-text) 15%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 13px;
+  font-family: inherit;
+  transition: all 0.06s;
+  box-sizing: border-box;
+}
+
+.setting-item select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+  cursor: pointer;
+}
+
+.setting-item select:focus,
+.setting-item input[type="number"]:focus,
+.setting-item input[type="text"]:focus,
+.setting-item input[type="password"]:focus,
+.setting-item textarea:focus {
+  outline: none;
+  border-color: var(--settings-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--settings-accent) 20%, transparent);
+}
+
+.setting-item select option {
+  background: var(--settings-bg);
+  color: var(--settings-text);
+  padding: 6px 12px;
+}
+
+.setting-item input[type="number"] {
+  max-width: 120px;
+}
+
+.settings-textarea {
+  min-height: 88px;
+  resize: vertical;
+  font-family: var(--font-family, 'SF Mono', 'Monaco', monospace);
+  line-height: 1.45;
+}
+
+/* Toggle setting */
+.setting-item.toggle {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.setting-item.toggle label {
+  flex: 1;
+}
+
+.setting-item.toggle input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--settings-accent);
+  cursor: pointer;
+}
+
+.setting-item.toggle .setting-description {
+  width: 100%;
+  margin-top: 4px;
+}
+
+/* Setting description */
+.setting-description {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--settings-text) 60%, transparent);
+  line-height: 1.4;
+}
+
+.settings-button-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.settings-panel .btn-toolbar {
+  width: auto;
+  min-width: 64px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 12px;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.settings-panel .btn-toolbar.danger {
+  border-color: color-mix(in srgb, #ef4444 55%, transparent);
+  background: color-mix(in srgb, #ef4444 14%, transparent);
+}
+
+/* Shortcut list */
+.shortcut-note {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--settings-text) 60%, transparent);
+  margin-bottom: 12px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--settings-accent) 10%, transparent);
+  border-radius: var(--brutal-radius);
+  border-left: 3px solid var(--settings-accent);
+}
+
+.shortcut-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.shortcut-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--settings-bg);
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 15%, transparent);
+}
+
+.shortcut-name {
+  font-size: 13px;
+  color: var(--settings-text);
+}
+
+.shortcut-key {
+  font-family: var(--font-family, 'SF Mono', 'Monaco', monospace);
+  font-size: 12px;
+  padding: 4px 8px;
+  background: color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  border: 1px solid var(--settings-accent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-accent);
+}
+
+/* Keybinding preset */
+.kb-preset-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 2px;
+}
+
+.kb-preset-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--settings-text) 14%, transparent);
+  background: color-mix(in srgb, var(--settings-bg) 86%, var(--settings-text) 14%);
+  color: var(--settings-text);
+  padding: 8px 12px;
+  border-radius: var(--brutal-radius);
+  font-size: 12px;
+  font-weight: 750;
+  cursor: pointer;
+  transition: transform 0.03s ease, background 0.15s ease, border-color 0.05s ease;
+}
+
+.kb-preset-btn:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--settings-accent) 40%, transparent);
+}
+
+.kb-preset-btn.active {
+  background: color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-color: var(--settings-accent);
+  color: var(--settings-accent);
+}
+
+/* Scrollbar */
+.settings-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.settings-content::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-content::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.settings-content::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--settings-accent) 60%, transparent);
+}
+
+/* Theme grid */
+.theme-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.theme-option {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border: 2px solid;
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+  transition: all 0.06s;
+  font-size: 11px;
+}
+
+.theme-option:hover {
+  transform: scale(1.05);
+}
+
+.theme-option.active {
+  border-width: 3px;
+  box-shadow: 0 0 12px currentColor;
+}
+
+.theme-name {
+  font-weight: 500;
+}
+
+.theme-preview {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* Theme preview box */
+.theme-preview-box {
+  border: 1px solid;
+  border-radius: var(--brutal-radius);
+  overflow: hidden;
+  font-family: var(--font-family, 'SF Mono', monospace);
+  font-size: 13px;
+}
+
+.preview-header {
+  padding: 8px 12px;
+  border-bottom: 1px solid;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-content {
+  padding: 12px;
+  line-height: 1.6;
+}
+
+/* Font grid */
+.font-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 8px;
+}
+
+.font-option {
+  padding: 10px 8px;
+  background: var(--settings-bg);
+  border: 2px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.06s;
+  text-align: center;
+}
+
+.font-option:hover {
+  border-color: var(--settings-accent);
+  transform: scale(1.02);
+}
+
+.font-option.active {
+  border-color: var(--settings-accent);
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--settings-accent) 30%, transparent);
+}
+
+/* Prompt presets */
+.preset-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.preset-item {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  background: var(--settings-bg);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border-radius: var(--brutal-radius);
+  transition: all 0.06s;
+}
+
+.preset-item:hover {
+  border-color: var(--settings-accent);
+}
+
+.preset-info {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preset-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.preset-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--settings-accent);
+}
+
+.preset-preview {
+  font-size: 12px;
+  color: var(--settings-text);
+  line-height: 1.5;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--settings-bg) 70%, black 30%);
+  border-radius: var(--brutal-radius);
+  border-left: 3px solid var(--settings-accent);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.preset-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.preset-actions button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-radius: var(--brutal-radius);
+  cursor: pointer;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.06s;
+}
+
+.preset-actions button:hover {
+  background: color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  border-color: var(--settings-accent);
+}
+
+/* Preset editing */
+.preset-edit {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preset-edit input,
+.preset-edit textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--settings-bg) 80%, black);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: none;
+}
+
+.preset-edit input:focus,
+.preset-edit textarea:focus {
+  outline: none;
+  border-color: var(--settings-accent);
+}
+
+.preset-edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.preset-edit-actions button {
+  padding: 6px 14px;
+  background: color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border: 1px solid var(--settings-accent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.preset-edit-actions button:hover {
+  background: color-mix(in srgb, var(--settings-accent) 40%, transparent);
+}
+
+/* Preset add form */
+.preset-add {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--settings-accent) 8%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.preset-add input,
+.preset-add textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--settings-bg);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 13px;
+  font-family: inherit;
+  resize: none;
+}
+
+.preset-add input:focus,
+.preset-add textarea:focus {
+  outline: none;
+  border-color: var(--settings-accent);
+}
+
+.preset-add button {
+  align-self: flex-end;
+  padding: 8px 16px;
+  background: var(--settings-accent);
+  border: none;
+  border-radius: var(--brutal-radius);
+  color: var(--settings-bg);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.preset-add button:hover:not(:disabled) {
+  filter: brightness(1.1);
+  transform: scale(1.02);
+}
+
+.preset-add button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* MCP */
+.mcp-mode-btn {
+  padding: 5px 14px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--settings-text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.05s;
+}
+
+.mcp-mode-btn:hover {
+  opacity: 0.85;
+  background: color-mix(in srgb, var(--settings-accent) 12%, transparent);
+}
+
+.mcp-mode-btn.active {
+  opacity: 1;
+  background: color-mix(in srgb, var(--settings-accent) 22%, transparent);
+  border-color: var(--settings-accent);
+}
+
+.mcp-preset-btn {
+  padding: 6px 12px;
+  border-radius: var(--brutal-radius);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--settings-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  color: var(--settings-text);
+  transition: all 0.05s;
+}
+
+.mcp-preset-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 28%, transparent);
+  border-color: var(--settings-accent);
+  transform: translateY(-1px);
+}
+
+.mcp-preset-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.mcp-help {
+  margin: 12px 0 14px;
+  padding: 12px 12px;
+  background: color-mix(in srgb, var(--settings-bg) 82%, black 18%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 22%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.mcp-help h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--settings-text);
+  letter-spacing: 0.2px;
+}
+
+.mcp-help ol {
+  margin: 0 0 10px 18px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: color-mix(in srgb, var(--settings-text) 85%, transparent);
+}
+
+.mcp-inline-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin: 10px 0 8px 0;
+}
+
+.mcp-inline-actions button {
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--settings-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 45%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.mcp-inline-actions button:hover {
+  background: color-mix(in srgb, var(--settings-accent) 26%, transparent);
+  border-color: var(--settings-accent);
+}
+
+.mcp-help-note {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  font-size: 11px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--settings-text) 80%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 10%, transparent);
+  border-left: 3px solid var(--settings-accent);
+}
+
+.mcp-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px 0;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--settings-bg) 80%, black);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.mcp-path-label {
+  font-size: 11px;
+  opacity: 0.7;
+  color: var(--settings-text);
+  flex-shrink: 0;
+}
+
+.mcp-path-value {
+  font-size: 11px;
+  color: var(--settings-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-textarea {
+  width: 100%;
+  min-height: 180px;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--settings-bg) 80%, black);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 35%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  font-family: var(--font-family, 'SF Mono', 'Monaco', monospace);
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.mcp-textarea.mcp-textarea-small {
+  min-height: 92px;
+}
+
+.mcp-textarea:focus {
+  outline: none;
+  border-color: var(--settings-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--settings-accent) 20%, transparent);
+}
+
+.mcp-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.mcp-actions button {
+  padding: 8px 14px;
+  background: color-mix(in srgb, var(--settings-accent) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 55%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.mcp-actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-color: var(--settings-accent);
+}
+
+.mcp-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mcp-status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--settings-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 35%, transparent);
+  color: var(--settings-text);
+  opacity: 0.9;
+}
+
+/* Telegram setup helpers (MCP tab) */
+.telegram-setup-card {
+  margin-top: 12px;
+  padding: 12px 12px;
+  background: color-mix(in srgb, var(--settings-bg) 82%, black 18%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 22%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.telegram-setup-title {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--settings-text);
+  letter-spacing: 0.2px;
+  margin-bottom: 8px;
+}
+
+.telegram-setup-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--settings-text) 85%, transparent);
+}
+
+.telegram-setup-steps code {
+  font-family: var(--font-family, 'SF Mono', 'Monaco', monospace);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 35%, transparent);
+}
+
+.telegram-setup-hint {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  font-size: 11px;
+  line-height: 1.45;
+  color: color-mix(in srgb, var(--settings-text) 80%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 10%, transparent);
+  border-left: 3px solid var(--settings-accent);
+}
+
+.telegram-setup-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
+.telegram-setup-actions button {
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--settings-accent) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 45%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.telegram-setup-actions button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 26%, transparent);
+  border-color: var(--settings-accent);
+}
+
+.telegram-setup-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.telegram-setup-error {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  font-size: 12px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: color-mix(in srgb, var(--settings-text) 92%, transparent);
+}
+
+.telegram-chat-candidates {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.telegram-chat-candidates-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--settings-accent);
+  letter-spacing: 0.2px;
+}
+
+.telegram-chat-candidate {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  padding: 10px 10px;
+  background: color-mix(in srgb, var(--settings-bg) 80%, black 20%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 18%, transparent);
+  border-radius: var(--brutal-radius);
+}
+
+.telegram-chat-candidate-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.telegram-chat-candidate-id code {
+  font-family: var(--font-family, 'SF Mono', 'Monaco', monospace);
+  font-size: 11px;
+}
+
+.telegram-chat-candidate-meta {
+  font-size: 11px;
+  opacity: 0.8;
+  color: color-mix(in srgb, var(--settings-text) 80%, transparent);
+}
+
+.telegram-chat-candidate-snippet {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--settings-text) 90%, transparent);
+  word-break: break-word;
+}
+
+.telegram-chat-use {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--settings-accent) 24%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 55%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.06s;
+}
+
+.telegram-chat-use:hover {
+  background: color-mix(in srgb, var(--settings-accent) 34%, transparent);
+  border-color: var(--settings-accent);
+}
+
+/* Project Settings */
+.project-settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.project-settings-card {
+  background: color-mix(in srgb, var(--settings-bg) 85%, var(--settings-text) 15%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  border-radius: var(--brutal-radius);
+  padding: 14px;
+  transition: border-color 0.06s;
+}
+
+.project-settings-card:hover {
+  border-color: color-mix(in srgb, var(--settings-accent) 60%, transparent);
+}
+
+.project-settings-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.project-settings-reorder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  flex-shrink: 0;
+}
+
+.project-reorder-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 12px;
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--settings-text) 40%, transparent);
+  cursor: pointer;
+  padding: 0;
+  border-radius: var(--brutal-radius);
+  transition: all 0.05s;
+}
+
+.project-reorder-btn:hover:not(:disabled) {
+  color: var(--settings-accent);
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+}
+
+.project-reorder-btn:disabled {
+  opacity: 0.2;
+  cursor: default;
+}
+
+.project-settings-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 16px;
+  background: var(--settings-accent);
+  color: var(--settings-bg);
+  border-radius: var(--brutal-radius);
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.project-settings-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--settings-text);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--brutal-radius);
+  transition: background 0.05s;
+}
+
+.project-settings-name:hover {
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+}
+
+.project-settings-name-input {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--settings-text);
+  background: color-mix(in srgb, var(--settings-bg) 80%, var(--settings-text) 20%);
+  border: 1px solid var(--settings-accent);
+  border-radius: var(--brutal-radius);
+  padding: 2px 6px;
+  outline: none;
+  font-family: inherit;
+}
+
+.project-settings-path {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--settings-text) 50%, transparent);
+  margin-left: 40px;
+  margin-bottom: 10px;
+  word-break: break-all;
+}
+
+.project-settings-options {
+  display: flex;
+  gap: 12px;
+  margin-left: 40px;
+}
+
+.project-settings-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+
+.project-settings-option label {
+  font-size: 11px;
+  color: color-mix(in srgb, var(--settings-text) 60%, transparent);
+  flex-shrink: 0;
+  min-width: 40px;
+}
+
+.project-settings-option select {
+  flex: 1;
+  padding: 4px 24px 4px 8px;
+  background: color-mix(in srgb, var(--settings-bg) 80%, var(--settings-text) 20%);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 35%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  font-size: 12px;
+  font-family: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 12 12'%3E%3Cpath fill='%23888' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  cursor: pointer;
+}
+
+.project-settings-option select:focus {
+  outline: none;
+  border-color: var(--settings-accent);
+}
+
+.project-settings-color-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--settings-text) 20%, transparent);
+}
+
+.project-settings-font-preview {
+  font-size: 14px;
+  color: var(--settings-text);
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+  .settings-panel {
+    width: 95vw;
+    max-height: 90vh;
+  }
+
+  .settings-tabs {
+    flex-wrap: wrap;
+    padding: 8px 12px;
+  }
+
+  .settings-tab {
+    padding: 6px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .settings-content {
+    padding: 12px;
+  }
+
+  .settings-group {
+    padding: 12px;
+  }
+
+  .shortcut-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .preset-item {
+    flex-direction: column;
+  }
+
+  .preset-actions {
+    align-self: flex-end;
+  }
+}
+
+/* Open config file button */
+.settings-open-file-btn {
+  padding: 5px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  align-self: flex-start;
+  appearance: none;
+  cursor: pointer;
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 40%, transparent);
+  border-radius: var(--brutal-radius);
+  color: var(--settings-text);
+  transition: background 0.15s, border-color 0.05s;
+}
+.settings-open-file-btn:hover {
+  background: color-mix(in srgb, var(--settings-accent) 28%, transparent);
+  border-color: var(--settings-accent);
+}
+
+/* ── Telegram Wizard & Dashboard ── */
+
+.tg-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.tg-wizard-progress {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tg-wizard-step-bar {
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
+  transition: background 0.25s;
+}
+
+.tg-wizard-step-bar.active {
+  background: color-mix(in srgb, var(--settings-accent) 60%, transparent);
+}
+
+.tg-wizard-step-bar.current {
+  background: var(--settings-accent);
+}
+
+.tg-wizard-step-label {
+  font-size: 11px;
+  opacity: 0.6;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.tg-wizard-content {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tg-wizard-content h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--settings-text);
+}
+
+/* Telegram buttons */
+.tg-btn {
+  padding: 7px 14px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 35%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 10%, transparent);
+  color: var(--settings-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.05s;
+}
+
+.tg-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 22%, transparent);
+  border-color: color-mix(in srgb, var(--settings-accent) 55%, transparent);
+}
+
+.tg-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.tg-btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+.tg-btn-primary {
+  background: color-mix(in srgb, var(--settings-accent) 25%, transparent);
+  border-color: color-mix(in srgb, var(--settings-accent) 55%, transparent);
+  font-weight: 600;
+}
+
+.tg-btn-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 38%, transparent);
+}
+
+.tg-btn-accent {
+  background: color-mix(in srgb, var(--settings-accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--settings-accent) 45%, transparent);
+}
+
+.tg-btn-accent:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--settings-accent) 30%, transparent);
+}
+
+.tg-btn-danger {
+  border-color: color-mix(in srgb, #ef4444 50%, transparent);
+  background: color-mix(in srgb, #ef4444 10%, transparent);
+  color: color-mix(in srgb, #ef4444 80%, var(--settings-text) 20%);
+}
+
+.tg-btn-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, #ef4444 22%, transparent);
+}
+
+/* Chat detection item */
+.tg-chat-detect-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 20%, transparent);
+}
+
+/* Dashboard */
+.tg-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tg-status-card {
+  padding: 10px 12px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 22%, transparent);
+}
+
+.tg-status-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tg-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tg-status-dot.connected {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+}
+
+.tg-status-dot.disconnected {
+  background: #ef4444;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
+}
+
+.tg-status-dot.checking {
+  background: #eab308;
+  box-shadow: 0 0 6px rgba(234, 179, 8, 0.4);
+  animation: tg-blink 1s ease-in-out infinite;
+}
+
+@keyframes tg-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.tg-stats-row {
+  margin-top: 4px;
+  opacity: 0.7;
+}
+
+.tg-error-log {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, #ef4444 6%, transparent);
+  border: 1px solid color-mix(in srgb, #ef4444 15%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* Chat card */
+.tg-chat-card {
+  padding: 8px 10px;
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 18%, transparent);
+}
+
+/* Manual settings */
+.tg-manual-settings {
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: var(--brutal-radius);
+  border: 1px dashed color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 4%, transparent);
+}
+
+.broker-preset-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 10px 0 12px;
+  font-size: 12px;
+}
+
+.broker-preset-row > span {
+  opacity: 0.72;
+  margin-right: 2px;
+}
+
+.broker-preset-btn {
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 34%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 8%, transparent);
+  color: var(--settings-text);
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.broker-preset-btn:hover {
+  background: color-mix(in srgb, var(--settings-accent) 16%, transparent);
+}
+
+.broker-role-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.broker-role-card {
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  border-radius: var(--brutal-radius);
+  background: color-mix(in srgb, var(--settings-accent) 5%, transparent);
+  padding: 10px;
+}
+
+.broker-role-card-head,
+.broker-profile-preview {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.broker-role-card-head {
+  margin-bottom: 9px;
+}
+
+.broker-role-card-head > span:last-child,
+.broker-profile-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.broker-role-card-head strong,
+.broker-profile-main strong {
+  font-size: 12px;
+}
+
+.broker-role-card-head span span,
+.broker-profile-main span {
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+.broker-role-card-face,
+.broker-profile-face {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 18%, var(--settings-bg, #0b0f14));
+  color: var(--settings-text);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.broker-profile-preview {
+  margin-top: 9px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in srgb, var(--settings-accent) 14%, transparent);
+}
+
+.broker-profile-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+.broker-profile-stats span {
+  min-width: 34px;
+  padding: 2px 5px;
+  border-radius: var(--brutal-radius);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 20%, transparent);
+  background: color-mix(in srgb, var(--settings-accent) 8%, transparent);
+  font-size: 10px;
+  text-align: center;
+}
+
+@media (max-width: 760px) {
+  .settings-panel {
+    width: 96vw;
+    height: 92vh;
+  }
+
+  .settings-body {
+    flex-direction: column;
+  }
+
+  .settings-tabs {
+    width: auto;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: 0;
+    border-bottom: 1px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
+  }
+
+  .settings-tab {
+    width: auto;
+    min-width: max-content;
+  }
+}
+
+/* BBARIT Agent persona preview + picker trigger */
+.bbarit-persona-picker-open {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 55%, transparent);
+  color: var(--settings-text);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.bbarit-persona-picker-open:hover {
+  background: color-mix(in srgb, var(--settings-accent) 22%, transparent);
+}
+
+.bbarit-persona-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.bbarit-persona-icon {
+  border-radius: 8px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.bbarit-persona-face {
+  font-size: 22px;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.bbarit-persona-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.bbarit-persona-main strong { font-size: 12.5px; }
+
+.bbarit-persona-main span {
+  font-size: 11px;
+  opacity: 0.65;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+
+/* ── Control CLI tab ─────────────────────────────────────────────── */
+.cli-cmd-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 10px;
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+
+.cli-cmd-row code {
+  flex: 1;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.cli-copy-btn {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid color-mix(in srgb, var(--settings-accent) 45%, transparent);
+  color: var(--settings-text);
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.cli-copy-btn:hover { background: color-mix(in srgb, var(--settings-accent) 22%, transparent); }
+
+.cli-cmd-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  max-height: 380px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.cli-cmd-group {
+  position: sticky;
+  top: 0;
+  padding: 5px 4px 3px;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--settings-accent);
+  background: var(--settings-bg);
+  z-index: 1;
+}
+
+.cli-cmd-item {
+  display: grid;
+  grid-template-columns: 170px minmax(120px, 220px) 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+
+.cli-cmd-item:hover { background: rgba(255, 255, 255, 0.05); }
+
+.cli-cmd-name { font-size: 12px; font-weight: 650; }
+.cli-cmd-args { font-size: 11px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cli-cmd-desc { font-size: 11.5px; opacity: 0.8; }
+
+@media (max-width: 900px) {
+  .cli-cmd-item { grid-template-columns: 140px 1fr auto; }
+  .cli-cmd-args { display: none; }
+}

@@ -1,0 +1,2599 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<title>BBARIT Terminal - Web</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #1c2129;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --accent-hover: #79c0ff;
+  --danger: #f85149;
+  --success: #3fb950;
+  --warning: #d29922;
+  --sidebar-w: 260px;
+  --app-h: 100vh;
+}
+
+/* Dynamic viewport height when supported (handles mobile URL bar). JS overrides
+   this with the exact visualViewport height while the soft keyboard is open. */
+@supports (height: 100dvh) {
+  :root { --app-h: 100dvh; }
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  height: var(--app-h);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Auth screen */
+#auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--app-h);
+  background: var(--bg);
+}
+
+.auth-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px;
+  width: 380px;
+  text-align: center;
+}
+
+.auth-box h1 {
+  font-size: 24px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.auth-box .subtitle {
+  color: var(--text-dim);
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+.auth-box input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+  margin-bottom: 16px;
+}
+
+.auth-box input:focus { border-color: var(--accent); }
+
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-weight: 500;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  width: 100%;
+  padding: 10px;
+}
+
+.btn-primary:hover { background: var(--accent-hover); }
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.btn-success { background: var(--success); color: #fff; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+
+.error-msg {
+  color: var(--danger);
+  font-size: 13px;
+  margin-top: 8px;
+}
+
+/* Main layout */
+#main-screen {
+  display: none;
+  flex-direction: column;
+  height: var(--app-h);
+}
+
+/* Top bar */
+.top-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.top-bar .logo {
+  font-weight: 700;
+  font-size: 15px;
+  margin-right: 8px;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  overflow-x: auto;
+}
+
+.tab {
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.tab:hover { background: var(--bg); color: var(--text); }
+.tab.active { background: var(--bg); color: var(--text); border-color: var(--border); }
+
+.tab .close-tab {
+  opacity: 0;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.tab:hover .close-tab { opacity: 0.6; }
+.tab .close-tab:hover { opacity: 1; background: var(--danger); color: #fff; }
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.status-dot.dead { background: var(--danger); }
+
+/* Content area: sidebar + main */
+.content-area {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+
+/* Sidebar */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.2s, min-width 0.2s;
+}
+
+.sidebar.collapsed {
+  width: 0;
+  min-width: 0;
+  border-right: none;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.sidebar-header .spacer { flex: 1; }
+
+.sidebar-header button {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.sidebar-header button:hover { color: var(--text); background: var(--bg); }
+
+/* Project selector */
+.project-selector {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.project-selector select {
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+}
+
+.project-selector select:focus { border-color: var(--accent); }
+
+.project-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.project-actions button {
+  flex: 1;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.project-actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+/* File tree */
+.file-tree {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0;
+}
+
+.file-tree::-webkit-scrollbar { width: 6px; }
+.file-tree::-webkit-scrollbar-track { background: transparent; }
+.file-tree::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+.ft-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px calc(8px + var(--depth, 0) * 16px);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.ft-item:hover { background: var(--bg); color: var(--text); }
+.ft-item.selected { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
+
+.ft-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  width: 16px;
+  text-align: center;
+}
+
+.ft-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ft-size {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--border);
+  flex-shrink: 0;
+}
+
+/* Main content */
+.main-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Toolbar */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.toolbar label { color: var(--text-dim); }
+
+.toolbar input {
+  padding: 3px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.toolbar input:focus { border-color: var(--accent); }
+
+.spacer { flex: 1; }
+
+/* Tunnel bar */
+.tunnel-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  background: #1a1e24;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.tunnel-url {
+  color: var(--accent);
+  text-decoration: none;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.tunnel-url:hover { text-decoration: underline; }
+
+/* View area: terminal + file viewer */
+.view-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+  min-height: 0; /* critical for flex children to shrink */
+}
+
+/* Terminal container */
+.terminal-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 200px;
+}
+
+.terminal-wrapper {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: none;
+}
+
+.terminal-wrapper.active { display: block; }
+
+.terminal-wrapper .xterm { height: 100%; width: 100%; }
+
+/* File editor overlay */
+.file-viewer {
+  display: none;
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg);
+  z-index: 5;
+  flex-direction: column;
+}
+
+.file-viewer.active { display: flex; }
+
+.file-viewer-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.file-viewer-header .file-path {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-viewer-header .modified-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning);
+  display: none;
+  flex-shrink: 0;
+}
+
+.file-viewer-header .modified-dot.show { display: block; }
+
+.file-viewer-header button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 4px;
+}
+
+.file-viewer-header button:hover { color: var(--text); border-color: var(--accent); }
+.file-viewer-header button.save-btn { border-color: var(--success); color: var(--success); }
+.file-viewer-header button.save-btn:hover { background: var(--success); color: #fff; }
+
+.file-viewer-header .close-viewer {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.file-viewer-header .close-viewer:hover { color: var(--text); background: var(--bg); }
+
+/* Monaco editor container */
+.editor-wrapper {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* Editor status bar */
+.editor-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  z-index: 100;
+  animation: fadeIn 0.2s;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Add project modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 50;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-overlay.active { display: flex; }
+
+.modal-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 400px;
+}
+
+.modal-box h3 {
+  font-size: 16px;
+  margin-bottom: 16px;
+}
+
+.modal-box input {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  margin-bottom: 8px;
+}
+
+.modal-box input:focus { border-color: var(--accent); }
+
+.modal-box .modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+/* Sidebar toggle */
+.sidebar-toggle {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.sidebar-toggle:hover { color: var(--text); background: var(--bg); }
+
+/* Browser panel */
+.browser-panel {
+  display: none;
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg);
+  z-index: 6;
+  flex-direction: column;
+}
+
+.browser-panel.active { display: flex; }
+
+/* Harness panel */
+.harness-panel {
+  display: none;
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg);
+  z-index: 6;
+  flex-direction: column;
+  padding: 24px;
+  overflow: auto;
+}
+.harness-panel.active { display: flex; }
+.harness-panel h2 { margin: 0 0 6px; color: var(--accent); font-size: 18px; }
+.harness-panel .subtitle { color: var(--text-dim); font-size: 12px; margin-bottom: 20px; }
+.harness-panel textarea {
+  width: 100%; min-height: 120px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 10px 12px; font-size: 13px; font-family: inherit;
+  resize: vertical; outline: none;
+}
+.harness-panel textarea:focus { border-color: var(--accent); }
+.harness-buttons { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.harness-btn {
+  padding: 8px 16px; font-size: 12px; font-weight: 600;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  cursor: pointer; transition: all 0.15s;
+}
+.harness-btn:hover { border-color: var(--accent); color: var(--accent); }
+.harness-btn.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.harness-hint { margin-top: 16px; font-size: 11px; color: var(--text-dim); line-height: 1.6; }
+
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.browser-toolbar button {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.browser-toolbar button:hover { color: var(--text); border-color: var(--accent); }
+
+.browser-url-input {
+  flex: 1;
+  padding: 5px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: monospace;
+  outline: none;
+}
+
+.browser-url-input:focus { border-color: var(--accent); }
+
+.browser-frame-wrap {
+  flex: 1;
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+
+.browser-iframe {
+  flex: 1;
+  border: none;
+  background: #fff;
+}
+
+/* Shown when a site refuses embedding (X-Frame-Options / CSP) or never loads */
+.browser-blocked {
+  display: none;
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--bg);
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+}
+
+.browser-blocked.active { display: flex; }
+.browser-blocked-inner { max-width: 420px; }
+.browser-blocked-title { color: var(--text); font-size: 15px; font-weight: 600; margin-bottom: 8px; }
+.browser-blocked-msg { color: var(--text-dim); font-size: 12px; line-height: 1.6; margin-bottom: 16px; word-break: break-all; }
+.browser-blocked-btn {
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--bg);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.browser-blocked-btn:hover { opacity: 0.9; }
+
+/* Bottom tab bar for view switching */
+.view-tabs {
+  display: flex;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.view-tab {
+  flex: 1;
+  padding: 6px 8px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  border: none;
+  background: none;
+  border-top: 2px solid transparent;
+}
+
+.view-tab:hover { color: var(--text); }
+.view-tab.active { color: var(--accent); border-top-color: var(--accent); }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  :root { --sidebar-w: 220px; }
+
+  .sidebar { position: absolute; z-index: 20; height: 100%; }
+  .sidebar.collapsed { width: 0; min-width: 0; }
+
+  .top-bar { padding: 4px 8px; gap: 4px; }
+  .top-bar .logo { font-size: 13px; margin-right: 4px; }
+
+  .tab { padding: 4px 8px; font-size: 11px; }
+  .tab .close-tab { display: none; }
+
+  .btn-sm { padding: 4px 8px; font-size: 11px; }
+
+  .ft-item { padding: 6px 8px 6px calc(8px + var(--depth, 0) * 12px); font-size: 13px; }
+
+  .editor-textarea { font-size: 12px; padding: 8px; }
+  .editor-lines { font-size: 12px; min-width: 36px; }
+
+  .browser-toolbar { flex-wrap: wrap; }
+  .browser-url-input { min-width: 0; }
+
+  .modal-box { width: 90%; max-width: 380px; padding: 20px; }
+
+  .view-tabs { display: flex; }
+
+  /* Touch-friendly: larger tap targets */
+  .project-selector select { padding: 8px; font-size: 14px; }
+  .project-actions button { padding: 6px; font-size: 12px; }
+  .auth-box { width: 90%; max-width: 380px; }
+  .auth-box input { padding: 12px; font-size: 16px; }
+  .btn-primary { padding: 12px; font-size: 16px; }
+}
+
+@media (max-width: 480px) {
+  :root { --sidebar-w: 100vw; }
+  .sidebar { width: 100vw; min-width: 100vw; }
+  .top-bar .logo span { display: none; }
+}
+
+/* ── Mobile on-screen key bar + keyboard-aware layout ── */
+.mobile-keybar { display: none; }
+
+body.is-mobile {
+  /* Pin to the top-left and let --app-h drive height so the layout shrinks to the
+     visible area when the keyboard opens, instead of iOS scrolling the page. */
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--app-h);
+}
+
+body.is-mobile .top-bar {
+  padding-top: calc(4px + env(safe-area-inset-top));
+  padding-left: calc(8px + env(safe-area-inset-left));
+  padding-right: calc(8px + env(safe-area-inset-right));
+}
+
+/* terminal can shrink fully when the keyboard takes most of the height */
+body.is-mobile .terminal-container { min-height: 0; }
+
+body.is-mobile .mobile-keybar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 6px calc(8px + env(safe-area-inset-right)) calc(6px + env(safe-area-inset-bottom)) calc(8px + env(safe-area-inset-left));
+}
+body.is-mobile .mobile-keybar::-webkit-scrollbar { display: none; }
+
+.mobile-keybar .mk {
+  flex-shrink: 0;
+  min-width: 40px;
+  height: 38px;
+  padding: 0 11px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+  cursor: pointer;
+}
+.mobile-keybar .mk:active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.mobile-keybar .mk.sticky-on { background: var(--accent); color: #fff; border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<!-- Auth Screen -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <svg viewBox="0 0 220 84" width="180" height="69" role="img" aria-label="BBARIT" style="display:block;margin:0 auto 6px;">
+      <path d="M10,20 L150,12 L211,15 L207,66 L120,72 L12,68 Z" fill="#E63946" stroke="#111" stroke-width="4" stroke-linejoin="round"/>
+      <text x="110" y="55" font-family="'Arial Black','Helvetica Neue',sans-serif" font-weight="900" font-size="42" fill="#111" text-anchor="middle" letter-spacing="1">BBARIT</text>
+    </svg>
+    <p class="subtitle">We work bbarit</p>
+    <input type="password" id="token-input" placeholder="Access Token" autocomplete="off">
+    <button class="btn btn-primary" onclick="doAuth()">Connect</button>
+    <div id="auth-error" class="error-msg" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Main Screen -->
+<div id="main-screen">
+  <div class="top-bar">
+    <button class="sidebar-toggle" onclick="toggleSidebar()" title="Toggle Sidebar">&#9776;</button>
+    <span class="logo" style="display:inline-flex;align-items:center;gap:6px;">
+      <svg viewBox="0 0 220 84" width="72" height="27" role="img" aria-label="BBARIT" style="vertical-align:middle;">
+        <path d="M10,20 L150,12 L211,15 L207,66 L120,72 L12,68 Z" fill="#E63946" stroke="#111" stroke-width="4" stroke-linejoin="round"/>
+        <text x="110" y="55" font-family="'Arial Black','Helvetica Neue',sans-serif" font-weight="900" font-size="42" fill="#111" text-anchor="middle" letter-spacing="1">BBARIT</text>
+      </svg>
+      <span>Web</span>
+    </span>
+    <div class="tab-bar" id="tab-bar"></div>
+    <select id="cli-type-select" style="padding:3px 6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;">
+      <option value="shell">Shell</option>
+      <option value="bbarit">BBARIT Agent</option>
+      <option value="claude">Claude</option>
+      <option value="codex">Codex</option>
+      <option value="cursor">Cursor</option>
+      <option value="kimi">Kimi</option>
+      <option value="ollama">Ollama</option>
+      <option value="qwen">Qwen</option>
+      <option value="reasonix">Reasonix</option>
+    </select>
+    <button class="btn btn-sm btn-outline" onclick="createTerminal()" title="New Terminal">+ Terminal</button>
+    <button class="btn btn-sm btn-outline" id="tunnel-toggle" onclick="toggleTunnel()">Tunnel</button>
+  </div>
+
+  <div class="tunnel-bar" id="tunnel-bar" style="display: none">
+    <span style="color: var(--success)">&#9679;</span>
+    <span>External:</span>
+    <a class="tunnel-url" id="tunnel-url" href="#" target="_blank"></a>
+    <button class="btn btn-sm btn-outline" onclick="copyTunnelUrl()">Copy</button>
+    <button class="btn btn-sm btn-danger" onclick="toggleTunnel()">Stop</button>
+  </div>
+
+  <div class="content-area">
+    <!-- Sidebar: project selector + file tree -->
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span>&#128193; Explorer</span>
+        <div class="spacer"></div>
+        <button onclick="refreshFileTree()" title="Refresh">&#8635;</button>
+      </div>
+      <div class="project-selector">
+        <select id="project-select" onchange="onProjectChange()">
+        </select>
+        <div class="project-actions">
+          <button onclick="showAddProject()">+ Add</button>
+          <button onclick="removeProject()">- Remove</button>
+        </div>
+      </div>
+      <div class="file-tree" id="file-tree"></div>
+    </div>
+
+    <!-- Main content area -->
+    <div class="main-content">
+      <div class="view-area">
+        <div class="terminal-container" id="terminal-container"></div>
+        <div class="file-viewer" id="file-viewer">
+          <div class="file-viewer-header">
+            <span class="file-path" id="viewer-path"></span>
+            <span class="modified-dot" id="modified-dot" title="Unsaved changes"></span>
+            <button class="save-btn" onclick="saveFile()" title="Save (Cmd+S)">Save</button>
+            <button class="close-viewer" onclick="closeFileViewer()">&times;</button>
+          </div>
+          <div class="editor-wrapper" id="monaco-container"></div>
+          <div class="editor-status">
+            <span id="editor-cursor">Ln 1, Col 1</span>
+            <span id="editor-size"></span>
+            <div class="spacer"></div>
+            <span id="editor-saved-status"></span>
+          </div>
+        </div>
+        <div class="browser-panel" id="browser-panel">
+          <div class="browser-toolbar">
+            <button onclick="browserBack()" title="Back">&#9664;</button>
+            <button onclick="browserForward()" title="Forward">&#9654;</button>
+            <button onclick="browserRefresh()" title="Refresh">&#8635;</button>
+            <input type="text" class="browser-url-input" id="browser-url" placeholder="https://example.com or localhost:3000" value="http://localhost:3000">
+            <button onclick="browserGo()" title="Go">Go</button>
+            <button onclick="browserOpenExternal()" title="Open in new tab">&#8599;</button>
+            <button onclick="closeBrowser()" title="Close">&times;</button>
+          </div>
+          <div class="browser-frame-wrap">
+            <iframe class="browser-iframe" id="browser-iframe" sandbox="allow-same-origin allow-scripts allow-forms allow-popups"></iframe>
+            <div class="browser-blocked" id="browser-blocked">
+              <div class="browser-blocked-inner">
+                <div class="browser-blocked-title">This site can't be embedded</div>
+                <div class="browser-blocked-msg" id="browser-blocked-msg"></div>
+                <button class="browser-blocked-btn" onclick="browserOpenExternal()">Open in new tab &#8599;</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- View switcher tabs -->
+      <div class="view-tabs">
+        <button class="view-tab active" id="vt-terminal" onclick="switchView('terminal')">Terminal</button>
+        <button class="view-tab" id="vt-browser" onclick="switchView('browser')">Browser</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Add Project Modal -->
+<div class="modal-overlay" id="add-project-modal">
+  <div class="modal-box">
+    <h3>Add Project</h3>
+    <input type="text" id="project-name-input" placeholder="Project Name (e.g. my-app)">
+    <input type="text" id="project-path-input" placeholder="Project Path (e.g. /Users/user/projects/my-app)">
+    <div class="modal-actions">
+      <button class="btn btn-sm btn-outline" onclick="closeAddProject()">Cancel</button>
+      <button class="btn btn-sm btn-primary" onclick="addProject()">Add</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.min.js"></script>
+<script>
+// ── State ──
+let TOKEN = '';
+let BASE_URL = '';
+let WS_BASE = '';
+const terminals = new Map();
+let activeTerminalId = null;
+let sidebarVisible = window.innerWidth >= 768;
+
+// Touch device detection drives the on-screen key bar and mobile layout tweaks.
+const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  || window.innerWidth < 768;
+if (IS_MOBILE) document.body.classList.add('is-mobile');
+
+// On-screen Ctrl/Alt are sticky: they modify the next key (from the bar or the soft keyboard).
+let mkCtrl = false, mkAlt = false;
+
+// ── Hangul 2-beolsik composition automaton ──
+// iOS WebKit + Magic Keyboard does NOT run the native IME composition for our textarea
+// (jamo arrive raw via insertText, with no compositionstart/update/end). So on mobile we
+// compose jamo into syllables ourselves: feed each jamo in, emit finalized syllables to
+// the PTY, and show the in-progress syllable as the input bar's value.
+const HG_CHO = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const HG_JUNG = ['ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ'];
+const HG_JONG = ['','ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const HG_JUNG_COMBO = { 'ㅗㅏ':'ㅘ','ㅗㅐ':'ㅙ','ㅗㅣ':'ㅚ','ㅜㅓ':'ㅝ','ㅜㅔ':'ㅞ','ㅜㅣ':'ㅟ','ㅡㅣ':'ㅢ' };
+const HG_JONG_COMBO = { 'ㄱㅅ':'ㄳ','ㄴㅈ':'ㄵ','ㄴㅎ':'ㄶ','ㄹㄱ':'ㄺ','ㄹㅁ':'ㄻ','ㄹㅂ':'ㄼ','ㄹㅅ':'ㄽ','ㄹㅌ':'ㄾ','ㄹㅍ':'ㄿ','ㄹㅎ':'ㅀ','ㅂㅅ':'ㅄ' };
+const HG_JUNG_SPLIT = {}, HG_JONG_SPLIT = {};
+for (const k in HG_JUNG_COMBO) HG_JUNG_SPLIT[HG_JUNG_COMBO[k]] = [k[0], k[1]];
+for (const k in HG_JONG_COMBO) HG_JONG_SPLIT[HG_JONG_COMBO[k]] = [k[0], k[1]];
+
+// iOS may deliver conjoining jamo (U+1100~ lead, U+1161~ vowel, U+11A8~ tail) instead of
+// compatibility jamo (U+3130~). Normalize to compatibility jamo so the automaton matches.
+function toCompatJamo(ch) {
+  const c = ch.charCodeAt(0);
+  if (c >= 0x1100 && c <= 0x1112) return HG_CHO[c - 0x1100];
+  if (c >= 0x1161 && c <= 0x1175) return HG_JUNG[c - 0x1161];
+  if (c >= 0x11A8 && c <= 0x11C2) return HG_JONG[c - 0x11A8 + 1] || ch;
+  return ch;
+}
+
+function makeHangulAutomaton() {
+  let cho = -1, jung = -1, jong = 0;
+  const reset = () => { cho = -1; jung = -1; jong = 0; };
+  const compose = () => {
+    if (cho >= 0 && jung >= 0) return String.fromCharCode(0xAC00 + (cho * 21 + jung) * 28 + jong);
+    if (cho >= 0) return HG_CHO[cho];
+    if (jung >= 0) return HG_JUNG[jung];
+    return '';
+  };
+  const inputOne = (ch) => {
+    const vi = HG_JUNG.indexOf(ch);
+    const ci = HG_CHO.indexOf(ch);
+    let commit = '';
+    if (vi >= 0) {
+      // vowel
+      if (cho >= 0 && jung < 0) {
+        jung = vi;
+      } else if (cho >= 0 && jung >= 0 && jong === 0) {
+        const combo = HG_JUNG_COMBO[HG_JUNG[jung] + ch];
+        if (combo) jung = HG_JUNG.indexOf(combo);
+        else { commit = compose(); reset(); jung = vi; }
+      } else if (cho >= 0 && jung >= 0 && jong > 0) {
+        // 도깨비불: 종성을 다음 음절 초성으로 넘긴다
+        const jc = HG_JONG[jong];
+        const sp = HG_JONG_SPLIT[jc];
+        if (sp) { jong = HG_JONG.indexOf(sp[0]); commit = compose(); const nc = HG_CHO.indexOf(sp[1]); reset(); cho = nc; jung = vi; }
+        else { const nc = HG_CHO.indexOf(jc); jong = 0; commit = compose(); reset(); cho = nc; jung = vi; }
+      } else if (cho < 0 && jung >= 0) {
+        const combo = HG_JUNG_COMBO[HG_JUNG[jung] + ch];
+        if (combo) jung = HG_JUNG.indexOf(combo);
+        else { commit = compose(); reset(); jung = vi; }
+      } else {
+        jung = vi;
+      }
+    } else if (ci >= 0) {
+      // consonant
+      if (cho < 0 && jung < 0) {
+        cho = ci;
+      } else if (cho >= 0 && jung < 0) {
+        commit = HG_CHO[cho]; reset(); cho = ci;
+      } else if (cho >= 0 && jung >= 0 && jong === 0) {
+        const ji = HG_JONG.indexOf(ch);
+        if (ji > 0) jong = ji;
+        else { commit = compose(); reset(); cho = ci; }
+      } else if (cho >= 0 && jung >= 0 && jong > 0) {
+        const combo = HG_JONG_COMBO[HG_JONG[jong] + ch];
+        if (combo) jong = HG_JONG.indexOf(combo);
+        else { commit = compose(); reset(); cho = ci; }
+      } else {
+        commit = compose(); reset(); cho = ci;
+      }
+    } else {
+      // not a jamo (ascii / symbol): finalize current syllable, then pass the char through
+      commit = compose() + ch; reset();
+    }
+    return commit;
+  };
+  return {
+    input(text) {
+      let commit = '';
+      for (const ch of String(text)) commit += inputOne(toCompatJamo(ch));
+      return { commit, preedit: compose() };
+    },
+    backspace() {
+      if (jong > 0) { const sp = HG_JONG_SPLIT[HG_JONG[jong]]; jong = sp ? HG_JONG.indexOf(sp[0]) : 0; }
+      else if (jung >= 0) { const sp = HG_JUNG_SPLIT[HG_JUNG[jung]]; jung = sp ? HG_JUNG.indexOf(sp[0]) : -1; }
+      else if (cho >= 0) { cho = -1; }
+      else return null;
+      return compose();
+    },
+    flush() { const c = compose(); reset(); return c; },
+  };
+}
+
+// Projects: [{ name, path, id }]
+let projects = JSON.parse(localStorage.getItem('octo-web-projects') || '[]');
+let currentProjectIdx = parseInt(localStorage.getItem('octo-web-project-idx') || '0');
+let dbProjectsLoaded = false;
+
+// File tree expanded state
+const expandedDirs = new Set(JSON.parse(localStorage.getItem('octo-web-expanded') || '[]'));
+
+// ── Auth ──
+async function doAuth() {
+  const input = document.getElementById('token-input');
+  TOKEN = input.value.trim();
+  if (!TOKEN) return;
+
+  BASE_URL = `${location.protocol}//${location.host}`;
+  WS_BASE = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+
+  try {
+    const data = await apiFetch('/api/terminal');
+    localStorage.setItem('octo-web-token', TOKEN);
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('main-screen').style.display = 'flex';
+
+    // Collapse sidebar on mobile
+    if (!sidebarVisible) {
+      document.getElementById('sidebar').classList.add('collapsed');
+    }
+
+    // Load projects from SurrealDB
+    await loadProjectsFromDB();
+    renderProjectSelect();
+
+    if (data.data && data.data.length > 0) {
+      data.data.forEach(t => attachTerminal(t.terminal_id, t.work_dir, t.alive, t.cli_type));
+    } else {
+      createTerminal();
+    }
+
+    if (currentProject()) {
+      loadFileTree(currentProject().path);
+    }
+  } catch (err) {
+    const el = document.getElementById('auth-error');
+    el.textContent = 'Invalid token or server unreachable';
+    el.style.display = 'block';
+  }
+}
+
+// Auto-login from saved token or hash
+(function autoLogin() {
+  const hash = location.hash;
+  if (hash.startsWith('#token=')) {
+    document.getElementById('token-input').value = hash.slice(7);
+    location.hash = '';
+    doAuth();
+  } else {
+    const saved = localStorage.getItem('octo-web-token');
+    if (saved) {
+      document.getElementById('token-input').value = saved;
+      doAuth();
+    }
+  }
+})();
+
+document.getElementById('token-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') doAuth();
+});
+
+// ── API ──
+async function apiFetch(path, opts = {}) {
+  const sep = path.includes('?') ? '&' : '?';
+  const url = `${BASE_URL}${path}${sep}token=${encodeURIComponent(TOKEN)}`;
+  const resp = await fetch(url, {
+    ...opts,
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+  });
+  const json = await resp.json();
+  if (!resp.ok || !json.success) throw new Error(json.error || 'API error');
+  return json;
+}
+
+// ── Project Management ──
+function currentProject() {
+  if (projects.length === 0) return null;
+  if (currentProjectIdx >= projects.length) currentProjectIdx = 0;
+  return projects[currentProjectIdx];
+}
+
+function saveProjects() {
+  localStorage.setItem('octo-web-projects', JSON.stringify(projects));
+  localStorage.setItem('octo-web-project-idx', String(currentProjectIdx));
+}
+
+function renderProjectSelect() {
+  const sel = document.getElementById('project-select');
+  sel.innerHTML = '';
+  if (projects.length === 0) {
+    sel.innerHTML = '<option>No projects</option>';
+    return;
+  }
+  projects.forEach((p, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = p.name;
+    opt.selected = i === currentProjectIdx;
+    sel.appendChild(opt);
+  });
+}
+
+function onProjectChange() {
+  const sel = document.getElementById('project-select');
+  currentProjectIdx = parseInt(sel.value) || 0;
+  saveProjects();
+  const p = currentProject();
+  if (p) loadFileTree(p.path);
+}
+
+function showAddProject() {
+  document.getElementById('add-project-modal').classList.add('active');
+  document.getElementById('project-name-input').focus();
+}
+
+function closeAddProject() {
+  document.getElementById('add-project-modal').classList.remove('active');
+  document.getElementById('project-name-input').value = '';
+  document.getElementById('project-path-input').value = '';
+}
+
+function addProject() {
+  const name = document.getElementById('project-name-input').value.trim();
+  const path = document.getElementById('project-path-input').value.trim();
+  if (!name || !path) return showToast('Name and path are required');
+
+  projects.push({ name, path });
+  currentProjectIdx = projects.length - 1;
+  saveProjects();
+  renderProjectSelect();
+  loadFileTree(path);
+  closeAddProject();
+}
+
+async function loadProjectsFromDB() {
+  try {
+    const { data } = await apiFetch('/api/kv?key=octo-terminal-projects');
+    if (!data || data === null) return;
+    // data is a JSON string from DB
+    const raw = typeof data === 'string' ? JSON.parse(data) : data;
+    if (!raw || !raw.projects || !Array.isArray(raw.projects)) return;
+
+    // Merge DB projects into local list (avoid duplicates by path)
+    const existingPaths = new Set(projects.map(p => p.path));
+    for (const p of raw.projects) {
+      if (!p.workDir) continue;
+      if (existingPaths.has(p.workDir)) continue;
+      projects.push({
+        name: p.displayName || p.name || p.workDir.split('/').pop() || 'project',
+        path: p.workDir,
+        id: p.id || '',
+        icon: p.icon || '',
+        terminals: (p.terminals || []).map(t => ({
+          id: t.id,
+          name: t.name,
+          cliType: t.cliType || 'shell',
+        })),
+      });
+      existingPaths.add(p.workDir);
+    }
+
+    // Use DB active project if available
+    if (raw.activeProjectId) {
+      const idx = projects.findIndex(p => p.id === raw.activeProjectId);
+      if (idx >= 0) currentProjectIdx = idx;
+    }
+
+    dbProjectsLoaded = true;
+    saveProjects();
+  } catch (e) {
+    console.warn('Failed to load projects from DB:', e);
+  }
+}
+
+function removeProject() {
+  if (projects.length === 0) return;
+  projects.splice(currentProjectIdx, 1);
+  currentProjectIdx = Math.max(0, currentProjectIdx - 1);
+  saveProjects();
+  renderProjectSelect();
+  document.getElementById('file-tree').innerHTML = '';
+  if (currentProject()) loadFileTree(currentProject().path);
+}
+
+// ── Sidebar ──
+function toggleSidebar() {
+  sidebarVisible = !sidebarVisible;
+  document.getElementById('sidebar').classList.toggle('collapsed', !sidebarVisible);
+  // Re-fit active terminal
+  setTimeout(() => {
+    if (activeTerminalId) {
+      const entry = terminals.get(activeTerminalId);
+      if (entry) entry.fit.fit();
+    }
+  }, 250);
+}
+
+// ── File Tree ──
+async function loadFileTree(dirPath) {
+  const tree = document.getElementById('file-tree');
+  try {
+    const { data } = await apiFetch(`/api/files?path=${encodeURIComponent(dirPath)}`);
+    renderTree(tree, data, 0, dirPath);
+  } catch (e) {
+    tree.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-size:12px">Cannot load: ${e.message}</div>`;
+  }
+}
+
+function renderTree(container, entries, depth, parentPath) {
+  container.innerHTML = '';
+  for (const entry of entries) {
+    const item = document.createElement('div');
+    item.className = 'ft-item';
+    item.style.setProperty('--depth', depth);
+
+    const icon = document.createElement('span');
+    icon.className = 'ft-icon';
+    icon.textContent = entry.is_dir ? (expandedDirs.has(entry.path) ? '&#128194;' : '&#128193;') : fileIcon(entry.name);
+    icon.innerHTML = entry.is_dir ? (expandedDirs.has(entry.path) ? '&#128194;' : '&#128193;') : fileIcon(entry.name);
+
+    const name = document.createElement('span');
+    name.className = 'ft-name';
+    name.textContent = entry.name;
+
+    item.appendChild(icon);
+    item.appendChild(name);
+
+    if (!entry.is_dir && entry.size > 0) {
+      const size = document.createElement('span');
+      size.className = 'ft-size';
+      size.textContent = formatSize(entry.size);
+      item.appendChild(size);
+    }
+
+    if (entry.is_dir) {
+      const childContainer = document.createElement('div');
+      item.onclick = () => toggleDir(entry.path, childContainer, depth + 1);
+      container.appendChild(item);
+      container.appendChild(childContainer);
+
+      // Expand if previously expanded
+      if (expandedDirs.has(entry.path)) {
+        loadSubDir(entry.path, childContainer, depth + 1);
+      }
+    } else {
+      item.onclick = () => openFile(entry.path, entry.name);
+      container.appendChild(item);
+    }
+  }
+}
+
+async function toggleDir(dirPath, childContainer, depth) {
+  if (expandedDirs.has(dirPath)) {
+    expandedDirs.delete(dirPath);
+    childContainer.innerHTML = '';
+    saveExpanded();
+  } else {
+    expandedDirs.add(dirPath);
+    saveExpanded();
+    await loadSubDir(dirPath, childContainer, depth);
+  }
+}
+
+async function loadSubDir(dirPath, container, depth) {
+  try {
+    const { data } = await apiFetch(`/api/files?path=${encodeURIComponent(dirPath)}`);
+    renderTree(container, data, depth, dirPath);
+  } catch (e) {
+    container.innerHTML = `<div class="ft-item" style="--depth:${depth};color:var(--danger)">Error loading</div>`;
+  }
+}
+
+function saveExpanded() {
+  localStorage.setItem('octo-web-expanded', JSON.stringify([...expandedDirs]));
+}
+
+function refreshFileTree() {
+  const p = currentProject();
+  if (p) loadFileTree(p.path);
+}
+
+function fileIcon(name) {
+  const ext = name.split('.').pop().toLowerCase();
+  const icons = {
+    rs: '&#x1F980;', ts: '&#x1F535;', tsx: '&#x1F535;', js: '&#x1F7E1;', jsx: '&#x1F7E1;',
+    json: '{ }', md: '&#x1F4DD;', css: '&#x1F3A8;', html: '&#x1F310;',
+    toml: '&#9881;', lock: '&#128274;', yaml: '&#9881;', yml: '&#9881;',
+    png: '&#x1F5BC;', jpg: '&#x1F5BC;', svg: '&#x1F5BC;', gif: '&#x1F5BC;',
+    sh: '&#x1F4DC;', env: '&#128273;', txt: '&#x1F4C4;', pdf: '&#x1F4D5;',
+  };
+  return icons[ext] || '&#x1F4C4;';
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'K';
+  return (bytes / (1024 * 1024)).toFixed(1) + 'M';
+}
+
+// ── Monaco Editor ──
+let monacoEditor = null;
+let monacoReady = false;
+let currentFilePath = '';
+let originalContent = '';
+let isModified = false;
+
+// Initialize Monaco
+require.config({ paths: { vs: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs' } });
+require(['vs/editor/editor.main'], function () {
+  // Define dark theme matching BBARIT Terminal
+  monaco.editor.defineTheme('octo-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': '#0d1117',
+      'editor.foreground': '#e6edf3',
+      'editor.lineHighlightBackground': '#161b22',
+      'editorLineNumber.foreground': '#30363d',
+      'editorLineNumber.activeForeground': '#8b949e',
+      'editor.selectionBackground': '#264f78',
+      'editorCursor.foreground': '#58a6ff',
+      'editorWidget.background': '#161b22',
+      'editorWidget.border': '#30363d',
+      'input.background': '#0d1117',
+      'input.border': '#30363d',
+    },
+  });
+  monacoReady = true;
+});
+
+function getLanguageFromPath(filePath) {
+  const ext = filePath.split('.').pop().toLowerCase();
+  const map = {
+    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+    rs: 'rust', py: 'python', go: 'go', java: 'java',
+    json: 'json', toml: 'toml', yaml: 'yaml', yml: 'yaml',
+    html: 'html', htm: 'html', css: 'css', scss: 'scss',
+    md: 'markdown', sh: 'shell', bash: 'shell', zsh: 'shell',
+    sql: 'sql', xml: 'xml', svg: 'xml',
+    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+    rb: 'ruby', php: 'php', swift: 'swift',
+    lock: 'json', env: 'ini', conf: 'ini', cfg: 'ini',
+    dockerfile: 'dockerfile',
+  };
+  return map[ext] || 'plaintext';
+}
+
+async function openFile(filePath, fileName) {
+  try {
+    const { data } = await apiFetch(`/api/file?path=${encodeURIComponent(filePath)}`);
+    const viewer = document.getElementById('file-viewer');
+    document.getElementById('viewer-path').textContent = filePath;
+    currentFilePath = filePath;
+    originalContent = data.content;
+    isModified = false;
+    updateModifiedDot();
+    document.getElementById('editor-size').textContent = formatSize(data.size);
+    document.getElementById('editor-saved-status').textContent = '';
+
+    viewer.classList.add('active');
+
+    // Wait for Monaco to be ready
+    if (!monacoReady) {
+      showToast('Loading editor...');
+      await new Promise(r => { const check = () => monacoReady ? r() : setTimeout(check, 100); check(); });
+    }
+
+    const container = document.getElementById('monaco-container');
+    const lang = getLanguageFromPath(filePath);
+
+    if (monacoEditor) {
+      monacoEditor.dispose();
+    }
+
+    monacoEditor = monaco.editor.create(container, {
+      value: data.content,
+      language: lang,
+      theme: 'octo-dark',
+      fontSize: 13,
+      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
+      minimap: { enabled: window.innerWidth > 768 },
+      scrollBeyondLastLine: false,
+      lineNumbers: 'on',
+      renderLineHighlight: 'line',
+      tabSize: 2,
+      insertSpaces: true,
+      wordWrap: 'off',
+      automaticLayout: true,
+      bracketPairColorization: { enabled: true },
+      guides: { bracketPairs: true, indentation: true },
+      smoothScrolling: true,
+      cursorSmoothCaretAnimation: 'on',
+      padding: { top: 8 },
+    });
+
+    // Track modifications
+    monacoEditor.onDidChangeModelContent(() => {
+      isModified = monacoEditor.getValue() !== originalContent;
+      updateModifiedDot();
+    });
+
+    // Cursor position tracking
+    monacoEditor.onDidChangeCursorPosition((e) => {
+      document.getElementById('editor-cursor').textContent = `Ln ${e.position.lineNumber}, Col ${e.position.column}`;
+    });
+
+    // Cmd+S save
+    monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      saveFile();
+    });
+
+    document.getElementById('editor-cursor').textContent = 'Ln 1, Col 1';
+    monacoEditor.focus();
+  } catch (e) {
+    showToast('Cannot open file: ' + e.message);
+  }
+}
+
+function updateModifiedDot() {
+  const dot = document.getElementById('modified-dot');
+  dot.classList.toggle('show', isModified);
+}
+
+async function saveFile() {
+  if (!currentFilePath || !monacoEditor) return;
+  const content = monacoEditor.getValue();
+  try {
+    await apiFetch('/api/file', {
+      method: 'POST',
+      body: JSON.stringify({ path: currentFilePath, content }),
+    });
+    originalContent = content;
+    isModified = false;
+    updateModifiedDot();
+    document.getElementById('editor-saved-status').textContent = 'Saved';
+    setTimeout(() => {
+      document.getElementById('editor-saved-status').textContent = '';
+    }, 2000);
+    showToast('Saved: ' + currentFilePath.split('/').pop());
+  } catch (e) {
+    showToast('Save failed: ' + e.message);
+  }
+}
+
+function closeFileViewer() {
+  if (isModified) {
+    if (!confirm('Unsaved changes will be lost. Close anyway?')) return;
+  }
+  document.getElementById('file-viewer').classList.remove('active');
+  if (monacoEditor) {
+    monacoEditor.dispose();
+    monacoEditor = null;
+  }
+  currentFilePath = '';
+  isModified = false;
+  // Re-focus terminal
+  if (activeTerminalId) {
+    const entry = terminals.get(activeTerminalId);
+    if (entry) {
+      setTimeout(() => {
+        entry.fit.fit();
+        if (entry.imeBridge) entry.imeBridge.focus({ preventScroll: true });
+        else entry.term.focus();
+      }, 50);
+    }
+  }
+}
+
+// ── Terminal Management ──
+async function createTerminal(cliTypeOverride) {
+  const p = currentProject();
+  const workDir = p ? p.path : undefined;
+  const cliType = cliTypeOverride || document.getElementById('cli-type-select').value || 'shell';
+  try {
+    const { data } = await apiFetch('/api/terminal', {
+      method: 'POST',
+      body: JSON.stringify({ work_dir: workDir, rows: 24, cols: 80, cli_type: cliType }),
+    });
+    attachTerminal(data.terminal_id, data.work_dir, true, data.cli_type || cliType);
+  } catch (e) {
+    showToast('Failed to create terminal: ' + e.message);
+  }
+}
+
+function attachTerminal(id, workDir, alive, cliType) {
+  cliType = cliType || 'shell';
+  const wrapper = document.createElement('div');
+  wrapper.className = 'terminal-wrapper';
+  wrapper.id = `tw-${id}`;
+  document.getElementById('terminal-container').appendChild(wrapper);
+
+  // IME bridge for CJK input in web browsers
+  const needsImeBridge = true;
+  const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || window.innerWidth < 768;
+  const termFontSize = isMobile ? 12 : 14;
+
+  const term = new window.Terminal({
+    cursorBlink: true,
+    fontSize: termFontSize,
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
+    cursorInactiveStyle: 'block',
+    disableStdin: needsImeBridge,
+    scrollback: isMobile ? 2000 : 5000,
+    theme: {
+      background: '#0d1117',
+      foreground: '#e6edf3',
+      cursor: '#58a6ff',
+      selectionBackground: '#264f78',
+      black: '#484f58',
+      red: '#ff7b72',
+      green: '#3fb950',
+      yellow: '#d29922',
+      blue: '#58a6ff',
+      magenta: '#bc8cff',
+      cyan: '#39d353',
+      white: '#b1bac4',
+      brightBlack: '#6e7681',
+      brightRed: '#ffa198',
+      brightGreen: '#56d364',
+      brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',
+      brightMagenta: '#d2a8ff',
+      brightCyan: '#56d364',
+      brightWhite: '#f0f6fc',
+    },
+    allowProposedApi: true,
+  });
+
+  const fit = new window.FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(wrapper);
+
+  // Only use WebGL on desktop - mobile has issues
+  if (!isMobile) {
+    try {
+      const webgl = new window.WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => { webgl.dispose(); });
+      term.loadAddon(webgl);
+    } catch (e) {
+      console.warn('WebGL addon failed, using canvas renderer');
+    }
+  }
+
+  // Delayed fit to ensure container has layout dimensions
+  setTimeout(() => fit.fit(), 100);
+
+  const ws = connectWs(id, term, fit);
+  const entry = { term, ws, fit, wrapper, alive, workDir };
+  terminals.set(id, entry);
+
+  // ── IME Bridge for CJK (Korean/Chinese/Japanese) input ──
+  if (needsImeBridge) {
+    const imeBridge = document.createElement('textarea');
+    // Always off. On mobile WE compose Hangul via the automaton, so the iOS native IME
+    // must stay out of the way: autocorrect/spellcheck="off" makes iOS deliver raw jamo
+    // through insertText (no native combining), which is exactly what the automaton wants.
+    // If the native IME also tried to combine, it would fight the automaton and drop the
+    // jongseong (batchim).
+    imeBridge.setAttribute('autocorrect', 'off');
+    imeBridge.setAttribute('autocapitalize', 'off');
+    imeBridge.setAttribute('spellcheck', 'false');
+    // Hidden 1px field for ALL platforms. On iOS a VISIBLE field makes WebKit do its own
+    // combining (deleteContentBackward + composed-syllable insertText) which fights our
+    // automaton and drops the batchim. Hidden → iOS delivers raw jamo via insertText,
+    // which the automaton composes. The in-progress syllable is shown in the cursor overlay.
+    imeBridge.style.cssText = `
+      position: absolute; left: 12px; top: 12px;
+      width: 1px; height: 1px; opacity: 0.01;
+      border: none; outline: none; padding: 0; margin: 0;
+      background: transparent; color: transparent;
+      -webkit-text-fill-color: transparent; caret-color: transparent;
+      z-index: 55; pointer-events: auto; resize: none; overflow: hidden;
+    `;
+    wrapper.style.position = 'relative';
+    wrapper.appendChild(imeBridge);
+
+    // Composition overlay (preedit text at cursor position)
+    const imeOverlay = document.createElement('div');
+    imeOverlay.style.cssText = `
+      position: absolute; display: none; pointer-events: none; user-select: none;
+      z-index: 100; white-space: pre;
+      background: #0d1117; color: #e6edf3;
+      font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace;
+      font-size: ${termFontSize}px;
+    `;
+    wrapper.appendChild(imeOverlay);
+
+    let composing = false;
+    let compositionStartValue = '';
+    let lastCommitted = '';
+    let lastCommittedAt = 0;
+    let pendingEnter = false;
+    const hangul = makeHangulAutomaton(); // mobile-only software composition
+    const isApplePlatform = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || '');
+    const isIpadOs = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+    const isMobileIme = isMobile || isIpadOs || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+    const DEDUP_MS = isApplePlatform || isIpadOs ? 500 : 350;
+    const INPUT_DEDUP_MS = isMobileIme ? 700 : 450;
+    const HANGUL_RE = /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7AF]/;
+    const JAMO_ONLY_RE = /^[\u1100-\u11FF\u3130-\u318F]+$/;
+
+    // Cached cell dimensions (avoid repeated DOM queries)
+    let cachedCellW = 0, cachedCellH = 0;
+
+    const updateCellDims = () => {
+      try {
+        const core = term._core;
+        const dims = core?._renderService?.dimensions;
+        cachedCellW = dims?.actualCellWidth || dims?.css?.cell?.width || 0;
+        cachedCellH = dims?.actualCellHeight || dims?.css?.cell?.height || 0;
+        if (!cachedCellW || !cachedCellH) {
+          const screen = wrapper.querySelector('.xterm-screen');
+          if (screen) {
+            const r = screen.getBoundingClientRect();
+            cachedCellW = r.width / (term.cols || 80);
+            cachedCellH = r.height / (term.rows || 24);
+          }
+        }
+      } catch {}
+    };
+
+    const updateOverlayPos = () => {
+      try {
+        if (!cachedCellW || !cachedCellH) updateCellDims();
+        const x = term.buffer.active.cursorX;
+        const y = term.buffer.active.cursorY;
+        const left = Math.round(x * cachedCellW) + 8;
+        const top = Math.round(y * cachedCellH) + 8;
+        imeBridge.style.left = left + 'px';
+        imeBridge.style.top = top + 'px';
+        imeOverlay.style.left = left + 'px';
+        imeOverlay.style.top = top + 'px';
+        if (cachedCellH) {
+          imeOverlay.style.lineHeight = cachedCellH + 'px';
+          imeOverlay.style.height = cachedCellH + 'px';
+        }
+      } catch {}
+    };
+
+    // Track cursor position via xterm events + fallback polling
+    const disposables = [];
+    try { disposables.push(term.onCursorMove(updateOverlayPos)); } catch {}
+    try { disposables.push(term.onRender(() => { updateCellDims(); updateOverlayPos(); })); } catch {}
+    const posInterval = setInterval(updateOverlayPos, 500);
+
+    const sendInput = (data) => {
+      const t = terminals.get(id);
+      if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+        t.ws.send(JSON.stringify({ type: 'input', data }));
+      }
+    };
+
+    // ── IME bridge: ported 1:1 from the main app (src/XTerminal.tsx). ──
+    // Core rule (handleImeBridgeInput): while composing — including iOS WebKit where
+    // compositionstart can be missing and a composition is only signalled via
+    // inputType 'insertCompositionText' — we NEVER push to the PTY, only update the
+    // preedit overlay. Final text is committed on compositionend. This is what keeps
+    // Hangul from splitting into separate jamo.
+    let compositionText = '';
+    const JAMO_PART_RE = new RegExp('[\\u1100-\\u11FF\\u3130-\\u318F]');
+    const normNL = (text) => text.replace(/\r?\n/g, '\r');
+
+    const getShortcutKey = (e) => {
+      const k = (e.key || '').toLowerCase();
+      if (k.length === 1 && k.charCodeAt(0) <= 0x7f) return k;
+      const code = e.code || '';
+      if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+      if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+      return k;
+    };
+
+    const showPreedit = (text) => {
+      const t = (text || '').replace(/\r?\n/g, '');
+      if (t) {
+        imeOverlay.textContent = t;
+        imeOverlay.style.display = 'inline-block';
+        updateOverlayPos();
+      } else {
+        imeOverlay.textContent = '';
+        imeOverlay.style.display = 'none';
+      }
+    };
+
+    // Mirror of XTerminal.tsx updateImeBridgeComposition: preedit overlay only, never PTY.
+    const updateComposition = (nextRaw) => {
+      let next = (nextRaw || '').toString();
+      if (compositionStartValue && next.startsWith(compositionStartValue)) {
+        next = next.slice(compositionStartValue.length);
+      }
+      next = next.replace(/\r?\n/g, '');
+      if (next.length > 24) next = next.slice(-24);
+      if (next === compositionText) return;
+      compositionText = next;
+      showPreedit(next);
+    };
+
+    // Mirror of XTerminal.tsx commitImeBridgeText: NFC + dedupe duplicate commits + send.
+    const commitImeBridgeText = (raw) => {
+      const finalText = raw ? raw.replace(/\r?\n/g, '').normalize('NFC') : '';
+      const now = Date.now();
+      const dedupWindowMs = isApplePlatform ? 180 : 300;
+      if (finalText && lastCommitted && finalText === lastCommitted && now - lastCommittedAt < dedupWindowMs) {
+        return;
+      }
+      lastCommitted = finalText;
+      lastCommittedAt = now;
+      if (finalText) sendInput(normNL(finalText));
+    };
+
+    // Mirror of XTerminal.tsx resolveImeCommitText.
+    const resolveImeCommitText = (eventData) => {
+      const current = (imeBridge.value || '').toString();
+      if (current) {
+        if (compositionStartValue && current.startsWith(compositionStartValue)) {
+          return current.slice(compositionStartValue.length);
+        }
+        return current;
+      }
+      const fromEvent = (eventData || '').toString();
+      if (fromEvent) return fromEvent;
+      return compositionText || '';
+    };
+
+    // ── Composition handlers (ported 1:1) ──
+    imeBridge.addEventListener('compositionstart', () => {
+      composing = true;
+      compositionStartValue = (imeBridge.value || '').toString();
+      compositionText = '';
+      lastCommitted = '';
+      lastCommittedAt = 0;
+      pendingEnter = false;
+      try { term.scrollToBottom(); } catch {}
+    });
+
+    imeBridge.addEventListener('compositionupdate', (e) => {
+      if (!composing) composing = true;
+      const preedit = e.data != null ? e.data : '';
+      if (preedit) {
+        const normalized = preedit.replace(/\r?\n/g, '');
+        if (normalized !== compositionText) {
+          compositionText = normalized;
+          showPreedit(normalized);
+        }
+      } else {
+        updateComposition(imeBridge.value || '');
+      }
+    });
+
+    imeBridge.addEventListener('compositionend', (e) => {
+      const raw = resolveImeCommitText(e.data);
+      composing = false;
+      compositionStartValue = '';
+      compositionText = '';
+      showPreedit('');
+      commitImeBridgeText(raw);
+      imeBridge.value = '';
+      if (pendingEnter) {
+        const pending = pendingEnter;
+        pendingEnter = false;
+        sendInput(pending === 'shift-enter' ? '\x1b[13;2u' : '\x0d');
+      }
+    });
+
+    // beforeinput: detect composition early (iOS WebKit) + defer Enter (ported 1:1).
+    imeBridge.addEventListener('beforeinput', (e) => {
+      const inputType = e.inputType || '';
+      const nativeIsComposing = e.isComposing === true;
+      const looksLikeComposition =
+        nativeIsComposing || /composition/i.test(inputType) || inputType === 'insertCompositionText';
+      if (looksLikeComposition) {
+        const next = (imeBridge.value || e.data || '').toString();
+        if (next) updateComposition(next);
+        return;
+      }
+      if (inputType !== 'insertParagraph' && inputType !== 'insertLineBreak') return;
+      const value = (imeBridge.value || '').toString();
+      const hasJamo = JAMO_RE.test(value);
+      if (composing || nativeIsComposing || value.length > 0 || hasJamo) {
+        e.preventDefault();
+        pendingEnter = 'enter';
+        return;
+      }
+      e.preventDefault();
+      sendInput('\x0d');
+    });
+
+    // input: never send while composing; commit non-composition text (ported 1:1).
+    imeBridge.addEventListener('input', (e) => {
+      const inputType = (e && e.inputType) || '';
+      const value = imeBridge.value || '';
+      const nativeIsComposing = !!(e && e.isComposing);
+      const looksLikeComposition =
+        nativeIsComposing || /composition/i.test(inputType) || inputType === 'insertCompositionText';
+
+      if (isMobile) {
+        // Software Hangul composition — iOS delivers raw jamo into this hidden field.
+        if (inputType === 'deleteContentBackward' || inputType === 'deleteContentForward') {
+          const pre = hangul.backspace();
+          if (pre === null) sendInput('\x7f'); // nothing composing → terminal backspace
+          showPreedit(pre || '');
+          imeBridge.value = '';
+          return;
+        }
+        const data = (e && e.data) || '';
+        if (!data) { imeBridge.value = ''; return; }
+        const r = hangul.input(data);
+        if (r.commit) sendInput(normNL(r.commit));
+        showPreedit(r.preedit); // in-progress syllable in the cursor overlay
+        imeBridge.value = '';
+        return;
+      }
+
+      if (!value) return;
+
+      if (composing || looksLikeComposition) {
+        if (!composing) composing = true;
+        updateComposition(value);
+        return;
+      }
+
+      // After compositionend, WebKit can fire echo input events (full text again, or a
+      // lone trailing jamo). Suppress those within a short window.
+      const suppressWindowMs = isApplePlatform ? 300 : 500;
+      if (Date.now() - lastCommittedAt < suppressWindowMs) {
+        const committed = lastCommitted;
+        if (committed && (value === committed || value === committed + '\n' || value === committed + '\r\n')) {
+          imeBridge.value = '';
+          return;
+        }
+        if (JAMO_ONLY_RE.test(value)) {
+          imeBridge.value = '';
+          return;
+        }
+      }
+
+      sendInput(normNL(value));
+      imeBridge.value = '';
+    });
+
+    // ── Keyboard handler (ported 1:1 from XTerminal.tsx handleImeBridgeKeyDown). ──
+    // Plain printable characters are intentionally NOT sent here — they land in the
+    // textarea and are committed by the input handler. Only special/modifier keys act.
+    imeBridge.addEventListener('keydown', (e) => {
+      if (isMobile) {
+        // Mobile uses the software Hangul automaton. Special keys flush the in-progress
+        // syllable first; plain/jamo keys fall through to the input handler.
+        const k = e.key;
+        if (k === 'Enter') { e.preventDefault(); const f = hangul.flush(); if (f) sendInput(normNL(f)); sendInput('\r'); showPreedit(''); imeBridge.value = ''; return; }
+        if (k === 'Backspace') { e.preventDefault(); const pre = hangul.backspace(); if (pre === null) sendInput('\x7f'); showPreedit(pre || ''); imeBridge.value = ''; return; }
+        const seq = { Escape: '\x1b', Tab: e.shiftKey ? '\x1b[Z' : '\t', ArrowUp: '\x1b[A', ArrowDown: '\x1b[B', ArrowLeft: '\x1b[D', ArrowRight: '\x1b[C', Home: '\x1b[H', End: '\x1b[F', Delete: '\x1b[3~' };
+        if (seq[k]) { e.preventDefault(); const f = hangul.flush(); if (f) sendInput(normNL(f)); showPreedit(''); imeBridge.value = ''; sendInput(seq[k]); return; }
+        if ((e.ctrlKey || e.metaKey) && k.length === 1) {
+          e.preventDefault();
+          const f = hangul.flush(); if (f) sendInput(normNL(f)); showPreedit(''); imeBridge.value = '';
+          const c = k.toLowerCase().charCodeAt(0);
+          if (c >= 97 && c <= 122) sendInput(String.fromCharCode(c - 96));
+          return;
+        }
+        return; // plain characters / jamo → handled by the input event (automaton)
+      }
+
+      const key229 = e.keyCode === 229 || e.which === 229;
+      const nativeIsComposing = e.isComposing === true || key229 || e.key === 'Process';
+
+      if (e.key === 'Enter') {
+        const current = (imeBridge.value || '').toString();
+        if (composing || nativeIsComposing || current.length > 0) {
+          e.preventDefault();
+          pendingEnter = e.shiftKey ? 'shift-enter' : 'enter';
+          return;
+        }
+      }
+      if (composing || nativeIsComposing) {
+        if (e.key === 'Enter') pendingEnter = e.shiftKey ? 'shift-enter' : 'enter';
+        return;
+      }
+
+      const key = e.key;
+      const ctrl = e.ctrlKey;
+      const alt = e.altKey;
+      const shift = e.shiftKey;
+      const meta = e.metaKey;
+
+      // Cmd shortcuts (macOS): copy/cut/select-all; paste flows natively.
+      if (meta && !ctrl && !alt) {
+        const k = getShortcutKey(e);
+        if (k === 'c' || k === 'x') {
+          const sel = term.getSelection();
+          if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+          return;
+        }
+        if (k === 'v') return;
+        if (k === 'a') { e.preventDefault(); try { term.selectAll(); } catch {} return; }
+        return;
+      }
+
+      // Ctrl+C: copy selection if present, else SIGINT. Ctrl+V: paste from clipboard.
+      if (ctrl && !alt && !meta) {
+        const k = getShortcutKey(e);
+        if (k === 'c') {
+          if (term.hasSelection && term.hasSelection()) {
+            const sel = term.getSelection() || '';
+            if (sel) navigator.clipboard.writeText(sel).catch(() => {});
+            return;
+          }
+          e.preventDefault();
+          sendInput('\x03');
+          return;
+        }
+        if (k === 'v') {
+          e.preventDefault();
+          navigator.clipboard.readText().then(t => { if (t) sendInput(normNL(t)); }).catch(() => {});
+          return;
+        }
+      }
+
+      if (key === 'Enter') { e.preventDefault(); sendInput(shift ? '\x1b[13;2u' : '\x0d'); return; }
+      if (key === 'Tab') { e.preventDefault(); sendInput(shift ? '\x1b[Z' : '\x09'); return; }
+      if (key === 'Escape') { e.preventDefault(); sendInput('\x1b'); return; }
+      if (key === 'Backspace') {
+        e.preventDefault();
+        if (ctrl) sendInput('\x08'); else if (alt) sendInput('\x1b\x7f'); else sendInput('\x7f');
+        return;
+      }
+      if (key === 'ArrowUp') { e.preventDefault(); sendInput(ctrl || meta ? '\x1b[1;5A' : '\x1b[A'); return; }
+      if (key === 'ArrowDown') { e.preventDefault(); sendInput(ctrl || meta ? '\x1b[1;5B' : '\x1b[B'); return; }
+      if (key === 'ArrowLeft') { e.preventDefault(); sendInput(ctrl || meta ? '\x1b[1;5D' : (alt ? '\x1bb' : '\x1b[D')); return; }
+      if (key === 'ArrowRight') { e.preventDefault(); sendInput(ctrl || meta ? '\x1b[1;5C' : (alt ? '\x1bf' : '\x1b[C')); return; }
+      if (key === 'Home') { e.preventDefault(); sendInput('\x1b[H'); return; }
+      if (key === 'End') { e.preventDefault(); sendInput('\x1b[F'); return; }
+      if (key === 'PageUp') { e.preventDefault(); sendInput('\x1b[5~'); return; }
+      if (key === 'PageDown') { e.preventDefault(); sendInput('\x1b[6~'); return; }
+      if (key === 'Delete') { e.preventDefault(); sendInput('\x1b[3~'); return; }
+
+      if (ctrl && !alt && !meta) {
+        const ctrlKey = getShortcutKey(e);
+        const ctrlCodes = {
+          'a': '\x01', 'b': '\x02', 'd': '\x04', 'e': '\x05', 'f': '\x06', 'g': '\x07', 'h': '\x08',
+          'i': '\x09', 'j': '\x0a', 'k': '\x0b', 'l': '\x0c', 'm': '\x0d', 'n': '\x0e', 'o': '\x0f', 'p': '\x10',
+          'q': '\x11', 'r': '\x12', 's': '\x13', 't': '\x14', 'u': '\x15', 'w': '\x17', 'x': '\x18', 'y': '\x19', 'z': '\x1a',
+          '[': '\x1b', '\\': '\x1c', ']': '\x1d', '^': '\x1e', '_': '\x1f', ' ': '\x00', '?': '\x7f',
+        };
+        if (ctrlCodes[ctrlKey]) {
+          e.preventDefault();
+          e.stopPropagation();
+          sendInput(ctrlCodes[ctrlKey]);
+          return;
+        }
+      }
+
+      if (alt && !ctrl && !meta && key.length === 1) {
+        e.preventDefault();
+        sendInput('\x1b' + key.toLowerCase());
+        return;
+      }
+
+      const fKeys = {
+        'F1': '\x1bOP', 'F2': '\x1bOQ', 'F3': '\x1bOR', 'F4': '\x1bOS',
+        'F5': '\x1b[15~', 'F6': '\x1b[17~', 'F7': '\x1b[18~', 'F8': '\x1b[19~',
+        'F9': '\x1b[20~', 'F10': '\x1b[21~', 'F11': '\x1b[23~', 'F12': '\x1b[24~',
+      };
+      if (fKeys[key]) { e.preventDefault(); sendInput(fKeys[key]); return; }
+      // Plain printable: do not send here; the input handler commits it.
+    });
+
+    // ── Focus management ──
+    // Strategy: aggressively keep IME bridge focused whenever the terminal wrapper
+    // is the intended target. xterm's helper textarea MUST NOT hold focus.
+
+    let refocusTimer = null;
+    const refocusBridge = () => {
+      if (refocusTimer) return;
+      refocusTimer = setTimeout(() => {
+        refocusTimer = null;
+        if (document.activeElement === imeBridge) return;
+        // Only refocus if this terminal is the active one
+        if (activeTerminalId !== id) return;
+        if (wrapper.offsetParent === null) return;
+        try { imeBridge.focus({ preventScroll: true }); } catch {}
+      }, 20);
+    };
+
+    // Capture on wrapper: intercept before xterm gets the event
+    wrapper.addEventListener('pointerdown', (e) => {
+      // Allow selection drag (don't preventDefault for text selection)
+      // But schedule refocus after xterm processes the event
+      setTimeout(() => refocusBridge(), 0);
+    }, true);
+    wrapper.addEventListener('click', refocusBridge, true);
+
+    // Global: refocus when window/tab regains focus
+    const onWindowFocus = () => {
+      if (activeTerminalId === id) refocusBridge();
+    };
+    window.addEventListener('focus', onWindowFocus);
+
+    // MutationObserver: detect when xterm (re-)creates helper textarea
+    // and immediately disable + hijack focus
+    const observer = new MutationObserver(() => {
+      const helpers = wrapper.querySelectorAll('.xterm-helper-textarea');
+      helpers.forEach(el => {
+        if (el._imeBridgeHijacked) return;
+        el._imeBridgeHijacked = true;
+        el.style.opacity = '0';
+        el.style.zIndex = '-1';
+        el.style.pointerEvents = 'none';
+        el.tabIndex = -1;
+        el.setAttribute('aria-hidden', 'true');
+        el.addEventListener('focus', (ev) => {
+          ev.stopImmediatePropagation();
+          refocusBridge();
+        }, true);
+      });
+    });
+    observer.observe(wrapper, { childList: true, subtree: true });
+
+    // Initial hide of xterm helper (in case it already exists)
+    setTimeout(() => {
+      const helpers = wrapper.querySelectorAll('.xterm-helper-textarea');
+      helpers.forEach(el => {
+        el._imeBridgeHijacked = true;
+        el.style.opacity = '0';
+        el.style.zIndex = '-1';
+        el.style.pointerEvents = 'none';
+        el.tabIndex = -1;
+        el.setAttribute('aria-hidden', 'true');
+        el.addEventListener('focus', (ev) => {
+          ev.stopImmediatePropagation();
+          refocusBridge();
+        }, true);
+      });
+    }, 100);
+
+    // Forward mouse escape sequences from xterm to PTY (for TUI apps)
+    term.onData(data => {
+      if (data.startsWith('\x1b[<') || data.startsWith('\x1b[M') ||
+          (data.length > 3 && data.startsWith('\x1b[') && data.endsWith('M'))) {
+        sendInput(data);
+      }
+    });
+    term.onBinary(data => sendInput(data));
+
+    // Initial focus
+    setTimeout(() => imeBridge.focus({ preventScroll: true }), 300);
+
+    // Store refs for cleanup and tab switching
+    entry.imeBridge = imeBridge;
+    entry._imeCleanup = () => {
+      clearInterval(posInterval);
+      if (refocusTimer) clearTimeout(refocusTimer);
+      observer.disconnect();
+      window.removeEventListener('focus', onWindowFocus);
+      disposables.forEach(d => { try { d.dispose(); } catch {} });
+    };
+  } else {
+    term.onData(data => {
+      const t = terminals.get(id);
+      if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+        t.ws.send(JSON.stringify({ type: 'input', data }));
+      }
+    });
+  }
+
+  term.onResize(({ rows, cols }) => {
+    const t = terminals.get(id);
+    if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+      t.ws.send(JSON.stringify({ type: 'resize', rows, cols }));
+    }
+  });
+
+  addTab(id, workDir, cliType);
+  switchTab(id);
+
+  const ro = new ResizeObserver(() => {
+    if (activeTerminalId === id) fit.fit();
+  });
+  ro.observe(wrapper);
+
+  // Auto-add as project if not exists
+  if (workDir && !projects.find(p => p.path === workDir)) {
+    const name = workDir.split('/').pop() || workDir;
+    projects.push({ name, path: workDir });
+    currentProjectIdx = projects.length - 1;
+    saveProjects();
+    renderProjectSelect();
+    loadFileTree(workDir);
+  }
+}
+
+function connectWs(id, term, fit) {
+  const url = `${WS_BASE}/ws/terminal/${id}?token=${encodeURIComponent(TOKEN)}`;
+  const ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    fit.fit();
+    const dims = fit.proposeDimensions();
+    if (dims) {
+      ws.send(JSON.stringify({ type: 'resize', rows: dims.rows, cols: dims.cols }));
+    }
+  };
+
+  ws.onmessage = (e) => { term.write(e.data); };
+
+  ws.onclose = () => {
+    const t = terminals.get(id);
+    if (t) { t.alive = false; updateTab(id, false); }
+  };
+
+  ws.onerror = () => { showToast('WebSocket error for terminal ' + id.slice(0, 8)); };
+
+  const pingInterval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping' }));
+    } else {
+      clearInterval(pingInterval);
+    }
+  }, 30000);
+
+  return ws;
+}
+
+// ── Tab Management ──
+function addTab(id, workDir, cliType) {
+  const bar = document.getElementById('tab-bar');
+  const tab = document.createElement('div');
+  tab.className = 'tab';
+  tab.id = `tab-${id}`;
+  tab.onclick = (e) => {
+    if (!e.target.classList.contains('close-tab')) switchTab(id);
+  };
+
+  const shortDir = workDir ? workDir.split('/').pop() || workDir : 'terminal';
+  const typeLabel = cliType && cliType !== 'shell' ? ` (${cliType})` : '';
+  tab.innerHTML = `
+    <span class="status-dot"></span>
+    <span class="tab-label">${shortDir}${typeLabel}</span>
+    <span class="close-tab" onclick="closeTerminal('${id}')">&times;</span>
+  `;
+  bar.appendChild(tab);
+}
+
+function updateTab(id, alive) {
+  const tab = document.getElementById(`tab-${id}`);
+  if (tab) {
+    const dot = tab.querySelector('.status-dot');
+    if (dot) dot.className = `status-dot ${alive ? '' : 'dead'}`;
+  }
+}
+
+function switchTab(id) {
+  // Close file viewer when switching tabs
+  closeFileViewer();
+
+  terminals.forEach((t, tid) => {
+    t.wrapper.classList.remove('active');
+    const tab = document.getElementById(`tab-${tid}`);
+    if (tab) tab.classList.remove('active');
+  });
+
+  const entry = terminals.get(id);
+  if (entry) {
+    entry.wrapper.classList.add('active');
+    const tab = document.getElementById(`tab-${id}`);
+    if (tab) tab.classList.add('active');
+    activeTerminalId = id;
+
+    setTimeout(() => {
+      entry.fit.fit();
+      if (entry.imeBridge) entry.imeBridge.focus({ preventScroll: true });
+      else entry.term.focus();
+    }, 50);
+  }
+}
+
+async function closeTerminal(id) {
+  const entry = terminals.get(id);
+  if (!entry) return;
+
+  if (entry._imeCleanup) entry._imeCleanup();
+  if (entry.ws) entry.ws.close();
+  entry.term.dispose();
+  entry.wrapper.remove();
+  terminals.delete(id);
+
+  const tab = document.getElementById(`tab-${id}`);
+  if (tab) tab.remove();
+
+  try { await apiFetch(`/api/terminal/${id}`, { method: 'DELETE' }); } catch (e) {}
+
+  if (activeTerminalId === id) {
+    const remaining = Array.from(terminals.keys());
+    if (remaining.length > 0) {
+      switchTab(remaining[remaining.length - 1]);
+    } else {
+      activeTerminalId = null;
+    }
+  }
+}
+
+// ── View switching (terminal | browser) ──
+let currentView = 'terminal';
+let browserLoadTimer = null;
+const BROWSER_LOAD_TIMEOUT = 8000;
+
+function switchView(view) {
+  currentView = view;
+  const termContainer = document.getElementById('terminal-container');
+  const browserPanel = document.getElementById('browser-panel');
+
+  document.querySelectorAll('.view-tab').forEach(t => t.classList.remove('active'));
+  if (browserPanel) browserPanel.classList.remove('active');
+
+  if (view === 'browser') {
+    termContainer.style.display = 'none';
+    if (browserPanel) browserPanel.classList.add('active');
+    const vtBrowser = document.getElementById('vt-browser');
+    if (vtBrowser) vtBrowser.classList.add('active');
+    const iframe = document.getElementById('browser-iframe');
+    if (iframe && (!iframe.src || iframe.src === 'about:blank')) browserGo();
+    setTimeout(() => { const el = document.getElementById('browser-url'); if (el) el.focus(); }, 50);
+    return;
+  }
+
+  currentView = 'terminal';
+  termContainer.style.display = '';
+  const vtTerminal = document.getElementById('vt-terminal');
+  if (vtTerminal) vtTerminal.classList.add('active');
+  if (activeTerminalId) {
+    const entry = terminals.get(activeTerminalId);
+    if (entry) setTimeout(() => {
+      entry.fit.fit();
+      if (entry.imeBridge) entry.imeBridge.focus({ preventScroll: true });
+      else entry.term.focus();
+    }, 50);
+  }
+}
+
+// http:// is missing → default to https, except for localhost/loopback which use http
+function normalizeBrowserUrl(raw) {
+  let url = (raw || '').trim();
+  if (!url) return '';
+  if (!/^https?:\/\//i.test(url)) {
+    const isLocal = /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i.test(url);
+    url = (isLocal ? 'http://' : 'https://') + url;
+  }
+  return url;
+}
+
+function currentBrowserUrl() {
+  const el = document.getElementById('browser-url');
+  return el ? normalizeBrowserUrl(el.value) : '';
+}
+
+function armBrowserLoadTimeout() {
+  clearTimeout(browserLoadTimer);
+  browserLoadTimer = setTimeout(showBrowserBlocked, BROWSER_LOAD_TIMEOUT);
+}
+
+function browserGo() {
+  const url = currentBrowserUrl();
+  if (!url) return;
+  const el = document.getElementById('browser-url');
+  if (el) el.value = url;
+  hideBrowserBlocked();
+  armBrowserLoadTimeout();
+  document.getElementById('browser-iframe').src = url;
+}
+
+function browserBack() {
+  try { document.getElementById('browser-iframe').contentWindow.history.back(); } catch(e) {}
+}
+
+function browserForward() {
+  try { document.getElementById('browser-iframe').contentWindow.history.forward(); } catch(e) {}
+}
+
+function browserRefresh() {
+  const iframe = document.getElementById('browser-iframe');
+  if (!iframe.src) { browserGo(); return; }
+  hideBrowserBlocked();
+  armBrowserLoadTimeout();
+  iframe.src = iframe.src;
+}
+
+function closeBrowser() {
+  switchView('terminal');
+}
+
+function browserOpenExternal() {
+  const url = currentBrowserUrl();
+  if (url) window.open(url, '_blank', 'noopener');
+}
+
+function showBrowserBlocked() {
+  const banner = document.getElementById('browser-blocked');
+  const msg = document.getElementById('browser-blocked-msg');
+  if (msg) msg.textContent = 'The page refused to load in an embedded frame (X-Frame-Options / CSP), or it took too long to respond. You can open it in a new browser tab instead.';
+  if (banner) banner.classList.add('active');
+}
+
+function hideBrowserBlocked() {
+  const banner = document.getElementById('browser-blocked');
+  if (banner) banner.classList.remove('active');
+}
+
+// Enter to navigate; a successful load clears the pending blocked-timeout.
+// XFO/CSP-blocked pages still fire `load` (on the browser error page) and are
+// indistinguishable from a real cross-origin load, so the always-visible
+// "Open in new tab" button stays as the reliable escape hatch for those.
+(function initBrowserPanel() {
+  const urlInput = document.getElementById('browser-url');
+  if (urlInput) urlInput.addEventListener('keydown', e => { if (e.key === 'Enter') browserGo(); });
+  const iframe = document.getElementById('browser-iframe');
+  if (iframe) iframe.addEventListener('load', () => { clearTimeout(browserLoadTimer); hideBrowserBlocked(); });
+})();
+
+// ── Tunnel ──
+let tunnelActive = false;
+
+async function toggleTunnel() {
+  const btn = document.getElementById('tunnel-toggle');
+  try {
+    if (!tunnelActive) {
+      btn.textContent = 'Starting...';
+      const { data } = await apiFetch('/api/ngrok/start', { method: 'POST', body: '{}' });
+      tunnelActive = true;
+      btn.textContent = 'Tunnel ON';
+      btn.classList.add('btn-success');
+      btn.classList.remove('btn-outline');
+      if (data.url) showTunnelUrl(data.url);
+      else showToast('Tunnel started. URL pending...');
+    } else {
+      await apiFetch('/api/ngrok/stop', { method: 'POST', body: '{}' });
+      tunnelActive = false;
+      btn.textContent = 'Tunnel';
+      btn.classList.remove('btn-success');
+      btn.classList.add('btn-outline');
+      document.getElementById('tunnel-bar').style.display = 'none';
+    }
+  } catch (e) {
+    showToast('Tunnel error: ' + e.message);
+    btn.textContent = tunnelActive ? 'Tunnel ON' : 'Tunnel';
+  }
+}
+
+function showTunnelUrl(url) {
+  const bar = document.getElementById('tunnel-bar');
+  const link = document.getElementById('tunnel-url');
+  const webUrl = url + '/web#token=' + encodeURIComponent(TOKEN);
+  link.href = webUrl;
+  link.textContent = webUrl;
+  bar.style.display = 'flex';
+}
+
+function copyTunnelUrl() {
+  const link = document.getElementById('tunnel-url');
+  navigator.clipboard.writeText(link.href).then(() => showToast('URL copied!'));
+}
+
+// ── Utils ──
+function showToast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// Global keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 't') {
+    e.preventDefault();
+    createTerminal();
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'w') {
+    e.preventDefault();
+    if (document.getElementById('file-viewer').classList.contains('active')) {
+      closeFileViewer();
+    } else if (activeTerminalId) {
+      closeTerminal(activeTerminalId);
+    }
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+    e.preventDefault();
+    if (document.getElementById('file-viewer').classList.contains('active')) {
+      saveFile();
+    }
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
+    e.preventDefault();
+    toggleSidebar();
+  }
+  if (e.key === 'Escape') {
+    if (document.getElementById('file-viewer').classList.contains('active')) {
+      closeFileViewer();
+    }
+    if (document.getElementById('add-project-modal').classList.contains('active')) {
+      closeAddProject();
+    }
+  }
+});
+
+// Modal: Enter to add, click outside to close
+document.getElementById('add-project-modal').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeAddProject();
+});
+document.getElementById('project-path-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') addProject();
+});
+
+// ── Mobile on-screen key bar ──
+function webSendKey(data) {
+  if (!activeTerminalId) return;
+  const t = terminals.get(activeTerminalId);
+  if (t && t.ws && t.ws.readyState === WebSocket.OPEN) {
+    t.ws.send(JSON.stringify({ type: 'input', data }));
+  }
+}
+
+function focusActiveBridge() {
+  if (!activeTerminalId) return;
+  const t = terminals.get(activeTerminalId);
+  if (!t) return;
+  if (t.imeBridge) t.imeBridge.focus({ preventScroll: true });
+  else t.term.focus();
+}
+
+function setMkMod(which, on) {
+  if (which === 'ctrl') { mkCtrl = on; document.getElementById('mk-ctrl')?.classList.toggle('sticky-on', on); }
+  if (which === 'alt')  { mkAlt = on;  document.getElementById('mk-alt')?.classList.toggle('sticky-on', on); }
+}
+
+function handleMobileKey(k) {
+  const arrows = { up: '\x1b[A', down: '\x1b[B', right: '\x1b[C', left: '\x1b[D' };
+  switch (k) {
+    case 'esc': webSendKey('\x1b'); break;
+    case 'tab': webSendKey('\t'); break;
+    case 'ctrl': setMkMod('ctrl', !mkCtrl); return;
+    case 'alt': setMkMod('alt', !mkAlt); return;
+    case 'up': case 'down': case 'left': case 'right': webSendKey(arrows[k]); break;
+    case 'ctrl-c': webSendKey('\x03'); break;
+    case 'ctrl-d': webSendKey('\x04'); break;
+    case 'ctrl-z': webSendKey('\x1a'); break;
+    case 'ctrl-l': webSendKey('\x0c'); break;
+    case 'kbd': focusActiveBridge(); return;
+    default:
+      if (k && k.startsWith('lit:')) {
+        let ch = k.slice(4);
+        if (mkCtrl) {
+          const c = ch.toLowerCase().charCodeAt(0);
+          if (c >= 97 && c <= 122) ch = String.fromCharCode(c - 96);
+          setMkMod('ctrl', false);
+        }
+        if (mkAlt) { ch = '\x1b' + ch; setMkMod('alt', false); }
+        webSendKey(ch);
+      }
+      break;
+  }
+}
+
+(function setupMobileKeybar() {
+  const bar = document.getElementById('mobile-keybar');
+  if (!bar) return;
+  bar.querySelectorAll('.mk').forEach(btn => {
+    // Keep focus on the terminal/IME textarea so the soft keyboard does not dismiss.
+    btn.addEventListener('mousedown', e => e.preventDefault());
+    btn.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
+    btn.addEventListener('click', () => handleMobileKey(btn.dataset.key));
+  });
+})();
+
+// ── Keyboard-aware viewport: shrink the app to the visible area so the prompt
+//    and key bar stay above the on-screen keyboard (iOS overlays it otherwise). ──
+function applyViewportHeight() {
+  const vv = window.visualViewport;
+  const h = vv ? vv.height : window.innerHeight;
+  if (h > 0) document.documentElement.style.setProperty('--app-h', h + 'px');
+  if (activeTerminalId) {
+    const entry = terminals.get(activeTerminalId);
+    if (entry) { try { entry.fit.fit(); } catch {} }
+  }
+}
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', applyViewportHeight);
+  window.visualViewport.addEventListener('scroll', applyViewportHeight);
+}
+window.addEventListener('orientationchange', () => setTimeout(applyViewportHeight, 300));
+applyViewportHeight();
+
+// Window resize
+window.addEventListener('resize', applyViewportHeight);
+</script>
+</body>
+</html>

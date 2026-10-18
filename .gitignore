@@ -1,0 +1,34 @@
+# Secrets and user data
+_secrets/
+credentials/
+.env
+.env.*
+!.env.example
+.dev.vars
+*.key
+*.pem
+*.p12
+*.pfx
+*.db
+*.db-*
+*.sqlite*
+certs/
+.keys/
+# Dependencies and build/test output (vendor/semble is reviewed source)
+node_modules/
+target/
+dist/
+.octo-tmp/
+.agent-browser-*/
+playwright-report/
+test-results/
+__pycache__/
+.venv/
+.DS_Store
+artifacts/
+output/
+*.log
+*.zip
+*.exe
+*.dmg
+*.app/

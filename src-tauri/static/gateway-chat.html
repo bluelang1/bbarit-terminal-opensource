@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>BBARIT Secretary</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+    background: #0d1117; color: #e6edf3;
+    display: flex; flex-direction: column;
+    height: 100vh;      /* fallback for older iOS Safari */
+    height: 100dvh;     /* dynamic viewport (accounts for the keyboard) */
+    overflow: hidden;
+  }
+  button { touch-action: manipulation; -webkit-appearance: none; -webkit-tap-highlight-color: transparent; }
+  header {
+    padding: 12px 16px;
+    padding-top: calc(12px + env(safe-area-inset-top));
+    border-bottom: 1px solid #21262d;
+    display: flex; align-items: center; gap: 10px; flex: none;
+  }
+  header .avatar { width: 36px; height: 36px; border-radius: 50%; background: #1f6feb22; flex: none; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; font-size: 18px; }
+  header .avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  header .titles { display: flex; flex-direction: column; min-width: 0; }
+  header .title { font-weight: 600; font-size: 15px; line-height: 1.2; }
+  header .meta { font-size: 11px; color: #7d8590; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header .meta .k { color: #58a6ff; }
+  header .status { margin-left: auto; font-size: 12px; color: #7d8590; flex: none; }
+  header .status.on { color: #3fb950; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 85%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-size: 15px; }
+  .msg.user { align-self: flex-end; background: #1f6feb; color: #fff; border-bottom-right-radius: 4px; }
+  .msg.bot { align-self: flex-start; background: #161b22; border: 1px solid #21262d; border-bottom-left-radius: 4px; }
+  .msg.tool { align-self: flex-start; background: #0d1117; border: 1px dashed #30363d; color: #7d8590; font-size: 13px; font-family: ui-monospace, monospace; }
+  .msg.err { align-self: flex-start; background: #3d1418; border: 1px solid #f85149; color: #ff7b72; }
+  footer {
+    flex: none; padding: 10px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid #21262d; display: flex; gap: 8px; align-items: flex-end;
+  }
+  #input { flex: 1; resize: none; background: #0d1117; color: #e6edf3; border: 1px solid #30363d;
+    border-radius: 12px; padding: 10px 12px; font-size: 16px; font-family: inherit; max-height: 120px; }
+  #send, #stop { flex: none; border: none; border-radius: 12px; padding: 0 16px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  #send { background: #238636; color: #fff; }
+  #send:disabled { background: #30363d; color: #7d8590; }
+  #stop { background: #6e2028; color: #ff7b72; display: none; }
+  /* Password login overlay */
+  #login {
+    position: fixed; inset: 0; z-index: 100; display: none;
+    background: #0d1117; flex-direction: column; align-items: center; justify-content: center;
+    padding: 24px; gap: 14px; text-align: center;
+  }
+  #login.show { display: flex; }
+  #login .lock { font-size: 40px; }
+  #login p { margin: 0; color: #7d8590; font-size: 15px; }
+  #login input {
+    width: 100%; max-width: 300px; font-size: 16px; padding: 12px 14px;
+    background: #161b22; color: #e6edf3; border: 1px solid #30363d; border-radius: 12px;
+  }
+  #login button {
+    width: 100%; max-width: 300px; font-size: 16px; font-weight: 600; padding: 12px;
+    background: #238636; color: #fff; border: none; border-radius: 12px; cursor: pointer;
+  }
+  #login .err { color: #ff7b72; font-size: 13px; min-height: 16px; }
+</style>
+</head>
+<body>
+  <header>
+    <svg viewBox="0 0 220 84" width="66" height="25" role="img" aria-label="BBARIT" style="flex:none;">
+      <path d="M10,20 L150,12 L211,15 L207,66 L120,72 L12,68 Z" fill="#E63946" stroke="#0d1117" stroke-width="4" stroke-linejoin="round"/>
+      <text x="110" y="55" font-family="'Arial Black','Helvetica Neue',sans-serif" font-weight="900" font-size="42" fill="#0d1117" text-anchor="middle" letter-spacing="1">BBARIT</text>
+    </svg>
+    <div class="avatar"><img src="/gateway/avatar" alt="Secretary" onerror="this.parentNode.textContent='🎩'"></div>
+    <div class="titles">
+      <div class="title">BBARIT Secretary</div>
+      <div class="meta"><span class="k">Model</span> <span id="model">—</span> · <span class="k">Project</span> <span id="project">—</span></div>
+    </div>
+    <div class="status" id="status">Connecting…</div>
+  </header>
+  <div id="login">
+    <div class="lock">🔒</div>
+    <p>Enter the access password.</p>
+    <input type="password" id="pw" placeholder="Password" autocomplete="current-password" enterkeyhint="go" />
+    <button id="pw-go" type="button">Enter</button>
+    <div class="err" id="pw-err"></div>
+  </div>
+  <div id="log"></div>
+  <footer>
+    <textarea id="input" rows="1" placeholder="Type a message…" autocomplete="off"></textarea>
+    <button id="send" type="button">Send</button>
+    <button id="stop" type="button">Stop</button>
+  </footer>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var token = params.get('token') || '';
+  var log = document.getElementById('log');
+  var input = document.getElementById('input');
+  var sendBtn = document.getElementById('send');
+  var stopBtn = document.getElementById('stop');
+  var statusEl = document.getElementById('status');
+  var ws = null, reqId = 0, running = false;
+  var curBot = null; // element accumulating the streaming reply
+  var currentPw = '';       // access password (from the login form)
+  var needPw = false;       // true once the server demanded a password
+  try { currentPw = sessionStorage.getItem('bbarit-gw-pw') || ''; } catch (e) {}
+  var modelEl = document.getElementById('model');
+  var projectEl = document.getElementById('project');
+  function refreshHeader() {
+    // Secretary model via get_state (answer arrives as an agent event).
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'req', id: ++reqId, method: 'get_state', params: {} }));
+    // Active project (codebase) via the app-state endpoint.
+    fetch('/gateway/appstate?token=' + encodeURIComponent(token)).then(function (r) { return r.json(); }).then(function (s) {
+      if (!s || s.ok === false) return;
+      var pid = s.activeProjectId;
+      var proj = (s.projects || []).filter(function (p) { return p.id === pid; })[0];
+      var name = proj ? (proj.name || proj.workDir || pid) : (pid || '—');
+      if (name && name.indexOf('/') >= 0) name = name.split('/').pop();
+      projectEl.textContent = name || '—';
+    }).catch(function () {});
+  }
+  var loginEl = document.getElementById('login');
+  var pwInput = document.getElementById('pw');
+  var pwGo = document.getElementById('pw-go');
+  var pwErr = document.getElementById('pw-err');
+  function showLogin(msg) {
+    needPw = true;
+    pwErr.textContent = msg || '';
+    loginEl.className = 'show';
+    pwInput.focus();
+  }
+  function hideLogin() {
+    needPw = false;
+    loginEl.className = '';
+    pwErr.textContent = '';
+  }
+
+  function add(cls, text) {
+    var el = document.createElement('div');
+    el.className = 'msg ' + cls;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+  var welcomed = false;
+  function showWelcome() {
+    // First connect with an empty log: introduce what the secretary can do,
+    // so the user knows what to ask without typing "help" first.
+    if (welcomed || log.childElementCount > 0) return;
+    welcomed = true;
+    add('bot',
+      '안녕하세요 대표님, 빠릿 비서예요 🎩 한 줄만 던져주시면 앱을 직접 움직여 끝내놓을게요.\n\n' +
+      '📂 프로젝트·화면 — “프로젝트 바꿔줘” “칸반 보여줘”\n' +
+      '🖥️ 터미널 — “빌드 돌려줘” “터미널 출력 읽어줘”\n' +
+      '📊 오피스 — “엑셀 정리해줘” “발표자료 초안 만들어줘”\n' +
+      '📋 칸반 — “할 일 추가해줘” “이거 완료로 옮겨줘”\n' +
+      '🎨 이미지·디자인·코워크 — “로고 시안 뽑아줘” “이 폴더 요약해줘”\n' +
+      '⏰ 스케줄링 — “매일 9시에 빌드 돌려줘” “10분마다 git pull”\n' +
+      '🔔 알림 — “끝나면 알려줘”\n\n' +
+      '궁금하시면 “뭐 할 수 있어?”라고 물어보셔도 돼요 ✨');
+  }
+  function setRunning(on) {
+    running = on;
+    // Keep the send button visible while a turn runs: the agent queues prompts
+    // arriving mid-turn and runs them as follow-ups, and phone users have no
+    // Enter key — hiding send left them unable to continue the conversation.
+    // 'block' (not '') — '' falls back to the stylesheet's display:none, which
+    // made BOTH buttons vanish during a turn.
+    stopBtn.style.display = on ? 'block' : 'none';
+  }
+  function connect() {
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(proto + '//' + location.host + '/gateway/ws?token=' + encodeURIComponent(token));
+    ws.onopen = function () { ws.send(JSON.stringify({ type: 'connect', password: currentPw })); };
+    ws.onclose = function () {
+      // If the server demanded a password, wait for the user to enter it
+      // instead of hammering reconnects with the wrong (or empty) one.
+      if (needPw) { statusEl.textContent = 'Password required'; statusEl.className = 'status'; return; }
+      statusEl.textContent = 'Disconnected — reconnecting…';
+      statusEl.className = 'status';
+      setTimeout(connect, 2000);
+    };
+    ws.onerror = function () { statusEl.textContent = 'Connection error'; };
+    ws.onmessage = function (ev) {
+      var frame;
+      try { frame = JSON.parse(ev.data); } catch (e) { return; }
+      if (frame.type === 'auth-fail') {
+        showLogin(currentPw ? 'Incorrect password' : '');
+        return;
+      }
+      if (frame.type === 'hello-ok') {
+        hideLogin();
+        statusEl.textContent = 'Online';
+        statusEl.className = 'status on';
+        // A fresh connection spawns a fresh agent — it cannot be mid-turn. If
+        // the previous turn's agent_end was lost to a disconnect, `running`
+        // was stuck true and the UI stayed in stop-mode forever.
+        setRunning(false);
+        refreshHeader();
+        showWelcome();
+        return;
+      }
+      if (frame.type === 'event' && frame.event === 'agent') {
+        handleAgent(frame.payload || {});
+      }
+    };
+  }
+  function handleAgent(p) {
+    switch (p.type) {
+      case 'response':
+        // get_state answer → current secretary model.
+        if (p.command === 'get_state' && p.data && p.data.model) {
+          modelEl.textContent = p.data.model.name || p.data.model.id || '—';
+        }
+        break;
+      case 'turn_start':
+        curBot = null;
+        setRunning(true);
+        break;
+      case 'message_update':
+        if (p.delta && p.delta.type === 'text_delta') {
+          if (!curBot) curBot = add('bot', '');
+          curBot.textContent += p.delta.text || '';
+          log.scrollTop = log.scrollHeight;
+        }
+        break;
+      case 'tool_execution_end':
+        add('tool', '🛠 ' + (p.toolName || 'tool'));
+        break;
+      case 'turn_end':
+        if (p.errorMessage) add('err', p.errorMessage);
+        else if (!curBot && p.message && p.message.content) add('bot', p.message.content);
+        break;
+      case 'agent_end':
+        setRunning(false);
+        curBot = null;
+        refreshHeader(); // model/project may have changed after a turn
+        break;
+      case 'stderr':
+        // keep quiet unless it looks like an error
+        break;
+    }
+  }
+  function send() {
+    var text = input.value.trim();
+    if (!text) return;
+    if (!ws || ws.readyState !== 1) {
+      // Not connected yet (or dropped): nudge a reconnect and tell the user,
+      // instead of silently doing nothing (which reads as "the button is dead").
+      statusEl.textContent = 'Connecting… try again in a moment';
+      statusEl.className = 'status';
+      if (!ws || ws.readyState === 3) connect();
+      return;
+    }
+    add('user', text);
+    input.value = '';
+    input.style.height = 'auto';
+    ws.send(JSON.stringify({ type: 'req', id: ++reqId, method: 'prompt', params: { message: text } }));
+  }
+  function stop() {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'req', id: ++reqId, method: 'abort', params: {} }));
+    setRunning(false);
+  }
+  function submitPassword() {
+    currentPw = pwInput.value;
+    try { sessionStorage.setItem('bbarit-gw-pw', currentPw); } catch (e) {}
+    needPw = false;
+    statusEl.textContent = 'Connecting…';
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'connect', password: currentPw }));
+    else connect();
+  }
+  pwGo.onclick = submitPassword;
+  pwInput.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); submitPassword(); }
+  });
+  sendBtn.onclick = send;
+  stopBtn.onclick = stop;
+  input.addEventListener('input', function () {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  connect();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>BBARIT</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>BBARIT uses the microphone for push-to-talk dictation.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>BBARIT uses speech recognition to transcribe your voice input.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>BBARIT can access the camera when attaching photos.</string>
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>BBARIT can access your photo library when selecting images.</string>
+  <key>NSPhotoLibraryAddUsageDescription</key>
+  <string>BBARIT can save generated images to your photo library.</string>
+</dict>
+</plist>
