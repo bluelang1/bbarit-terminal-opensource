@@ -4934,7 +4934,7 @@ fn aws_credentials_path() -> std::path::PathBuf {
     env::var("AWS_SHARED_CREDENTIALS_FILE")
         .ok()
         .map(Into::into)
-        .or_else(|| dirs_next::home_dir().map(|home| home.join(".aws").join("credentials")))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".aws").join("credentials")))
         .unwrap_or_else(|| ".aws/credentials".into())
 }
 
@@ -4942,7 +4942,7 @@ fn aws_config_path() -> std::path::PathBuf {
     env::var("AWS_CONFIG_FILE")
         .ok()
         .map(Into::into)
-        .or_else(|| dirs_next::home_dir().map(|home| home.join(".aws").join("config")))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".aws").join("config")))
         .unwrap_or_else(|| ".aws/config".into())
 }
 

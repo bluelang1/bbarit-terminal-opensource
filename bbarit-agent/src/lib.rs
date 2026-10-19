@@ -56,6 +56,7 @@ pub(crate) mod test_support {
     }
 }
 
+use std::io::IsTerminal;
 use crate::cli::{Cli, OutputMode};
 use crate::commands::{handle_input, print_help};
 use crate::config::AppConfig;
@@ -152,7 +153,7 @@ pub fn run() -> Result<()> {
         return run_json_mode(&mut store, &registry, &config, initial);
     }
     if cli.print
-        || (!cli.tui && (!atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout)))
+        || (!cli.tui && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()))
     {
         if let Some(input) = initial {
             handle_and_print(&mut store, &registry, &config, &input)?;
@@ -221,7 +222,7 @@ fn handle_and_print(
 
     // On a real terminal, show a spinner while waiting then stream tokens. When
     // piped, stream raw text only (no spinner/control characters).
-    if atty::is(atty::Stream::Stdout) {
+    if std::io::stdout().is_terminal() {
         let guard = crate::stream_ui::start(String::new());
         let result = handle_input(store, registry, config, input);
         let streamed = guard.finish();

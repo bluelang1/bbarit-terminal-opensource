@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
@@ -59,7 +60,7 @@ pub fn require_trusted(config: &AppConfig, operation: &str) -> Result<()> {
     if is_trusted(config)? {
         return Ok(());
     }
-    if atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout) {
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         return prompt_for_trust(config, operation);
     }
     let project = canonical(&config.cwd);

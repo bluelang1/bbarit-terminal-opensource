@@ -25,7 +25,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "multipart", "rustls-tls"] }
-parking_lot = "0.12"
 libc = "0.2"
 portable-pty = "0.8"
 screenshots = "0.8.10"
@@ -39,10 +38,8 @@ regex = "1.11"
 surrealdb = { version = "2", default-features = false, features = ["kv-rocksdb"] }
 axum = { version = "0.8", features = ["ws"] }
 uuid = { version = "1", features = ["v4"] }
-tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 sha2 = "0.10"
-hex = "0.4"
 # Chrome/Chromium 프로필 임포트: macOS는 AES-128-CBC(Keychain 키), Windows는 AES-256-GCM(DPAPI 키).
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
@@ -63,19 +60,13 @@ tauri-plugin-single-instance = "2"
 bbarit = { path = "../bbarit-agent" }
 
 # --- Embedded Semble dependencies ---
-clap = { version = "4", features = ["derive"] }
+# (tokenizers/safetensors/hf-hub/half are pulled in by model2vec-rs; listing
+# them here too built a second, unused tokenizers 0.20 with its own C++ deps.)
 once_cell = "1"
 chrono = { version = "0.4", features = ["clock"] }
 ignore = "0.4"
 ndarray = "0.15"
-tokenizers = "0.20"
-safetensors = "0.4"
-hf-hub = "0.4"
-half = "2"
-log = "0.4"
-env_logger = "0.11"
 anyhow = "1"
-thiserror = "2"
 tree-sitter = "0.25"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.23"

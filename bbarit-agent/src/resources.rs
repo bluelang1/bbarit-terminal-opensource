@@ -158,7 +158,7 @@ pub fn format_skills_for_prompt(config: &AppConfig) -> Result<String> {
     }
     // Interop/home-scanned third-party skill dirs rank after the user's own
     // and the project's — when the block budget truncates, those drop first.
-    let third_party: Vec<PathBuf> = dirs_next::home_dir()
+    let third_party: Vec<PathBuf> = dirs::home_dir()
         .map(|home| {
             vec![
                 home.join(".agents").join("skills"),
@@ -258,7 +258,7 @@ fn resource_paths(config: &AppConfig, kind: &str) -> Vec<PathBuf> {
         config.user_app_dir.join(kind),
     ];
     if kind == "skills"
-        && let Some(home) = dirs_next::home_dir()
+        && let Some(home) = dirs::home_dir()
     {
         paths.push(home.join(".agents").join("skills"));
     }
@@ -621,7 +621,7 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
 fn ancestor_agents_skill_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let git_root = find_git_root(cwd);
-    let user_agents_skills = dirs_next::home_dir().map(|home| home.join(".agents").join("skills"));
+    let user_agents_skills = dirs::home_dir().map(|home| home.join(".agents").join("skills"));
     let mut current = Some(cwd);
     while let Some(dir) = current {
         let candidate = dir.join(".agents").join("skills");

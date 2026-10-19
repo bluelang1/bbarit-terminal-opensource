@@ -152,6 +152,7 @@
     "opensource/manifest.json",
     "docs/OPEN_SOURCE.md",
     "docs/BBARIT_CLI.md",
+    ".github/dependabot.yml",
     ".github/workflows/opensource-ci.yml",
     "scripts/bump-version.mjs",
     "agent-browser-cli/package-lock.json"

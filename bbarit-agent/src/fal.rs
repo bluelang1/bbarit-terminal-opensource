@@ -589,7 +589,7 @@ fn fal_key(config: &AppConfig) -> Result<String> {
             return Ok(value.trim().to_string());
         }
     }
-    if let Some(home) = dirs_next::home_dir() {
+    if let Some(home) = dirs::home_dir() {
         let env_path = home.join(".config/octo/.env");
         if let Ok(content) = std::fs::read_to_string(&env_path) {
             for line in content.lines() {

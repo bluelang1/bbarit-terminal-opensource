@@ -3,6 +3,7 @@
 //! menu. The agent turn runs on a worker thread so the UI keeps rendering
 //! (spinner-free live streaming) and never freezes during long model calls.
 
+use std::io::IsTerminal;
 use std::io;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -65,7 +66,7 @@ impl StderrRedirectGuard {
     fn install() -> Option<Self> {
         #[cfg(unix)]
         {
-            let dir = dirs_next::home_dir()?.join(".bbarit").join("agent");
+            let dir = dirs::home_dir()?.join(".bbarit").join("agent");
             let _ = std::fs::create_dir_all(&dir);
             let path = dir.join("tui-stderr.log");
             // 무한 성장 방지: 1MB 넘으면 새로 시작.
@@ -486,10 +487,10 @@ fn change_codebase(
 /// a directory literally named "~".
 fn expand_home(raw: &str) -> PathBuf {
     if raw == "~" {
-        return dirs_next::home_dir().unwrap_or_else(|| PathBuf::from(raw));
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(raw));
     }
     if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\"))
-        && let Some(home) = dirs_next::home_dir()
+        && let Some(home) = dirs::home_dir()
     {
         return home.join(rest);
     }
@@ -2418,7 +2419,7 @@ pub fn run_interactive(
     crate::commands::refresh_wiki_panel(config);
     // ratatui needs a real terminal; when stdin/stdout is piped (scripts,
     // smoke tests) fall back to a line-based REPL so it stays scriptable.
-    if !atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout) {
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return run_line_repl(store, registry, config, initial);
     }
     // Force streaming in the interactive TUI: tokens show live AND Esc can cancel
@@ -5983,7 +5984,7 @@ mod tests {
 
     #[test]
     fn expand_home_resolves_tilde_prefix() {
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             assert_eq!(expand_home("~"), home);
             assert_eq!(expand_home("~/projects/foo"), home.join("projects/foo"));
         }

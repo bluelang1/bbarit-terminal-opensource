@@ -201,7 +201,7 @@ fn note_vault_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("BBARIT_NOTE_VAULT_DIR") {
         return PathBuf::from(dir);
     }
-    dirs_next::home_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("Documents")
         .join("octo-notes")
