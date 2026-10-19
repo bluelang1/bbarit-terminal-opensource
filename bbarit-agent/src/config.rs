@@ -1598,10 +1598,8 @@ mod tests {
 
     #[test]
     fn project_mcp_and_models_json_count_as_trust_gated_resources() {
-        let root = std::env::temp_dir().join(format!(
-            "bbarit-trust-resources-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bbarit-trust-resources-{}", uuid::Uuid::new_v4()));
         let app_dir = root.join(".bbarit");
         let legacy_app_dir = root.join(".pi");
         fs::create_dir_all(&root).unwrap();

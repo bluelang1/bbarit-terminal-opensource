@@ -56,7 +56,6 @@ pub(crate) mod test_support {
     }
 }
 
-use std::io::IsTerminal;
 use crate::cli::{Cli, OutputMode};
 use crate::commands::{handle_input, print_help};
 use crate::config::AppConfig;
@@ -65,6 +64,7 @@ use crate::session::{CURRENT_SESSION_VERSION, Message, Role, SessionStore};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Run the BBARIT agent CLI/TUI. Parses args from the process environment and

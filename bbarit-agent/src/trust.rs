@@ -1,7 +1,6 @@
-use std::io::IsTerminal;
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};

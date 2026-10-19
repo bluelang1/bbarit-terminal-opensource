@@ -3,8 +3,7 @@
 //! menu. The agent turn runs on a worker thread so the UI keeps rendering
 //! (spinner-free live streaming) and never freezes during long model calls.
 
-use std::io::IsTerminal;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;

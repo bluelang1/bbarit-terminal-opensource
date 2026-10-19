@@ -1,4 +1,7 @@
 version: 2
+# Note: `xlsx` is a URL dependency (cdn.sheetjs.com tarball) because the npm
+# registry build is unpatched. Dependabot and `npm audit` both skip URL deps,
+# so SheetJS advisories must be tracked by hand (https://cdn.sheetjs.com).
 updates:
   - package-ecosystem: npm
     directory: /
