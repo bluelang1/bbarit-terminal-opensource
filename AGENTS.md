@@ -24,6 +24,25 @@ Useful source checks:
     npm run test:run
     npm run build
     npm run check:bundled-scripts
+    cargo test --manifest-path bbarit-agent/Cargo.toml --locked   # ~370 tests, seconds once built
+    cargo test --manifest-path src-tauri/Cargo.toml --locked      # ~120 tests; first build ~3 min
+
+Build/test gotchas:
+
+- src-tauri needs `cmake` on PATH (whisper-rs build script); `brew install cmake`.
+- `npm run test:run` prints jsdom "HTMLCanvasElement.getContext not implemented"
+  stack traces from xterm; they are noise, check the pass/fail summary.
+- ESLint has rules-of-hooks, exhaustive-deps, and no-unused-vars disabled; a
+  clean lint does not mean hook usage is correct.
+- src-tauri/src/{pty,gateway,config,shannon}.rs are not in the `mod` tree of
+  main.rs; edit main.rs, not those files.
+- New scripts referenced from package.json or tauri resources must be added to
+  opensource/manifest.json `extra_files`, or `--audit` fails.
+- Local bridges (browser_bridge.rs, design_http.rs) are wrapped in
+  `with_local_guard`: native clients must send no Origin; webview origins are
+  allowlisted in `local_origin_allowed`.
+- Upstream remote `upstream` = johunsang/bbarit-terminal-opensource; fork main
+  shares ancestry with it, so `git merge upstream/main` works normally.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
