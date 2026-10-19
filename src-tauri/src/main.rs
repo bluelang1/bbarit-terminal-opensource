@@ -188,6 +188,17 @@ fn sh_quote(input: &str) -> String {
     format!("'{}'", input.replace('\'', "'\\''"))
 }
 
+/// Refuse a user-supplied ref, remote, path, or URL that git would parse as an
+/// option (`--upload-pack=…`, `-D`, …). Positional values never legitimately
+/// start with `-`, so this closes argument injection through the git commands
+/// below without changing what valid input does.
+fn reject_option_like(value: &str, what: &str) -> Result<(), String> {
+    if value.trim_start().starts_with('-') {
+        return Err(format!("Invalid {what}: must not start with '-'"));
+    }
+    Ok(())
+}
+
 fn parse_ssh_path(path: &str) -> Result<Option<SshPathSpec>, String> {
     let raw = path.trim();
     if !raw.starts_with("ssh://") {
@@ -214,6 +225,9 @@ fn parse_ssh_path(path: &str) -> Result<Option<SshPathSpec>, String> {
     if username.trim().is_empty() {
         return Err("Invalid SSH path format: empty username".to_string());
     }
+    if username.trim().starts_with('-') {
+        return Err("Invalid SSH path format: username must not start with '-'".to_string());
+    }
 
     let (host, port) = match host_port.rsplit_once(':') {
         Some((h, p)) if !p.trim().is_empty() => {
@@ -227,6 +241,9 @@ fn parse_ssh_path(path: &str) -> Result<Option<SshPathSpec>, String> {
     };
     if host.trim().is_empty() {
         return Err("Invalid SSH path format: empty host".to_string());
+    }
+    if host.starts_with('-') {
+        return Err("Invalid SSH path format: host must not start with '-'".to_string());
     }
 
     let identity_file = if let Some(encoded) = encoded_key_opt {
@@ -6172,7 +6189,14 @@ fn pm2_action(work_dir: String, action: String, app_name: String) -> Result<Stri
         "restart" | "stop" | "start" | "reload" | "delete" => {}
         _ => return Err(format!("Invalid pm2 action: {action}")),
     }
-    let cmd_str = format!("pm2 {} {} 2>&1", action, app_name);
+    // `app_name` goes through `sh -lc` / a remote shell: quote it, and refuse
+    // option-shaped names so it can't become a pm2 flag either.
+    let app_name = app_name.trim();
+    if app_name.is_empty() {
+        return Err("pm2 app name is required".to_string());
+    }
+    reject_option_like(app_name, "pm2 app name")?;
+    let cmd_str = format!("pm2 {} {} 2>&1", action, sh_quote(app_name));
     let spec = parse_ssh_path(&work_dir)?;
     if let Some(spec) = spec {
         let out = run_ssh_command(&spec, &cmd_str)?;
@@ -7015,6 +7039,8 @@ fn git_worktree_add(
     branch_name: String,
 ) -> Result<String, String> {
     let branch = branch_name.trim();
+    reject_option_like(branch, "branch name")?;
+    reject_option_like(&worktree_dir, "worktree path")?;
     let _ = common::no_window_command("git")
         .args(["worktree", "prune"])
         .current_dir(&repo_dir)
@@ -7067,6 +7093,7 @@ fn git_worktree_head(worktree_dir: String) -> Result<String, String> {
 
 #[tauri::command]
 fn git_worktree_remove(worktree_dir: String) -> Result<(), String> {
+    reject_option_like(&worktree_dir, "worktree path")?;
     // Force remove worktree
     let output = common::no_window_command("git")
         .args(["worktree", "remove", "--force", &worktree_dir])
@@ -7086,6 +7113,7 @@ fn git_worktree_remove(worktree_dir: String) -> Result<(), String> {
 
 #[tauri::command]
 fn git_merge_branch(repo_dir: String, branch_name: String) -> Result<String, String> {
+    reject_option_like(&branch_name, "branch name")?;
     // First, make sure we're on the main branch (or whatever was current before worktrees)
     // Get current branch
     let current = common::no_window_command("git")
@@ -7223,6 +7251,7 @@ fn git_merge_branch(repo_dir: String, branch_name: String) -> Result<String, Str
 
 #[tauri::command]
 fn git_delete_branch(repo_dir: String, branch_name: String) -> Result<(), String> {
+    reject_option_like(&branch_name, "branch name")?;
     let output = common::no_window_command("git")
         .args(["branch", "-D", &branch_name])
         .current_dir(&repo_dir)
@@ -7357,6 +7386,8 @@ fn git_current_branch(repo_dir: String) -> Result<String, String> {
 // Count how many commits `branch` is ahead of `base`
 #[tauri::command]
 fn git_branch_ahead_count(repo_dir: String, branch: String, base: String) -> Result<u32, String> {
+    reject_option_like(&branch, "branch")?;
+    reject_option_like(&base, "base")?;
     let range = format!("{}..{}", base, branch);
     let output = common::no_window_command("git")
         .args(["rev-list", "--count", &range])
@@ -7851,6 +7882,7 @@ fn git_diff(
 ) -> Result<String, String> {
     let mut args = vec!["diff".to_string()];
     if let Some(ref c) = commit {
+        reject_option_like(c, "commit")?;
         args.push(format!("{c}^..{c}"));
     } else if staged {
         args.push("--cached".to_string());
@@ -7871,6 +7903,7 @@ fn git_diff(
 fn git_diff_stat(repo_dir: String, commit: Option<String>) -> Result<String, String> {
     let mut args = vec!["diff".to_string(), "--stat".to_string()];
     if let Some(ref c) = commit {
+        reject_option_like(c, "commit")?;
         args.clear();
         args.extend([
             "diff".to_string(),
@@ -7928,6 +7961,7 @@ fn git_log(
 
 #[tauri::command]
 fn git_show(repo_dir: String, commit: String) -> Result<String, String> {
+    reject_option_like(&commit, "commit")?;
     let output = common::no_window_command("git")
         .args([
             "show",
@@ -7969,8 +8003,10 @@ fn git_branch_create(
     name: String,
     start_point: Option<String>,
 ) -> Result<String, String> {
+    reject_option_like(&name, "branch name")?;
     let mut args = vec!["checkout".to_string(), "-b".to_string(), name];
     if let Some(sp) = start_point {
+        reject_option_like(&sp, "start point")?;
         args.push(sp);
     }
     let output = common::no_window_command("git")
@@ -7987,6 +8023,10 @@ fn git_branch_create(
 
 #[tauri::command]
 fn git_checkout(repo_dir: String, target: String) -> Result<String, String> {
+    // `git checkout -` (previous branch) is the one legitimate dash target.
+    if target.trim() != "-" {
+        reject_option_like(&target, "checkout target")?;
+    }
     let output = common::no_window_command("git")
         .args(["checkout", &target])
         .current_dir(&repo_dir)
@@ -8006,6 +8046,7 @@ fn git_fetch(repo_dir: String, remote: Option<String>, prune: bool) -> Result<St
         args.push("--prune".to_string());
     }
     if let Some(r) = remote {
+        reject_option_like(&r, "remote")?;
         args.push(r);
     }
     let output = common::no_window_command("git")
@@ -8032,9 +8073,11 @@ fn git_pull(
         args.push("--rebase".to_string());
     }
     if let Some(r) = remote {
+        reject_option_like(&r, "remote")?;
         args.push(r);
     }
     if let Some(b) = branch {
+        reject_option_like(&b, "branch")?;
         args.push(b);
     }
     let output = common::no_window_command("git")
@@ -8065,9 +8108,11 @@ fn git_push(
         args.push("-u".to_string());
     }
     if let Some(r) = remote {
+        reject_option_like(&r, "remote")?;
         args.push(r);
     }
     if let Some(b) = branch {
+        reject_option_like(&b, "branch")?;
         args.push(b);
     }
     let output = common::no_window_command("git")
@@ -8106,6 +8151,7 @@ fn git_stash_list(repo_dir: String) -> Result<String, String> {
 fn git_stash_drop(repo_dir: String, stash_ref: Option<String>) -> Result<String, String> {
     let mut args = vec!["stash".to_string(), "drop".to_string()];
     if let Some(r) = stash_ref {
+        reject_option_like(&r, "stash ref")?;
         args.push(r);
     }
     let output = common::no_window_command("git")
@@ -8141,6 +8187,10 @@ fn git_tag_create(
     message: Option<String>,
     commit: Option<String>,
 ) -> Result<String, String> {
+    reject_option_like(&name, "tag name")?;
+    if let Some(ref c) = commit {
+        reject_option_like(c, "commit")?;
+    }
     let mut args = vec!["tag".to_string()];
     if let Some(ref m) = message {
         args.push("-a".to_string());
@@ -8167,6 +8217,7 @@ fn git_tag_create(
 
 #[tauri::command]
 fn git_tag_delete(repo_dir: String, name: String) -> Result<(), String> {
+    reject_option_like(&name, "tag name")?;
     let output = common::no_window_command("git")
         .args(["tag", "-d", &name])
         .current_dir(&repo_dir)
@@ -8182,7 +8233,7 @@ fn git_tag_delete(repo_dir: String, name: String) -> Result<(), String> {
 #[tauri::command]
 fn git_blame(repo_dir: String, path: String) -> Result<String, String> {
     let output = common::no_window_command("git")
-        .args(["blame", "--porcelain", &path])
+        .args(["blame", "--porcelain", "--", &path])
         .current_dir(&repo_dir)
         .output()
         .map_err(|e| format!("git blame failed: {e}"))?;
@@ -8195,8 +8246,10 @@ fn git_blame(repo_dir: String, path: String) -> Result<String, String> {
 
 #[tauri::command]
 fn git_clone(url: String, dest: String) -> Result<String, String> {
+    reject_option_like(&url, "clone URL")?;
+    reject_option_like(&dest, "clone destination")?;
     let output = common::no_window_command("git")
-        .args(["clone", &url, &dest])
+        .args(["clone", "--", &url, &dest])
         .output()
         .map_err(|e| format!("git clone failed: {e}"))?;
     if output.status.success() {
@@ -9578,4 +9631,37 @@ fn main() {
                 agent_rpc_stop_all();
             }
         });
+}
+
+#[cfg(test)]
+mod argument_hardening_tests {
+    use super::{parse_ssh_path, reject_option_like, sh_quote};
+
+    #[test]
+    fn option_shaped_values_are_refused() {
+        assert!(reject_option_like("--upload-pack=touch /tmp/pwned", "clone URL").is_err());
+        assert!(reject_option_like("-D", "branch name").is_err());
+        assert!(reject_option_like("  --force", "ref").is_err());
+        assert!(reject_option_like("main", "branch").is_ok());
+        assert!(reject_option_like("origin/main", "base").is_ok());
+        assert!(reject_option_like("https://github.com/x/y.git", "clone URL").is_ok());
+        assert!(reject_option_like("stash@{0}", "stash ref").is_ok());
+        assert!(reject_option_like("", "ref").is_ok());
+    }
+
+    #[test]
+    fn sh_quote_neutralises_shell_metacharacters() {
+        assert_eq!(sh_quote("api"), "'api'");
+        assert_eq!(sh_quote("x; rm -rf ~"), "'x; rm -rf ~'");
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+        assert_eq!(sh_quote("$(id)"), "'$(id)'");
+    }
+
+    #[test]
+    fn ssh_user_and_host_cannot_be_options() {
+        assert!(parse_ssh_path("ssh://-oProxyCommand=evil@host::/srv").is_err());
+        assert!(parse_ssh_path("ssh://user@-oProxyCommand=evil::/srv").is_err());
+        let ok = parse_ssh_path("ssh://deploy@example.com:2222::/srv/app").unwrap().unwrap();
+        assert_eq!(ok.port, 2222);
+    }
 }

@@ -2,7 +2,7 @@
 
 BBARIT Terminal is a desktop development environment with shell, filesystem, browser, and agent capabilities. It runs with the permissions of the current OS user. Review commands, agent instructions, imported skills, and project contents before allowing them to act on sensitive workspaces.
 
-Keep development/debug bridges on a trusted local machine. Do not expose their ports through a reverse proxy, tunnel, or untrusted network. A local development build is not a hosted multi-user service or a sandbox for untrusted code.
+Keep development/debug bridges on a trusted local machine. Do not expose their ports through a reverse proxy, tunnel, or untrusted network. The loopback bridges (19980/19981 invoke and editor, the design server) refuse requests whose `Host` is not loopback or whose `Origin` is not this app's own webview, so a page in a normal browser cannot drive them; native local clients send no `Origin` and are accepted without a token. A local development build is not a hosted multi-user service or a sandbox for untrusted code.
 
 Supply external service credentials locally. User configuration and agent sessions can contain credentials and private project information; do not commit local environment files, browser profiles, databases, signing material, logs, or `.octo-tmp` captures. The source exporter excludes these paths and scans known secret formats, but pattern checks cannot detect every secret.
 

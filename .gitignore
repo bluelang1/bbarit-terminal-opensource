@@ -34,3 +34,4 @@ output/
 *.app/
 # IDE
 .idea/
+src-tauri/gen/

@@ -9,8 +9,14 @@
 //!   - POST /api/ngrok/*     — ngrok tunnel control
 
 use axum::{
+    body::Body,
     extract::State as AxumState,
-    http::StatusCode,
+    http::{
+        header::{HOST, ORIGIN},
+        HeaderMap, Request, StatusCode,
+    },
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
@@ -21,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::web_terminal::{self, NgrokState, WebTerminalState};
 
@@ -64,12 +70,10 @@ pub async fn start_browser_bridge(
     };
 
     // ── LOCAL server (BRIDGE_PORT): unauthenticated, trusted-local routes. ──
-    // NEVER exposed through a tunnel. Permissive CORS is acceptable here only
-    // because the port stays loopback-local and off the tunnel.
-    let local_cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    // NEVER exposed through a tunnel. Loopback alone is not enough, though: a
+    // web page in the user's normal browser can POST here too, so the router is
+    // wrapped in `with_local_guard` (Host must be loopback, Origin must be one
+    // of this app's own webview origins, CORS limited to the same).
     let local_app = Router::new()
         .route("/health", get(handle_health))
         .route("/api/invoke", post(handle_invoke))
@@ -83,8 +87,8 @@ pub async fn start_browser_bridge(
             Router::new()
                 .route("/gateway/ui", post(crate::agent_gateway::handle_gateway_ui))
                 .with_state(gateway_ctx.clone()),
-        )
-        .layer(local_cors);
+        );
+    let local_app = with_local_guard(local_app, BRIDGE_PORT);
 
     // ── REMOTE server (REMOTE_PORT): every route token-authenticated. ──
     // This is the ONLY server a tunnel points at. No permissive CORS layer:
@@ -193,6 +197,197 @@ async fn bind_with_retry(addr: &str, label: &str) -> Option<tokio::net::TcpListe
 
 async fn handle_health() -> &'static str {
     "ok"
+}
+
+// ── Loopback request guard ──
+//
+// The LOCAL server is unauthenticated by design: native CLIs, the embedded
+// agent, and MCP servers on this machine call it without a token. The only
+// thing between a malicious web page and `run_cli_oneshot` is therefore the
+// browser itself, and two header checks make that hold:
+//   * `Host` must name loopback for this port. Blocks DNS rebinding, where
+//     attacker.example resolves to 127.0.0.1 so the page is "same-origin".
+//   * `Origin`, when present, must be one of this app's own webview origins.
+//     Browsers attach Origin to every cross-origin request and to all POSTs,
+//     so a page on any other site is refused before the handler runs. Native
+//     HTTP clients send no Origin and pass through.
+// CORS is restricted to the same origins so preflights from other sites fail.
+
+/// Vite dev server origin (`npm run dev` / `tauri:dev`); only a dev build loads
+/// its UI from there.
+#[cfg(debug_assertions)]
+const DEV_UI_PORT: u16 = 5175;
+
+pub(crate) fn local_origin_allowed(origin: &str, port: u16) -> bool {
+    let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+    if matches!(
+        origin.as_str(),
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    let mut ports = vec![port];
+    #[cfg(debug_assertions)]
+    ports.push(DEV_UI_PORT);
+    for host in ["127.0.0.1", "localhost", "[::1]"] {
+        for p in &ports {
+            if origin == format!("http://{host}:{p}") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn loopback_host_allowed(host: &str, port: u16) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    let (name, port_part): (String, Option<&str>) = if let Some(rest) = host.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((ip, tail)) => (format!("[{ip}]"), tail.strip_prefix(':')),
+            None => return false,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, p)) => (name.to_string(), Some(p)),
+            None => (host.clone(), None),
+        }
+    };
+    if !matches!(name.as_str(), "127.0.0.1" | "localhost" | "[::1]") {
+        return false;
+    }
+    match port_part {
+        None => true,
+        Some(p) => p.parse::<u16>().ok() == Some(port),
+    }
+}
+
+pub(crate) fn local_request_allowed(headers: &HeaderMap, port: u16) -> Result<(), &'static str> {
+    // Every real client (browsers, reqwest, Node fetch, curl) sends Host on
+    // HTTP/1.1, so requiring it costs nothing and makes the rebinding check
+    // unconditional.
+    let host = headers.get(HOST).ok_or("missing Host header")?;
+    let host = host.to_str().map_err(|_| "unreadable Host header")?;
+    if !loopback_host_allowed(host, port) {
+        return Err("Host is not loopback");
+    }
+    if let Some(origin) = headers.get(ORIGIN) {
+        let origin = origin.to_str().map_err(|_| "unreadable Origin header")?;
+        if !local_origin_allowed(origin, port) {
+            return Err("Origin is not this app");
+        }
+    }
+    Ok(())
+}
+
+async fn local_guard(
+    AxumState(port): AxumState<u16>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    match local_request_allowed(req.headers(), port) {
+        Ok(()) => next.run(req).await,
+        Err(reason) => {
+            safe_eprintln!(
+                "[browser-bridge] refused {} {} on :{port}: {reason}",
+                req.method(),
+                req.uri().path()
+            );
+            (StatusCode::FORBIDDEN, format!("forbidden: {reason}")).into_response()
+        }
+    }
+}
+
+fn local_cors(port: u16) -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin
+                .to_str()
+                .map(|o| local_origin_allowed(o, port))
+                .unwrap_or(false)
+        }))
+        .allow_methods(Any)
+        .allow_headers(Any)
+}
+
+/// Wrap a loopback-only router (the LOCAL bridge, the design server) with the
+/// Host/Origin guard and the matching CORS policy. The guard is the outer
+/// layer, so a refused preflight never reaches CORS either.
+pub(crate) fn with_local_guard(router: Router, port: u16) -> Router {
+    router
+        .layer(local_cors(port))
+        .layer(middleware::from_fn_with_state(port, local_guard))
+}
+
+#[cfg(test)]
+mod local_guard_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    const PORT: u16 = 19980;
+
+    #[test]
+    fn app_webview_origins_pass() {
+        assert!(local_origin_allowed("tauri://localhost", PORT));
+        assert!(local_origin_allowed("http://tauri.localhost", PORT));
+        assert!(local_origin_allowed("HTTP://TAURI.LOCALHOST/", PORT));
+        assert!(local_origin_allowed("http://127.0.0.1:19980", PORT));
+        assert!(local_origin_allowed("http://localhost:19980", PORT));
+    }
+
+    #[test]
+    fn foreign_origins_fail() {
+        assert!(!local_origin_allowed("https://evil.example", PORT));
+        assert!(!local_origin_allowed("http://127.0.0.1:19981", PORT));
+        assert!(!local_origin_allowed("null", PORT));
+        assert!(!local_origin_allowed("", PORT));
+        assert!(!local_origin_allowed("http://127.0.0.1.evil.example:19980", PORT));
+    }
+
+    #[test]
+    fn host_must_be_loopback_for_this_port() {
+        assert!(loopback_host_allowed("127.0.0.1:19980", PORT));
+        assert!(loopback_host_allowed("localhost:19980", PORT));
+        assert!(loopback_host_allowed("[::1]:19980", PORT));
+        assert!(loopback_host_allowed("127.0.0.1", PORT));
+        assert!(!loopback_host_allowed("127.0.0.1:19981", PORT));
+        assert!(!loopback_host_allowed("rebind.evil.example:19980", PORT));
+        assert!(!loopback_host_allowed("127.0.0.1.evil.example:19980", PORT));
+        assert!(!loopback_host_allowed("[::1", PORT));
+    }
+
+    #[test]
+    fn native_client_without_origin_passes() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, HeaderValue::from_static("127.0.0.1:19980"));
+        assert!(local_request_allowed(&h, PORT).is_ok());
+        assert_eq!(
+            local_request_allowed(&HeaderMap::new(), PORT),
+            Err("missing Host header")
+        );
+    }
+
+    #[test]
+    fn browser_page_on_other_site_is_refused() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, HeaderValue::from_static("127.0.0.1:19980"));
+        h.insert(ORIGIN, HeaderValue::from_static("https://evil.example"));
+        assert_eq!(local_request_allowed(&h, PORT), Err("Origin is not this app"));
+    }
+
+    #[test]
+    fn dns_rebinding_is_refused() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, HeaderValue::from_static("rebind.evil.example:19980"));
+        assert_eq!(local_request_allowed(&h, PORT), Err("Host is not loopback"));
+    }
+
+    #[test]
+    fn app_webview_request_passes() {
+        let mut h = HeaderMap::new();
+        h.insert(HOST, HeaderValue::from_static("localhost:19980"));
+        h.insert(ORIGIN, HeaderValue::from_static("tauri://localhost"));
+        assert!(local_request_allowed(&h, PORT).is_ok());
+    }
 }
 
 // ── Editor control bridge ──
