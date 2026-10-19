@@ -1,7 +1,10 @@
 // BBARIT Lounge client — pure protocol/state logic for the global community chat.
 // Wire protocol: docs/BBARIT_LOUNGE_DESIGN.md §5 (JSON tagged union, v:1).
 
-export const LOUNGE_DEFAULT_URL = 'wss://bbarit.com/api/lounge/ws';
+import { LOUNGE_WS_URL } from '../config/endpoints';
+
+// Build-time default (VITE_BBARIT_LOUNGE_WS_URL); ~/.config/octo/.env BBARIT_LOUNGE_URL still overrides at runtime.
+export const LOUNGE_DEFAULT_URL = LOUNGE_WS_URL;
 // Transport-level cap (code units), larger than the 1,000-char UI cap because
 // E2E ciphertext expands: 1,000 emoji (4B each) → ~5,380 chars of base64
 // payload. The server enforces the same 6,000 limit.

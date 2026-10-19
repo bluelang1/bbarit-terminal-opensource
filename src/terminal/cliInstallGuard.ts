@@ -4,6 +4,7 @@
 // 그래서 실행 "출력"의 실패 패턴을 감지해 재시도를 멈추고 안내 배너를 띄운다.
 
 import { stripTerminalControls, type AgentCliKind } from './agentReadiness';
+import { AGENT_INSTALL_COMMAND } from '../config/endpoints';
 
 export type CliLaunchFailureKind = 'not-found' | 'broken-npm-shim';
 
@@ -36,7 +37,7 @@ export const CLI_INSTALL_INFO: Partial<Record<AgentCliKind, CliInstallInfo>> = {
   pi: { binName: 'pi', displayName: 'Pi', install: 'npm install -g --ignore-scripts @earendil-works/pi-coding-agent' },
   reasonix: { binName: 'reasonix', displayName: 'Reasonix', install: 'npm i -g reasonix' },
   bbarit: { binName: 'bbarit', displayName: 'BBARIT Agent', install: '', bundled: true },
-  'bbarit-oss': { binName: 'bbarit-oss', displayName: 'BBARIT OSS Agent', install: 'curl -fsSL https://bbarit.com/agent/install.sh | sh' },
+  'bbarit-oss': { binName: 'bbarit-oss', displayName: 'BBARIT OSS Agent', install: AGENT_INSTALL_COMMAND },
 };
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

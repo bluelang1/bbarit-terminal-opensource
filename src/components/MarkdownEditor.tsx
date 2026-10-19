@@ -251,7 +251,8 @@ const MermaidRenderer = ({ code }: { code: string }) => {
     (async () => {
       try {
         const mermaid = (await import('mermaid')).default;
-        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+        // mermaid 12 defaults to ELK layout + 'neo' look; keep the classic rendering.
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose', layout: 'dagre', look: 'classic' });
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
         const { svg } = await mermaid.render(id, code.trim());
         if (!cancelled && containerRef.current) {

@@ -28,6 +28,7 @@ import { deriveBrokerHarnessName, lifecycleFromBrokerStatus, normalizeBrokerSess
 import { BrokerHarnessModal, type BrokerHarness } from './components/BrokerHarnessModal';
 import { SettingsPanel, getAgentSettings, getEditorSettings, getTerminalSettings, getNoteTemplates, type EditorSettings, type TerminalSettings } from './components/SettingsPanel';
 import { GithubStarNudge } from './components/GithubStarNudge';
+import { RELEASE_REPO_MAC, RELEASE_REPO_WIN } from './config/endpoints';
 
 import { CommandPaletteLite, type PaletteCommand } from './components/CommandPaletteLite';
 import { ModelRoundtableModal } from './roundtable/ModelRoundtableModal';
@@ -196,8 +197,11 @@ requestIdleCallback(() => {
 
 const IS_WINDOWS = navigator.platform.toLowerCase().includes('win');
 const BROWSER_TOOLBAR_ENABLED = false;
-const TERMINAL_REPOSITORY = 'bbarit/terminal';
-const WINDOWS_RELEASES_REPOSITORY = 'bbarit/terminal-win';
+// GitHub repositories for the toolbar link and the "open release page" fallback
+// (VITE_BBARIT_RELEASE_REPO_MAC / _WIN, see src/config/endpoints.ts). The signed
+// Tauri updater endpoint is configured in src-tauri and is not derived from these.
+const TERMINAL_REPOSITORY = RELEASE_REPO_MAC;
+const WINDOWS_RELEASES_REPOSITORY = RELEASE_REPO_WIN;
 const RELEASES_REPO = IS_WINDOWS ? WINDOWS_RELEASES_REPOSITORY : TERMINAL_REPOSITORY;
 const GITHUB_REPOSITORY_PAGE = `https://github.com/${TERMINAL_REPOSITORY}`;
 const BROWSER_TOOLBAR_BUTTON_ENABLED = false;
@@ -16727,7 +16731,7 @@ Office project scaffold created by BBARIT Terminal.
               <button
                 className="btn-top-small toolbar-tool tool-github"
                 onClick={() => { void openExternalUrl(GITHUB_REPOSITORY_PAGE); }}
-                title="GitHub Repository: bbarit/terminal"
+                title={`GitHub Repository: ${TERMINAL_REPOSITORY}`}
               >
                 <LucideIcons.FolderGit2 size={14} />
               </button>

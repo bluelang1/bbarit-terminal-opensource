@@ -90,6 +90,21 @@ Cargo metadata 성공은 네이티브 컴파일·링크·실행 성공을 의미
 
 제품 공지는 `bbarit.com`에서 읽으며, 채팅·Thread·원격 협업·모델 다운로드·외부 연동은 각각의 서버와 네트워크를 사용할 수 있습니다. 이 소스 배포는 모든 기능을 오프라인으로 바꾸는 작업이 아닙니다. 자세한 범위는 [공개 소스 안내](docs/OPEN_SOURCE.md)를 참고하세요.
 
+## 엔드포인트 설정
+
+프런트엔드가 사용하는 서버 주소와 릴리즈 저장소는 `src/config/endpoints.ts` 한 곳에서 읽습니다. 빌드 시 `VITE_*` 환경 변수로 바꿀 수 있고, 설정하지 않으면 기본값을 씁니다. 예시는 `.env.example`을 복사해 `.env.local`로 쓰세요.
+
+| 변수 | 기본값 | 용도 |
+| --- | --- | --- |
+| `VITE_BBARIT_API_BASE_URL` | `https://bbarit.com` | Thread API·공지·라운지·설치 스크립트의 기준 주소 |
+| `VITE_BBARIT_NOTICES_URL` | `<기준 주소>/api/products/notices` | 제품 공지 피드. `off` 또는 빈 값이면 요청하지 않음 |
+| `VITE_BBARIT_LOUNGE_WS_URL` | `wss://bbarit.com/api/lounge/ws` | 라운지 웹소켓 (`~/.config/octo/.env`의 `BBARIT_LOUNGE_URL`이 실행 시 우선) |
+| `VITE_BBARIT_AGENT_INSTALL_URL` | `<기준 주소>/agent/install.sh` | `bbarit-oss` 에이전트 미설치 안내에 쓰는 설치 스크립트 |
+| `VITE_BBARIT_RELEASE_REPO_MAC` | `bluelang1/bbarit-terminal-opensource` | 툴바 GitHub 링크·릴리즈 페이지 (macOS) |
+| `VITE_BBARIT_RELEASE_REPO_WIN` | `bluelang1/bbarit-terminal-opensource` | 릴리즈 페이지 (Windows) |
+
+서명된 Tauri 업데이터 엔드포인트는 `src-tauri` 설정에 있으며 이 변수들의 영향을 받지 않습니다.
+
 ## 검증 범위
 
 공개 준비 시 수행한 검사는 [공개 소스 안내](docs/OPEN_SOURCE.md)에 구분해 기록합니다. 프런트엔드 빌드·단위 검사·설정 검사와 네이티브 앱의 실제 실행 검증은 서로 다른 근거입니다.

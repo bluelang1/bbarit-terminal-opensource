@@ -26,6 +26,7 @@ import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs'
 import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
+import { AGENT_INSTALL_COMMAND } from './config/endpoints';
 import { Eraser, RotateCcw } from 'lucide-react';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
@@ -3374,7 +3375,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             cmd += ' -c';
           }
           cmd += flagsToString(normalizedFlags);
-          return wrapCliCheck(cmd, 'bbarit-oss', 'curl -fsSL https://bbarit.com/agent/install.sh | sh');
+          return wrapCliCheck(cmd, 'bbarit-oss', AGENT_INSTALL_COMMAND);
         })(),
         pi: (() => {
           let cmd = 'pi';

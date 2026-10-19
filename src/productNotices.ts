@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import { BBARIT_API_BASE_URL, PRODUCT_NOTICES_URL } from './config/endpoints'
 
-const API_BASE = 'https://bbarit.com'
+const API_BASE = BBARIT_API_BASE_URL
 const PRODUCT_CODE = 'terminal'
 
 function debugLog(msg: string) {
@@ -46,8 +47,10 @@ export async function openBbaritUrl(pathOrUrl: string): Promise<void> {
 
 export async function fetchProductNotices(productCode = PRODUCT_CODE): Promise<ProductNotice[]> {
   if (!isTauri()) return []
+  // VITE_BBARIT_NOTICES_URL=off (or empty) disables the feed: no request, no modal.
+  if (!PRODUCT_NOTICES_URL) return []
   try {
-    const url = `${API_BASE}/api/products/notices?product_code=${encodeURIComponent(productCode)}`
+    const url = `${PRODUCT_NOTICES_URL}?product_code=${encodeURIComponent(productCode)}`
     const readJson = async () => {
       try {
         const res = await fetch(url, {

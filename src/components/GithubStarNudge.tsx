@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Star, X } from 'lucide-react';
+import { RELEASE_REPO_MAC } from '../config/endpoints';
 
 // GitHub-star beggar: appears a little while after startup once the app has
 // been launched a few times, then comes back weekly — and keeps begging,
 // a little more desperately each time, until the user actually stars.
 
 const KEY = 'bbarit-star-nudge';
-export const STAR_REPO_URL = 'https://github.com/bbarit/terminal';
+export const STAR_REPO_URL = `https://github.com/${RELEASE_REPO_MAC}`;
 const MIN_LAUNCHES = 3;
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const SHOW_DELAY_MS = 30000;
