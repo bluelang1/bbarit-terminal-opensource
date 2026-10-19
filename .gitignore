@@ -32,3 +32,5 @@ output/
 *.exe
 *.dmg
 *.app/
+# IDE
+.idea/
