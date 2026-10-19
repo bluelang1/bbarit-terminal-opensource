@@ -64,6 +64,7 @@ use crate::session::{CURRENT_SESSION_VERSION, Message, Role, SessionStore};
 use anyhow::Result;
 use chrono::Utc;
 use serde_json::json;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Run the BBARIT agent CLI/TUI. Parses args from the process environment and
@@ -152,7 +153,7 @@ pub fn run() -> Result<()> {
         return run_json_mode(&mut store, &registry, &config, initial);
     }
     if cli.print
-        || (!cli.tui && (!atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout)))
+        || (!cli.tui && (!std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()))
     {
         if let Some(input) = initial {
             handle_and_print(&mut store, &registry, &config, &input)?;
@@ -221,7 +222,7 @@ fn handle_and_print(
 
     // On a real terminal, show a spinner while waiting then stream tokens. When
     // piped, stream raw text only (no spinner/control characters).
-    if atty::is(atty::Stream::Stdout) {
+    if std::io::stdout().is_terminal() {
         let guard = crate::stream_ui::start(String::new());
         let result = handle_input(store, registry, config, input);
         let streamed = guard.finish();

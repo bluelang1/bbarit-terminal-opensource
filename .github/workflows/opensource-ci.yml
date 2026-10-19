@@ -30,6 +30,7 @@ jobs:
           npm run test:run
           npm run test:source-build
           npm run check:bundled-scripts
+          npm run office:cli-smoke
           npm run build
       - name: Check local Rust workspace metadata
         run: cargo metadata --manifest-path src-tauri/Cargo.toml --locked --no-deps --format-version 1 > /dev/null

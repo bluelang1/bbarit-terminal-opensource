@@ -4849,7 +4849,7 @@ pub fn codex_image(cwd: &Path, args: &Value) -> Result<String> {
     // 샌드박스가 지정 경로 쓰기를 거부한 경우: codex는 산출물을
     // ~/.codex/generated_images/ 에 남긴다 — 이번 실행 중 생긴 최신 이미지를
     // 찾아 지정 경로로 회수한다.
-    if let Some(home) = dirs_next::home_dir() {
+    if let Some(home) = dirs::home_dir() {
         let generated = home.join(".codex/generated_images");
         let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
         if let Ok(entries) = std::fs::read_dir(&generated) {

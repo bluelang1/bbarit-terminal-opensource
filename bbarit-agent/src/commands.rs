@@ -263,7 +263,7 @@ fn load_image_data_url(path: &str, cwd: &std::path::Path) -> Option<String> {
     }
     let ext_mime = image_mime(path)?;
     let full = if let Some(rest) = path.strip_prefix("~/") {
-        dirs_next::home_dir()?.join(rest)
+        dirs::home_dir()?.join(rest)
     } else if std::path::Path::new(path).is_absolute() {
         std::path::PathBuf::from(path)
     } else {
@@ -7155,11 +7155,11 @@ fn normalize_path_arg(raw: &str) -> String {
         trimmed
     };
     if unquoted == "~" {
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             return home.to_string_lossy().into_owned();
         }
     } else if let Some(rest) = unquoted.strip_prefix("~/") {
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             return home.join(rest).to_string_lossy().into_owned();
         }
     }
@@ -7306,7 +7306,7 @@ mod tests {
         assert_eq!(normalize_path_arg("\"my file.txt\""), "my file.txt");
         assert_eq!(normalize_path_arg("'a b.rs'"), "a b.rs");
         assert_eq!(normalize_path_arg("plain.txt"), "plain.txt");
-        if let Some(home) = dirs_next::home_dir() {
+        if let Some(home) = dirs::home_dir() {
             assert_eq!(
                 normalize_path_arg("~/notes.md"),
                 home.join("notes.md").to_string_lossy()
@@ -7739,7 +7739,7 @@ mod tests {
     /// burned tool turns trying to `read` a path that "didn't exist".
     #[test]
     fn extract_image_expands_tilde_to_home() {
-        let home = dirs_next::home_dir().expect("home dir");
+        let home = dirs::home_dir().expect("home dir");
         let name = format!(".bbarit-test-tilde-{}.png", uuid::Uuid::new_v4());
         let file = home.join(&name);
         std::fs::write(&file, b"\x89PNG\r\n\x1a\nfake").unwrap();

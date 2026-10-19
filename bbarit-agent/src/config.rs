@@ -335,7 +335,7 @@ impl AppConfig {
         let cwd = resolve_startup_cwd()?;
         let app_dir = cwd.join(APP_DIR);
         let legacy_app_dir = cwd.join(LEGACY_APP_DIR);
-        let home = dirs_next::home_dir().unwrap_or_else(|| cwd.clone());
+        let home = dirs::home_dir().unwrap_or_else(|| cwd.clone());
         let user_app_dir = env::var(PI_AGENT_DIR_ENV)
             .ok()
             .map(resolve_home_path)
@@ -1224,7 +1224,7 @@ fn resolve_pathbuf_home(path: PathBuf) -> PathBuf {
 
 /// Path to the user-level settings.json (honors PI_CODING_AGENT_DIR).
 pub fn user_settings_file() -> PathBuf {
-    let home = dirs_next::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     env::var(PI_AGENT_DIR_ENV)
         .ok()
         .map(resolve_home_path)
@@ -1294,13 +1294,13 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 
 fn resolve_home_path(value: String) -> PathBuf {
     if value == "~" {
-        return dirs_next::home_dir().unwrap_or_else(|| PathBuf::from(value));
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(value));
     }
 
     if let Some(rest) = value
         .strip_prefix("~/")
         .or_else(|| value.strip_prefix("~\\"))
-        && let Some(home) = dirs_next::home_dir()
+        && let Some(home) = dirs::home_dir()
     {
         return join_path_components(home, rest);
     }
@@ -1542,7 +1542,7 @@ fn discover_append_system_prompt_file(
 
 /// 앱 공용 dotenv (~/.config/octo/.env) — API 키·기능 토글이 사는 곳.
 pub fn octo_env_path() -> Option<PathBuf> {
-    dirs_next::home_dir().map(|home| home.join(".config/octo/.env"))
+    dirs::home_dir().map(|home| home.join(".config/octo/.env"))
 }
 
 /// 변수 하나를 프로세스 env → ~/.config/octo/.env 순으로 읽는다.
@@ -1598,10 +1598,8 @@ mod tests {
 
     #[test]
     fn project_mcp_and_models_json_count_as_trust_gated_resources() {
-        let root = std::env::temp_dir().join(format!(
-            "bbarit-trust-resources-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("bbarit-trust-resources-{}", uuid::Uuid::new_v4()));
         let app_dir = root.join(".bbarit");
         let legacy_app_dir = root.join(".pi");
         fs::create_dir_all(&root).unwrap();
@@ -1644,7 +1642,7 @@ mod tests {
 
     #[test]
     fn config_paths_expand_tilde_to_home() {
-        let home = dirs_next::home_dir().expect("home directory is available");
+        let home = dirs::home_dir().expect("home directory is available");
         assert_eq!(resolve_home_path("~".to_string()), home);
     }
 
@@ -1741,7 +1739,7 @@ mod tests {
 
     #[test]
     fn config_paths_expand_tilde_children_before_cwd_resolution() {
-        let home = dirs_next::home_dir().expect("home directory is available");
+        let home = dirs::home_dir().expect("home directory is available");
         let cwd = env::current_dir().expect("cwd is available");
 
         assert_eq!(
@@ -1782,7 +1780,7 @@ mod tests {
             vec![
                 base.join("prompts"),
                 base.join("skills").join("review"),
-                dirs_next::home_dir()
+                dirs::home_dir()
                     .expect("home directory is available")
                     .join(".pi")
                     .join("agent")

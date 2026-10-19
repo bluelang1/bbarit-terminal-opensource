@@ -37,7 +37,7 @@ fn should_pick(_cli: &Cli) -> bool {
     //     !cli.no_pick && cli.mode == OutputMode::Text && !cli.print
     //         && cli.inputs.is_empty() && cli.session.is_none() && cli.fork.is_none()
     //         && !cli.resume && !cli.continue_session
-    //         && atty::is(atty::Stream::Stdin) && atty::is(atty::Stream::Stdout)
+    //         && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
     // Restore that body to re-enable the picker.
     false
 }
@@ -48,7 +48,7 @@ fn agent_dir() -> PathBuf {
     {
         return PathBuf::from(dir);
     }
-    dirs_next::home_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(crate::config::APP_DIR)
         .join("agent")

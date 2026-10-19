@@ -3,7 +3,7 @@ import fs from 'fs';
 import { createRequire } from 'node:module';
 import path from 'path';
 import process from 'process';
-import XLSX from 'xlsx';
+import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import mammoth from 'mammoth';
 import {
@@ -17,6 +17,10 @@ import {
   TextRun,
   WidthType,
 } from 'docx';
+
+// SheetJS 0.20+ (ESM build) no longer touches the filesystem on its own;
+// readFile/writeFile need Node's fs handed over explicitly.
+XLSX.set_fs(fs);
 
 const require = createRequire(import.meta.url);
 const pptxgen = require('pptxgenjs');

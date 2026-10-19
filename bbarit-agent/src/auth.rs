@@ -659,7 +659,7 @@ fn google_vertex_auth_status(config: &AppConfig) -> Result<String> {
     {
         return Ok(format!("GOOGLE_APPLICATION_CREDENTIALS {}", path.display()));
     }
-    if let Some(home) = dirs_next::home_dir() {
+    if let Some(home) = dirs::home_dir() {
         let unix_adc = home
             .join(".config")
             .join("gcloud")
