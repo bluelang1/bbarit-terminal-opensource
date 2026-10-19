@@ -308,6 +308,31 @@ fn sanitize_name(s: &str) -> String {
     }
 }
 
+/// History ids are bare file names inside `history_dir()`. Anything that could
+/// walk out of that directory (path separators, `.`/`..`, hidden names, NUL) is
+/// rejected rather than cleaned, so no caller — including the design HTTP
+/// server, which takes the id from a request body — can pick an arbitrary path.
+fn validate_history_id(raw: &str) -> Result<String, String> {
+    use std::path::{Component, Path};
+    let id = raw.trim();
+    if id.is_empty() {
+        return Err("id is required".into());
+    }
+    // `:` matters on Windows: `Path::join("C:x")` has a drive prefix but no
+    // root and *replaces* the base directory instead of nesting under it.
+    if id.contains(['/', '\\', '\0', ':']) || id.starts_with('.') {
+        return Err("invalid id".into());
+    }
+    // Belt and braces: the id must be exactly one normal path component, so
+    // nothing the platform parser treats specially (prefixes, roots, `..`)
+    // can slip through.
+    let mut components = Path::new(id).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(id.to_string()),
+        _ => Err("invalid id".into()),
+    }
+}
+
 fn unique_history_id(dir: &PathBuf, base: &str) -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -385,9 +410,9 @@ pub async fn claude_design_save(
     let id = if request.id.trim().is_empty() {
         unique_history_id(&dir, &base)
     } else {
-        let raw = request.id.trim();
+        let raw = validate_history_id(&request.id)?;
         if raw.ends_with(".html") {
-            raw.to_string()
+            raw
         } else {
             format!("{}.html", raw)
         }
@@ -576,10 +601,7 @@ pub async fn makeke_text_generate(
 #[tauri::command]
 pub async fn claude_design_load(id: String) -> Result<String, String> {
     let dir = history_dir()?;
-    let safe_id: String = id
-        .chars()
-        .filter(|c| !matches!(c, '/' | '\\' | '\0'))
-        .collect();
+    let safe_id = validate_history_id(&id)?;
     let path = dir.join(&safe_id);
     fs::read_to_string(&path).map_err(|e| format!("load failed: {}", e))
 }
@@ -616,4 +638,25 @@ pub async fn claude_design_generate(
         provider: "gemini".into(),
         model,
     })
+}
+
+#[cfg(test)]
+mod history_id_tests {
+    use super::validate_history_id;
+
+    #[test]
+    fn plain_names_pass() {
+        assert_eq!(validate_history_id("landing-1700000000").unwrap(), "landing-1700000000");
+        assert_eq!(validate_history_id("  hero.html ").unwrap(), "hero.html");
+    }
+
+    #[test]
+    fn traversal_and_hidden_names_are_rejected() {
+        for bad in [
+            "", "   ", "..", ".", "../x", "..\\x", "a/b", "a\\b", ".hidden", "x\0y", "/abs",
+            "C:pwn.html", "C:\\pwn.html", "x:y",
+        ] {
+            assert!(validate_history_id(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
 }

@@ -685,14 +685,21 @@ impl AppConfig {
         })
     }
 
+    /// models.json files in override order (later wins). The two project-level
+    /// files are only included once the project is trusted: a repo's
+    /// `.bbarit/models.json` can repoint a known provider's `base_url` (sending
+    /// the user's real key elsewhere) or set `apiKey: "!cmd"` (running a
+    /// command), so it is treated like project skills and extensions.
     pub fn models_json_paths(&self) -> Vec<PathBuf> {
-        vec![
-            self.legacy_app_dir.join("models.json"),
-            self.app_dir.join("models.json"),
-            self.legacy_user_app_dir.join("models.json"),
-            self.user_app_dir.join("models.json"),
-            self.models_dev_cache_path(),
-        ]
+        let mut paths = Vec::new();
+        if self.project_trusted {
+            paths.push(self.legacy_app_dir.join("models.json"));
+            paths.push(self.app_dir.join("models.json"));
+        }
+        paths.push(self.legacy_user_app_dir.join("models.json"));
+        paths.push(self.user_app_dir.join("models.json"));
+        paths.push(self.models_dev_cache_path());
+        paths
     }
 
     /// Auto-managed catalog written by `/models refresh` (kept separate from any
@@ -1385,7 +1392,9 @@ fn read_project_trust_decision(user_app_dir: &Path, cwd: &Path) -> Result<Option
     }
 }
 
-fn has_project_resources(cwd: &Path, app_dir: &Path, legacy_app_dir: &Path) -> bool {
+/// Anything in the project that can run code or redirect credentials once the
+/// agent loads it. Finding one of these turns on the trust prompt.
+pub(crate) fn has_project_resources(cwd: &Path, app_dir: &Path, legacy_app_dir: &Path) -> bool {
     [app_dir, legacy_app_dir].iter().any(|pi_dir| {
         [
             "settings.json",
@@ -1395,12 +1404,15 @@ fn has_project_resources(cwd: &Path, app_dir: &Path, legacy_app_dir: &Path) -> b
             "themes",
             "SYSTEM.md",
             "APPEND_SYSTEM.md",
+            // Can repoint providers / run `!cmd` key helpers.
+            "models.json",
         ]
         .iter()
         .any(|entry| pi_dir.join(entry).exists())
-    }) || ancestor_agents_skills(cwd)
-        .into_iter()
-        .any(|path| path.exists())
+    }) || cwd.join(".mcp.json").exists() // spawns the servers it lists
+        || ancestor_agents_skills(cwd)
+            .into_iter()
+            .any(|path| path.exists())
 }
 
 fn ancestor_agents_skills(cwd: &Path) -> Vec<PathBuf> {
@@ -1583,6 +1595,52 @@ pub fn set_octo_env_var(name: &str, value: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_mcp_and_models_json_count_as_trust_gated_resources() {
+        let root = std::env::temp_dir().join(format!(
+            "bbarit-trust-resources-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app_dir = root.join(".bbarit");
+        let legacy_app_dir = root.join(".pi");
+        fs::create_dir_all(&root).unwrap();
+        assert!(!has_project_resources(&root, &app_dir, &legacy_app_dir));
+
+        fs::write(root.join(".mcp.json"), "{\"mcpServers\":{}}").unwrap();
+        assert!(has_project_resources(&root, &app_dir, &legacy_app_dir));
+        fs::remove_file(root.join(".mcp.json")).unwrap();
+        assert!(!has_project_resources(&root, &app_dir, &legacy_app_dir));
+
+        fs::create_dir_all(&app_dir).unwrap();
+        fs::write(app_dir.join("models.json"), "{\"providers\":{}}").unwrap();
+        assert!(has_project_resources(&root, &app_dir, &legacy_app_dir));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn project_models_json_paths_require_trust() {
+        let mut config = AppConfig::for_test(std::env::temp_dir().join("bbarit-models-paths-test"));
+        // The test default points every dir at cwd; give the project dirs
+        // their real shape so the user-level paths are distinguishable.
+        config.app_dir = config.cwd.join(".bbarit");
+        config.legacy_app_dir = config.cwd.join(".pi");
+        config.project_trusted = false;
+        let untrusted = config.models_json_paths();
+        assert!(
+            untrusted
+                .iter()
+                .all(|p| !p.starts_with(&config.app_dir) && !p.starts_with(&config.legacy_app_dir)),
+            "untrusted project must not read project models.json: {untrusted:?}"
+        );
+        config.project_trusted = true;
+        let trusted = config.models_json_paths();
+        assert!(trusted.contains(&config.app_dir.join("models.json")));
+        assert!(trusted.contains(&config.legacy_app_dir.join("models.json")));
+        // Project files come first so user-level files still win.
+        assert_eq!(trusted.len(), untrusted.len() + 2);
+    }
 
     #[test]
     fn config_paths_expand_tilde_to_home() {

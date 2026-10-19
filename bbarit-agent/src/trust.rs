@@ -41,7 +41,9 @@ pub fn set(config: &AppConfig, decision: Option<bool>) -> Result<String> {
             if value {
                 // project_trusted is a startup snapshot, so already-skipped
                 // resources only appear after a restart.
-                message.push_str("\nProject skills, extensions, and hooks load on the next start.");
+                message.push_str(
+                    "\nProject skills, extensions, hooks, MCP servers, and models.json load on the next start.",
+                );
             }
             Ok(message)
         }

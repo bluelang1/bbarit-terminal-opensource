@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::Mutex;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::services::ServeDir;
 
 use crate::claude_design;
 
@@ -104,8 +104,6 @@ pub async fn start_design_server(
 
     let ctx = Arc::new(DesignCtx { _app_handle: app_handle });
 
-    let cors = CorsLayer::permissive();
-
     let app = Router::new()
         .route("/api/claude-design/generate", post(handle_generate))
         .route("/api/claude-design/edit", post(handle_edit))
@@ -117,8 +115,10 @@ pub async fn start_design_server(
             "/",
             ServeDir::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("design-static")),
         )
-        .layer(cors)
         .with_state(ctx);
+    // Loopback only, but `/save` writes files and `/generate` spends the user's
+    // Gemini key: refuse requests from pages that aren't this app's webview.
+    let app = crate::browser_bridge::with_local_guard(app, DESIGN_PORT);
 
     let addr = format!("127.0.0.1:{}", DESIGN_PORT);
     let listener = tokio::net::TcpListener::bind(&addr)

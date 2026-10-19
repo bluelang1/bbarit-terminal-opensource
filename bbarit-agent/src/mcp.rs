@@ -47,7 +47,7 @@ struct Server {
 
 static SERVERS: OnceLock<Mutex<HashMap<String, Server>>> = OnceLock::new();
 
-type ConfigCache = Option<(PathBuf, PathBuf, HashMap<String, ServerConfig>)>;
+type ConfigCache = Option<(PathBuf, PathBuf, bool, HashMap<String, ServerConfig>)>;
 static CONFIG_CACHE: OnceLock<Mutex<ConfigCache>> = OnceLock::new();
 
 fn config_cache() -> &'static Mutex<ConfigCache> {
@@ -110,9 +110,10 @@ pub fn reload_servers() -> usize {
 
 /// Read `mcpServers` from `.mcp.json` (cwd) and `<user_app_dir>/mcp.json`.
 fn read_config(config: &AppConfig) -> HashMap<String, ServerConfig> {
-    if let Some((cwd, user_app_dir, configs)) = config_cache().lock().unwrap().as_ref()
+    if let Some((cwd, user_app_dir, trusted, configs)) = config_cache().lock().unwrap().as_ref()
         && *cwd == config.cwd
         && *user_app_dir == config.user_app_dir
+        && *trusted == config.project_trusted
     {
         return configs.clone();
     }
@@ -121,6 +122,7 @@ fn read_config(config: &AppConfig) -> HashMap<String, ServerConfig> {
     *config_cache().lock().unwrap() = Some((
         config.cwd.clone(),
         config.user_app_dir.clone(),
+        config.project_trusted,
         configs.clone(),
     ));
     configs
@@ -128,10 +130,15 @@ fn read_config(config: &AppConfig) -> HashMap<String, ServerConfig> {
 
 fn read_config_uncached(config: &AppConfig) -> HashMap<String, ServerConfig> {
     let mut out = HashMap::new();
-    for path in [
-        config.cwd.join(".mcp.json"),
-        config.user_app_dir.join("mcp.json"),
-    ] {
+    // A project's `.mcp.json` spawns whatever commands it lists the first time
+    // a tool list is built, so it only counts once the project is trusted —
+    // the same gate as project skills, extensions, and hooks.
+    let mut paths = Vec::new();
+    if config.project_trusted {
+        paths.push(config.cwd.join(".mcp.json"));
+    }
+    paths.push(config.user_app_dir.join("mcp.json"));
+    for path in paths {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
