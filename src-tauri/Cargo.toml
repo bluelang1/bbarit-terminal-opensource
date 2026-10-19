@@ -52,7 +52,9 @@ urlencoding = "2"
 notify = { version = "7", features = ["macos_fsevent"] }
 font-kit = "0.14"
 dirs = "5"
-tauri-plugin-mcp-bridge = "0.10"
+# Vendored copy with an Origin/Host guard on its control WebSocket; see
+# vendor/tauri-plugin-mcp-bridge/README.md.
+tauri-plugin-mcp-bridge = { path = "vendor/tauri-plugin-mcp-bridge" }
 tauri-plugin-single-instance = "2"
 
 # Internalized BBARIT coding agent: compiled INTO this app binary (no separate

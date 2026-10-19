@@ -4963,6 +4963,12 @@ export default function BrowserPage({ embedded = false, embeddedProject, embedde
           (window as any).__BBARIT_SESSION_TAB__ = null;
         }
         const body = String(payload.body || '');
+        // Security note: `body` is arbitrary JS by design — this is the browser
+        // CLI's eval channel. The only emitter is the CLI itself, which already
+        // runs inside this webview through the mcp-bridge (so it has nothing
+        // to gain here), and `bbarit-browser-rpc` is a Tauri event that no web
+        // page can raise. The real gate is therefore the mcp-bridge exposure,
+        // not a check on `body`; see SECURITY.md.
         const result = await new Function('api', `return (async () => { ${body} })();`)(api);
         await emitTo('main', resultEvent, { ok: true, result });
       } catch (err) {

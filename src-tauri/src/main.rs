@@ -3258,6 +3258,15 @@ fn mcp_bridge_base_port() -> u16 {
     }
 }
 
+/// Whether this process opens the tauri-plugin-mcp-bridge control WebSocket
+/// (9223 release / 9323 debug). On by default: the vendored plugin refuses
+/// browser-originated upgrades (see vendor/tauri-plugin-mcp-bridge
+/// websocket.rs `upgrade_allowed`), so a web page cannot reach it.
+/// `BBARIT_DISABLE_MCP_BRIDGE` turns it off in any build.
+fn mcp_bridge_enabled() -> bool {
+    std::env::var_os("BBARIT_DISABLE_MCP_BRIDGE").is_none()
+}
+
 fn personas_root() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     for ancestor in exe.ancestors().skip(1).take(5) {
@@ -9110,6 +9119,9 @@ fn main() {
         if args.is_empty() && (force_software || default_software) {
             args.push_str("--disable-gpu-compositing");
         }
+        // WebView2 CDP on 127.0.0.1:9666. Chromium only accepts browser-originated
+        // DevTools WebSocket upgrades when --remote-allow-origins is given, which
+        // it is not, so web pages cannot attach; BBARIT_NO_CDP turns it off.
         if !args.contains("--remote-debugging-port") && std::env::var_os("BBARIT_NO_CDP").is_none()
         {
             if !args.is_empty() {
@@ -9184,8 +9196,17 @@ fn main() {
         builder = builder.plugin(tauri_plugin_drag::init());
     }
 
-    if std::env::var_os("BBARIT_DISABLE_MCP_BRIDGE").is_none() {
+    // The control WebSocket can run JS in the app webview. The vendored plugin
+    // (vendor/tauri-plugin-mcp-bridge) refuses upgrades that carry a browser
+    // `Origin` or a non-loopback `Host`, so a web page cannot reach it while
+    // native local clients (browser CLI, bbarit-ctl, the agent) connect as before.
+    if mcp_bridge_enabled() {
         builder = builder.plugin(mcp_bridge);
+    } else {
+        safe_eprintln!(
+            "[mcp-bridge] control WebSocket (127.0.0.1:{}) is OFF (BBARIT_DISABLE_MCP_BRIDGE set); the browser CLI, agent `browser` tool and bbarit-ctl cannot reach this app.",
+            mcp_bridge_base_port()
+        );
     }
 
     builder
