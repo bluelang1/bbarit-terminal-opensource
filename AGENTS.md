@@ -61,6 +61,8 @@ Build/test gotchas:
   `v<version>` triggers .github/workflows/fork-release.yml (draft release).
 - The original installed app (com.octo.terminal, author-signed) cannot receive
   fork updates; only an installed fork build (com.bbarit.terminal.source) can.
+- bbarit-ctl / tauri-dev-screen auto-scan accepts com.bbarit.terminal.source
+  first and com.octo.terminal as fallback; BBARIT_BRIDGE_APP_ID pins one.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
   CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
 

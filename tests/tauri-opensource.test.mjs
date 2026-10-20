@@ -120,3 +120,15 @@ test('fork releases keep only the updater signing key in the environment', () =>
   assert.doesNotThrow(() => checkForkReleaseEnvironment({}, ['build']));
   assert.doesNotThrow(() => checkForkReleaseEnvironment({}, ['dev', '--fork-release']));
 });
+
+test('bridge CLIs default to the source build identifier', () => {
+  const identifier = JSON.parse(readFileSync(new URL('../src-tauri/tauri.opensource.conf.json', import.meta.url), 'utf8')).identifier;
+  for (const script of ['scripts/bbarit-ctl.mjs', 'scripts/tauri-dev-screen.mjs']) {
+    const source = readFileSync(new URL(`../${script}`, import.meta.url), 'utf8');
+    const match = source.match(/const DEFAULT_APP_IDS = \[([^\]]+)\];/);
+    assert.ok(match, `${script} declares DEFAULT_APP_IDS`);
+    const ids = match[1].split(',').map((part) => part.trim().replace(/^'|'$/g, ''));
+    assert.equal(ids[0], identifier, `${script} prefers the source build`);
+    assert.match(source, /process\.env\.BBARIT_BRIDGE_APP_ID/);
+  }
+});

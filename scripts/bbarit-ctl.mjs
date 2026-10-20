@@ -21,6 +21,12 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import os from 'node:os';
 
+// Which app the auto-scan may attach to. The fork build (tauri.opensource.conf.json)
+// is the default; the original author-signed app is still accepted so the CLI keeps
+// working during the transition. BBARIT_BRIDGE_APP_ID restricts it to one identifier.
+const DEFAULT_APP_IDS = ['com.bbarit.terminal.source', 'com.octo.terminal'];
+const ACCEPTED_APP_IDS = process.env.BBARIT_BRIDGE_APP_ID ? [process.env.BBARIT_BRIDGE_APP_ID] : DEFAULT_APP_IDS;
+
 const DEV_BASE_PORT = 9323;
 const DEV_PORT_SPAN = 100;
 const INSTALLED_PORT = 9223;
@@ -72,7 +78,7 @@ async function connectBridge() {
           ws.addEventListener('message', onMsg);
           ws.send(JSON.stringify({ id, command: 'invoke_tauri', args: { command: 'plugin:mcp-bridge|get_backend_state', args: { windowLabel: 'main' } } }));
         });
-        if (ident !== (process.env.BBARIT_BRIDGE_APP_ID || 'com.octo.terminal')) {
+        if (!ACCEPTED_APP_IDS.includes(ident)) {
           try { ws.close(); } catch { /* ignore */ }
           continue;
         }
