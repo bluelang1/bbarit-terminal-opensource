@@ -149,6 +149,7 @@ import { countTextLines, countUtf8Bytes, extractExternalDropPathsFromDataTransfe
 import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from './utils/fileTreeInteractions';
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
 import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
+import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from './projectDragGhost';
 import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
@@ -2553,14 +2554,12 @@ function App() {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const [terminalClickFlashId, setTerminalClickFlashId] = useState<string | null>(null);
-  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement } | null>(null);
+  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement; ghost?: DragGhost } | null>(null);
   const terminalClickFlashFrameRef = useRef<number | null>(null);
   const terminalClickFlashTimerRef = useRef<number | null>(null);
   const suppressProjectTabClickRef = useRef(false);
   const projectTabCleanupRef = useRef<(() => void) | null>(null);
-  const projectDragPreviewRef = useRef<HTMLDivElement | null>(null);
   const projectReorderFlipRectsRef = useRef<Map<string, DOMRect> | null>(null);
-  const [projectDragPreview, setProjectDragPreview] = useState<{ label: string; icon: string } | null>(null);
   const [projectDropIndicator, setProjectDropIndicator] = useState<{ projectId: string; side: 'before' | 'after' } | null>(null);
   // Row size (+gap) of the row being dragged; neighbours slide by this much to open the drop slot.
   const [projectDragShift, setProjectDragShift] = useState<ProjectDragShift | null>(null);
@@ -7802,11 +7801,12 @@ Office project scaffold created by BBARIT Terminal.
 
     suppressProjectTabClickRef.current = drag.dragging;
     projectTabDragRef.current = null;
+    document.body.classList.remove('project-dragging');
     setDragOverProjectId(null);
     setDragOverGroupId(null);
     setProjectDropIndicator(null);
-    setProjectDragPreview(null);
-    if (drag.dragging && !willReorder && !willMoveGroup) {
+    const cancelled = drag.dragging && !willReorder && !willMoveGroup;
+    if (cancelled) {
       // Cancelled drag: clearing the indicator removes the slide transforms
       // while `.project-shift` is still present, so the rows glide back instead
       // of snapping; the class and dim go away once that transition is done.
@@ -7819,9 +7819,23 @@ Office project scaffold created by BBARIT Terminal.
       setDragProjectId(null);
       setProjectDragShift(null);
     }
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = '-9999px';
-      projectDragPreviewRef.current.style.top = '-9999px';
+    // Land the ghost on the row's final position (after React commits the new
+    // order) and keep the real row invisible until the ghost arrives, so the
+    // row appears to be carried into its slot instead of jumping there.
+    const ghost = drag.ghost;
+    if (ghost) {
+      const projectId = drag.projectId;
+      const source = drag.element;
+      if (source) source.style.visibility = 'hidden';
+      requestAnimationFrame(() => {
+        const target = (source?.isConnected ? source : null)
+          || document.querySelector<HTMLElement>(`[data-project-tab-id="${CSS.escape(projectId)}"]`);
+        if (target && target !== source) target.style.visibility = 'hidden';
+        void landDragGhost(ghost, target).then(() => {
+          if (source) source.style.visibility = '';
+          if (target) target.style.visibility = '';
+        });
+      });
     }
     if (projectTabCleanupRef.current) {
       projectTabCleanupRef.current();
@@ -7840,12 +7854,17 @@ Office project scaffold created by BBARIT Terminal.
     if (!drag.dragging) {
       drag.dragging = true;
       setDragProjectId(drag.projectId);
-      setProjectDragPreview({ label: drag.label, icon: drag.icon });
       const origin = drag.element?.isConnected
         ? drag.element
         : (document.elementFromPoint(drag.startX, drag.startY) as HTMLElement | null)?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
       setProjectDragShift(origin ? measureProjectDragShift(origin) : null);
+      if (origin) {
+        drag.element = origin;
+        drag.ghost = createDragGhost(origin, drag.startX, drag.startY);
+      }
+      document.body.classList.add('project-dragging');
     }
+    if (drag.ghost) moveDragGhost(drag.ghost, clientX, clientY);
 
     const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
     const dropTarget = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
@@ -7866,10 +7885,6 @@ Office project scaffold created by BBARIT Terminal.
       ));
     } else {
       setProjectDropIndicator((prev) => (prev ? null : prev));
-    }
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = `${clientX + 14}px`;
-      projectDragPreviewRef.current.style.top = `${clientY + 14}px`;
     }
   }, []);
 
@@ -7896,13 +7911,10 @@ Office project scaffold created by BBARIT Terminal.
       icon: projects.find((p) => p.id === projectId)?.icon || '•',
       element: event.currentTarget,
     };
+    // A press that may become a drag must not start a text selection.
+    event.preventDefault();
     suppressProjectTabClickRef.current = false;
     setProjectDropIndicator(null);
-    setProjectDragPreview(null);
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = '-9999px';
-      projectDragPreviewRef.current.style.top = '-9999px';
-    }
 
     if (projectTabCleanupRef.current) {
       projectTabCleanupRef.current();
@@ -16296,17 +16308,6 @@ Office project scaffold created by BBARIT Terminal.
           </div>
         )}
           </>
-        )}
-
-        {projectDragPreview && (
-          <div
-            ref={projectDragPreviewRef}
-            className="project-drag-preview"
-            style={{ left: -9999, top: -9999 }}
-          >
-            <span className="project-drag-preview-icon">{projectDragPreview.icon}</span>
-            <span>{projectDragPreview.label}</span>
-          </div>
         )}
 
         {/* Project tab context menu */}

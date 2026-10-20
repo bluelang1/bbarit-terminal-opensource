@@ -535,6 +535,35 @@ body {
 /* While a project row is dragged, neighbours slide to open the drop slot. The
    class is removed together with the inline transform on drop, so the commit
    itself does not transition (the FLIP animation below takes over). */
+/* Kanban-style drag: the pressed row/tab is cloned and carried by the pointer. */
+.project-drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  margin: 0;
+  z-index: 9999;
+  pointer-events: none;
+  will-change: transform;
+  opacity: 0.96;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.36), 0 0 0 1px color-mix(in srgb, var(--selector-accent, var(--tab-accent, var(--accent-color))) 40%, transparent);
+  transition: none !important;
+  animation: none !important;
+}
+.project-drag-ghost::before,
+.project-drag-ghost::after {
+  display: none;
+}
+body.project-dragging,
+body.project-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+.project-selector-item {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .project-tab.project-shift {
   transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
   will-change: transform;
@@ -963,9 +992,10 @@ body {
 }
 
 .project-selector-item.dragging {
-  opacity: 0.42;
-  transform: scale(0.985);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--selector-accent, var(--accent-color)) 18%, transparent);
+  /* Placeholder left behind while the ghost follows the pointer. */
+  opacity: 0.28;
+  border-style: dashed;
+  box-shadow: none;
 }
 
 .project-selector-item.drag-over {
