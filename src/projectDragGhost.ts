@@ -14,7 +14,13 @@ export type DragGhost = {
 const GHOST_CLASS = 'project-drag-ghost';
 const STATE_CLASSES = ['dragging', 'active', 'drag-over', 'drop-before', 'drop-after', 'project-shift', 'context-active', 'project-reorder-animating'];
 
+/** Remove ghosts a previous drag may have left behind (e.g. an interrupted landing). */
+export function removeStaleDragGhosts(): void {
+  document.querySelectorAll(`.${GHOST_CLASS}`).forEach((el) => el.remove());
+}
+
 export function createDragGhost(source: HTMLElement, clientX: number, clientY: number): DragGhost {
+  removeStaleDragGhosts();
   const rect = source.getBoundingClientRect();
   const element = source.cloneNode(true) as HTMLElement;
   element.classList.add(GHOST_CLASS);
@@ -55,8 +61,17 @@ export function landDragGhost(ghost: DragGhost, target: HTMLElement | null, dura
     { duration, easing: 'cubic-bezier(0.2, 0, 0, 1)', fill: 'forwards' },
   );
   return new Promise((resolve) => {
-    const done = () => { el.remove(); resolve(); };
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      el.remove();
+      resolve();
+    };
     animation.addEventListener('finish', done, { once: true });
     animation.addEventListener('cancel', done, { once: true });
+    // Animations do not run (and never finish) while the window is hidden;
+    // never leave a ghost behind in that case.
+    setTimeout(done, duration + 300);
   });
 }

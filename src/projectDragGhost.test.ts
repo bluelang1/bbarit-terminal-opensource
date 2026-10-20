@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDragGhost, landDragGhost, moveDragGhost } from './projectDragGhost';
+import { createDragGhost, landDragGhost, moveDragGhost, removeStaleDragGhosts } from './projectDragGhost';
 
 function makeRow(): HTMLElement {
   const row = document.createElement('div');
@@ -59,6 +59,25 @@ describe('project drag ghost', () => {
     expect(frames[1]).toEqual({ transform: 'translate3d(20px, 284px, 0)' });
     listeners.finish();
     await done;
+    expect(document.querySelector('.project-drag-ghost')).toBeNull();
+  });
+});
+
+describe('ghost hygiene', () => {
+  it('drops stale ghosts when a new drag starts', () => {
+    const row = makeRow();
+    createDragGhost(row, 50, 130);
+    createDragGhost(row, 50, 130);
+    expect(document.querySelectorAll('.project-drag-ghost')).toHaveLength(1);
+    removeStaleDragGhosts();
+    expect(document.querySelectorAll('.project-drag-ghost')).toHaveLength(0);
+  });
+
+  it('removes the ghost even if the animation never finishes', async () => {
+    const ghost = createDragGhost(makeRow(), 50, 130);
+    const target = document.createElement('div');
+    ghost.element.animate = (() => ({ addEventListener: () => {} }) as unknown as Animation) as HTMLElement['animate'];
+    await landDragGhost(ghost, target, 10);
     expect(document.querySelector('.project-drag-ghost')).toBeNull();
   });
 });

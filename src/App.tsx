@@ -7831,7 +7831,10 @@ Office project scaffold created by BBARIT Terminal.
       const projectId = drag.projectId;
       const source = drag.element;
       if (source) source.style.visibility = 'hidden';
-      requestAnimationFrame(() => {
+      // React flushes the reorder synchronously for this discrete event, so a
+      // macrotask sees the committed DOM. (Not requestAnimationFrame: it is
+      // paused while the window is hidden and the ghost would never land.)
+      window.setTimeout(() => {
         const target = (source?.isConnected ? source : null)
           || document.querySelector<HTMLElement>(`[data-project-tab-id="${CSS.escape(projectId)}"]`);
         if (target && target !== source) target.style.visibility = 'hidden';
@@ -7839,7 +7842,7 @@ Office project scaffold created by BBARIT Terminal.
           if (source) source.style.visibility = '';
           if (target) target.style.visibility = '';
         });
-      });
+      }, 0);
     }
     if (projectTabCleanupRef.current) {
       projectTabCleanupRef.current();
