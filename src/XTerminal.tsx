@@ -1651,7 +1651,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     enqueueSlackCommandFromKeystrokes(terminalId, data);
   }, [terminalId, skills, onRunSkill, cliType, workDir]);
 
-  // Native OS file drop routed from App.tsx (getCurrentWindow().onDragDropEvent).
+  // Native OS file drop routed from App.tsx (getCurrentWebview().onDragDropEvent).
   // The drop is matched to this terminal by id; we insert the real file paths.
   useEffect(() => {
     const onOsDrop = (e: Event) => {
@@ -6035,7 +6035,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           e.preventDefault();
           e.stopPropagation();
           // NOTE: macOS WKWebView never fires this for OS file drops — those are
-          // handled natively via getCurrentWindow().onDragDropEvent in App.tsx
+          // handled natively via getCurrentWebview().onDragDropEvent in App.tsx
           // (routed back here through the 'octo-terminal-os-drop' event). This DOM
           // handler still serves internal drags (file tree) and other platforms.
           // 1. File tree drag (internal): read path from dataTransfer

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { listen as tauriListen, emit as tauriEmit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listenNativeDragDrop } from './utils/nativeDragDrop';
 import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getVersion } from '@tauri-apps/api/app';
@@ -7307,8 +7308,11 @@ Office project scaffold created by BBARIT Terminal.
     if (!isTauri()) return;
     // Native OS file drop (dragDropEnabled). macOS WKWebView never delivers OS
     // drops as DOM drop events, so this is the only reliable path for real paths.
-    getCurrentWindow().onDragDropEvent((event) => {
-      const payload = event?.payload as unknown as { type: string; position?: { x: number; y: number }; paths?: string[] };
+    // With the `unstable` Cargo feature the runtime emits drag-drop to the webview
+    // target, so the former getCurrentWindow() listener never fired (measured in
+    // the app); listenNativeDragDrop matches the webview label whichever target
+    // the runtime picks.
+    listenNativeDragDrop((payload: { type: string; position?: { x: number; y: number }; paths?: string[] }) => {
 
       // The editor is only a drop target when it is actually on screen.
       const editorVisible = !(viewMode === 'terminal' || viewMode === 'project-terminal' || viewMode === 'kanban');
@@ -7318,11 +7322,13 @@ Office project scaffold created by BBARIT Terminal.
         return;
       }
 
-      // Tauri native drop positions are physical pixels on macOS and Windows,
-      // while DOM hit-testing uses CSS pixels. This must be converted on both
-      // platforms (especially Retina macOS), not only scaled Windows displays.
+      // DOM hit-testing uses CSS pixels. wry reports CSS points on macOS and
+      // physical pixels on Windows/Linux; the helper knows the difference.
       const toCssDropPosition = (position?: { x: number; y: number }) => (
-        nativeDropPositionToCss(position, window.devicePixelRatio)
+        nativeDropPositionToCss(position, window.devicePixelRatio, {
+          platform: navigator.platform || navigator.userAgent,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        })
       );
 
       if (payload?.type === 'enter' || payload?.type === 'over') {
