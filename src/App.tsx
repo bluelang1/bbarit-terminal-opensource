@@ -148,6 +148,7 @@ import { DashboardLayout, normalizeDashboardLayout, type DashboardLayoutData } f
 import { countTextLines, countUtf8Bytes, extractExternalDropPathsFromDataTransfer, isLineCountEligiblePath } from './utils/fileTreeMeta';
 import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from './utils/fileTreeInteractions';
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
+import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
 import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
@@ -2552,7 +2553,7 @@ function App() {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const [terminalClickFlashId, setTerminalClickFlashId] = useState<string | null>(null);
-  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string } | null>(null);
+  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement } | null>(null);
   const terminalClickFlashFrameRef = useRef<number | null>(null);
   const terminalClickFlashTimerRef = useRef<number | null>(null);
   const suppressProjectTabClickRef = useRef(false);
@@ -2561,6 +2562,8 @@ function App() {
   const projectReorderFlipRectsRef = useRef<Map<string, DOMRect> | null>(null);
   const [projectDragPreview, setProjectDragPreview] = useState<{ label: string; icon: string } | null>(null);
   const [projectDropIndicator, setProjectDropIndicator] = useState<{ projectId: string; side: 'before' | 'after' } | null>(null);
+  // Row size (+gap) of the row being dragged; neighbours slide by this much to open the drop slot.
+  const [projectDragShift, setProjectDragShift] = useState<ProjectDragShift | null>(null);
   // Project context menu & hidden projects
   const [projectContextMenu, setProjectContextMenu] = useState<{ x: number; y: number; projectId: string } | null>(null);
   // Left-tree group UI state
@@ -7799,11 +7802,23 @@ Office project scaffold created by BBARIT Terminal.
 
     suppressProjectTabClickRef.current = drag.dragging;
     projectTabDragRef.current = null;
-    setDragProjectId(null);
     setDragOverProjectId(null);
     setDragOverGroupId(null);
     setProjectDropIndicator(null);
     setProjectDragPreview(null);
+    if (drag.dragging && !willReorder && !willMoveGroup) {
+      // Cancelled drag: clearing the indicator removes the slide transforms
+      // while `.project-shift` is still present, so the rows glide back instead
+      // of snapping; the class and dim go away once that transition is done.
+      window.setTimeout(() => {
+        if (projectTabDragRef.current) return; // a new drag already started
+        setDragProjectId(null);
+        setProjectDragShift(null);
+      }, 200);
+    } else {
+      setDragProjectId(null);
+      setProjectDragShift(null);
+    }
     if (projectDragPreviewRef.current) {
       projectDragPreviewRef.current.style.left = '-9999px';
       projectDragPreviewRef.current.style.top = '-9999px';
@@ -7826,6 +7841,10 @@ Office project scaffold created by BBARIT Terminal.
       drag.dragging = true;
       setDragProjectId(drag.projectId);
       setProjectDragPreview({ label: drag.label, icon: drag.icon });
+      const origin = drag.element?.isConnected
+        ? drag.element
+        : (document.elementFromPoint(drag.startX, drag.startY) as HTMLElement | null)?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
+      setProjectDragShift(origin ? measureProjectDragShift(origin) : null);
     }
 
     const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
@@ -7875,6 +7894,7 @@ Office project scaffold created by BBARIT Terminal.
       dragging: false,
       label: projects.find((p) => p.id === projectId)?.displayName || '',
       icon: projects.find((p) => p.id === projectId)?.icon || '•',
+      element: event.currentTarget,
     };
     suppressProjectTabClickRef.current = false;
     setProjectDropIndicator(null);
@@ -7945,8 +7965,17 @@ Office project scaffold created by BBARIT Terminal.
     );
   }, []);
 
+  // Live reorder preview: while a row is dragged, rows between it and the drop
+  // slot slide one row so the slot visibly opens (see projectReorderPreview.ts).
+  const projectShiftStyle = (listProjects: readonly Project[], projectId: string, orientation: 'vertical' | 'horizontal'): React.CSSProperties => {
+    if (!dragProjectId || !projectDragShift || projectId === dragProjectId) return {};
+    const shift = projectReorderShifts(listProjects.map((p) => p.id), dragProjectId, projectDropIndicator).get(projectId);
+    const transform = projectShiftTransform(shift, projectDragShift, orientation);
+    return transform ? { transform } : {};
+  };
+
   // One row in the left project tree. Shared by grouped + ungrouped rendering.
-  const renderLeftProjectItem = (project: Project) => {
+  const renderLeftProjectItem = (project: Project, listProjects: readonly Project[]) => {
     const projStyle = STYLES[project.styleIndex] || STYLES[0];
     const isActive = project.id === activeProjectId;
     return (
@@ -7960,6 +7989,7 @@ Office project scaffold created by BBARIT Terminal.
         className={[
           'project-selector-item',
           isActive ? 'active' : '',
+          dragProjectId ? 'project-shift' : '',
           dragProjectId === project.id ? 'dragging' : '',
           dragOverProjectId === project.id ? 'drag-over' : '',
           projectDropIndicator?.projectId === project.id && projectDropIndicator.side === 'before' ? 'drop-before' : '',
@@ -7982,7 +8012,7 @@ Office project scaffold created by BBARIT Terminal.
             openProjectTerminal(project.id);
           }
         }}
-        style={{ '--selector-accent': projStyle.accent } as React.CSSProperties}
+        style={{ '--selector-accent': projStyle.accent, ...projectShiftStyle(listProjects, project.id, 'vertical') } as React.CSSProperties}
         title={project.workDir}
       >
         {renderProjectDropCue(project.id)}
@@ -16135,6 +16165,7 @@ Office project scaffold created by BBARIT Terminal.
             className={[
               'project-tab',
               project.id === activeProjectId ? 'active' : '',
+              dragProjectId ? 'project-shift' : '',
               dragProjectId === project.id ? 'dragging' : '',
               dragOverProjectId === project.id ? 'drag-over' : '',
               projectDropIndicator?.projectId === project.id && projectDropIndicator.side === 'before' ? 'drop-before' : '',
@@ -16151,7 +16182,7 @@ Office project scaffold created by BBARIT Terminal.
               e.preventDefault();
               setProjectContextMenu({ x: e.clientX, y: e.clientY, projectId: project.id });
             }}
-            style={{ '--tab-accent': (STYLES[project.styleIndex] || STYLES[0]).accent } as React.CSSProperties}
+            style={{ '--tab-accent': (STYLES[project.styleIndex] || STYLES[0]).accent, ...projectShiftStyle(sectionProjects, project.id, 'horizontal') } as React.CSSProperties}
             title={t('app.project.dragToReorder' as any)}
           >
             {renderProjectDropCue(project.id)}
@@ -17065,7 +17096,7 @@ Office project scaffold created by BBARIT Terminal.
                     </div>
                     {!group.collapsed && (
                       <div className="project-group-children">
-                        {groupProjects.map(renderLeftProjectItem)}
+                        {groupProjects.map((p) => renderLeftProjectItem(p, groupProjects))}
                         {groupProjects.length === 0 && (
                           <div className="project-group-empty">{t('app.group.dropHere' as any, 'Drag projects here')}</div>
                         )}
@@ -17075,7 +17106,7 @@ Office project scaffold created by BBARIT Terminal.
                 );
               })}
               <div className="project-root-zone" data-group-drop-id="__root__">
-                {visibleProjects.filter((p) => !p.groupId || !projectGroups.some((g) => g.id === p.groupId)).map(renderLeftProjectItem)}
+                {(() => { const rootProjects = visibleProjects.filter((p) => !p.groupId || !projectGroups.some((g) => g.id === p.groupId)); return rootProjects.map((p) => renderLeftProjectItem(p, rootProjects)); })()}
               </div>
             </div>
           </div>
@@ -19503,6 +19534,7 @@ Office project scaffold created by BBARIT Terminal.
 	                      className={[
                           'project-selector-item',
                           isActive ? 'active' : '',
+                          dragProjectId ? 'project-shift' : '',
                           dragProjectId === project.id ? 'dragging' : '',
                           dragOverProjectId === project.id ? 'drag-over' : '',
                           projectDropIndicator?.projectId === project.id && projectDropIndicator.side === 'before' ? 'drop-before' : '',
@@ -19525,7 +19557,7 @@ Office project scaffold created by BBARIT Terminal.
                             openProjectTerminal(project.id);
                           }
                         }}
-	                      style={{ '--selector-accent': projStyle.accent } as React.CSSProperties}
+	                      style={{ '--selector-accent': projStyle.accent, ...projectShiftStyle(visibleProjects, project.id, 'vertical') } as React.CSSProperties}
 	                      title={project.workDir}
 	                    >
                         {renderProjectDropCue(project.id)}
