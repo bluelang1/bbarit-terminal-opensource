@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJBMDFBMDlFMkYzRTMzMQpSV1F4NC9QaUNScWdDNmo5QWFRU2hqMFdNRnJTbGo1STR4OENTUGk0RzA1dHRFKytlSlNPYW9sTAo=",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFDNzgwRDgxN0I1MkRGQzkKUldUSjMxSjdnUTE0ckVyWXBseWd1Z3U0L3hJRUs1QmRPbS9Sc0tYZXFTZWdRM0RhNDJBTitTZFgK",
       "endpoints": [
         "https://github.com/bluelang1/bbarit-terminal-opensource/releases/latest/download/latest.json"
       ]
