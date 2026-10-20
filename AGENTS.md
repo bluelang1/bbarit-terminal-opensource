@@ -26,6 +26,7 @@ Useful source checks:
     npm run check:bundled-scripts
     cargo test --manifest-path bbarit-agent/Cargo.toml --locked   # ~370 tests, seconds once built
     cargo test --manifest-path src-tauri/Cargo.toml --locked      # ~120 tests; first build ~3 min
+    cargo test -p tauri-plugin-mcp-bridge --lib --manifest-path src-tauri/Cargo.toml  # vendored plugin guard
 
 Build/test gotchas:
 
@@ -43,6 +44,15 @@ Build/test gotchas:
   allowlisted in `local_origin_allowed`.
 - Upstream remote `upstream` = johunsang/bbarit-terminal-opensource; fork main
   shares ancestry with it, so `git merge upstream/main` works normally.
+- Keep index.html free of inline <style>/<script>: Tauri adds a CSP nonce to
+  them, which disables 'unsafe-inline' and breaks JS-injected styles in release.
+- srcdoc previews inherit the webview CSP (src-tauri/tauri.conf.json); do not
+  tighten script-src/style-src without moving previews to the design server.
+- Product URLs come from src/config/endpoints.ts (VITE_BBARIT_*); do not add
+  bbarit.com literals elsewhere. Local ports: bridge 19980/19981, design
+  19985/19986, collab 19990, mcp-bridge 9223/9323.
+- tauri-plugin-mcp-bridge is vendored (src-tauri/vendor); upgrade by re-copying
+  the crate and re-applying `upgrade_allowed` in websocket.rs.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
