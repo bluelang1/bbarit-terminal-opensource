@@ -150,6 +150,7 @@ import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from '
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
 import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
 import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from './projectDragGhost';
+import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } from './projectDropTargets';
 import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
@@ -2554,7 +2555,7 @@ function App() {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const [terminalClickFlashId, setTerminalClickFlashId] = useState<string | null>(null);
-  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement; ghost?: DragGhost } | null>(null);
+  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement; ghost?: DragGhost; targets?: DropTargetRect[] } | null>(null);
   const terminalClickFlashFrameRef = useRef<number | null>(null);
   const terminalClickFlashTimerRef = useRef<number | null>(null);
   const suppressProjectTabClickRef = useRef(false);
@@ -7766,21 +7767,24 @@ Office project scaffold created by BBARIT Terminal.
     let targetGroupId: string | undefined;
     if (typeof clientX === 'number' && typeof clientY === 'number') {
       const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const dropTarget = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
-      dropProjectId = dropTarget?.dataset.projectDropId ?? null;
+      // Rows are translated while dragging, so resolve the row from the rects
+      // captured at drag start (see projectDropTargets.ts); group zones do not move.
+      const dropTarget = drag.targets
+        ? findDropTarget(drag.targets, clientX, clientY)
+        : (() => {
+          const el = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { id: el.dataset.projectDropId || '', orientation: el.dataset.projectDropOrientation === 'vertical' ? 'vertical' as const : 'horizontal' as const, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+        })();
+      dropProjectId = dropTarget?.id ?? null;
       const groupTarget = target?.closest<HTMLElement>('[data-group-drop-id]') ?? null;
       if (groupTarget) {
         hasGroupTarget = true;
         const gid = groupTarget.dataset.groupDropId || '';
         targetGroupId = gid === '__root__' ? undefined : gid;
       }
-      if (dropTarget) {
-        const rect = dropTarget.getBoundingClientRect();
-        const orientation = dropTarget.dataset.projectDropOrientation === 'vertical' ? 'vertical' : 'horizontal';
-        dropSide = orientation === 'vertical'
-          ? (clientY < rect.top + rect.height / 2 ? 'before' : 'after')
-          : (clientX < rect.left + rect.width / 2 ? 'before' : 'after');
-      }
+      if (dropTarget) dropSide = dropSideFor(dropTarget, clientX, clientY);
     } else {
       dropProjectId = dragOverProjectId;
     }
@@ -7858,6 +7862,9 @@ Office project scaffold created by BBARIT Terminal.
         ? drag.element
         : (document.elementFromPoint(drag.startX, drag.startY) as HTMLElement | null)?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
       setProjectDragShift(origin ? measureProjectDragShift(origin) : null);
+      // Snapshot the row rects now, before neighbours start sliding; all later
+      // hit-tests use it because the live layout no longer matches the pointer.
+      drag.targets = captureDropTargets();
       if (origin) {
         drag.element = origin;
         drag.ghost = createDragGhost(origin, drag.startX, drag.startY);
@@ -7867,17 +7874,13 @@ Office project scaffold created by BBARIT Terminal.
     if (drag.ghost) moveDragGhost(drag.ghost, clientX, clientY);
 
     const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-    const dropTarget = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
-    const overProjectId = dropTarget?.dataset.projectDropId ?? null;
+    const dropTarget = drag.targets ? findDropTarget(drag.targets, clientX, clientY) : null;
+    const overProjectId = dropTarget?.id ?? null;
     setDragOverProjectId(overProjectId && overProjectId !== drag.projectId ? overProjectId : null);
     const groupOver = target?.closest<HTMLElement>('[data-group-drop-id]')?.dataset.groupDropId ?? null;
     setDragOverGroupId(groupOver && groupOver !== '__root__' ? groupOver : null);
     if (dropTarget && overProjectId && overProjectId !== drag.projectId) {
-      const rect = dropTarget.getBoundingClientRect();
-      const orientation = dropTarget.dataset.projectDropOrientation === 'vertical' ? 'vertical' : 'horizontal';
-      const side: 'before' | 'after' = orientation === 'vertical'
-        ? (clientY < rect.top + rect.height / 2 ? 'before' : 'after')
-        : (clientX < rect.left + rect.width / 2 ? 'before' : 'after');
+      const side = dropSideFor(dropTarget, clientX, clientY);
       setProjectDropIndicator((prev) => (
         prev?.projectId === overProjectId && prev.side === side
           ? prev
@@ -8011,7 +8014,7 @@ Office project scaffold created by BBARIT Terminal.
         onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
         onMouseEnter={() => {
           const drag = projectTabDragRef.current;
-          if (!drag?.dragging) return;
+          if (!drag?.dragging || drag.targets) return;
           setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
         }}
         onContextMenu={(e) => {
@@ -16187,7 +16190,7 @@ Office project scaffold created by BBARIT Terminal.
             onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
             onMouseEnter={() => {
               const drag = projectTabDragRef.current;
-              if (!drag?.dragging) return;
+              if (!drag?.dragging || drag.targets) return;
               setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
             }}
             onContextMenu={(e) => {
@@ -19545,7 +19548,7 @@ Office project scaffold created by BBARIT Terminal.
                         onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
                         onMouseEnter={() => {
                           const drag = projectTabDragRef.current;
-                          if (!drag?.dragging) return;
+                          if (!drag?.dragging || drag.targets) return;
                           setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
                         }}
                         onContextMenu={(e) => {
