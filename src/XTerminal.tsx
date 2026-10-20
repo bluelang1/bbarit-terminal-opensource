@@ -21,6 +21,7 @@ import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
+import { claudeSessionArgsToFlags, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
@@ -69,6 +70,8 @@ interface XTerminalProps {
   startupMode?: 'normal' | 'auto-accept' | 'bypass-permissions' | 'auto-edit' | 'full-auto' | 'yolo';
   codexWebSearch?: boolean;
   resumeLastSession?: boolean;
+  /** Dedicated Claude Code session for this tab (uuid); undefined = shared `--continue` tab. */
+  claudeSessionId?: string;
   extraFlags?: string[];
   modelId?: string;
   mcpConfigPath?: string;
@@ -1101,7 +1104,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1651,7 +1654,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     enqueueSlackCommandFromKeystrokes(terminalId, data);
   }, [terminalId, skills, onRunSkill, cliType, workDir]);
 
-  // Native OS file drop routed from App.tsx (getCurrentWindow().onDragDropEvent).
+  // Native OS file drop routed from App.tsx (getCurrentWebview().onDragDropEvent).
   // The drop is matched to this terminal by id; we insert the real file paths.
   useEffect(() => {
     const onOsDrop = (e: Event) => {
@@ -3276,12 +3279,30 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         } catch { /* default scan */ }
       }
 
+      // Claude session flag: a tab with its own session id gets `--session-id`
+      // (first launch) or `--resume <id>` (later), so sibling tabs never share a
+      // conversation. Shared tabs use `--continue`, but only once a transcript
+      // exists: on a fresh project the flag makes Claude exit with
+      // "No conversation found to continue".
+      let claudeSessionFlags = '';
+      if (cliType === 'claude') {
+        claudeSessionFlags = claudeSessionArgsToFlags(await resolveClaudeSessionArgs(
+          { workDir, sessionId: claudeSessionId, resumeLastSession },
+          {
+            getHomeDir: () => invoke<string>('get_home_dir'),
+            readDirectory: (path) => invoke<Array<{ name: string; is_dir: boolean }>>('read_directory', { path }),
+          },
+        ));
+      }
+
       const cliCommands: Record<string, string> = {
         claude: (() => {
           let cmd = 'claude';
           // Legacy mode compat + flags
           if (startupMode === 'bypass-permissions' || autoAccept) cmd += ' --dangerously-skip-permissions';
-          if (resumeLastSession && !hasFlag('--continue') && !hasFlag('-c') && !hasFlag('--resume') && !hasFlag('-r')) cmd += ' --continue';
+          const userPicksSession = hasFlag('--continue') || hasFlag('-c') || hasFlag('--resume') || hasFlag('-r') || hasFlag('--session-id')
+            || normalizedFlags.some(f => f.startsWith('--resume=') || f.startsWith('--session-id='));
+          if (claudeSessionFlags && !userPicksSession) cmd += claudeSessionFlags;
           // Inject --model if set and not already in flags
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             cmd += ` --model ${shellQuoteArg(modelId, argShell)}`;
@@ -3739,7 +3760,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       onDispose?.();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
+  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, claudeSessionId, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
 
   const enableDirectInput = useCallback(() => {
     const state = terminalStates.get(terminalId);
@@ -6035,7 +6056,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           e.preventDefault();
           e.stopPropagation();
           // NOTE: macOS WKWebView never fires this for OS file drops — those are
-          // handled natively via getCurrentWindow().onDragDropEvent in App.tsx
+          // handled natively via getCurrentWebview().onDragDropEvent in App.tsx
           // (routed back here through the 'octo-terminal-os-drop' event). This DOM
           // handler still serves internal drags (file tree) and other platforms.
           // 1. File tree drag (internal): read path from dataTransfer

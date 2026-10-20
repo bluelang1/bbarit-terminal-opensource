@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { listen as tauriListen, emit as tauriEmit } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { listenNativeDragDrop } from './utils/nativeDragDrop';
 import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getVersion } from '@tauri-apps/api/app';
@@ -148,6 +149,7 @@ import { countTextLines, countUtf8Bytes, extractExternalDropPathsFromDataTransfe
 import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from './utils/fileTreeInteractions';
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
 import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
+import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
@@ -560,6 +562,8 @@ interface TerminalInstance {
   discordChannelId?: string;
   slackChannelId?: string;
   lastWorkDir?: string;
+  /** Dedicated Claude Code session (uuid) created by "Claude (new session)"; absent = shared --continue tab. */
+  claudeSessionId?: string;
   /** Set on the two terminals opened by the Broker Agent, for strong visual distinction. */
   brokerRole?: 'developer' | 'reviewer';
 }
@@ -1785,6 +1789,7 @@ function saveProjects(projects: Project[], activeId: string | null) {
         startupMode: t.startupMode || undefined,
         telegramChatId: (t.telegramChatId || '').trim(),
         lastWorkDir: t.lastWorkDir || '',
+        claudeSessionId: t.claudeSessionId || undefined,
       })),
       activeTerminalId: p.activeTerminalId,
     })),
@@ -1828,6 +1833,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
               startupMode,
               telegramChatId: typeof t?.telegramChatId === 'string' ? t.telegramChatId : '',
               lastWorkDir,
+              claudeSessionId: isClaudeSessionId(t?.claudeSessionId) ? t.claudeSessionId : undefined,
             } as TerminalInstance;
           })
         : [createTerminal()];
@@ -7310,8 +7316,11 @@ Office project scaffold created by BBARIT Terminal.
     if (!isTauri()) return;
     // Native OS file drop (dragDropEnabled). macOS WKWebView never delivers OS
     // drops as DOM drop events, so this is the only reliable path for real paths.
-    getCurrentWindow().onDragDropEvent((event) => {
-      const payload = event?.payload as unknown as { type: string; position?: { x: number; y: number }; paths?: string[] };
+    // With the `unstable` Cargo feature the runtime emits drag-drop to the webview
+    // target, so the former getCurrentWindow() listener never fired (measured in
+    // the app); listenNativeDragDrop matches the webview label whichever target
+    // the runtime picks.
+    listenNativeDragDrop((payload: { type: string; position?: { x: number; y: number }; paths?: string[] }) => {
 
       // The editor is only a drop target when it is actually on screen.
       const editorVisible = !(viewMode === 'terminal' || viewMode === 'project-terminal' || viewMode === 'kanban');
@@ -7321,11 +7330,13 @@ Office project scaffold created by BBARIT Terminal.
         return;
       }
 
-      // Tauri native drop positions are physical pixels on macOS and Windows,
-      // while DOM hit-testing uses CSS pixels. This must be converted on both
-      // platforms (especially Retina macOS), not only scaled Windows displays.
+      // DOM hit-testing uses CSS pixels. wry reports CSS points on macOS and
+      // physical pixels on Windows/Linux; the helper knows the difference.
       const toCssDropPosition = (position?: { x: number; y: number }) => (
-        nativeDropPositionToCss(position, window.devicePixelRatio)
+        nativeDropPositionToCss(position, window.devicePixelRatio, {
+          platform: navigator.platform || navigator.userAgent,
+          viewport: { width: window.innerWidth, height: window.innerHeight },
+        })
       );
 
       if (payload?.type === 'enter' || payload?.type === 'over') {
@@ -11642,6 +11653,7 @@ Office project scaffold created by BBARIT Terminal.
       { id: 'cp.terminal.open-wsl-external', label: 'Open WSL Terminal', category: 'terminal' as const, run: () => { void openExternalWslTerminal(); } },
     ] : []),
     { id: 'cp.terminal.new-claude', label: t('cp.newClaude' as any), category: 'terminal', run: () => addTerminal('claude') },
+    { id: 'cp.terminal.new-claude-session', label: t('cp.newClaudeNew' as any), category: 'terminal', run: () => addTerminal('claude', undefined, undefined, undefined, { freshClaudeSession: true }) },
     { id: 'cp.terminal.new-codex', label: t('cp.newCodex' as any), category: 'terminal', run: () => addTerminal('codex') },
     { id: 'cp.terminal.new-cursor', label: t('cp.newCursor' as any), category: 'terminal', run: () => addTerminal('cursor') },
     { id: 'cp.terminal.new-opencode', label: t('cp.newOpenCode' as any), category: 'terminal', run: () => addTerminal('opencode') },
@@ -13487,7 +13499,7 @@ Office project scaffold created by BBARIT Terminal.
     recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, customFontFamily });
   };
 
-  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string): string | undefined => {
+  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string, options?: { freshClaudeSession?: boolean }): string | undefined => {
     if (!activeProjectId) return undefined;
     // "Side" keeps an existing terminal beside the editor, but a newly created
     // terminal needs usable width. Promote only this transition to the full
@@ -13537,12 +13549,16 @@ Office project scaffold created by BBARIT Terminal.
     }
 
     // 터미널을 미리 생성하여 ID 확보
-    const termName = nameOverride || `${cliNames[resolvedCliType]}`;
+    const freshClaude = resolvedCliType === 'claude' && !!options?.freshClaudeSession;
+    const termName = nameOverride || (freshClaude ? t('terminal.claudeNew' as any) : `${cliNames[resolvedCliType]}`);
     const preCount = (terminalSplitMode === 'tree'
       ? (projects.find(p => p.id === activeProjectId)?.terminals ?? [])
       : (projects.find(p => p.id === activeProjectId)?.terminals ?? [])
-    ).filter(t => t.cliType === resolvedCliType).length + 1;
+    ).filter(t => t.cliType === resolvedCliType && !!t.claudeSessionId === freshClaude).length + 1;
     const terminal = createTerminal(nameOverride ? termName : `${termName} ${preCount}`, resolvedCliType, shouldAutoAccept, startupMode);
+    // A dedicated Claude session: the tab launches `claude --session-id <uuid>` and
+    // later `--resume <uuid>`, so it never shares a conversation with other tabs.
+    if (freshClaude) terminal.claudeSessionId = newClaudeSessionId();
     // Optional per-terminal working directory (e.g. a Broker Harness git worktree),
     // so the CLI launches inside that isolated dir instead of the project root.
     if (workDirOverride && workDirOverride.trim()) terminal.lastWorkDir = workDirOverride.trim();
@@ -20057,6 +20073,7 @@ Office project scaffold created by BBARIT Terminal.
                             ['bbarit', t('terminal.bbarit' as any)],
                             ['bbarit-oss', t('terminal.bbaritOss' as any)],
                             ['claude', t('terminal.claude')],
+                            ['claude-new', t('terminal.claudeNew' as any)],
                             ['codex', t('terminal.codex')],
                             ['cursor', t('terminal.cursor' as any)],
                             ['opencode', t('terminal.opencode')],
@@ -20067,17 +20084,18 @@ Office project scaffold created by BBARIT Terminal.
                             ['pi', t('terminal.pi' as any)],
                             ['reasonix', t('terminal.reasonix' as any)],
                             ['gajae', 'Gajae'],
-                          ] as Array<[TerminalCreateCliType, string]>).map(([cliType, label]) => (
+                          ] as Array<[TerminalCreateCliType | 'claude-new', string]>).map(([cliType, label]) => (
                             <button
                               key={cliType}
                               type="button"
-                              className={`assistant-terminal-menu-item ${cliType}`}
+                              className={`assistant-terminal-menu-item ${cliType === 'claude-new' ? 'claude' : cliType}`}
                               onClick={() => {
-                                addTerminal(cliType);
+                                if (cliType === 'claude-new') addTerminal('claude', undefined, undefined, undefined, { freshClaudeSession: true });
+                                else addTerminal(cliType);
                                 setShowTerminalCreateMenu(false);
                               }}
                             >
-                              <CliIcon cliType={cliType} className="assistant-terminal-menu-icon" size={15} />
+                              <CliIcon cliType={cliType === 'claude-new' ? 'claude' : cliType} className="assistant-terminal-menu-icon" size={15} />
                               <span>{label}</span>
                             </button>
                           ))}
@@ -20415,6 +20433,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            startupMode={terminal.startupMode}
 			                            codexWebSearch={agentSettings.codexWebSearch ?? true}
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
+			                            claudeSessionId={terminal.claudeSessionId}
 			                            extraFlags={
 			                              (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
 			                               terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -20805,6 +20824,7 @@ Office project scaffold created by BBARIT Terminal.
                             startupMode={terminal.startupMode}
                             codexWebSearch={agentSettings.codexWebSearch ?? true}
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
+			                            claudeSessionId={terminal.claudeSessionId}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -21109,6 +21129,7 @@ Office project scaffold created by BBARIT Terminal.
                                     startupMode={terminal.startupMode}
                                     codexWebSearch={agentSettings.codexWebSearch ?? true}
                                     resumeLastSession={agentSettings.resumeLastSession ?? false}
+                                    claudeSessionId={terminal.claudeSessionId}
                                     extraFlags={
                                       (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                        terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -21392,6 +21413,7 @@ Office project scaffold created by BBARIT Terminal.
 			                              startupMode={terminal.startupMode}
                             codexWebSearch={agentSettings.codexWebSearch ?? true}
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
+			                            claudeSessionId={terminal.claudeSessionId}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -21732,6 +21754,7 @@ Office project scaffold created by BBARIT Terminal.
 		                                  startupMode={terminal.startupMode}
                             codexWebSearch={agentSettings.codexWebSearch ?? true}
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
+			                            claudeSessionId={terminal.claudeSessionId}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -22043,6 +22066,7 @@ Office project scaffold created by BBARIT Terminal.
                           startupMode={terminal.startupMode}
                             codexWebSearch={agentSettings.codexWebSearch ?? true}
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
+			                            claudeSessionId={terminal.claudeSessionId}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
