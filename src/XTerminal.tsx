@@ -21,6 +21,7 @@ import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
+import { shouldContinueClaudeSession } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
@@ -3276,12 +3277,22 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         } catch { /* default scan */ }
       }
 
+      // `claude --continue` fails on a project that has no Claude session yet
+      // ("No conversation found to continue"), so drop the flag on the first run.
+      let claudeCanContinue = resumeLastSession;
+      if (cliType === 'claude' && resumeLastSession) {
+        claudeCanContinue = await shouldContinueClaudeSession(workDir, {
+          getHomeDir: () => invoke<string>('get_home_dir'),
+          readDirectory: (path) => invoke<Array<{ name: string; is_dir: boolean }>>('read_directory', { path }),
+        });
+      }
+
       const cliCommands: Record<string, string> = {
         claude: (() => {
           let cmd = 'claude';
           // Legacy mode compat + flags
           if (startupMode === 'bypass-permissions' || autoAccept) cmd += ' --dangerously-skip-permissions';
-          if (resumeLastSession && !hasFlag('--continue') && !hasFlag('-c') && !hasFlag('--resume') && !hasFlag('-r')) cmd += ' --continue';
+          if (claudeCanContinue && !hasFlag('--continue') && !hasFlag('-c') && !hasFlag('--resume') && !hasFlag('-r')) cmd += ' --continue';
           // Inject --model if set and not already in flags
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             cmd += ` --model ${shellQuoteArg(modelId, argShell)}`;
