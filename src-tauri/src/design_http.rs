@@ -16,10 +16,15 @@ use tower_http::services::ServeDir;
 
 use crate::claude_design;
 
+/// Loopback port for the design server (release 19985 / debug 19986).
+///
+/// It used to sit on 19981/19982, which a release app's design server shared
+/// with the dev browser bridge (19981) and the collab host, and with the LAN
+/// discovery UDP port (19982). See the port map in `browser_bridge.rs`.
 #[cfg(debug_assertions)]
-pub const DESIGN_PORT: u16 = 19982;
+pub const DESIGN_PORT: u16 = 19986;
 #[cfg(not(debug_assertions))]
-pub const DESIGN_PORT: u16 = 19981;
+pub const DESIGN_PORT: u16 = 19985;
 
 // ── Shared state ──
 

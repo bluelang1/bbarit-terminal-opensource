@@ -2,6 +2,11 @@
  * Keep this file minimal: the UI theme lives in `App.css` and is driven by CSS variables.
  */
 
+/* Moved out of index.html: Tauri adds a CSP nonce to inline <style> tags,
+   which would switch off 'unsafe-inline' for every JS-injected stylesheet. */
+* { box-sizing: border-box; }
+body { margin: 0; }
+
 html,
 body {
   width: 100%;

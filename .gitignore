@@ -35,3 +35,4 @@ output/
 # IDE
 .idea/
 src-tauri/gen/
+src-tauri/vendor/*/Cargo.lock

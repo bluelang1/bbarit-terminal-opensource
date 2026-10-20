@@ -33,7 +33,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' tauri: asset: http://asset.localhost ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: https:; style-src 'self' 'unsafe-inline' data: blob: https:; img-src * tauri: data: blob: asset: http://asset.localhost; media-src * tauri: data: blob: asset: http://asset.localhost; font-src * tauri: data: blob: asset: http://asset.localhost; connect-src * tauri: data: blob: ipc: http://ipc.localhost asset: http://asset.localhost; frame-src * tauri: data: blob: asset: http://asset.localhost; worker-src 'self' blob: data:; child-src 'self' blob: data:; object-src 'none'; base-uri 'self'",
       "assetProtocol": {
         "enable": true,
         "scope": {

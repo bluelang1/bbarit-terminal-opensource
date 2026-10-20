@@ -81,11 +81,11 @@ export function CollabPanel({ style, locale, userName = '' }: Props) {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const [hostRunning, setHostRunning] = useState(false);
   const [hostInfo, setHostInfo] = useState<ServerInfo | null>(null);
-  const [hostPort, setHostPort] = useState<string>('19981');
+  const [hostPort, setHostPort] = useState<string>('19990');
   const [tunnelUrl, setTunnelUrl] = useState<string>('');
 
   // Client-side
-  const [clientUrl, setClientUrl] = useState<string>('ws://127.0.0.1:19981/ws');
+  const [clientUrl, setClientUrl] = useState<string>('ws://127.0.0.1:19990/ws');
   const [clientRoom, setClientRoom] = useState<string>('');
   const [clientName, setClientName] = useState<string>(userName || '');
   const [clientConnected, setClientConnected] = useState(false);
@@ -567,7 +567,7 @@ export function CollabPanel({ style, locale, userName = '' }: Props) {
               value={clientUrl}
               onChange={(e) => setClientUrl(e.target.value)}
               disabled={clientConnected}
-              placeholder="ws://127.0.0.1:19981/ws"
+              placeholder="ws://127.0.0.1:19990/ws"
               style={{ padding: '5px 8px', border, borderRadius: 'var(--brutal-radius)', background: 'transparent', color: style.text, fontSize: 11 }}
             />
           </label>

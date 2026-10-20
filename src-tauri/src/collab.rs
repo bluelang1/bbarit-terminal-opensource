@@ -36,7 +36,12 @@ use tokio::sync::{broadcast, Mutex as TokioMutex, RwLock};
 const ROOM_BROADCAST_CAPACITY: usize = 256;
 
 /// Default bind port for the collab server.
-pub const DEFAULT_COLLAB_PORT: u16 = 19981;
+///
+/// 19990 is kept clear of the loopback bridges (19980/19981), the design
+/// server (19985/19986) and LAN discovery (UDP 19982); it previously shared
+/// 19981 with the dev bridge and the release design server. The CollabPanel
+/// defaults (`src/collab/CollabPanel.tsx`) must match.
+pub const DEFAULT_COLLAB_PORT: u16 = 19990;
 
 // ── Types ──
 

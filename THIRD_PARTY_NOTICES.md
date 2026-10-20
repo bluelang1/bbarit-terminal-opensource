@@ -34,3 +34,11 @@ Honor each font's reserved names and modification conditions. Fontsource package
 Use `package-lock.json`, `src-tauri/Cargo.lock`, and `bbarit-agent/Cargo.lock` to identify exact dependencies. Their licenses do not become MIT because this project's own code is MIT. In particular, the resolved SurrealDB 2.6.2 dependency uses Business Source License terms (`licenses/SurrealDB-2.6.2-BSL.txt`); it is not an OSI open-source license. Consult the license for the exact resolved version before offering a service or redistributing a compiled product using it.
 
 This clean source distribution excludes prebuilt executables, private release/signing material, user projects and captures. Before distributing a compiled installer, collect the license/notice files for the actual dependency tree and bundled binaries, and verify the terms of optional services and downloaded tools. Brand artwork provenance is maintained separately from third-party software licensing; project trademarks and external service rights are not granted by a dependency license.
+
+## tauri-plugin-mcp-bridge 0.10.0 (vendored, MIT)
+
+`src-tauri/vendor/tauri-plugin-mcp-bridge` is a copy of the crates.io release
+(Copyright (c) 2025 Fireside Development, LLC, MIT; upstream
+https://github.com/hypothesi/mcp-server-tauri) with one local change: the
+control WebSocket refuses browser-originated upgrades. The license text is kept
+in that directory.

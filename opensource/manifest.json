@@ -154,13 +154,13 @@
     "docs/BBARIT_CLI.md",
     ".github/dependabot.yml",
     ".github/workflows/opensource-ci.yml",
+    "src-tauri/vendor/tauri-plugin-mcp-bridge/LICENSE",
     "scripts/bump-version.mjs",
     "agent-browser-cli/package-lock.json"
   ],
   "excluded_prefixes": [
     "src-tauri/keys/",
     "src-tauri/gen/",
-    "src-tauri/vendor/",
     "agent-browser-cli/.agent-browser-",
     "bbarit-agent/vendor/semble/docs/",
     "bbarit-agent/vendor/semble/.git/"

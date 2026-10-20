@@ -1,7 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { loadIdentity } from '../collab/loungeIdentity';
+import { BBARIT_API_BASE_URL } from '../config/endpoints';
 
-const API_BASE = (import.meta.env.VITE_BBARIT_API_BASE_URL || 'https://bbarit.com').replace(/\/$/, '');
+const API_BASE = BBARIT_API_BASE_URL;
 const TOKEN_KEY = 'bbarit-thread-token-v1';
 const DEVICE_HASH_KEY = 'bbarit-thread-device-hash-v1';
 

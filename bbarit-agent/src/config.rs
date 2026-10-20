@@ -1338,16 +1338,24 @@ fn resolve_project_trusted(
     project_resources_detected: bool,
     default_project_trust: Option<&str>,
 ) -> Result<bool> {
+    if cli.no_approve {
+        return Ok(false);
+    }
+    // The host app always launches the agent with --approve (opening a project
+    // in the app is the trust decision), but an explicit stored "no" from
+    // `/trust no` must still win — otherwise that repo's .mcp.json,
+    // models.json, skills, extensions and hooks load anyway.
+    let stored = read_project_trust_decision(user_app_dir, cwd)?;
+    if stored == Some(false) {
+        return Ok(false);
+    }
     if !project_resources_detected {
         return Ok(true);
     }
     if cli.approve {
         return Ok(true);
     }
-    if cli.no_approve {
-        return Ok(false);
-    }
-    if let Some(decision) = read_project_trust_decision(user_app_dir, cwd)? {
+    if let Some(decision) = stored {
         return Ok(decision);
     }
     Ok(matches!(default_project_trust, Some("always")))
@@ -1613,6 +1621,42 @@ mod tests {
         fs::create_dir_all(&app_dir).unwrap();
         fs::write(app_dir.join("models.json"), "{\"providers\":{}}").unwrap();
         assert!(has_project_resources(&root, &app_dir, &legacy_app_dir));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stored_trust_no_wins_over_cli_approve() {
+        use clap::Parser;
+        let root = std::env::temp_dir()
+            .join(format!("bbarit-trust-precedence-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        let user_app_dir = root.join("user-app");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&user_app_dir).unwrap();
+        let approve = Cli::parse_from(["bbarit", "--approve"]);
+        let no_approve = Cli::parse_from(["bbarit", "--no-approve"]);
+        let plain = Cli::parse_from(["bbarit"]);
+        let resolve = |cli: &Cli, default: Option<&str>| {
+            resolve_project_trusted(cli, &project, &user_app_dir, true, default).unwrap()
+        };
+
+        // No stored decision: --approve trusts, the default does not.
+        assert!(resolve(&approve, None));
+        assert!(!resolve(&plain, None));
+
+        // `/trust no` recorded for this project: --approve (what the host app
+        // passes) no longer overrides it, nor does default_project_trust.
+        let key = fs::canonicalize(&project).unwrap().display().to_string();
+        let store = user_app_dir.join("trust.json");
+        fs::write(&store, serde_json::json!({ key.clone(): false }).to_string()).unwrap();
+        assert!(!resolve(&approve, None));
+        assert!(!resolve(&plain, Some("always")));
+
+        // A stored yes still trusts, and --no-approve stays a hard no.
+        fs::write(&store, serde_json::json!({ key: true }).to_string()).unwrap();
+        assert!(resolve(&plain, None));
+        assert!(!resolve(&no_approve, None));
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -36,6 +36,17 @@ use crate::web_terminal::{self, NgrokState, WebTerminalState};
 /// Debug builds use a separate port so a dev app does not collide with an
 /// installed release app that is already holding 19980 (mirrors the mcp-bridge
 /// 9323/9223 dev/release split).
+///
+/// Local port map (release/debug, loopback unless noted):
+/// - 19980/19981 this bridge (`/api/invoke`, `/editor`, `/gateway/ui`)
+/// - 19970/19971 `REMOTE_PORT` (token-authenticated; the only tunnelled port)
+/// - 19982 LAN discovery beacons (UDP, broadcast)
+/// - 19985/19986 design server (`design_http.rs`)
+/// - 19990 collab host (`collab.rs`, also the CollabPanel default)
+/// - 9223/9323 tauri-plugin-mcp-bridge WebSocket (release: opt-in via
+///   browser Origins are refused by the vendored plugin)
+/// - 9666 WebView2 CDP, Windows only (off with `BBARIT_NO_CDP`)
+/// Keep new listeners off these numbers.
 #[cfg(debug_assertions)]
 pub const BRIDGE_PORT: u16 = 19981;
 #[cfg(not(debug_assertions))]

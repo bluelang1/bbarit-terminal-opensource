@@ -139,7 +139,9 @@ export default function MermaidFileEditor({ content, onChange, onSave, style, fo
 
   /* ── Initialize mermaid only when the theme changes ── */
   useEffect(() => {
-    mermaid.initialize({ startOnLoad: false, theme: isLightTheme ? 'default' : 'dark', securityLevel: 'loose' });
+    // mermaid 12 switched the defaults to the ELK layout and the 'neo' look; keep
+    // the classic dagre rendering so existing diagrams look the same.
+    mermaid.initialize({ startOnLoad: false, theme: isLightTheme ? 'default' : 'dark', securityLevel: 'loose', layout: 'dagre', look: 'classic' });
   }, [isLightTheme]);
 
   /* ── Render diagram (debounced) ── */

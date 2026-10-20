@@ -3,9 +3,9 @@
  * Direct CLI control for the live Tauri development screen.
  *
  * This intentionally does not start or call an MCP server. It talks directly to
- * tauri-plugin-mcp-bridge's debug WebSocket endpoint (9223-9322) and exposes
- * practical terminal commands for code agents: status, screenshot, snapshot,
- * js, click, type, key, resize, and check.
+ * tauri-plugin-mcp-bridge's debug WebSocket endpoint (dev 9323-9422, installed
+ * 9223-9322) and exposes practical terminal commands for code agents: status,
+ * screenshot, snapshot, js, click, type, key, resize, and check.
  */
 
 import { existsSync, mkdirSync, writeFileSync, openSync, closeSync, readFileSync } from 'node:fs';

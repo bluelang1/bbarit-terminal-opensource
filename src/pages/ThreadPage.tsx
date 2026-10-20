@@ -20,6 +20,7 @@ import {
   type ThreadProfile,
   type ThreadUser,
 } from '../thread/threadApi';
+import { THREAD_WEB_URL } from '../config/endpoints';
 import './ThreadPage.css';
 
 type ComposerTarget = { mode: 'create' } | { mode: 'reply'; post: ThreadPost } | { mode: 'edit'; post: ThreadPost };
@@ -274,7 +275,7 @@ export default function ThreadPage() {
               </button>
             </div>
           </div>
-          <a className="thread-public-link" href="https://bbarit.com/thread" target="_blank" rel="noreferrer">Open the read-only website feed ↗</a>
+          <a className="thread-public-link" href={THREAD_WEB_URL} target="_blank" rel="noreferrer">Open the read-only website feed ↗</a>
         </aside>
       </div>
     </div>

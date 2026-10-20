@@ -19,8 +19,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex as TokioMutex;
 
-/// UDP port used for discovery beacons. Distinct from collab (19981) and the
-/// browser bridge (19980).
+/// UDP port used for discovery beacons. Distinct from the browser bridge
+/// (TCP 19980/19981), the design server (TCP 19985/19986) and the collab host
+/// (TCP 19990).
 pub const DISCOVERY_PORT: u16 = 19982;
 /// How often each instance broadcasts its presence.
 const BEACON_INTERVAL_SECS: u64 = 3;
