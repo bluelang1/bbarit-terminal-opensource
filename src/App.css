@@ -535,10 +535,10 @@ body {
 /* While a project row is dragged, neighbours slide to open the drop slot. The
    class is removed together with the inline transform on drop, so the commit
    itself does not transition (the FLIP animation below takes over). */
-/* Kanban-style drag: the pressed row/tab is cloned and carried by the pointer. */
+/* Kanban-style drag: the pressed row/tab is cloned and carried by the pointer.
+   !important: the clone keeps .project-selector-item / .project-tab, whose
+   later `position: relative` rules would otherwise win. */
 .project-drag-ghost {
-  /* !important: the cloned row keeps .project-selector-item / .project-tab,
-     whose later `position: relative` rules would otherwise win. */
   position: fixed !important;
   top: 0 !important;
   left: 0 !important;
@@ -566,6 +566,10 @@ body.project-dragging * {
 .project-selector-item {
   user-select: none;
   -webkit-user-select: none;
+}
+/* Placeholders left behind while the ghost follows the pointer. */
+.project-tab.dragging {
+  transform: none;
 }
 
 .project-tab.project-shift {
@@ -720,7 +724,14 @@ body.project-dragging * {
   right: auto;
   margin-top: 0;
   z-index: 2147483647;
-}.project-selector-panel {
+}
+
+
+
+
+
+
+.project-selector-panel {
   width: 260px;
   min-width: 220px;
   max-width: 320px;
@@ -9518,7 +9529,11 @@ body.ftree-dragging * {
 .terminal-app::after,
 .terminal-tab.active::before,
 .terminal-inner-wrapper::after,
-.terminal-panel-header::after,
+.terminal-panel-header::after {
+  animation: none !important;
+  opacity: 0 !important;
+}
+
 select,
 input[type="text"],
 input[type="number"],
@@ -9545,7 +9560,12 @@ input[type="range"]::-webkit-slider-thumb {
 
 .octo-tooltip,
 .skip-link,
-.panel-modal-container,
+.panel-modal-container {
+  border-radius: var(--brutal-radius) !important;
+  border: 2px solid var(--brutal-line) !important;
+  box-shadow: var(--brutal-shadow) !important;
+}
+
 .project-tabs,
 .top-toolbar,
 .terminals-area,
@@ -9763,7 +9783,8 @@ input[type="range"]::-webkit-slider-thumb {
 .project-selector-item.drop-after::after {
   border-radius: 0 !important;
   box-shadow: 3px 3px 0 color-mix(in srgb, #000 72%, transparent) !important;
-}.panel-modal-overlay {
+}
+.panel-modal-overlay {
   backdrop-filter: none !important;
 }
 

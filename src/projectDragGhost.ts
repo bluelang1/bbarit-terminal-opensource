@@ -31,6 +31,7 @@ export function createDragGhost(source: HTMLElement, clientX: number, clientY: n
   element.removeAttribute('data-project-drop-orientation');
   element.removeAttribute('id');
   element.setAttribute('aria-hidden', 'true');
+  element.style.visibility = ''; // the source may be hidden while a previous ghost lands
   element.style.width = `${rect.width}px`;
   element.style.height = `${rect.height}px`;
   const ghost: DragGhost = { element, grabX: clientX - rect.left, grabY: clientY - rect.top, x: rect.left, y: rect.top };

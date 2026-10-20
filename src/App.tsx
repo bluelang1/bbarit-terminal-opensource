@@ -7713,6 +7713,10 @@ Office project scaffold created by BBARIT Terminal.
 
       const previousRect = previousRects.get(projectId);
       if (!previousRect) return;
+      // A row hidden while the drag ghost lands on it must not FLIP: the ghost
+      // reads this row's rect as its destination and the FLIP transform would
+      // send the ghost back to the old slot.
+      if (element.style.visibility === 'hidden') return;
 
       const nextRect = element.getBoundingClientRect();
       const dx = previousRect.left - nextRect.left;
@@ -7907,6 +7911,14 @@ Office project scaffold created by BBARIT Terminal.
     const target = event.target as HTMLElement | null;
     const interactiveAncestor = target?.closest<HTMLElement>('input, button, textarea, select, a, [data-project-tab-ignore-drag="true"]') ?? null;
     if (interactiveAncestor && interactiveAncestor !== event.currentTarget) return;
+    // A drag whose mouseup was lost (e.g. released outside the window) must be
+    // settled first, otherwise its ghost would be orphaned in <body>. It is
+    // settled as a cancel: a plain click must never commit a stale reorder.
+    const stale = projectTabDragRef.current;
+    if (stale) {
+      stale.dragging = false;
+      finishProjectTabDrag();
+    }
 
     projectTabDragRef.current = {
       projectId,
@@ -7917,8 +7929,9 @@ Office project scaffold created by BBARIT Terminal.
       icon: projects.find((p) => p.id === projectId)?.icon || '•',
       element: event.currentTarget,
     };
-    // A press that may become a drag must not start a text selection.
-    event.preventDefault();
+    // Text selection is prevented by CSS (user-select: none on rows and on
+    // body.project-dragging); preventDefault here would also block the blur
+    // that commits an open group-rename input.
     suppressProjectTabClickRef.current = false;
     setProjectDropIndicator(null);
 
@@ -7936,15 +7949,26 @@ Office project scaffold created by BBARIT Terminal.
     const onWindowBlur = () => {
       finishProjectTabDrag();
     };
+    // The drop-target snapshot goes stale when the list scrolls or the window
+    // resizes mid-drag; captureDropTargets undoes the preview translate, so it
+    // can be re-taken at any time.
+    const onLayoutShift = () => {
+      const drag = projectTabDragRef.current;
+      if (drag?.dragging && drag.targets) drag.targets = captureDropTargets();
+    };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
     window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('scroll', onLayoutShift, true);
+    window.addEventListener('resize', onLayoutShift);
 
     projectTabCleanupRef.current = () => {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('scroll', onLayoutShift, true);
+      window.removeEventListener('resize', onLayoutShift);
     };
   }, [finishProjectTabDrag, handleProjectTabPointerMove, projects]);
 
