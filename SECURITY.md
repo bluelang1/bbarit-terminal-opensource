@@ -8,7 +8,7 @@ The webview has a Content Security Policy (`src-tauri/tauri.conf.json`). It is d
 
 Supply external service credentials locally. User configuration and agent sessions can contain credentials and private project information; do not commit local environment files, browser profiles, databases, signing material, logs, or `.octo-tmp` captures. The source exporter excludes these paths and scans known secret formats, but pattern checks cannot detect every secret.
 
-Use a dedicated temporary project and test credentials for verification. Native macOS and Windows behavior must be checked separately. Public builds must use the open-source build wrapper, without the original release signing identities, updater endpoints, or private deployment scripts.
+Use a dedicated temporary project and test credentials for verification. Native macOS and Windows behavior must be checked separately. Public builds must use the open-source build wrapper, without the original release signing identities, updater endpoints, or private deployment scripts. A fork may ship its own updater through `src-tauri/tauri.fork.conf.json` (`npm run tauri:build:fork`): that file holds only the fork's minisign public key and GitHub release endpoint, the private key lives in CI secrets or a local file and is never committed, and the release workflow only produces draft releases that a maintainer publishes by hand.
 
 Report vulnerabilities privately through the repository's private vulnerability reporting feature when available, or contact the maintainers privately through their GitHub profile. Do not post credentials, private captures, or exploit details in a public issue. Include the affected revision, platform, minimal reproduction, and expected/actual behavior with sensitive values removed.
 

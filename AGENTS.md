@@ -53,6 +53,14 @@ Build/test gotchas:
   19985/19986, collab 19990, mcp-bridge 9223/9323.
 - tauri-plugin-mcp-bridge is vendored (src-tauri/vendor); upgrade by re-copying
   the crate and re-applying `upgrade_allowed` in websocket.rs.
+- Fork auto-update: `npm run tauri:build:fork` layers src-tauri/tauri.fork.conf.json
+  (fork minisign pubkey + GitHub latest.json endpoint) on the source config and
+  keeps only TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) in the env; never commit the
+  private key. Releases: bump with scripts/bump-version.mjs, then run
+  `cargo update -p octo-ui --offline` in src-tauri or `--locked` fails; tag
+  `v<version>` triggers .github/workflows/fork-release.yml (draft release).
+- The original installed app (com.octo.terminal, author-signed) cannot receive
+  fork updates; only an installed fork build (com.bbarit.terminal.source) can.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.

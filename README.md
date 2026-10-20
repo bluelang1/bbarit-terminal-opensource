@@ -10,7 +10,7 @@ Tauri 2, Rust, React 19, TypeScript로 만든 데스크톱 AI 개발 환경입�
 
 ## 소스 기준
 
-원본 최신 `main` 커밋 `e8515d22`를 기준으로 준비했습니다. 해당 소스는 Windows 수정 릴리즈 `v1.1.51`에 해당하지만 `package.json`·Cargo·기본/macOS Tauri 버전은 `1.1.50`, Windows Tauri 버전은 `1.1.51`입니다. 이 배포본에서는 원본 버전 메타데이터를 유지합니다.
+원본 최신 `main` 커밋 `e8515d22`(원작자 릴리즈 `v1.1.50`/Windows `v1.1.51`)를 기준으로 준비했습니다. 이 포크는 자체 릴리스를 내므로 버전은 `scripts/bump-version.mjs`로 모든 플랫폼을 함께 올립니다. 현재 버전은 `package.json`·`src-tauri/tauri.conf.json`을 기준으로 합니다.
 
 ## 준비할 도구
 
@@ -73,6 +73,30 @@ npm run tauri:build -- --no-bundle
 - 실행 래퍼는 자식 빌드 프로세스의 Apple·업데이터·Windows 인증서 환경 변수를 제거합니다. 운영 릴리즈·서명 스크립트는 공개 묶음에 포함하지 않습니다.
 
 별도 앱 식별자는 **사용자 데이터의 완전한 격리를 의미하지 않습니다**. 기존 코드가 사용하는 `octo` 설정 폴더, `~/.bbarit`, 노트·프로젝트 데이터 경로는 유지합니다. 기존 설치본의 데이터와 완전히 분리해 시험하려면 별도 OS 사용자 환경을 사용하세요. 이 공개 준비 작업에서는 설치된 앱이나 실사용 데이터를 조작하지 않았습니다.
+
+### 포크 릴리스와 자동 업데이트
+
+공개 빌드는 업데이트 주소와 키가 비어 있어 자동 업데이트를 받지 않습니다. 이 포크는 자체 minisign 키와 GitHub Releases를 업데이트 소스로 쓰도록 [`tauri.fork.conf.json`](src-tauri/tauri.fork.conf.json)을 소스 설정 위에 덧씌울 수 있습니다. 원작자의 운영 키·주소와는 무관하며, 공개키만 저장소에 있고 개인키는 커밋하지 않습니다.
+
+```sh
+npx tauri signer generate -w ~/.tauri/bbarit-fork.key   # 최초 1회. 공개키를 tauri.fork.conf.json에 넣습니다
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/bbarit-fork.key)" \
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…' npm run tauri:build:fork
+node scripts/fork-release-manifest.mjs --tag v1.1.51 --repo bluelang1/bbarit-terminal-opensource --out release-out
+```
+
+`tauri:build:fork`는 `--fork-release`로 업데이트 서명 산출물(`.app.tar.gz` + `.sig`)을 만들고, 래퍼는 `TAURI_SIGNING_PRIVATE_KEY`·`_PASSWORD`만 자식 프로세스에 남깁니다. 매니페스트 스크립트는 태그가 `v<앱 버전>`과 같은지 확인하고 `release-out/`에 공백 없는 이름의 번들 파일과 `latest.json`을 씁니다.
+
+릴리스 절차는 다음과 같습니다.
+
+1. `node scripts/bump-version.mjs 1.1.52`로 버전을 올리고, `src-tauri`에서 `cargo update -p octo-ui --offline`으로 Cargo.lock도 맞춘 뒤 머지합니다(아니면 CI의 `--locked` 검사가 실패합니다). 업데이터는 현재 버전보다 큰 버전만 설치합니다.
+2. `git tag v1.1.52 && git push origin v1.1.52`. [`fork-release.yml`](.github/workflows/fork-release.yml) 워크플로가 macOS(Apple Silicon)에서 빌드해 **초안(draft) 릴리스**에 산출물과 `latest.json`을 올립니다. 저장소 시크릿 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다.
+3. GitHub에서 초안을 검토하고 게시(publish)합니다. 게시된 최신 릴리스만 `releases/latest/download/latest.json`으로 제공되므로, 게시 전에는 설치된 앱이 업데이트를 보지 못합니다.
+4. 포크 빌드를 설치한 앱은 버전 배지에서 새 버전을 감지하고, 업데이트 버튼을 눌렀을 때만 내려받아 설치·재시작합니다.
+
+이 포크를 다시 포크한다면 업데이트 주소(`tauri.fork.conf.json`)와 배지·릴리스 페이지 링크 기본값(`src/config/endpoints.ts`의 릴리스 저장소)을 함께 바꾸고, 자신의 키를 새로 만드세요.
+
+원작자 서명 설치본(`com.octo.terminal`)은 원작자 키로만 검증하므로 이 포크의 릴리스를 받지 않습니다. 포크 빌드(`com.bbarit.terminal.source`)를 한 번 직접 설치한 뒤부터 자동 업데이트가 이어집니다. ad-hoc 서명 앱의 교체·재실행은 실제 macOS에서 확인해야 합니다.
 
 ## Rust 검사
 

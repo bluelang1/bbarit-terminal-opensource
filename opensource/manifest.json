@@ -123,6 +123,7 @@
     "agent-browser-cli/CLI.md",
     "scripts/export-opensource.py",
     "scripts/tauri-opensource.mjs",
+    "scripts/fork-release-manifest.mjs",
     "scripts/vite-dev.mjs",
     "scripts/check-ui-mojibake.mjs",
     "scripts/check-bundled-scripts.mjs",
@@ -154,6 +155,7 @@
     "docs/BBARIT_CLI.md",
     ".github/dependabot.yml",
     ".github/workflows/opensource-ci.yml",
+    ".github/workflows/fork-release.yml",
     "src-tauri/vendor/tauri-plugin-mcp-bridge/LICENSE",
     "scripts/bump-version.mjs",
     "agent-browser-cli/package-lock.json"
