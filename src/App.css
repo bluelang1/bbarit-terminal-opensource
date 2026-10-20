@@ -532,6 +532,18 @@ body {
   right: -8px;
 }
 
+/* While a project row is dragged, neighbours slide to open the drop slot. The
+   class is removed together with the inline transform on drop, so the commit
+   itself does not transition (the FLIP animation below takes over). */
+.project-tab.project-shift {
+  transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease, box-shadow 0.15s ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform;
+}
+.project-selector-item.project-shift {
+  transition: border-color 0.05s ease, background 0.05s ease, box-shadow 0.05s ease, transform 180ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform;
+}
+
 .project-tab.project-reorder-animating,
 .project-selector-item.project-reorder-animating {
   z-index: 4;
