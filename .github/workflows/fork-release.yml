@@ -50,7 +50,19 @@ jobs:
           workspaces: |
             src-tauri
             bbarit-agent
+          # A failed signing step must not throw away the 30-minute Rust build.
+          cache-on-failure: true
       - run: npm ci
+      - name: Check the signing key and password before the long build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          echo probe > "$RUNNER_TEMP/sign-probe.txt"
+          # Fails in seconds with "Wrong password for that key" if the
+          # TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret does not match the key.
+          npx tauri signer sign "$RUNNER_TEMP/sign-probe.txt" > /dev/null
+          rm -f "$RUNNER_TEMP/sign-probe.txt" "$RUNNER_TEMP/sign-probe.txt.sig"
       - name: Build the fork bundle (ad-hoc app signature, signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
