@@ -61,6 +61,8 @@ Build/test gotchas:
   `v<version>` triggers .github/workflows/fork-release.yml (draft release).
 - The original installed app (com.octo.terminal, author-signed) cannot receive
   fork updates; only an installed fork build (com.bbarit.terminal.source) can.
+- `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
+  CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.

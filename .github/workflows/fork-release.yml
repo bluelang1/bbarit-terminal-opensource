@@ -55,6 +55,10 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # `vite build` needs more than Node's default ~2 GB heap on the 7 GB
+          # macOS arm64 runner (App.tsx alone is >500 KB); it ran out of memory
+          # in run 39378093986. The Rust build starts only after it finishes.
+          NODE_OPTIONS: --max-old-space-size=5120
         # Arguments after the second `--` go to cargo; --locked keeps CI on the
         # committed Cargo.lock like the source checks workflow.
         run: npm run tauri:build:fork -- -- --locked
