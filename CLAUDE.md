@@ -67,6 +67,9 @@ Build/test gotchas:
   non-alphanumeric char replaced by "-">/*.jsonl; src/terminal/claudeSessionDir.ts
   probes it so `--continue` is only added when a transcript exists (sessions
   relocated with CLAUDE_CONFIG_DIR are not detected, so resume is skipped).
+- "Claude (new session)" tabs carry TerminalInstance.claudeSessionId (uuid) and
+  launch `claude --session-id <id>` first, `--resume <id>` afterwards; plain
+  Claude tabs keep the shared `--continue` behavior.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
   CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
 

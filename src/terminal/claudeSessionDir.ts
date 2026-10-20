@@ -54,3 +54,72 @@ export async function shouldContinueClaudeSession(workDir: string | undefined, p
     return false;
   }
 }
+
+/** Transcript file Claude Code writes for a session id inside the project folder. */
+export function claudeSessionFileName(sessionId: string): string {
+  return `${sessionId}.jsonl`;
+}
+
+export function hasClaudeSessionFile(entries: readonly DirEntryLike[], sessionId: string): boolean {
+  const wanted = claudeSessionFileName(sessionId).toLowerCase();
+  return entries.some((entry) => !(entry.is_dir ?? entry.isDir) && entry.name.toLowerCase() === wanted);
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isClaudeSessionId(value: unknown): value is string {
+  return typeof value === 'string' && UUID_RE.test(value);
+}
+
+export function newClaudeSessionId(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (c?.getRandomValues) c.getRandomValues(bytes);
+  else for (let i = 0; i < 16; i += 1) bytes[i] = Math.floor(Math.random() * 256);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+export type ClaudeSessionArgs =
+  | { kind: 'resume'; sessionId: string }
+  | { kind: 'new'; sessionId: string }
+  | { kind: 'continue' }
+  | { kind: 'none' };
+
+/**
+ * Pick the session flag for a Claude terminal:
+ * - a tab with its own session id resumes that exact conversation when its
+ *   transcript exists and otherwise creates it with `--session-id`, so the
+ *   tab never shares a conversation with sibling tabs;
+ * - a tab without an id keeps the shared "continue the latest" behavior.
+ */
+export async function resolveClaudeSessionArgs(
+  options: { workDir?: string; sessionId?: string | null; resumeLastSession: boolean },
+  probe: ClaudeContinueProbe,
+): Promise<ClaudeSessionArgs> {
+  const sessionId = isClaudeSessionId(options.sessionId) ? options.sessionId : null;
+  if (sessionId) {
+    if (!isLocalWorkDir(options.workDir)) return { kind: 'new', sessionId };
+    try {
+      const home = await probe.getHomeDir();
+      const entries = await probe.readDirectory(claudeProjectSessionDir(home, options.workDir));
+      return hasClaudeSessionFile(entries, sessionId) ? { kind: 'resume', sessionId } : { kind: 'new', sessionId };
+    } catch {
+      return { kind: 'new', sessionId };
+    }
+  }
+  if (!options.resumeLastSession) return { kind: 'none' };
+  return (await shouldContinueClaudeSession(options.workDir, probe)) ? { kind: 'continue' } : { kind: 'none' };
+}
+
+export function claudeSessionArgsToFlags(args: ClaudeSessionArgs): string {
+  switch (args.kind) {
+    case 'resume': return ` --resume ${args.sessionId}`;
+    case 'new': return ` --session-id ${args.sessionId}`;
+    case 'continue': return ' --continue';
+    default: return '';
+  }
+}
