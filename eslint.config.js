@@ -20,6 +20,7 @@ export default defineConfig([
     'system_prompts_leaks',
     'opencut',
     'src-tauri/target',
+    'src-tauri/vendor',
   ]),
   {
     files: ['**/*.{ts,tsx}'],

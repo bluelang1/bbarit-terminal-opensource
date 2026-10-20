@@ -877,8 +877,8 @@ pub(crate) fn upgrade_allowed(
         .to_ascii_lowercase();
     let name = if let Some(rest) = host.strip_prefix('[') {
         match rest.split_once(']') {
-            Some((ip, _)) => format!("[{ip}]"),
-            None => return Err("malformed Host header"),
+            Some((ip, tail)) if tail.is_empty() || tail.starts_with(':') => format!("[{ip}]"),
+            _ => return Err("malformed Host header"),
         }
     } else {
         host.rsplit_once(':').map(|(n, _)| n.to_string()).unwrap_or(host.clone())
@@ -928,5 +928,6 @@ mod upgrade_guard_tests {
         assert_eq!(upgrade_allowed(&headers(&[("host", "127.0.0.1.evil.example")])), Err("Host is not loopback"));
         assert_eq!(upgrade_allowed(&headers(&[])), Err("missing Host header"));
         assert!(upgrade_allowed(&headers(&[("host", "[::1")])).is_err());
+        assert!(upgrade_allowed(&headers(&[("host", "[::1]evil.example:9223")])).is_err());
     }
 }

@@ -99,6 +99,8 @@ jobs:
             bbarit-agent
       - name: Test the embedded agent
         run: cargo test --manifest-path bbarit-agent/Cargo.toml --locked
+      - name: Test the vendored mcp-bridge plugin guard
+        run: cargo test -p tauri-plugin-mcp-bridge --lib --manifest-path src-tauri/Cargo.toml --locked
       - name: Check the Tauri host crate
         # Plain `cargo check` runs without the `custom-protocol` feature, so the
         # Tauri codegen stays in dev mode and does not require ../dist to exist.

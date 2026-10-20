@@ -50,7 +50,9 @@ export async function fetchProductNotices(productCode = PRODUCT_CODE): Promise<P
   // VITE_BBARIT_NOTICES_URL=off (or empty) disables the feed: no request, no modal.
   if (!PRODUCT_NOTICES_URL) return []
   try {
-    const url = `${PRODUCT_NOTICES_URL}?product_code=${encodeURIComponent(productCode)}`
+    const target = new URL(PRODUCT_NOTICES_URL)
+    target.searchParams.set('product_code', productCode)
+    const url = target.toString()
     const readJson = async () => {
       try {
         const res = await fetch(url, {

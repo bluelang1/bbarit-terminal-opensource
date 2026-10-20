@@ -1338,9 +1338,6 @@ fn resolve_project_trusted(
     project_resources_detected: bool,
     default_project_trust: Option<&str>,
 ) -> Result<bool> {
-    if !project_resources_detected {
-        return Ok(true);
-    }
     if cli.no_approve {
         return Ok(false);
     }
@@ -1351,6 +1348,9 @@ fn resolve_project_trusted(
     let stored = read_project_trust_decision(user_app_dir, cwd)?;
     if stored == Some(false) {
         return Ok(false);
+    }
+    if !project_resources_detected {
+        return Ok(true);
     }
     if cli.approve {
         return Ok(true);

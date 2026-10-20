@@ -98,7 +98,7 @@ Cargo metadata 성공은 네이티브 컴파일·링크·실행 성공을 의미
 | --- | --- | --- |
 | `VITE_BBARIT_API_BASE_URL` | `https://bbarit.com` | Thread API·공지·라운지·설치 스크립트의 기준 주소 |
 | `VITE_BBARIT_NOTICES_URL` | `<기준 주소>/api/products/notices` | 제품 공지 피드. `off` 또는 빈 값이면 요청하지 않음 |
-| `VITE_BBARIT_LOUNGE_WS_URL` | `wss://bbarit.com/api/lounge/ws` | 라운지 웹소켓 (`~/.config/octo/.env`의 `BBARIT_LOUNGE_URL`이 실행 시 우선) |
+| `VITE_BBARIT_LOUNGE_WS_URL` | 기준 주소에서 파생 (`wss://bbarit.com/api/lounge/ws`) | 라운지 웹소켓 (`~/.config/octo/.env`의 `BBARIT_LOUNGE_URL`이 실행 시 우선) |
 | `VITE_BBARIT_AGENT_INSTALL_URL` | `<기준 주소>/agent/install.sh` | `bbarit-oss` 에이전트 미설치 안내에 쓰는 설치 스크립트 |
 | `VITE_BBARIT_RELEASE_REPO_MAC` | `bluelang1/bbarit-terminal-opensource` | 툴바 GitHub 링크·릴리즈 페이지 (macOS) |
 | `VITE_BBARIT_RELEASE_REPO_WIN` | `bluelang1/bbarit-terminal-opensource` | 릴리즈 페이지 (Windows) |
