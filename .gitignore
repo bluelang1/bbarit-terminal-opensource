@@ -36,3 +36,6 @@ output/
 .idea/
 src-tauri/gen/
 src-tauri/vendor/*/Cargo.lock
+
+# Fork release output (scripts/fork-release-manifest.mjs)
+release-out/

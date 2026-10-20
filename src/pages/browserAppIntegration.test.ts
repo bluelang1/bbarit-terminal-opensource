@@ -410,8 +410,9 @@ describe('BBARIT Browser app integration', () => {
     expect(browserAgentVerify).toContain('checkGeneratedReport(out, skipBuild)');
     expect(pkg.scripts['tauri:dev']).toBe('node scripts/tauri-opensource.mjs dev');
     expect(pkg.scripts['tauri:build']).toBe('node scripts/tauri-opensource.mjs build');
-    expect(sourceWrapper).toContain("'--config', 'src-tauri/tauri.opensource.conf.json'");
-    expect(sourceWrapper).toContain('env: sourceBuildEnvironment(process.env)');
+    expect(sourceWrapper).toContain("SOURCE_CONFIG = 'src-tauri/tauri.opensource.conf.json'");
+    expect(sourceWrapper).toContain("FORK_RELEASE_CONFIG = 'src-tauri/tauri.fork.conf.json'");
+    expect(sourceWrapper).toContain('env: sourceBuildEnvironment(process.env, process.platform, { forkRelease })');
     expect(sourceTauri.identifier).toBe('com.bbarit.terminal.source');
     expect(sourceTauri.plugins.updater.endpoints).toEqual([]);
     expect(sourceTauri.bundle.createUpdaterArtifacts).toBe(false);

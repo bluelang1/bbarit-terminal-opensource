@@ -1,7 +1,7 @@
 {
   "name": "octo-ui",
   "private": true,
-  "version": "1.1.50",
+  "version": "1.1.51",
   "type": "module",
   "scripts": {
     "dev": "node scripts/vite-dev.mjs",
@@ -21,6 +21,8 @@
     "tauri": "node scripts/tauri-opensource.mjs",
     "tauri:dev": "node scripts/tauri-opensource.mjs dev",
     "tauri:build": "node scripts/tauri-opensource.mjs build",
+    "tauri:build:fork": "node scripts/tauri-opensource.mjs build --fork-release",
+    "release:fork:manifest": "node scripts/fork-release-manifest.mjs",
     "browser-agent:verify": "node scripts/browser-agent-verify.mjs",
     "browser-agent:report-check": "node scripts/browser-agent-report-check.mjs",
     "browser-agent:report-check:self-test": "node scripts/browser-agent-report-check-selftest.mjs",
@@ -61,7 +63,7 @@
     "office:project": "node scripts/office-edit.mjs project:create",
     "office:cli-smoke": "node scripts/office-edit-cli-smoke.mjs",
     "ctl": "node scripts/bbarit-ctl.mjs",
-    "test:source-build": "node --test tests/tauri-opensource.test.mjs"
+    "test:source-build": "node --test tests/tauri-opensource.test.mjs tests/fork-release-manifest.test.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.0",
