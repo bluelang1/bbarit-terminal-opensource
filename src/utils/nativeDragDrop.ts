@@ -1,4 +1,4 @@
-import { listen, TauriEvent, type UnlistenFn } from '@tauri-apps/api/event';
+import { listen, TauriEvent, type EventTarget as TauriEventTarget, type UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 
 export type NativeDragDropPayload =
@@ -9,22 +9,39 @@ export type NativeDragDropPayload =
 
 /**
  * Native OS drag-drop for this webview, independent of which target the
- * runtime emits to. tauri-runtime-wry sends the window's content webview
- * events as WebviewEvent (webview target) when the `unstable` feature is on
- * (src-tauri/Cargo.toml) and as a synthesized window event otherwise, which
- * lands on the Window target when child webviews exist. A plain label target
- * ("AnyLabel") matches all of these, so Finder/Explorer drops keep arriving
- * if the feature set or child webviews change. Measured in the app: the
- * Window-target listener (`getCurrentWindow().onDragDropEvent`) never fired.
+ * runtime emits to. With the `unstable` Cargo feature (src-tauri/Cargo.toml)
+ * tauri-runtime-wry sends the content webview's events as WebviewEvent, which
+ * only a listener with target {kind:'Webview'} receives; without it the event
+ * is a synthesized window event that reaches a {kind:'Window'} listener.
+ * Measured in the app (tauri 2.10.3): `getCurrentWindow().onDragDropEvent`
+ * never fired, and a plain label-string target ("AnyLabel") did not match
+ * either — only the explicit Webview target and an untargeted listener did.
+ * Both explicit targets are registered; if a runtime ever delivers one event
+ * to both, `dedupe` drops the second copy.
  */
 export async function listenNativeDragDrop(handler: (payload: NativeDragDropPayload) => void): Promise<UnlistenFn> {
-  const target = getCurrentWebview().label;
-  const options = { target };
-  const unlisteners = await Promise.all([
-    listen<{ paths: string[]; position: { x: number; y: number } }>(TauriEvent.DRAG_ENTER, (e) => handler({ type: 'enter', ...e.payload }), options),
-    listen<{ position: { x: number; y: number } }>(TauriEvent.DRAG_OVER, (e) => handler({ type: 'over', ...e.payload }), options),
-    listen<{ paths: string[]; position: { x: number; y: number } }>(TauriEvent.DRAG_DROP, (e) => handler({ type: 'drop', ...e.payload }), options),
-    listen<null>(TauriEvent.DRAG_LEAVE, () => handler({ type: 'leave' }), options),
-  ]);
+  const label = getCurrentWebview().label;
+  const deliver = dedupe(handler);
+  const targets: TauriEventTarget[] = [{ kind: 'Webview', label }, { kind: 'Window', label }];
+  const unlisteners = await Promise.all(targets.flatMap((target) => [
+    listen<{ paths: string[]; position: { x: number; y: number } }>(TauriEvent.DRAG_ENTER, (e) => deliver({ type: 'enter', ...e.payload }), { target }),
+    listen<{ position: { x: number; y: number } }>(TauriEvent.DRAG_OVER, (e) => deliver({ type: 'over', ...e.payload }), { target }),
+    listen<{ paths: string[]; position: { x: number; y: number } }>(TauriEvent.DRAG_DROP, (e) => deliver({ type: 'drop', ...e.payload }), { target }),
+    listen<null>(TauriEvent.DRAG_LEAVE, () => deliver({ type: 'leave' }), { target }),
+  ]));
   return () => { for (const unlisten of unlisteners) unlisten(); };
+}
+
+/** Collapse an identical payload delivered twice within a few milliseconds. */
+export function dedupe(handler: (payload: NativeDragDropPayload) => void, windowMs = 30, now: () => number = () => Date.now()) {
+  let lastKey = '';
+  let lastAt = 0;
+  return (payload: NativeDragDropPayload) => {
+    const key = JSON.stringify(payload);
+    const at = now();
+    if (key === lastKey && at - lastAt <= windowMs) return;
+    lastKey = key;
+    lastAt = at;
+    handler(payload);
+  };
 }

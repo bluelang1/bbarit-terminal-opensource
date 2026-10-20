@@ -149,6 +149,8 @@ import { countTextLines, countUtf8Bytes, extractExternalDropPathsFromDataTransfe
 import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from './utils/fileTreeInteractions';
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
 import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
+import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from './projectDragGhost';
+import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } from './projectDropTargets';
 import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
@@ -2553,14 +2555,12 @@ function App() {
   const [dragTerminalId, setDragTerminalId] = useState<string | null>(null);
   const [dragOverTerminalId, setDragOverTerminalId] = useState<string | null>(null);
   const [terminalClickFlashId, setTerminalClickFlashId] = useState<string | null>(null);
-  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement } | null>(null);
+  const projectTabDragRef = useRef<{ projectId: string; startX: number; startY: number; dragging: boolean; label: string; icon: string; element?: HTMLElement; ghost?: DragGhost; targets?: DropTargetRect[] } | null>(null);
   const terminalClickFlashFrameRef = useRef<number | null>(null);
   const terminalClickFlashTimerRef = useRef<number | null>(null);
   const suppressProjectTabClickRef = useRef(false);
   const projectTabCleanupRef = useRef<(() => void) | null>(null);
-  const projectDragPreviewRef = useRef<HTMLDivElement | null>(null);
   const projectReorderFlipRectsRef = useRef<Map<string, DOMRect> | null>(null);
-  const [projectDragPreview, setProjectDragPreview] = useState<{ label: string; icon: string } | null>(null);
   const [projectDropIndicator, setProjectDropIndicator] = useState<{ projectId: string; side: 'before' | 'after' } | null>(null);
   // Row size (+gap) of the row being dragged; neighbours slide by this much to open the drop slot.
   const [projectDragShift, setProjectDragShift] = useState<ProjectDragShift | null>(null);
@@ -7713,6 +7713,10 @@ Office project scaffold created by BBARIT Terminal.
 
       const previousRect = previousRects.get(projectId);
       if (!previousRect) return;
+      // A row hidden while the drag ghost lands on it must not FLIP: the ghost
+      // reads this row's rect as its destination and the FLIP transform would
+      // send the ghost back to the old slot.
+      if (element.style.visibility === 'hidden') return;
 
       const nextRect = element.getBoundingClientRect();
       const dx = previousRect.left - nextRect.left;
@@ -7767,21 +7771,24 @@ Office project scaffold created by BBARIT Terminal.
     let targetGroupId: string | undefined;
     if (typeof clientX === 'number' && typeof clientY === 'number') {
       const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-      const dropTarget = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
-      dropProjectId = dropTarget?.dataset.projectDropId ?? null;
+      // Rows are translated while dragging, so resolve the row from the rects
+      // captured at drag start (see projectDropTargets.ts); group zones do not move.
+      const dropTarget = drag.targets
+        ? findDropTarget(drag.targets, clientX, clientY)
+        : (() => {
+          const el = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { id: el.dataset.projectDropId || '', orientation: el.dataset.projectDropOrientation === 'vertical' ? 'vertical' as const : 'horizontal' as const, left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+        })();
+      dropProjectId = dropTarget?.id ?? null;
       const groupTarget = target?.closest<HTMLElement>('[data-group-drop-id]') ?? null;
       if (groupTarget) {
         hasGroupTarget = true;
         const gid = groupTarget.dataset.groupDropId || '';
         targetGroupId = gid === '__root__' ? undefined : gid;
       }
-      if (dropTarget) {
-        const rect = dropTarget.getBoundingClientRect();
-        const orientation = dropTarget.dataset.projectDropOrientation === 'vertical' ? 'vertical' : 'horizontal';
-        dropSide = orientation === 'vertical'
-          ? (clientY < rect.top + rect.height / 2 ? 'before' : 'after')
-          : (clientX < rect.left + rect.width / 2 ? 'before' : 'after');
-      }
+      if (dropTarget) dropSide = dropSideFor(dropTarget, clientX, clientY);
     } else {
       dropProjectId = dragOverProjectId;
     }
@@ -7802,11 +7809,12 @@ Office project scaffold created by BBARIT Terminal.
 
     suppressProjectTabClickRef.current = drag.dragging;
     projectTabDragRef.current = null;
+    document.body.classList.remove('project-dragging');
     setDragOverProjectId(null);
     setDragOverGroupId(null);
     setProjectDropIndicator(null);
-    setProjectDragPreview(null);
-    if (drag.dragging && !willReorder && !willMoveGroup) {
+    const cancelled = drag.dragging && !willReorder && !willMoveGroup;
+    if (cancelled) {
       // Cancelled drag: clearing the indicator removes the slide transforms
       // while `.project-shift` is still present, so the rows glide back instead
       // of snapping; the class and dim go away once that transition is done.
@@ -7819,9 +7827,26 @@ Office project scaffold created by BBARIT Terminal.
       setDragProjectId(null);
       setProjectDragShift(null);
     }
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = '-9999px';
-      projectDragPreviewRef.current.style.top = '-9999px';
+    // Land the ghost on the row's final position (after React commits the new
+    // order) and keep the real row invisible until the ghost arrives, so the
+    // row appears to be carried into its slot instead of jumping there.
+    const ghost = drag.ghost;
+    if (ghost) {
+      const projectId = drag.projectId;
+      const source = drag.element;
+      if (source) source.style.visibility = 'hidden';
+      // React flushes the reorder synchronously for this discrete event, so a
+      // macrotask sees the committed DOM. (Not requestAnimationFrame: it is
+      // paused while the window is hidden and the ghost would never land.)
+      window.setTimeout(() => {
+        const target = (source?.isConnected ? source : null)
+          || document.querySelector<HTMLElement>(`[data-project-tab-id="${CSS.escape(projectId)}"]`);
+        if (target && target !== source) target.style.visibility = 'hidden';
+        void landDragGhost(ghost, target).then(() => {
+          if (source) source.style.visibility = '';
+          if (target) target.style.visibility = '';
+        });
+      }, 0);
     }
     if (projectTabCleanupRef.current) {
       projectTabCleanupRef.current();
@@ -7840,25 +7865,29 @@ Office project scaffold created by BBARIT Terminal.
     if (!drag.dragging) {
       drag.dragging = true;
       setDragProjectId(drag.projectId);
-      setProjectDragPreview({ label: drag.label, icon: drag.icon });
       const origin = drag.element?.isConnected
         ? drag.element
         : (document.elementFromPoint(drag.startX, drag.startY) as HTMLElement | null)?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
       setProjectDragShift(origin ? measureProjectDragShift(origin) : null);
+      // Snapshot the row rects now, before neighbours start sliding; all later
+      // hit-tests use it because the live layout no longer matches the pointer.
+      drag.targets = captureDropTargets();
+      if (origin) {
+        drag.element = origin;
+        drag.ghost = createDragGhost(origin, drag.startX, drag.startY);
+      }
+      document.body.classList.add('project-dragging');
     }
+    if (drag.ghost) moveDragGhost(drag.ghost, clientX, clientY);
 
     const target = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
-    const dropTarget = target?.closest<HTMLElement>('[data-project-drop-id]') ?? null;
-    const overProjectId = dropTarget?.dataset.projectDropId ?? null;
+    const dropTarget = drag.targets ? findDropTarget(drag.targets, clientX, clientY) : null;
+    const overProjectId = dropTarget?.id ?? null;
     setDragOverProjectId(overProjectId && overProjectId !== drag.projectId ? overProjectId : null);
     const groupOver = target?.closest<HTMLElement>('[data-group-drop-id]')?.dataset.groupDropId ?? null;
     setDragOverGroupId(groupOver && groupOver !== '__root__' ? groupOver : null);
     if (dropTarget && overProjectId && overProjectId !== drag.projectId) {
-      const rect = dropTarget.getBoundingClientRect();
-      const orientation = dropTarget.dataset.projectDropOrientation === 'vertical' ? 'vertical' : 'horizontal';
-      const side: 'before' | 'after' = orientation === 'vertical'
-        ? (clientY < rect.top + rect.height / 2 ? 'before' : 'after')
-        : (clientX < rect.left + rect.width / 2 ? 'before' : 'after');
+      const side = dropSideFor(dropTarget, clientX, clientY);
       setProjectDropIndicator((prev) => (
         prev?.projectId === overProjectId && prev.side === side
           ? prev
@@ -7866,10 +7895,6 @@ Office project scaffold created by BBARIT Terminal.
       ));
     } else {
       setProjectDropIndicator((prev) => (prev ? null : prev));
-    }
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = `${clientX + 14}px`;
-      projectDragPreviewRef.current.style.top = `${clientY + 14}px`;
     }
   }, []);
 
@@ -7886,6 +7911,14 @@ Office project scaffold created by BBARIT Terminal.
     const target = event.target as HTMLElement | null;
     const interactiveAncestor = target?.closest<HTMLElement>('input, button, textarea, select, a, [data-project-tab-ignore-drag="true"]') ?? null;
     if (interactiveAncestor && interactiveAncestor !== event.currentTarget) return;
+    // A drag whose mouseup was lost (e.g. released outside the window) must be
+    // settled first, otherwise its ghost would be orphaned in <body>. It is
+    // settled as a cancel: a plain click must never commit a stale reorder.
+    const stale = projectTabDragRef.current;
+    if (stale) {
+      stale.dragging = false;
+      finishProjectTabDrag();
+    }
 
     projectTabDragRef.current = {
       projectId,
@@ -7896,13 +7929,11 @@ Office project scaffold created by BBARIT Terminal.
       icon: projects.find((p) => p.id === projectId)?.icon || '•',
       element: event.currentTarget,
     };
+    // Text selection is prevented by CSS (user-select: none on rows and on
+    // body.project-dragging); preventDefault here would also block the blur
+    // that commits an open group-rename input.
     suppressProjectTabClickRef.current = false;
     setProjectDropIndicator(null);
-    setProjectDragPreview(null);
-    if (projectDragPreviewRef.current) {
-      projectDragPreviewRef.current.style.left = '-9999px';
-      projectDragPreviewRef.current.style.top = '-9999px';
-    }
 
     if (projectTabCleanupRef.current) {
       projectTabCleanupRef.current();
@@ -7918,15 +7949,26 @@ Office project scaffold created by BBARIT Terminal.
     const onWindowBlur = () => {
       finishProjectTabDrag();
     };
+    // The drop-target snapshot goes stale when the list scrolls or the window
+    // resizes mid-drag; captureDropTargets undoes the preview translate, so it
+    // can be re-taken at any time.
+    const onLayoutShift = () => {
+      const drag = projectTabDragRef.current;
+      if (drag?.dragging && drag.targets) drag.targets = captureDropTargets();
+    };
 
     document.addEventListener('mousemove', onMouseMove);
     document.addEventListener('mouseup', onMouseUp);
     window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('scroll', onLayoutShift, true);
+    window.addEventListener('resize', onLayoutShift);
 
     projectTabCleanupRef.current = () => {
       document.removeEventListener('mousemove', onMouseMove);
       document.removeEventListener('mouseup', onMouseUp);
       window.removeEventListener('blur', onWindowBlur);
+      document.removeEventListener('scroll', onLayoutShift, true);
+      window.removeEventListener('resize', onLayoutShift);
     };
   }, [finishProjectTabDrag, handleProjectTabPointerMove, projects]);
 
@@ -7999,7 +8041,7 @@ Office project scaffold created by BBARIT Terminal.
         onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
         onMouseEnter={() => {
           const drag = projectTabDragRef.current;
-          if (!drag?.dragging) return;
+          if (!drag?.dragging || drag.targets) return;
           setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
         }}
         onContextMenu={(e) => {
@@ -16175,7 +16217,7 @@ Office project scaffold created by BBARIT Terminal.
             onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
             onMouseEnter={() => {
               const drag = projectTabDragRef.current;
-              if (!drag?.dragging) return;
+              if (!drag?.dragging || drag.targets) return;
               setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
             }}
             onContextMenu={(e) => {
@@ -16296,17 +16338,6 @@ Office project scaffold created by BBARIT Terminal.
           </div>
         )}
           </>
-        )}
-
-        {projectDragPreview && (
-          <div
-            ref={projectDragPreviewRef}
-            className="project-drag-preview"
-            style={{ left: -9999, top: -9999 }}
-          >
-            <span className="project-drag-preview-icon">{projectDragPreview.icon}</span>
-            <span>{projectDragPreview.label}</span>
-          </div>
         )}
 
         {/* Project tab context menu */}
@@ -19544,7 +19575,7 @@ Office project scaffold created by BBARIT Terminal.
                         onMouseDown={(e) => handleProjectTabMouseDown(project.id, e)}
                         onMouseEnter={() => {
                           const drag = projectTabDragRef.current;
-                          if (!drag?.dragging) return;
+                          if (!drag?.dragging || drag.targets) return;
                           setDragOverProjectId(project.id !== drag.projectId ? project.id : null);
                         }}
                         onContextMenu={(e) => {
