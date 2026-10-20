@@ -47,7 +47,10 @@ const DEV_BASE_PORT = Number(process.env.TAURI_DEV_BASE_PORT || readArg('--base-
 // tauri dev 앱이 mcp-bridge 를 열고 있으면 isDebug 점수(100)만으로는 남의 앱이
 // 설치본(release, 0점)을 제친다 — 실측: 스마트쿠팡 dev(9250)가 설치본(9223)을
 // 가로채 브라우저 CLI 가 무한 auto-opening 루프에 빠짐(2026-07-15).
-const EXPECTED_APP_ID = process.env.BBARIT_BRIDGE_APP_ID || 'com.octo.terminal';
+// The fork build (tauri.opensource.conf.json) is the default; the original
+// author-signed app is still accepted. BBARIT_BRIDGE_APP_ID restricts to one.
+const DEFAULT_APP_IDS = ['com.bbarit.terminal.source', 'com.octo.terminal'];
+const EXPECTED_APP_IDS = process.env.BBARIT_BRIDGE_APP_ID ? [process.env.BBARIT_BRIDGE_APP_ID] : DEFAULT_APP_IDS;
 const outputDir = resolve(readArg('--out', process.env.TAURI_DEV_SCREEN_DIR || '.octo-tmp/tauri-dev-screen'));
 const timeoutMs = Number(readArg('--timeout-ms', '120000'));
 const windowLabel = readArg('--window', 'main');
@@ -135,7 +138,7 @@ async function findBridgePort() {
     if (!probe) continue;
     // BBARIT 가 아닌 앱(identifier 불일치·확인 불가)은 제외 — 후보가 없으면
     // 호출측 재시도 루프가 다시 스캔하므로 시작 중 일시 실패는 자연 회복된다.
-    if (probe.identifier !== EXPECTED_APP_ID) continue;
+    if (!EXPECTED_APP_IDS.includes(probe.identifier)) continue;
     // 설치본(release, isDebug=false)에는 기본적으로 붙지 않는다 — dev:screen 은 개발 앱만 제어한다.
     // 단, 내장 에이전트가 *자기* 설치본 앱을 제어할 때는 BBARIT_BRIDGE_ALLOW_RELEASE=1 로 허용한다
     // (앱이 에이전트 실행 시 TAURI_DEV_BASE_PORT=9223 과 함께 넘긴다). 명시 제어는 --port 로도 가능.
