@@ -1,7 +1,7 @@
 [package]
 name = "octo-ui"
 default-run = "octo-ui"
-version = "1.1.51"
+version = "1.1.52"
 description = "Octo IDE - AI Coding Assistant"
 authors = ["you"]
 edition = "2021"
