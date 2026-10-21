@@ -90,7 +90,7 @@ node scripts/fork-release-manifest.mjs --tag v1.1.51 --repo bluelang1/bbarit-ter
 릴리스 절차는 다음과 같습니다.
 
 1. `node scripts/bump-version.mjs 1.1.52`로 버전을 올리고, `src-tauri`에서 `cargo update -p octo-ui --offline`으로 Cargo.lock도 맞춘 뒤 머지합니다(아니면 CI의 `--locked` 검사가 실패합니다). 업데이터는 현재 버전보다 큰 버전만 설치합니다.
-2. `git tag v1.1.52 && git push origin v1.1.52`. [`fork-release.yml`](.github/workflows/fork-release.yml) 워크플로가 macOS(Apple Silicon)에서 빌드해 **초안(draft) 릴리스**에 산출물과 `latest.json`을 올립니다. 저장소 시크릿 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다.
+2. `gh workflow run fork-release.yml --ref main -f tag=v1.1.52`. [`fork-release.yml`](.github/workflows/fork-release.yml) 워크플로가 macOS(Apple Silicon)에서 빌드해 **초안(draft) 릴리스**에 산출물과 `latest.json`을 올립니다. 태그는 직접 만들지 않습니다. 초안을 **게시하는 순간** GitHub가 빌드한 커밋에 태그를 만듭니다. 저장소 시크릿 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다. main에서 실행하는 이유는 Rust 캐시가 `main`에 남아 두 번째 릴리스부터 빌드가 짧아지기 때문입니다(캐시는 ref 단위로 격리되므로 첫 실행은 콜드).
 3. GitHub에서 초안을 검토하고 게시(publish)합니다. 게시된 최신 릴리스만 `releases/latest/download/latest.json`으로 제공되므로, 게시 전에는 설치된 앱이 업데이트를 보지 못합니다.
 4. 포크 빌드를 설치한 앱은 버전 배지에서 새 버전을 감지하고, 업데이트 버튼을 눌렀을 때만 내려받아 설치·재시작합니다.
 
