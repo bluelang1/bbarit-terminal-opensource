@@ -592,6 +592,11 @@ const buildSshStartupCommand = async (workDir: string): Promise<string | null> =
 const normalizeNewlines = (text: string) => text.replace(/\r?\n/g, '\r\n');
 const normalizeInputNewlines = (text: string) => text.replace(/\r?\n/g, '\r');
 const submitDroppedPaths = (paths: string[]) => `${paths.map(shellQuotePath).join(' ')}\r`;
+// Drag-and-drop only inserts the quoted paths (plus a trailing space) and never
+// presses Enter, like macOS Terminal: the user usually adds a prompt next to
+// the file. Sending `path\r` in one write made agent TUIs submit sometimes and
+// not other times (depending on whether they took the burst as a paste).
+const insertDroppedPaths = (paths: string[]) => `${paths.map(shellQuotePath).join(' ')} `;
 const isImagePath = (path: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(path.trim().replace(/^file:\/\//i, ''));
 const normalizeMaybeFileUrlPath = (path: string) => {
   const trimmed = path.trim();
@@ -1662,7 +1667,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (!detail || detail.terminalId !== terminalId) return;
       const paths = Array.isArray(detail.paths) ? detail.paths.filter(Boolean) : [];
       if (!paths.length) return;
-      sendToPty(submitDroppedPaths(paths));
+      sendToPty(insertDroppedPaths(paths));
     };
     window.addEventListener('octo-terminal-os-drop', onOsDrop as EventListener);
     return () => window.removeEventListener('octo-terminal-os-drop', onOsDrop as EventListener);
@@ -6065,13 +6070,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             try {
               const paths: string[] = JSON.parse(octoData);
               const clean = paths.filter(Boolean);
-              if (clean.length) sendToPty(submitDroppedPaths(clean));
+              if (clean.length) sendToPty(insertDroppedPaths(clean));
             } catch { /* ignore */ }
             return;
           }
           const textPath = e.dataTransfer.getData('text/plain');
           if (textPath && (textPath.startsWith('/') || /^[a-zA-Z]:\\/.test(textPath))) {
-            sendToPty(submitDroppedPaths([textPath]));
+            sendToPty(insertDroppedPaths([textPath]));
             return;
           }
           // 2. External file drop: try text/uri-list first (file:// URIs from Finder/Explorer)
@@ -6085,7 +6090,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               })
               .filter(Boolean);
             if (paths.length > 0) {
-              sendToPty(submitDroppedPaths(paths));
+              sendToPty(insertDroppedPaths(paths));
               return;
             }
           }
@@ -6126,7 +6131,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
                 if (isBbaritAgentCli(cliType) && rawPaths.length === parts.length && rawPaths.every(isImagePath)) {
                   sendToPty(rawPaths.map(bbaritImageToken).join(''));
                 } else {
-                  sendToPty(`${parts.join(' ')}\r`);
+                  sendToPty(`${parts.join(' ')} `);
                 }
               }
             })();

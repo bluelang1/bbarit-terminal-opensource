@@ -157,6 +157,7 @@ import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard'
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
 const Pm2Panel = React.lazy(() => import('./pm2/Pm2Panel').then(m => ({ default: m.Pm2Panel })));
 const HubPanel = React.lazy(() => import('./pm2/HubPanel').then(m => ({ default: m.HubPanel })));
+const DashboardPanel = React.lazy(() => import('./dashboard/DashboardPanel').then(m => ({ default: m.DashboardPanel })));
 import type { KanbanTask } from './kanban/types';
 import { loadKanbanBoard, saveKanbanBoard, createTask, moveTask, updateTask } from './kanban/storage';
 
@@ -2466,8 +2467,8 @@ function App() {
     | null
   >(null);
 
-  type ToolbarButtonId = 'noteGraph' | 'planner' | 'kanban' | 'pm2' | 'hub' | 'mic' | 'settings' | 'menu' | 'github' | 'skills' | 'mcp' | 'database' | 'promptLibrary' | 'git' | 'browser' | 'agentPanel' | 'editors' | 'secretary';
-  const TOOLBAR_ALL: ToolbarButtonId[] = ['noteGraph', 'planner', 'kanban', 'pm2', 'hub', 'mic', 'settings', 'menu', 'github', 'skills', 'mcp', 'database', 'promptLibrary', 'git', 'editors', 'secretary'];
+  type ToolbarButtonId = 'noteGraph' | 'planner' | 'kanban' | 'pm2' | 'hub' | 'mic' | 'settings' | 'menu' | 'github' | 'skills' | 'mcp' | 'database' | 'promptLibrary' | 'git' | 'browser' | 'agentPanel' | 'editors' | 'secretary' | 'dashboard';
+  const TOOLBAR_ALL: ToolbarButtonId[] = ['noteGraph', 'planner', 'kanban', 'pm2', 'hub', 'mic', 'settings', 'menu', 'github', 'skills', 'mcp', 'database', 'promptLibrary', 'git', 'editors', 'secretary', 'dashboard'];
   const TOOLBAR_VISIBILITY_VERSION_KEY = 'octo-toolbar-visibility-version';
   const TOOLBAR_VISIBILITY_VERSION = '4';
   // 사용자 지시(2026-07-07): 모든 툴바 아이콘을 pin 없이 기본 전체 표시.
@@ -3023,6 +3024,7 @@ function App() {
   const [showGitPanel, setShowGitPanel] = useState(false);
   // 앱 내부 비서(웹챗 iframe) 오버레이. URL은 gateway_info로 lazy 로드.
   const [showSecretary, setShowSecretary] = useState(false);
+  const [showDashboard, setShowDashboard] = useState(false);
   const [secretaryUrl, setSecretaryUrl] = useState<string | null>(null);
   const [secretaryError, setSecretaryError] = useState<string | null>(null);
   const openSecretary = useCallback(async () => {
@@ -16829,6 +16831,7 @@ Office project scaffold created by BBARIT Terminal.
             </button>}
 
             {isToolbarVisible('secretary') && <button className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
+            {isToolbarVisible('dashboard') && <button className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드' : 'Agent Dashboard'}><LucideIcons.LayoutDashboard size={14} /></button>}
 
             <button className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
 
@@ -16885,6 +16888,7 @@ Office project scaffold created by BBARIT Terminal.
                     ['skills', 'Skills', <LucideIcons.Blocks key="sk" size={12} />, () => { void openToolWindow('skills'); }],
                     ['agentPanel', locale === 'ko' ? '빠릿 에이전트 패널' : 'BBARIT Agent Panel', <LucideIcons.BotMessageSquare key="ap" size={12} />, () => { void openToolWindow('agent'); }],
                     ['secretary', 'BBARIT Secretary', <LucideIcons.UserRound key="sec" size={12} />, () => { void openSecretary(); }],
+                    ['dashboard', locale === 'ko' ? '에이전트 대시보드' : 'Agent Dashboard', <LucideIcons.LayoutDashboard key="dsh" size={12} />, () => { setShowDashboard(true); }],
                     ['broker', locale === 'ko' ? '브로커 하네스' : 'Broker Harness', <OctoAntler key="bh" size={13} />, () => { void openHarnessWindow(); }],
                     ['mcp', 'MCP Server', <LucideIcons.ServerCog key="mp" size={12} />, () => { setShowMcpPanel(true); }],
                     ['database', 'Database', <Database key="dbi" size={12} />, () => { setShowDatabasePanel(true); }],
@@ -22318,6 +22322,17 @@ Office project scaffold created by BBARIT Terminal.
       </React.Suspense>
 
       {/* BBARIT Secretary — 앱 내부 비서 웹챗(gateway) iframe 오버레이 */}
+      {showDashboard && (
+        <React.Suspense fallback={null}>
+          <DashboardPanel
+            onClose={() => setShowDashboard(false)}
+            onOpenExternal={(url) => { void openExternalUrl(url); }}
+            accent={activeStyle.accent}
+            bg={activeStyle.bg}
+            text={activeStyle.text}
+          />
+        </React.Suspense>
+      )}
       {showSecretary && (
         <div
           className="secretary-overlay"

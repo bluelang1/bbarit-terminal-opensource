@@ -73,6 +73,8 @@ Build/test gotchas:
 - "Claude (new session)" tabs carry TerminalInstance.claudeSessionId (uuid) and
   launch `claude --session-id <id>` first, `--resume <id>` afterwards; plain
   Claude tabs keep the shared `--continue` behavior.
+- Terminal drops insert quoted paths + a space and never press Enter
+  (insertDroppedPaths in XTerminal.tsx); paste keeps its own submit rules.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
   CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
 
