@@ -156,6 +156,7 @@
     ".github/dependabot.yml",
     ".github/workflows/opensource-ci.yml",
     ".github/workflows/fork-release.yml",
+    ".github/release/notes-header.md",
     "src-tauri/vendor/tauri-plugin-mcp-bridge/LICENSE",
     "scripts/bump-version.mjs",
     "agent-browser-cli/package-lock.json"

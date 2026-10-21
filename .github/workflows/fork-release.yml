@@ -144,7 +144,9 @@ jobs:
           else
             # --target records the commit; GitHub creates the git tag there when
             # the draft is published.
+            # The install guide goes first; GitHub appends the generated PR list.
             gh release create "$RELEASE_TAG" release-out/* \
-              --draft --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
+              --draft --title "$RELEASE_TAG" --notes-file .github/release/notes-header.md --generate-notes \
+              --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
           echo "Draft release $RELEASE_TAG is ready; publish it to make it the updater's latest."
