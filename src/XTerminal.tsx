@@ -1667,11 +1667,16 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (!detail || detail.terminalId !== terminalId) return;
       const paths = Array.isArray(detail.paths) ? detail.paths.filter(Boolean) : [];
       if (!paths.length) return;
+      // The internal bbarit agent attaches images given as `@<path>` tokens.
+      if (isBbaritAgentCli(cliType) && paths.every(isImagePath)) {
+        sendToPty(paths.map(bbaritImageToken).join(''));
+        return;
+      }
       sendToPty(insertDroppedPaths(paths));
     };
     window.addEventListener('octo-terminal-os-drop', onOsDrop as EventListener);
     return () => window.removeEventListener('octo-terminal-os-drop', onOsDrop as EventListener);
-  }, [terminalId, sendToPty]);
+  }, [terminalId, sendToPty, cliType]);
 
   const activeOllamaPullModelRef = useRef<string | null>(null);
   const ollamaPullUnlistenRef = useRef<(() => void) | null>(null);

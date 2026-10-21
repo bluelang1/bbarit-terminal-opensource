@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from './dashboardUrl';
+import { DASHBOARD_SANDBOX, DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from './dashboardUrl';
 
 describe('dashboard url', () => {
   it('accepts http(s) URLs and fills in a missing scheme', () => {
@@ -23,5 +23,21 @@ describe('dashboard url', () => {
     expect(loadDashboardUrl(storage)).toBe('http://localhost:4000/');
     map.set('octo-dashboard-url', 'javascript:evil');
     expect(loadDashboardUrl(storage)).toBe(DEFAULT_DASHBOARD_URL);
+  });
+});
+
+describe('dashboard frame isolation', () => {
+  it('refuses to frame the app itself', () => {
+    expect(normalizeDashboardUrl('http://tauri.localhost/')).toBeNull();
+    expect(normalizeDashboardUrl('http://127.0.0.1:5175')).toBeNull();
+    expect(normalizeDashboardUrl('localhost:5175/#/x')).toBeNull();
+    expect(normalizeDashboardUrl('http://localhost:5176')).toBe('http://localhost:5176/');
+  });
+
+  it('never lets the frame navigate the app window or open popups', () => {
+    const flags = DASHBOARD_SANDBOX.split(/\s+/);
+    expect(flags).toContain('allow-scripts');
+    expect(flags.some((f) => f.startsWith('allow-top-navigation'))).toBe(false);
+    expect(flags.some((f) => f.startsWith('allow-popups'))).toBe(false);
   });
 });

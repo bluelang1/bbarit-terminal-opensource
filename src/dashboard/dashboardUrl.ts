@@ -5,6 +5,20 @@
 export const DASHBOARD_URL_KEY = 'octo-dashboard-url';
 export const DEFAULT_DASHBOARD_URL = 'http://localhost:3000';
 
+// Origins the app's own webview is served from (Windows release, dev server).
+const APP_ORIGINS = new Set([
+  'http://tauri.localhost', 'https://tauri.localhost',
+  'http://127.0.0.1:5175', 'http://localhost:5175',
+]);
+
+/**
+ * Sandbox for the framed dashboard. Scripts, its own origin storage, forms,
+ * dialogs and downloads work; navigating the app window (allow-top-navigation*)
+ * and opening popups are withheld, because the main webview injects Tauri IPC
+ * into any document it navigates to.
+ */
+export const DASHBOARD_SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-modals allow-downloads';
+
 export function normalizeDashboardUrl(raw: string): string | null {
   let value = String(raw || '').trim();
   if (!value) return null;
@@ -14,6 +28,9 @@ export function normalizeDashboardUrl(raw: string): string | null {
     const url = new URL(value);
     if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
     if (!url.hostname) return null;
+    // Never frame the app itself: a same-origin frame with allow-scripts +
+    // allow-same-origin could remove its own sandbox.
+    if (APP_ORIGINS.has(url.origin)) return null;
     return url.toString();
   } catch {
     return null;
