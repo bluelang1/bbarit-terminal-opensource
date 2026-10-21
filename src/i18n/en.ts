@@ -2991,6 +2991,7 @@ export const en = {
   'skills.priorityTitle': "Higher priority skills appear first",
   // i18n batch: misc2
   'terminal.clearInput': "Clear input",
+  'terminal.clearInputAll': 'Clear all input (every line)',
   'terminal.searchPlaceholder': "Search...",
   'terminal.ollamaNoModelSettings': "No model selected. Go to Settings → Agent → Ollama to configure.",
   'terminal.ollamaIntro': "Type your message and press Enter. Type /clear to reset, /model <name> to switch.",

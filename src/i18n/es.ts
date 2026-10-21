@@ -2935,6 +2935,7 @@ export const es: Record<TranslationKey, string> = {
   'skills.priorityTitle': "Las skills con mayor prioridad aparecen primero",
   // i18n batch: misc2
   'terminal.clearInput': "Borrar entrada",
+  'terminal.clearInputAll': 'Borrar toda la entrada (todas las líneas)',
   'terminal.searchPlaceholder': "Buscar...",
   'terminal.ollamaNoModelSettings': "Ningún modelo seleccionado. Ve a Ajustes → Agent → Ollama para configurarlo.",
   'terminal.ollamaIntro': "Escribe tu mensaje y pulsa Enter. /clear para reiniciar, /model <name> para cambiar.",
