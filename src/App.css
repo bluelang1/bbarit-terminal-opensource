@@ -11956,7 +11956,7 @@ textarea,
 .top-utils .tool-design::before     { -webkit-mask-image: url('/icons/glass/design.png'); mask-image: url('/icons/glass/design.png'); }
 .top-utils .tool-cowork::before     { -webkit-mask-image: url('/icons/glass/cowork.png'); mask-image: url('/icons/glass/cowork.png'); }
 .top-utils .tool-marketing::before  { -webkit-mask-image: url('/icons/glass/marketing.png'); mask-image: url('/icons/glass/marketing.png'); }
-.top-utils .tool-image::before      { -webkit-mask-image: url('/icons/glass/image.png'); mask-image: url('/icons/glass/image.png'); }
+.top-utils .tool-image::before      { -webkit-mask-image: url('/icons/glass/image.svg'); mask-image: url('/icons/glass/image.svg'); }
 .top-utils .tool-motion::before     { -webkit-mask-image: url('/icons/glass/motion.png?v=3'); mask-image: url('/icons/glass/motion.png?v=3'); }
 .top-utils .tool-browser::before    { -webkit-mask-image: url('/icons/glass/browser.png'); mask-image: url('/icons/glass/browser.png'); }
 .top-utils .tool-pm2::before        { -webkit-mask-image: url('/icons/glass/pm2.png'); mask-image: url('/icons/glass/pm2.png'); }
