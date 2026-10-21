@@ -10,20 +10,33 @@ name: Fork release
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the minisign private key file
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (omit the secret if the key has none)
 
+# Trigger: `gh workflow run fork-release.yml --ref main -f tag=vX.Y.Z` after the
+# version bump is merged. Running on main keeps the Rust cache on
+# refs/heads/main, which every later run can restore; a run on a tag ref saves
+# its cache under refs/tags/vX.Y.Z where no other run can see it (each tag
+# build was a ~35 minute cold build for that reason; the first run on main is
+# still cold). There is deliberately no `push: tags` trigger: a draft release
+# carries only a target commit, GitHub creates the git tag when the draft is
+# published, and that tag push would start a second, cold, failing run.
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, must equal v<app version> (e.g. v1.1.54)
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: fork-release-${{ github.ref }}
+  group: fork-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   macos-arm64:
@@ -31,13 +44,53 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
+      - name: Require main
+        # Releases are cut from main only (that is also where the cache lives);
+        # fail loudly instead of silently skipping when dispatched elsewhere.
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Run this workflow with --ref main (got $GITHUB_REF)."
+          exit 1
       - uses: actions/checkout@v5
+      - name: Check the release tag before the long build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 1) The tag must be v<app version> of this commit (same rule as the
+          #    manifest step, but checked in seconds instead of after the build).
+          version="$(node -p "const f=require('fs'); const r=p=>JSON.parse(f.readFileSync(p,'utf8')); (r('src-tauri/tauri.macos.conf.json').version || r('src-tauri/tauri.conf.json').version)")"
+          if [ "$RELEASE_TAG" != "v$version" ]; then
+            echo "::error::Tag '$RELEASE_TAG' does not match the app version $version on this commit. Merge the version bump first or fix the tag input."
+            exit 1
+          fi
+          # 2) A git tag that already exists must point at the commit being built
+          #    (annotated tags: compare the peeled ^{} commit, not the tag object).
+          peeled="$(git ls-remote origin "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" | awk '$2 ~ /\^\{\}$/ {p=$1} $2 !~ /\^\{\}$/ {c=$1} END {print (p ? p : c)}')"
+          if [ -n "$peeled" ] && [ "$peeled" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag $RELEASE_TAG already points at $peeled, not at $GITHUB_SHA. Bump the version or delete the tag."
+            exit 1
+          fi
+          # 3) A published release is final; a draft from an earlier run may only
+          #    be rebuilt from the same commit, or its tag would land elsewhere.
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,targetCommitish > release.json 2>/dev/null; then
+            if [ "$(node -p "require('./release.json').isDraft")" != "true" ]; then
+              echo "::error::Release $RELEASE_TAG is already published; bump the version instead."
+              exit 1
+            fi
+            target="$(node -p "require('./release.json').targetCommitish")"
+            if [ "$target" != "$GITHUB_SHA" ]; then
+              echo "::error::Draft $RELEASE_TAG targets $target, not $GITHUB_SHA. Delete the draft and run again."
+              exit 1
+            fi
+          fi
+          rm -f release.json
+          echo "Building $RELEASE_TAG from $GITHUB_SHA on $GITHUB_REF_NAME"
       - name: Require the fork updater signing key
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::Set the TAURI_SIGNING_PRIVATE_KEY repository secret before tagging a release."
+            echo "::error::Set the TAURI_SIGNING_PRIVATE_KEY repository secret before running a release."
             exit 1
           fi
       - uses: actions/setup-node@v5
@@ -75,21 +128,23 @@ jobs:
         # committed Cargo.lock like the source checks workflow.
         run: npm run tauri:build:fork -- -- --locked
       - name: Prepare release assets and latest.json
-        run: node scripts/fork-release-manifest.mjs --tag "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --out release-out
+        run: node scripts/fork-release-manifest.mjs --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --out release-out
       - name: Upload to a draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # Never replace the assets of a release that was already published:
             # that is what installed apps download. Delete or re-draft it by hand first.
-            if [ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)" != "true" ]; then
-              echo "::error::Release $GITHUB_REF_NAME is already published; refusing to overwrite its assets."
+            if [ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft)" != "true" ]; then
+              echo "::error::Release $RELEASE_TAG is already published; refusing to overwrite its assets."
               exit 1
             fi
-            gh release upload "$GITHUB_REF_NAME" release-out/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RELEASE_TAG" release-out/* --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$GITHUB_REF_NAME" release-out/* \
-              --draft --title "$GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"
+            # --target records the commit; GitHub creates the git tag there when
+            # the draft is published.
+            gh release create "$RELEASE_TAG" release-out/* \
+              --draft --title "$RELEASE_TAG" --generate-notes --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
-          echo "Draft release $GITHUB_REF_NAME is ready; publish it to make it the updater's latest."
+          echo "Draft release $RELEASE_TAG is ready; publish it to make it the updater's latest."

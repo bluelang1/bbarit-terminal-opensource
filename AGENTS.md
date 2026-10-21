@@ -57,8 +57,11 @@ Build/test gotchas:
   (fork minisign pubkey + GitHub latest.json endpoint) on the source config and
   keeps only TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) in the env; never commit the
   private key. Releases: bump with scripts/bump-version.mjs, then run
-  `cargo update -p octo-ui --offline` in src-tauri or `--locked` fails; tag
-  `v<version>` triggers .github/workflows/fork-release.yml (draft release).
+  `cargo update -p octo-ui --offline` in src-tauri or `--locked` fails; then
+  `gh workflow run fork-release.yml --ref main -f tag=v<version>` (draft
+  release; GitHub creates the tag when the draft is published). Never push
+  the tag by hand: Actions caches are scoped per ref, so a tag-ref run never
+  restores the Rust cache (~35 min cold); the first main run is cold too.
 - The original installed app (com.octo.terminal, author-signed) cannot receive
   fork updates; only an installed fork build (com.bbarit.terminal.source) can.
 - bbarit-ctl / tauri-dev-screen auto-scan accepts com.bbarit.terminal.source
