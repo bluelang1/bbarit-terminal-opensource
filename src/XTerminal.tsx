@@ -28,7 +28,8 @@ import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
 import { AGENT_INSTALL_COMMAND } from './config/endpoints';
-import { Eraser, RotateCcw } from 'lucide-react';
+import { Eraser, ListX, RotateCcw } from 'lucide-react';
+import { runClearAllInput } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
@@ -2068,6 +2069,21 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     st?.writeToPty?.('\x05\x15');
     focusActiveInput();
   }, [focusActiveInput, terminalId]);
+
+  // Multi-line variant: plain shells take only one line, so they keep the
+  // single-line clear; agent TUIs get every line removed (see clearInputAll.ts).
+  const clearAllRunRef = useRef(0);
+  const clearTerminalInputAll = useCallback(() => {
+    if (cliType === 'shell') { clearTerminalInput(); return; }
+    clearTerminalInput();
+    const run = ++clearAllRunRef.current;
+    const st = terminalStates.get(terminalId);
+    const write = st?.writeToPty;
+    if (!write) return;
+    void runClearAllInput((data) => write(data), {
+      isCancelled: () => clearAllRunRef.current !== run || !terminalStates.get(terminalId),
+    }).then(() => focusActiveInput());
+  }, [cliType, clearTerminalInput, focusActiveInput, terminalId]);
 
   // Codex is an inline TUI that keeps scrollback, so activating its tab could
   // land on a stale mid-buffer viewport. Snap to the latest output whenever a
@@ -6510,6 +6526,35 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             }}
           >
             <RotateCcw size={10} />
+          </button>
+          <button
+            type="button"
+            title={t('terminal.clearInputAll')}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+            }}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              clearTerminalInputAll();
+            }}
+            style={{
+              height: 20,
+              minWidth: 20,
+              padding: 0,
+              borderRadius: 'var(--brutal-radius)',
+              border: `1px solid ${style?.accent || '#89b4fa'}66`,
+              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
+              color: style?.text || '#cdd6f4',
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              lineHeight: 1,
+            }}
+          >
+            <ListX size={10} />
           </button>
         </div>
       </div>

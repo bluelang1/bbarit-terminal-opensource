@@ -2935,6 +2935,7 @@ export const zh: Record<TranslationKey, string> = {
   'skills.priorityTitle': "优先级高的技能优先显示",
   // i18n batch: misc2
   'terminal.clearInput': "清除输入",
+  'terminal.clearInputAll': '清除全部输入(所有行)',
   'terminal.searchPlaceholder': "搜索...",
   'terminal.ollamaNoModelSettings': "未选择模型。请前往 设置 → Agent → Ollama 进行配置。",
   'terminal.ollamaIntro': "输入消息并按 Enter。输入 /clear 重置，/model <name> 切换模型。",
