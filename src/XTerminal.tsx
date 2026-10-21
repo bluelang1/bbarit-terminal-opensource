@@ -29,7 +29,7 @@ import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
 import { AGENT_INSTALL_COMMAND } from './config/endpoints';
 import { Eraser, ListX, RotateCcw } from 'lucide-react';
-import { runClearAllInput } from './terminal/clearInputAll';
+import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
@@ -1524,7 +1524,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // Shell line buffer for auto-saving prompts to library
   const shellLineBufferRef = useRef('');
 
+  // Bumped to cancel a running "clear all input" loop (new click or any input).
+  const clearAllRunRef = useRef(0);
   const sendToPty = useCallback((data: string) => {
+    // The user typed while a clear-all loop was running: stop it so the
+    // remaining Backspace/Ctrl+U steps do not erase what was just typed.
+    clearAllRunRef.current += 1;
     // A submitted line (Enter) means the user kicked off work — arm the
     // "task completed" notification for the next idle period.
     if (/[\r\n]/.test(data)) taskPendingRef.current = true;
@@ -2070,12 +2075,11 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     focusActiveInput();
   }, [focusActiveInput, terminalId]);
 
-  // Multi-line variant: plain shells take only one line, so they keep the
-  // single-line clear; agent TUIs get every line removed (see clearInputAll.ts).
-  const clearAllRunRef = useRef(0);
+  // Multi-line variant for agent TUIs (see clearInputAll.ts); clearTerminalInput
+  // resets local buffers and clears the current line, the loop takes the rest.
   const clearTerminalInputAll = useCallback(() => {
-    if (cliType === 'shell') { clearTerminalInput(); return; }
     clearTerminalInput();
+    if (usesSingleLineClear(cliType, isBbaritAgentCli(cliType))) return;
     const run = ++clearAllRunRef.current;
     const st = terminalStates.get(terminalId);
     const write = st?.writeToPty;

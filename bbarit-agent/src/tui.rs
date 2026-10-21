@@ -2987,7 +2987,11 @@ fn handle_key(
             KeyCode::Backspace => {
                 prompt.value.pop();
             }
-            KeyCode::Char(ch) => prompt.value.push(ch),
+            // Control chords (Ctrl+E/Ctrl+U from the app's clear-input buttons)
+            // are not text; typing them must not insert 'e'/'u'.
+            KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.value.push(ch)
+            }
             _ => {}
         }
         return Ok(());
@@ -3003,7 +3007,7 @@ fn handle_key(
                 selector.filter.pop();
                 selector.cursor = selector.first_selectable();
             }
-            KeyCode::Char(ch) => {
+            KeyCode::Char(ch) if !modifiers.contains(KeyModifiers::CONTROL) => {
                 selector.filter.push(ch);
                 selector.cursor = selector.first_selectable();
             }

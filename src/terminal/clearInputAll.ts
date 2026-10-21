@@ -11,10 +11,20 @@ export const CLEAR_PREVIOUS_LINE = '\x7f\x05\x15';
 /** Upper bound of lines removed per click; prompts are rarely longer. */
 export const CLEAR_ALL_MAX_LINES = 60;
 
+/** Steps after the current line was already cleared (the caller sends CLEAR_LINE). */
 export function clearAllInputSteps(maxLines = CLEAR_ALL_MAX_LINES): string[] {
-  const steps = [CLEAR_LINE];
+  const steps: string[] = [];
   for (let i = 1; i < maxLines; i += 1) steps.push(CLEAR_PREVIOUS_LINE);
   return steps;
+}
+
+/**
+ * CLIs whose input is a single line or that clear everything with Ctrl+U
+ * (the internal bbarit agent) keep the one-line clear; plain shells too, and
+ * Ollama chat has no PTY at all.
+ */
+export function usesSingleLineClear(cliType: string | undefined, isBbaritAgent: boolean): boolean {
+  return !cliType || cliType === 'shell' || cliType === 'ollama' || isBbaritAgent;
 }
 
 export async function runClearAllInput(
