@@ -1,12 +1,44 @@
-# BBARIT Terminal · 빠릿터미널
-
-**빠릿터미널이 MIT 오픈소스로 공개되었습니다.**
-
-소스: [johunsang/bbarit-terminal-opensource](https://github.com/johunsang/bbarit-terminal-opensource)
+# BBARIT Terminal · 빠릿터미널 (bluelang1 포크)
 
 Tauri 2, Rust, React 19, TypeScript로 만든 데스크톱 AI 개발 환경입니다. 실제 PTY 터미널, 여러 프로젝트, AI CLI 연동, 코드·문서 편집기, 내장 브라우저, 에이전트와 작업 패널을 제공합니다. 이전 제품명은 Octo Terminal입니다.
 
-[공개 소스 저장소](https://github.com/johunsang/bbarit-terminal-opensource)는 **MIT 라이선스의 소스 배포본**입니다. 운영 키, 사용자 데이터, 서명 인증서, 설치 파일과 비공개 Git 이력을 포함하지 않습니다. 외부 AI·GitHub·SNS 서비스는 사용자가 자신의 계정이나 키로 연결합니다. 서버를 사용하는 채팅·Thread 등 기존 기능도 남아 있습니다.
+이 저장소는 원작자의 [johunsang/bbarit-terminal-opensource](https://github.com/johunsang/bbarit-terminal-opensource)(MIT)를 포크해 보안 수정과 기능 개선을 더하고, **macOS 설치 파일과 자동 업데이트를 직접 배포**하는 저장소입니다. 원작자의 공식 배포판이 아니며 원작자는 이 포크를 지원하지 않습니다.
+
+## 이 포크 설치하기
+
+현재 **macOS Apple Silicon(M1 이상)**용 설치 파일만 제공합니다. Intel Mac과 Windows는 아래 [네이티브 앱 개발과 로컬 빌드](#네이티브-앱-개발과-로컬-빌드)로 직접 빌드해야 합니다.
+
+1. [Releases 최신 버전](https://github.com/bluelang1/bbarit-terminal-opensource/releases/latest)의 **Assets**에서 `BBARIT-Terminal-Source_<버전>_aarch64.dmg`를 받습니다.
+2. DMG를 열고 `BBARIT Terminal Source`를 `Applications` 폴더로 끌어 넣습니다.
+3. 처음 열 때 "확인되지 않은 개발자" 경고가 뜨면 Finder에서 앱을 **우클릭 → 열기**를 누릅니다. 또는 터미널에서 다음을 실행합니다.
+
+   ```sh
+   xattr -dr com.apple.quarantine "/Applications/BBARIT Terminal Source.app"
+   ```
+
+   Apple 개발자 인증서 대신 로컬(ad-hoc) 서명을 쓰기 때문에 뜨는 경고입니다. 자동 업데이트 파일은 별도의 서명 키로 검증합니다.
+4. 이후 새 버전이 나오면 상단 버전 배지가 알려 주고, **업데이트 버튼을 누를 때만** 내려받아 교체·재시작합니다. 자동으로 설치되지는 않습니다.
+
+알아 둘 점
+
+- 앱 이름은 `BBARIT Terminal Source`, 식별자는 `com.bbarit.terminal.source`입니다. 원작자 앱(`BBARIT Terminal`, `com.octo.terminal`)과 따로 설치되며, 원작자 앱은 이 포크의 업데이트를 받지 않습니다.
+- 프로젝트 목록·설정·대화 기록은 `~/.config/octo`, `~/.bbarit`를 원작자 앱과 함께 씁니다. 같은 데이터를 보므로 옮겨 오는 작업은 필요 없지만, 두 앱을 동시에 쓰면 서로의 변경이 보입니다.
+- 채팅·라운지·Thread·제품 공지 같은 서버 기능은 지금도 원작자의 서버(`bbarit.com`)에 연결합니다. 끄거나 바꾸려면 [엔드포인트 설정](#엔드포인트-설정)을 보세요.
+- AI CLI(Claude Code, Codex 등)와 외부 서비스는 각자 설치하고 본인 계정·키로 연결합니다.
+
+### 원작자 버전과 다른 점
+
+- 로컬 브리지(19980/19985)와 제어 WebSocket에 출처 검사를 넣어, 일반 웹페이지가 앱을 조종하지 못하게 했습니다. 웹뷰에 CSP를 적용하고 Git 명령 인자 주입도 막았습니다.
+- 자체 서명 키와 GitHub Releases로 자동 업데이트를 제공합니다.
+- 같은 프로젝트에서 대화가 섞이지 않는 "Claude 새 대화" 탭을 추가하고, 처음 여는 프로젝트에서 `claude --continue`가 실패하던 문제를 고쳤습니다.
+- Finder 파일 드롭을 고쳤습니다. 이제 드롭하면 경로만 입력되고 Enter는 누르지 않습니다. 여러 줄 입력을 한 번에 지우는 버튼도 추가했습니다.
+- 툴바에 내 로컬 대시보드를 띄우는 Dashboard 버튼을 추가했습니다(주소는 설정 > Hub). 프로젝트 목록 드래그도 개선했습니다.
+
+전체 변경 내역은 [Releases](https://github.com/bluelang1/bbarit-terminal-opensource/releases)와 [커밋 기록](https://github.com/bluelang1/bbarit-terminal-opensource/commits/main)에 있습니다.
+
+### 소스 배포본에 대해
+
+원작자의 공개 저장소는 **MIT 라이선스의 소스 배포본**입니다. 운영 키, 사용자 데이터, 서명 인증서, 비공개 Git 이력을 포함하지 않습니다. 이 포크도 같은 원칙을 지키며, 설치 파일만 GitHub Releases에 따로 올립니다. 외부 AI·GitHub·SNS 서비스는 사용자가 자신의 계정이나 키로 연결합니다.
 
 ## 소스 기준
 
