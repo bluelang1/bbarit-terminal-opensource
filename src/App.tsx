@@ -16831,7 +16831,7 @@ Office project scaffold created by BBARIT Terminal.
             </button>}
 
             {isToolbarVisible('secretary') && <button className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
-            {isToolbarVisible('dashboard') && <button className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드' : 'Agent Dashboard'}><LucideIcons.LayoutDashboard size={14} /></button>}
+            {isToolbarVisible('dashboard') && <button className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
 
             <button className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
 
@@ -16888,7 +16888,7 @@ Office project scaffold created by BBARIT Terminal.
                     ['skills', 'Skills', <LucideIcons.Blocks key="sk" size={12} />, () => { void openToolWindow('skills'); }],
                     ['agentPanel', locale === 'ko' ? '빠릿 에이전트 패널' : 'BBARIT Agent Panel', <LucideIcons.BotMessageSquare key="ap" size={12} />, () => { void openToolWindow('agent'); }],
                     ['secretary', 'BBARIT Secretary', <LucideIcons.UserRound key="sec" size={12} />, () => { void openSecretary(); }],
-                    ['dashboard', locale === 'ko' ? '에이전트 대시보드' : 'Agent Dashboard', <LucideIcons.LayoutDashboard key="dsh" size={12} />, () => { setShowDashboard(true); }],
+                    ['dashboard', locale === 'ko' ? '에이전트 대시보드' : 'Agent Dashboard', <LucideIcons.Gauge key="dsh" size={12} />, () => { setShowDashboard(true); }],
                     ['broker', locale === 'ko' ? '브로커 하네스' : 'Broker Harness', <OctoAntler key="bh" size={13} />, () => { void openHarnessWindow(); }],
                     ['mcp', 'MCP Server', <LucideIcons.ServerCog key="mp" size={12} />, () => { setShowMcpPanel(true); }],
                     ['database', 'Database', <Database key="dbi" size={12} />, () => { setShowDatabasePanel(true); }],

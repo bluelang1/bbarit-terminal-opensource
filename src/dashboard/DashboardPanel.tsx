@@ -75,7 +75,7 @@ export function DashboardPanel({ onClose, onOpenExternal, accent = '#89b4fa', bg
           onSubmit={(e) => { e.preventDefault(); apply(); }}
           style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '8px 10px', borderBottom: `1px solid ${text}1f` }}
         >
-          <LucideIcons.LayoutDashboard size={15} style={{ color: accent, flexShrink: 0 }} />
+          <LucideIcons.Gauge size={15} style={{ color: accent, flexShrink: 0 }} />
           <input
             ref={inputRef}
             value={draft}

@@ -19,6 +19,13 @@ export const ko: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': '\uB2E8\uCD95\uD0A4',
   'settings.tab.browser': '\uBE0C\uB77C\uC6B0\uC800',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': '에이전트 대시보드',
+  'settings.dashboard.desc': '상단 툴바의 Dashboard 버튼이 앱 안에 띄울 주소입니다. 로컬에서 실행 중인 대시보드 주소(예: http://localhost:3000)를 넣으세요.',
+  'settings.dashboard.url': '대시보드 주소',
+  'settings.dashboard.save': '저장',
+  'settings.dashboard.saved': '저장됨',
+  'settings.dashboard.invalid': 'http(s) 주소만 쓸 수 있습니다. 앱 자체 주소는 쓸 수 없습니다.',
+  'settings.dashboard.open': '열기',
   'settings.tab.about': '\uC815\uBCF4',
 
   // Settings Panel - General

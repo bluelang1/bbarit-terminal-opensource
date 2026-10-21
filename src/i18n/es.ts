@@ -40,6 +40,13 @@ export const es: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'Atajos',
   'settings.tab.browser': 'Navegador',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'Agent dashboard',
+  'settings.dashboard.desc': 'The page the Dashboard toolbar button shows inside the app. Enter the address of your locally running dashboard (e.g. http://localhost:3000).',
+  'settings.dashboard.url': 'Dashboard URL',
+  'settings.dashboard.save': 'Save',
+  'settings.dashboard.saved': 'Saved',
+  'settings.dashboard.invalid': "Only http(s) addresses are allowed, and not the app's own address.",
+  'settings.dashboard.open': 'Open',
   'settings.tab.about': 'Acerca de',
 
   // Settings Panel - General

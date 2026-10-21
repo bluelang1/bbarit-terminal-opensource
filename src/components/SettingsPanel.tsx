@@ -37,6 +37,7 @@ import { GATEWAY_UI_COMMAND_DOCS } from '../gatewayUiCommands';
 import BBARIT_CLI_DOC from '../../docs/BBARIT_CLI.md?raw';
 import BBARIT_CTL_SOURCE from '../../scripts/bbarit-ctl.mjs?raw';
 import './SettingsPanel.css';
+import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from '../dashboard/dashboardUrl';
 
 // Control CLI 탭에서 버스 명령 → 복사용 CLI 예시 매핑 (bbarit-ctl 서브커맨드).
 const CLI_EXAMPLES: Record<string, string> = {
@@ -3971,6 +3972,7 @@ export function SettingsPanel({
 
           {activeTab === 'integrations' && (
             <div className="settings-section">
+              <DashboardUrlSetting t={t} />
               <div className="settings-group" style={{ display: 'none' }}>
                 <h3>{t('settings.agent.stt.title')}</h3>
                 <span className="setting-description">
@@ -4987,4 +4989,42 @@ export function getNoteTemplates(): NoteTemplate[] {
 export function getEditorSettings(): EditorSettings {
   const e = getConfigSnapshot().editor;
   return { ...e, fontSize: clampEditorFontSize(e.fontSize) };
+}
+
+// Address of the user's own agent dashboard (toolbar "Dashboard" button).
+// Same storage as the overlay's URL bar, see src/dashboard/dashboardUrl.ts.
+function DashboardUrlSetting({ t }: { t: (key: any, fallback?: string) => string }) {
+  const [draft, setDraft] = useState(() => loadDashboardUrl());
+  const [status, setStatus] = useState<'idle' | 'saved' | 'invalid'>('idle');
+  const save = () => {
+    const next = normalizeDashboardUrl(draft);
+    if (!next) { setStatus('invalid'); return; }
+    saveDashboardUrl(next);
+    setDraft(next);
+    setStatus('saved');
+  };
+  return (
+    <div className="settings-group">
+      <h3>{t('settings.dashboard.title')}</h3>
+      <span className="setting-description">{t('settings.dashboard.desc')}</span>
+      <div className="setting-item">
+        <label htmlFor="dashboard-url-setting">{t('settings.dashboard.url')}</label>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            id="dashboard-url-setting"
+            type="text"
+            value={draft}
+            placeholder={DEFAULT_DASHBOARD_URL}
+            spellCheck={false}
+            onChange={(e) => { setDraft(e.target.value); setStatus('idle'); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }}
+            style={{ flex: '1 1 260px' }}
+          />
+          <button type="button" className="btn-toolbar" onClick={save}>{t('settings.dashboard.save')}</button>
+          {status === 'saved' && <span className="setting-description">{t('settings.dashboard.saved')}</span>}
+        </div>
+        {status === 'invalid' && <span className="setting-description" style={{ color: '#f38ba8' }}>{t('settings.dashboard.invalid')}</span>}
+      </div>
+    </div>
+  );
 }

@@ -12000,6 +12000,7 @@ textarea,
 .top-utils .tool-motion::after     { content: 'Motion'; }
 .top-utils .tool-browser::after    { content: 'Browser'; }
 .top-utils .tool-secretary::after  { content: 'Secretary'; }
+.top-utils .tool-dashboard::after  { content: 'Dashboard'; }
 .top-utils .tool-broker::after     { content: 'Broker'; }
 .top-utils .tool-settings::after   { content: 'Settings'; }
 .top-utils .tool-menu::after       { content: 'Menu'; }
