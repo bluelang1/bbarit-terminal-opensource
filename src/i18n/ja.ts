@@ -40,6 +40,12 @@ export const ja: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'ショートカット',
   'settings.tab.browser': 'ブラウザ',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'エージェントダッシュボード',
+  'settings.dashboard.desc': '上部ツールバーの Dashboard ボタンがアプリ内に表示するアドレスです。ローカルで動いているダッシュボードのアドレス(例: http://localhost:3000)を入力してください。',
+  'settings.dashboard.url': 'ダッシュボード URL',
+  'settings.dashboard.save': '保存',
+  'settings.dashboard.saved': '保存しました',
+  'settings.dashboard.invalid': 'http(s) のアドレスのみ使えます。アプリ自身のアドレスは使えません。',
   'settings.tab.about': '情報',
 
   // Settings Panel - General

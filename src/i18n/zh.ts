@@ -40,6 +40,12 @@ export const zh: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': '快捷键',
   'settings.tab.browser': '浏览器',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': '智能体仪表盘',
+  'settings.dashboard.desc': '顶部工具栏 Dashboard 按钮在应用内显示的地址。请输入本地运行的仪表盘地址(例如 http://localhost:3000)。',
+  'settings.dashboard.url': '仪表盘地址',
+  'settings.dashboard.save': '保存',
+  'settings.dashboard.saved': '已保存',
+  'settings.dashboard.invalid': '仅支持 http(s) 地址,且不能使用应用自身的地址。',
   'settings.tab.about': '关于',
 
   // Settings Panel - General

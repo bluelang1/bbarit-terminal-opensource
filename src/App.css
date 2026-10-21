@@ -11964,6 +11964,7 @@ textarea,
 .top-utils .tool-skills::before     { -webkit-mask-image: url('/icons/glass/skills.png'); mask-image: url('/icons/glass/skills.png'); }
 .top-utils .tool-mcp::before        { -webkit-mask-image: url('/icons/glass/mcp.png'); mask-image: url('/icons/glass/mcp.png'); }
 .top-utils .tool-secretary::before  { -webkit-mask-image: url('/icons/glass/secretary.png'); mask-image: url('/icons/glass/secretary.png'); }
+.top-utils .tool-dashboard::before  { -webkit-mask-image: url('/icons/glass/dashboard.svg'); mask-image: url('/icons/glass/dashboard.svg'); }
 .top-utils .tool-collab::before     { -webkit-mask-image: url('/icons/glass/community.png'); mask-image: url('/icons/glass/community.png'); }
 .top-utils .tool-thread::before     { -webkit-mask-image: url('/icons/glass/thread.png'); mask-image: url('/icons/glass/thread.png'); }
 .top-utils .tool-broker::before     { -webkit-mask-image: url('/icons/glass/broker.png'); mask-image: url('/icons/glass/broker.png'); }
@@ -12000,6 +12001,7 @@ textarea,
 .top-utils .tool-motion::after     { content: 'Motion'; }
 .top-utils .tool-browser::after    { content: 'Browser'; }
 .top-utils .tool-secretary::after  { content: 'Secretary'; }
+.top-utils .tool-dashboard::after  { content: 'Dashboard'; }
 .top-utils .tool-broker::after     { content: 'Broker'; }
 .top-utils .tool-settings::after   { content: 'Settings'; }
 .top-utils .tool-menu::after       { content: 'Menu'; }
@@ -12064,6 +12066,7 @@ textarea,
 /* divider order 21 */
 .top-utils > .tool-pm2              { order: 22 !important; }
 .top-utils > .tool-hub              { order: 24 !important; }
+.top-utils > .tool-dashboard        { order: 25 !important; }
 .top-utils > .tool-skills           { order: 26 !important; }
 .top-utils > .tool-mcp              { order: 28 !important; }
 .top-utils > .tool-collab           { order: 30 !important; }

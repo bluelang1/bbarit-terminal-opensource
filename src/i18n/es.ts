@@ -40,6 +40,12 @@ export const es: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'Atajos',
   'settings.tab.browser': 'Navegador',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'Panel de agentes',
+  'settings.dashboard.desc': 'La página que el botón Dashboard de la barra superior muestra dentro de la app. Introduce la dirección de tu panel local (p. ej. http://localhost:3000).',
+  'settings.dashboard.url': 'URL del panel',
+  'settings.dashboard.save': 'Guardar',
+  'settings.dashboard.saved': 'Guardado',
+  'settings.dashboard.invalid': 'Solo se permiten direcciones http(s), no la de la propia app.',
   'settings.tab.about': 'Acerca de',
 
   // Settings Panel - General

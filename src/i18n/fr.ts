@@ -40,6 +40,12 @@ export const fr: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'Raccourcis',
   'settings.tab.browser': 'Navigateur',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'Tableau de bord des agents',
+  'settings.dashboard.desc': "La page que le bouton Dashboard de la barre supérieure affiche dans l'application. Saisissez l'adresse de votre tableau de bord local (ex. http://localhost:3000).",
+  'settings.dashboard.url': 'URL du tableau de bord',
+  'settings.dashboard.save': 'Enregistrer',
+  'settings.dashboard.saved': 'Enregistré',
+  'settings.dashboard.invalid': "Seules les adresses http(s) sont autorisées, pas celle de l'application elle-même.",
   'settings.tab.about': 'À propos',
 
   // Settings Panel - General

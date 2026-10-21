@@ -40,6 +40,12 @@ export const de: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'Tastenkürzel',
   'settings.tab.browser': 'Browser',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'Agent-Dashboard',
+  'settings.dashboard.desc': 'Die Seite, die der Dashboard-Button in der oberen Leiste in der App zeigt. Gib die Adresse deines lokal laufenden Dashboards ein (z. B. http://localhost:3000).',
+  'settings.dashboard.url': 'Dashboard-URL',
+  'settings.dashboard.save': 'Speichern',
+  'settings.dashboard.saved': 'Gespeichert',
+  'settings.dashboard.invalid': 'Nur http(s)-Adressen sind erlaubt, nicht die Adresse der App selbst.',
   'settings.tab.about': 'Über',
 
   // Settings Panel - General

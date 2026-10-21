@@ -40,6 +40,12 @@ export const it: Record<TranslationKey, string> = {
   'settings.tab.shortcuts': 'Scorciatoie',
   'settings.tab.browser': 'Browser',
   'settings.tab.integrations': 'Hub',
+  'settings.dashboard.title': 'Dashboard degli agenti',
+  'settings.dashboard.desc': "La pagina che il pulsante Dashboard della barra superiore mostra nell'app. Inserisci l'indirizzo della tua dashboard locale (es. http://localhost:3000).",
+  'settings.dashboard.url': 'URL della dashboard',
+  'settings.dashboard.save': 'Salva',
+  'settings.dashboard.saved': 'Salvato',
+  'settings.dashboard.invalid': "Sono consentiti solo indirizzi http(s), non quello dell'app stessa.",
   'settings.tab.about': 'Informazioni',
 
   // Settings Panel - General
