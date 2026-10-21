@@ -23,7 +23,6 @@ export const en = {
   'settings.dashboard.save': 'Save',
   'settings.dashboard.saved': 'Saved',
   'settings.dashboard.invalid': "Only http(s) addresses are allowed, and not the app's own address.",
-  'settings.dashboard.open': 'Open',
   'settings.tab.about': 'About',
 
   // Settings Panel - General

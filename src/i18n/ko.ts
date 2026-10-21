@@ -25,7 +25,6 @@ export const ko: Record<TranslationKey, string> = {
   'settings.dashboard.save': '저장',
   'settings.dashboard.saved': '저장됨',
   'settings.dashboard.invalid': 'http(s) 주소만 쓸 수 있습니다. 앱 자체 주소는 쓸 수 없습니다.',
-  'settings.dashboard.open': '열기',
   'settings.tab.about': '\uC815\uBCF4',
 
   // Settings Panel - General

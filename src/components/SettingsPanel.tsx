@@ -22,6 +22,7 @@ import {
 } from '../integrations/linear';
 import { useConfig, getConfigSnapshot } from '../config/ConfigContext';
 import { useTranslation } from '../i18n';
+import type { TranslationKey } from '../i18n/en';
 import { LATEST_OPENAI_STT_MODEL } from '../config/schema';
 import type { AgentConfig, TerminalConfig, EditorConfig, NoteTemplate, SttConfig } from '../config/schema';
 import { getModelsForCliType } from '../config/modelPresets';
@@ -36,8 +37,8 @@ import { qrToDataUri } from '../utils/qrCode';
 import { GATEWAY_UI_COMMAND_DOCS } from '../gatewayUiCommands';
 import BBARIT_CLI_DOC from '../../docs/BBARIT_CLI.md?raw';
 import BBARIT_CTL_SOURCE from '../../scripts/bbarit-ctl.mjs?raw';
-import './SettingsPanel.css';
 import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from '../dashboard/dashboardUrl';
+import './SettingsPanel.css';
 
 // Control CLI 탭에서 버스 명령 → 복사용 CLI 예시 매핑 (bbarit-ctl 서브커맨드).
 const CLI_EXAMPLES: Record<string, string> = {
@@ -4993,7 +4994,7 @@ export function getEditorSettings(): EditorSettings {
 
 // Address of the user's own agent dashboard (toolbar "Dashboard" button).
 // Same storage as the overlay's URL bar, see src/dashboard/dashboardUrl.ts.
-function DashboardUrlSetting({ t }: { t: (key: any, fallback?: string) => string }) {
+function DashboardUrlSetting({ t }: { t: (key: TranslationKey, fallback?: string) => string }) {
   const [draft, setDraft] = useState(() => loadDashboardUrl());
   const [status, setStatus] = useState<'idle' | 'saved' | 'invalid'>('idle');
   const save = () => {
@@ -5017,6 +5018,7 @@ function DashboardUrlSetting({ t }: { t: (key: any, fallback?: string) => string
             placeholder={DEFAULT_DASHBOARD_URL}
             spellCheck={false}
             onChange={(e) => { setDraft(e.target.value); setStatus('idle'); }}
+            onBlur={() => { if (normalizeDashboardUrl(draft)) save(); }}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); save(); } }}
             style={{ flex: '1 1 260px' }}
           />
