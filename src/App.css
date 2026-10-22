@@ -1009,6 +1009,7 @@ body.project-dragging * {
 
 /* hairline dividers between the stacked square buttons (no margin) */
 .project-selector-actions .project-theme-wrap,
+.project-selector-actions .project-selector-edit,
 .project-selector-actions .project-selector-close {
   border-top: 1px solid color-mix(in srgb, var(--text-color) 18%, transparent) !important;
 }

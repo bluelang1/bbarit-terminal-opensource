@@ -2800,8 +2800,560 @@ fn spawn_utf8_reader_thread(
     });
 }
 
-// Create PTY and start shell
+/// Owner segment of a github.com remote URL (https, ssh or scp-style), if any.
+#[cfg(not(target_os = "windows"))]
+fn github_remote_owner(remote_url: &str) -> Option<String> {
+    let url = remote_url.trim();
+    // Strip the scheme and userinfo so only an exact `github.com` host matches.
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, r)| r);
+    let path = rest.strip_prefix("github.com")?;
+    let path = path
+        .strip_prefix(':')
+        .or_else(|| path.strip_prefix('/'))?
+        .trim_start_matches('/');
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    if owner.is_empty() || parts.next().map_or(true, |r| r.is_empty()) {
+        return None;
+    }
+    Some(owner.to_string())
+}
+
+/// gh login to use for a remote owner: an explicit `owners` entry in
+/// ~/.config/octo/github-accounts.json wins, otherwise the owner name itself
+/// (a personal repo owned by one of the logged-in gh accounts).
+#[cfg(not(target_os = "windows"))]
+fn github_login_candidates(owner: &str, mapping: Option<&serde_json::Value>) -> Vec<String> {
+    let mut logins = Vec::new();
+    if let Some(login) = mapping
+        .and_then(|m| m.get("owners"))
+        .and_then(|o| o.as_object())
+        .and_then(|o| o.iter().find(|(k, _)| k.eq_ignore_ascii_case(owner)))
+        .and_then(|(_, v)| v.as_str())
+    {
+        logins.push(login.to_string());
+    }
+    if !logins.iter().any(|l| l.eq_ignore_ascii_case(owner)) {
+        logins.push(owner.to_string());
+    }
+    logins
+}
+
+/// Logged-in github.com accounts and the active one, parsed from gh's
+/// hosts.yml (`github.com: users: <login>: ... user: <active>`). Older gh
+/// versions without multi-account support only write `user:`, which then
+/// counts as the single account.
+#[cfg(not(target_os = "windows"))]
+fn parse_gh_hosts_accounts(yaml: &str) -> (Vec<String>, Option<String>) {
+    fn split_key(content: &str) -> (String, String) {
+        let unquote = |s: &str| s.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+        match content.split_once(':') {
+            Some((k, v)) => (unquote(k), unquote(v.split(" #").next().unwrap_or(""))),
+            None => (unquote(content), String::new()),
+        }
+    }
+    let mut accounts: Vec<String> = Vec::new();
+    let mut active: Option<String> = None;
+    let mut in_host = false;
+    let mut key_indent: Option<usize> = None;
+    let mut in_users = false;
+    let mut user_indent: Option<usize> = None;
+    for line in yaml.lines() {
+        let content = line.trim();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 {
+            in_host = split_key(content).0.eq_ignore_ascii_case("github.com");
+            key_indent = None;
+            in_users = false;
+            continue;
+        }
+        if !in_host {
+            continue;
+        }
+        let host_key_indent = *key_indent.get_or_insert(indent);
+        if indent <= host_key_indent {
+            let (key, value) = split_key(content);
+            in_users = key == "users" && value.is_empty();
+            user_indent = None;
+            if key == "user" && !value.is_empty() {
+                active = Some(value);
+            }
+        } else if in_users && indent == *user_indent.get_or_insert(indent) {
+            let (login, _) = split_key(content);
+            if !login.is_empty() && !accounts.iter().any(|a| a.eq_ignore_ascii_case(&login)) {
+                accounts.push(login);
+            }
+        }
+    }
+    if accounts.is_empty() {
+        if let Some(login) = &active {
+            accounts.push(login.clone());
+        }
+    }
+    (accounts, active)
+}
+
+/// gh's config directory (GH_CONFIG_DIR, then XDG_CONFIG_HOME/gh, then ~/.config/gh).
+#[cfg(not(target_os = "windows"))]
+fn gh_config_dir(home: &str) -> String {
+    if let Ok(dir) = std::env::var("GH_CONFIG_DIR") {
+        if !dir.trim().is_empty() {
+            return dir;
+        }
+    }
+    match std::env::var("XDG_CONFIG_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => format!("{}/gh", dir),
+        _ => format!("{}/.config/gh", home),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn gh_logged_in_accounts(home: &str) -> (Vec<String>, Option<String>) {
+    std::fs::read_to_string(format!("{}/hosts.yml", gh_config_dir(home)))
+        .map(|s| parse_gh_hosts_accounts(&s))
+        .unwrap_or_default()
+}
+
+/// First account whose organization list contains `owner` (case-insensitive).
+#[cfg(not(target_os = "windows"))]
+fn account_for_org_owner(owner: &str, account_orgs: &[(String, Vec<String>)]) -> Option<String> {
+    account_orgs
+        .iter()
+        .find(|(_, orgs)| orgs.iter().any(|o| o.eq_ignore_ascii_case(owner)))
+        .map(|(login, _)| login.clone())
+}
+
+/// github-accounts.json with `owners[owner] = login` merged in, keeping every
+/// other key. `None` when the existing file is not a JSON object (never clobber it).
+#[cfg(not(target_os = "windows"))]
+fn merge_owner_mapping(existing: Option<&str>, owner: &str, login: &str) -> Option<serde_json::Value> {
+    let mut root = match existing.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(text) => serde_json::from_str::<serde_json::Value>(text).ok()?,
+        None => serde_json::json!({}),
+    };
+    let root_obj = root.as_object_mut()?;
+    let owners = root_obj
+        .entry("owners")
+        .or_insert_with(|| serde_json::json!({}));
+    if !owners.is_object() {
+        *owners = serde_json::json!({});
+    }
+    let owners = owners.as_object_mut()?;
+    owners.retain(|k, _| !k.eq_ignore_ascii_case(owner));
+    owners.insert(owner.to_string(), serde_json::Value::String(login.to_string()));
+    Some(root)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn github_accounts_file(home: &str) -> String {
+    format!("{}/.config/octo/github-accounts.json", home)
+}
+
+/// Remember a positively detected org owner so later tabs skip the network call.
+/// Serialized in-process so concurrent lookups cannot drop each other's entries.
+#[cfg(not(target_os = "windows"))]
+fn cache_owner_mapping(home: &str, owner: &str, login: &str) {
+    static WRITE_LOCK: Mutex<()> = Mutex::new(());
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let file = github_accounts_file(home);
+    let existing = std::fs::read_to_string(&file).ok();
+    let Some(merged) = merge_owner_mapping(existing.as_deref(), owner, login) else {
+        return;
+    };
+    let Ok(text) = serde_json::to_string_pretty(&merged) else {
+        return;
+    };
+    let path = std::path::Path::new(&file);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let tmp = format!(
+        "{}.tmp-{}-{}",
+        file,
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    if std::fs::write(&tmp, format!("{}\n", text)).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// Run a short git/gh helper with stdin closed and a hard timeout; trimmed
+/// stdout on success. `token` is passed only through the child's environment.
+#[cfg(not(target_os = "windows"))]
+fn run_github_helper(
+    program: &str,
+    args: &[&str],
+    work_dir: Option<&str>,
+    path: Option<&str>,
+    token: Option<&str>,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    let mut command = common::no_window_command(program);
+    command.args(args);
+    if let Some(dir) = work_dir {
+        command.current_dir(dir);
+    }
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
+    if let Some(token) = token {
+        command.env("GH_TOKEN", token);
+    }
+    command.env("GH_PROMPT_DISABLED", "1");
+    let mut child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    let out = out.trim().to_string();
+    (!out.is_empty()).then_some(out)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn gh_token_for(login: &str, path: Option<&str>) -> Option<String> {
+    run_github_helper(
+        "gh",
+        &["auth", "token", "--hostname", "github.com", "--user", login],
+        None,
+        path,
+        None,
+        std::time::Duration::from_secs(2),
+    )
+}
+
+/// Organizations of each account, fetched with that account's own token.
+/// Successful lookups are memoized in-process for a few minutes (never on disk),
+/// so a repo owned by nobody we know does not hit the network on every tab.
+#[cfg(not(target_os = "windows"))]
+fn gh_account_orgs(accounts: &[(String, String)], path: Option<&str>) -> Vec<(String, Vec<String>)> {
+    type OrgCache = Mutex<HashMap<String, (std::time::Instant, Vec<String>)>>;
+    static ORG_CACHE: OnceLock<OrgCache> = OnceLock::new();
+    const TTL: std::time::Duration = std::time::Duration::from_secs(600);
+    let cache = ORG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = accounts
+            .iter()
+            .map(|(login, token)| {
+                scope.spawn(move || {
+                    if let Some((at, orgs)) = cache.lock().ok().and_then(|c| c.get(login).cloned()) {
+                        if at.elapsed() < TTL {
+                            return (login.clone(), orgs);
+                        }
+                    }
+                    let fetched = run_github_helper(
+                        "gh",
+                        &["api", "user/orgs", "--paginate", "--jq", ".[].login"],
+                        None,
+                        path,
+                        Some(token),
+                        std::time::Duration::from_secs(6),
+                    );
+                    let orgs: Vec<String> = fetched
+                        .as_deref()
+                        .unwrap_or("")
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    if fetched.is_some() {
+                        if let Ok(mut c) = cache.lock() {
+                            c.insert(login.clone(), (std::time::Instant::now(), orgs.clone()));
+                        }
+                    }
+                    (login.clone(), orgs)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    })
+}
+
+/// State of the org-membership lookup for one remote owner (in-memory only).
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OrgLookup {
+    InFlight(std::time::Instant),
+    Miss(std::time::Instant),
+}
+
+/// Whether a background org lookup for an owner may start now: not while one
+/// is running (unless it looks stuck), and not again within `ttl` of a miss.
+#[cfg(not(target_os = "windows"))]
+fn org_lookup_should_start(
+    entry: Option<OrgLookup>,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> bool {
+    const STUCK: std::time::Duration = std::time::Duration::from_secs(60);
+    match entry {
+        None => true,
+        Some(OrgLookup::InFlight(at)) => now.saturating_duration_since(at) >= STUCK,
+        Some(OrgLookup::Miss(at)) => now.saturating_duration_since(at) >= ttl,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+const ORG_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[cfg(not(target_os = "windows"))]
+fn org_lookups() -> &'static Mutex<HashMap<String, OrgLookup>> {
+    static LOOKUPS: OnceLock<Mutex<HashMap<String, OrgLookup>>> = OnceLock::new();
+    LOOKUPS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Network step of auto-detection: the logged-in account whose organizations
+/// include `owner`. A hit is written to github-accounts.json; the outcome is
+/// recorded in the in-memory lookup table (misses are never written to disk).
+#[cfg(not(target_os = "windows"))]
+fn detect_org_account(owner: &str, home: &str, path: Option<&str>) -> Option<(String, String)> {
+    let key = owner.to_ascii_lowercase();
+    let (logins, _) = gh_logged_in_accounts(home);
+    let accounts: Vec<(String, String)> = logins
+        .iter()
+        .filter(|l| reject_option_like(l, "GitHub account").is_ok())
+        .filter_map(|l| gh_token_for(l, path).map(|t| (l.clone(), t)))
+        .collect();
+    let found = if accounts.is_empty() {
+        None
+    } else {
+        account_for_org_owner(owner, &gh_account_orgs(&accounts, path))
+    };
+    let result = found.and_then(|login| accounts.into_iter().find(|(l, _)| *l == login));
+    if let Ok(mut lookups) = org_lookups().lock() {
+        match &result {
+            Some(_) => {
+                lookups.remove(&key);
+            }
+            None => {
+                lookups.insert(key, OrgLookup::Miss(std::time::Instant::now()));
+            }
+        }
+    }
+    if let Some((login, _)) = &result {
+        cache_owner_mapping(home, owner, login);
+    }
+    result
+}
+
+/// Local (no network) part of auto-detection: the remote owner and, if the
+/// owners mapping or the owner name itself names a logged-in gh account, that
+/// (login, token). Owner is None for ssh:// or missing dirs, when
+/// ~/.config/octo/.env sets GH_TOKEN, or when origin is not on github.com.
+#[cfg(not(target_os = "windows"))]
+fn resolve_github_login_local(
+    work_dir: &str,
+    home: &str,
+    path: Option<&str>,
+) -> (Option<String>, Option<(String, String)>) {
+    if is_remote_ssh_path(work_dir) || !std::path::Path::new(work_dir).is_dir() {
+        return (None, None);
+    }
+    if read_octo_env().contains_key("GH_TOKEN") {
+        return (None, None);
+    }
+    let Some(owner) = run_github_helper(
+        "git",
+        &["remote", "get-url", "origin"],
+        Some(work_dir),
+        path,
+        None,
+        std::time::Duration::from_secs(2),
+    )
+    .as_deref()
+    .and_then(github_remote_owner) else {
+        return (None, None);
+    };
+    let mapping = std::fs::read_to_string(github_accounts_file(home))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let found = github_login_candidates(&owner, mapping.as_ref())
+        .into_iter()
+        .filter(|login| reject_option_like(login, "GitHub account").is_ok())
+        .find_map(|login| gh_token_for(&login, path).map(|token| (login, token)));
+    (Some(owner), found)
+}
+
+/// Full auto-detection for the project dialog (blocking; run off the main
+/// thread): local resolution, then the org lookup unless it recently missed.
+#[cfg(not(target_os = "windows"))]
+fn resolve_github_login(work_dir: &str, home: &str, path: Option<&str>) -> Option<(String, String)> {
+    let (owner, found) = resolve_github_login_local(work_dir, home, path);
+    if found.is_some() {
+        return found;
+    }
+    let owner = owner?;
+    let recent_miss = org_lookups()
+        .lock()
+        .ok()
+        .and_then(|l| l.get(&owner.to_ascii_lowercase()).copied())
+        .is_some_and(|e| matches!(e, OrgLookup::Miss(at) if at.elapsed() < ORG_MISS_TTL));
+    if recent_miss {
+        return None;
+    }
+    detect_org_account(&owner, home, path)
+}
+
+/// Tab-spawn miss: look the owner up among the accounts' organizations in a
+/// background thread so the PTY starts immediately; a hit is cached to disk
+/// and picked up by the next tab.
+#[cfg(not(target_os = "windows"))]
+fn spawn_org_lookup(owner: String, home: String, path: Option<String>) {
+    let key = owner.to_ascii_lowercase();
+    {
+        let Ok(mut lookups) = org_lookups().lock() else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if !org_lookup_should_start(lookups.get(&key).copied(), now, ORG_MISS_TTL) {
+            return;
+        }
+        lookups.insert(key, OrgLookup::InFlight(now));
+    }
+    std::thread::spawn(move || {
+        let _ = detect_org_account(&owner, &home, path.as_deref());
+    });
+}
+
+/// Per-tab GitHub identity: env vars pinning gh/git in this PTY to one gh
+/// account, so tabs for different accounts can run side by side without
+/// `gh auth switch`. `choice` is the project's setting: None/"" = auto-detect
+/// (local steps only; org detection runs in the background on a miss),
+/// "__none__" = inject nothing (gh's active account), otherwise a gh login
+/// (nothing is injected if gh has no token for it).
+#[cfg(not(target_os = "windows"))]
+fn github_account_env(
+    work_dir: &str,
+    home: &str,
+    path: Option<&str>,
+    choice: Option<&str>,
+) -> Vec<(String, String)> {
+    let choice = choice.map(str::trim).filter(|c| !c.is_empty());
+    if choice == Some("__none__")
+        || is_remote_ssh_path(work_dir)
+        || !std::path::Path::new(work_dir).is_dir()
+        || read_octo_env().contains_key("GH_TOKEN")
+    {
+        return Vec::new();
+    }
+    let resolved = match choice {
+        Some(login) => {
+            if reject_option_like(login, "GitHub account").is_err() {
+                safe_eprintln!("[github] ignoring invalid project GitHub account {:?}", login);
+                return Vec::new();
+            }
+            let token = gh_token_for(login, path);
+            if token.is_none() {
+                safe_eprintln!(
+                    "[github] no gh token for project account {:?}; using gh's active account",
+                    login
+                );
+            }
+            token.map(|t| (login.to_string(), t))
+        }
+        None => {
+            let (owner, found) = resolve_github_login_local(work_dir, home, path);
+            if found.is_none() {
+                if let Some(owner) = owner {
+                    spawn_org_lookup(owner, home.to_string(), path.map(str::to_string));
+                }
+            }
+            found
+        }
+    };
+    match resolved {
+        Some((login, token)) => vec![
+            ("GH_TOKEN".to_string(), token),
+            ("BBARIT_GITHUB_ACCOUNT".to_string(), login),
+        ],
+        None => Vec::new(),
+    }
+}
+
+/// PATH for gh/git lookups from Tauri commands (GUI launches have a thin PATH).
+#[cfg(not(target_os = "windows"))]
+fn github_helper_path(home: &str) -> String {
+    format!(
+        "/opt/homebrew/bin:/usr/local/bin:{}/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin:{}",
+        home,
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GithubAccountsInfo {
+    accounts: Vec<String>,
+    active: Option<String>,
+}
+
+/// gh accounts logged in on github.com (logins only, never tokens).
 #[tauri::command]
+fn list_github_accounts() -> GithubAccountsInfo {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let (accounts, active) = resolve_home_dir()
+            .map(|home| gh_logged_in_accounts(&home))
+            .unwrap_or_default();
+        GithubAccountsInfo { accounts, active }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        GithubAccountsInfo { accounts: Vec::new(), active: None }
+    }
+}
+
+/// Login that auto-detection would pin for `work_dir` (None = gh active account).
+/// The resolved token is dropped here and never leaves the backend.
+#[tauri::command]
+async fn detect_github_account(work_dir: String) -> Option<String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            let home = resolve_home_dir()?;
+            let path = github_helper_path(&home);
+            resolve_github_login(&work_dir, &home, Some(&path)).map(|(login, _token)| login)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = work_dir;
+        None
+    }
+}
+
+// Create PTY and start shell. Runs on the async runtime (not the main thread)
+// because it spawns git/gh helpers; it never awaits, so State use is unchanged.
+#[tauri::command(async)]
 fn create_shell(
     state: State<'_, AppState>,
     terminal_id: String,
@@ -2809,11 +3361,15 @@ fn create_shell(
     rows: u16,
     cols: u16,
     shell_type: Option<String>,
+    github_account: Option<String>,
 ) -> Result<(), String> {
     // shell_type is only consulted in the #[cfg(windows)] branches below;
     // keep the name (JS invoke arg `shellType`) and silence macOS unused warnings.
     #[cfg(not(target_os = "windows"))]
     let _ = &shell_type;
+    // github_account (JS `githubAccount`) pins the per-tab gh identity on macOS/Linux.
+    #[cfg(target_os = "windows")]
+    let _ = &github_account;
     let pty_system = native_pty_system();
 
     let pty_pair = pty_system
@@ -2973,6 +3529,16 @@ fn create_shell(
                     cmd.env(key, value);
                 }
             }
+        }
+
+        let github_env =
+            github_account_env(&work_dir, &home, Some(&path), github_account.as_deref());
+        if !github_env.is_empty() {
+            // gh prefers GH_TOKEN, but drop a stale GITHUB_TOKEN so nothing else picks it up.
+            cmd.env_remove("GITHUB_TOKEN");
+        }
+        for (key, value) in github_env {
+            cmd.env(key, value);
         }
     }
 
@@ -3782,8 +4348,9 @@ fn agent_rpc_stop(panel_id: String) {
     agent_rpc_stop_inner(&panel_id);
 }
 
-// Create shell via CLI tool (Claude, Codex, etc.)
-#[tauri::command]
+// Create shell via CLI tool (Claude, Codex, etc.). Async runtime for the same
+// reason as create_shell.
+#[tauri::command(async)]
 fn create_cli_shell(
     state: State<'_, AppState>,
     terminal_id: String,
@@ -3794,11 +4361,15 @@ fn create_cli_shell(
     rows: u16,
     cols: u16,
     shell_type: Option<String>,
+    github_account: Option<String>,
 ) -> Result<(), String> {
     // shell_type is only consulted in the #[cfg(windows)] branches below;
     // keep the name (JS invoke arg `shellType`) and silence macOS unused warnings.
     #[cfg(not(target_os = "windows"))]
     let _ = &shell_type;
+    // github_account (JS `githubAccount`) pins the per-tab gh identity on macOS/Linux.
+    #[cfg(target_os = "windows")]
+    let _ = &github_account;
     let pty_system = native_pty_system();
 
     let pty_pair = pty_system
@@ -4008,6 +4579,16 @@ fn create_cli_shell(
                     cmd.env(key, value);
                 }
             }
+        }
+
+        let github_env =
+            github_account_env(&work_dir, &home, Some(&path), github_account.as_deref());
+        if !github_env.is_empty() {
+            // gh prefers GH_TOKEN, but drop a stale GITHUB_TOKEN so nothing else picks it up.
+            cmd.env_remove("GITHUB_TOKEN");
+        }
+        for (key, value) in github_env {
+            cmd.env(key, value);
         }
     }
 
@@ -9406,6 +9987,8 @@ fn main() {
             chrome_import::chrome_list_profiles,
             chrome_import::chrome_import_data,
             create_shell,
+            list_github_accounts,
+            detect_github_account,
             resolve_bundled_agent,
             resolve_browser_cli,
             editor_bridge_respond,
@@ -9652,6 +10235,101 @@ fn main() {
                 agent_rpc_stop_all();
             }
         });
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod github_account_tests {
+    use super::{
+        account_for_org_owner, github_login_candidates, github_remote_owner, merge_owner_mapping,
+        org_lookup_should_start, parse_gh_hosts_accounts, OrgLookup,
+    };
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn org_lookup_runs_once_and_backs_off_after_a_miss() {
+        let ttl = Duration::from_secs(600);
+        let now = Instant::now();
+        assert!(org_lookup_should_start(None, now, ttl));
+        assert!(!org_lookup_should_start(Some(OrgLookup::InFlight(now)), now, ttl));
+        assert!(org_lookup_should_start(
+            Some(OrgLookup::InFlight(now)),
+            now + Duration::from_secs(61),
+            ttl
+        ));
+        assert!(!org_lookup_should_start(Some(OrgLookup::Miss(now)), now + Duration::from_secs(10), ttl));
+        assert!(org_lookup_should_start(Some(OrgLookup::Miss(now)), now + ttl, ttl));
+    }
+
+    #[test]
+    fn owner_is_parsed_from_github_remotes() {
+        assert_eq!(github_remote_owner("https://github.com/bluelang1/repo.git").as_deref(), Some("bluelang1"));
+        assert_eq!(github_remote_owner("git@github.com:org/repo.git").as_deref(), Some("org"));
+        assert_eq!(github_remote_owner("ssh://git@github.com/org/repo").as_deref(), Some("org"));
+        assert_eq!(github_remote_owner("https://gitlab.com/org/repo.git"), None);
+        assert_eq!(github_remote_owner("https://github.com/org"), None);
+        assert_eq!(github_remote_owner("https://evil.example/github.com/me/x"), None);
+        assert_eq!(github_remote_owner("https://github.com.evil.example/me/x"), None);
+        assert_eq!(github_remote_owner("https://user@github.com/org/repo.git").as_deref(), Some("org"));
+    }
+
+    #[test]
+    fn mapped_login_is_tried_before_owner_name() {
+        let mapping = serde_json::json!({ "owners": { "acme-org": "me-work" } });
+        assert_eq!(github_login_candidates("acme-org", Some(&mapping)), vec!["me-work", "acme-org"]);
+        assert_eq!(github_login_candidates("me", Some(&mapping)), vec!["me"]);
+        assert_eq!(github_login_candidates("me", None), vec!["me"]);
+        assert_eq!(github_login_candidates("Acme-Org", Some(&mapping)), vec!["me-work", "Acme-Org"]);
+    }
+
+    #[test]
+    fn hosts_yml_lists_all_github_accounts_and_active_one() {
+        let yaml = "github.com:\n    users:\n        work-me:\n        bluelang1:\n            oauth_token: secret\n    git_protocol: https\n    user: work-me\nghe.example.com:\n    users:\n        other:\n    user: other\n";
+        let (accounts, active) = parse_gh_hosts_accounts(yaml);
+        assert_eq!(accounts, vec!["work-me", "bluelang1"]);
+        assert_eq!(active.as_deref(), Some("work-me"));
+    }
+
+    #[test]
+    fn hosts_yml_legacy_single_user_and_missing_host() {
+        let legacy = "github.com:\n  oauth_token: secret\n  user: solo\n  git_protocol: ssh\n";
+        assert_eq!(parse_gh_hosts_accounts(legacy), (vec!["solo".to_string()], Some("solo".to_string())));
+        let other_host_only = "gitlab.com:\n  users:\n    x:\n  user: x\n";
+        assert_eq!(parse_gh_hosts_accounts(other_host_only), (Vec::<String>::new(), None));
+        assert_eq!(parse_gh_hosts_accounts(""), (Vec::<String>::new(), None));
+        let quoted = "\"github.com\":\n  users:\n    \"me\":\n  user: \"me\"\n";
+        assert_eq!(parse_gh_hosts_accounts(quoted), (vec!["me".to_string()], Some("me".to_string())));
+    }
+
+    #[test]
+    fn org_owner_matches_account_case_insensitively() {
+        let orgs = vec![
+            ("personal".to_string(), vec![]),
+            ("work".to_string(), vec!["ColosseumCoinCKR".to_string(), "other".to_string()]),
+        ];
+        assert_eq!(account_for_org_owner("colosseumcoinckr", &orgs).as_deref(), Some("work"));
+        assert_eq!(account_for_org_owner("stranger", &orgs), None);
+        assert_eq!(account_for_org_owner("x", &[]), None);
+    }
+
+    #[test]
+    fn owner_mapping_merge_keeps_other_keys_and_replaces_case_variants() {
+        let created = merge_owner_mapping(None, "acme", "me-work").unwrap();
+        assert_eq!(created, serde_json::json!({ "owners": { "acme": "me-work" } }));
+
+        let existing = r#"{"note": "keep", "owners": {"ACME": "old", "beta": "me"}}"#;
+        let merged = merge_owner_mapping(Some(existing), "acme", "me-work").unwrap();
+        assert_eq!(
+            merged,
+            serde_json::json!({ "note": "keep", "owners": { "acme": "me-work", "beta": "me" } })
+        );
+
+        let bad_owners = merge_owner_mapping(Some(r#"{"owners": 3}"#), "acme", "me").unwrap();
+        assert_eq!(bad_owners, serde_json::json!({ "owners": { "acme": "me" } }));
+
+        assert!(merge_owner_mapping(Some("not json"), "acme", "me").is_none());
+        assert!(merge_owner_mapping(Some("[1]"), "acme", "me").is_none());
+        assert!(merge_owner_mapping(Some("  "), "acme", "me").is_some());
+    }
 }
 
 #[cfg(test)]

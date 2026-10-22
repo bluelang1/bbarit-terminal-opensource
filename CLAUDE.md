@@ -77,6 +77,16 @@ Build/test gotchas:
   (insertDroppedPaths in XTerminal.tsx); paste keeps its own submit rules.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
   CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
+- Plain `#[tauri::command] fn` runs on the main thread; any subprocess or network
+  work in it freezes the whole UI. Use `#[tauri::command(async)]` or a thread.
+- PTY env is built twice (create_shell, create_cli_shell in main.rs); change both.
+  create_cli_shell has no frontend caller today.
+- Per-tab GitHub account: create_shell sets GH_TOKEN from Project.githubAccount >
+  ~/.config/octo/github-accounts.json `owners` > owner==gh login (local only); org
+  detection (`gh api user/orgs`) runs in the background and caches hits to that file.
+  gh accounts come from ~/.config/gh/hosts.yml; never return or log tokens.
+- Project edit reuses the new-project modal (editingProjectId); save logic lives in
+  src/projectEdit.ts. Category is forced to `coding` on load/save.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
