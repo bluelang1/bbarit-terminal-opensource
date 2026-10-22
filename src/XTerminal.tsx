@@ -79,6 +79,10 @@ interface XTerminalProps {
 
   inputMode?: 'direct' | 'ime';
   shellType?: 'powershell' | 'cmd' | 'gitbash' | 'wsl';
+  /** Project's gh account for this PTY: undefined/'' = auto-detect from the origin
+   *  remote, a login = that account, '__none__' = gh's active account. Only read
+   *  when the PTY is created, so a change applies to newly opened tabs. */
+  githubAccount?: string;
   telegram?: {
     enabled: boolean;
     mirrorCommands?: boolean;
@@ -1110,7 +1114,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1134,6 +1138,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   useEffect(() => { csiUKeysRef.current = csiUKeys; }, [csiUKeys]);
   const jisYenRef = useRef(jisYenToBackslash);
   useEffect(() => { jisYenRef.current = jisYenToBackslash; }, [jisYenToBackslash]);
+  // Read at PTY creation only; changing it must not restart a running tab.
+  const githubAccountRef = useRef(githubAccount);
+  githubAccountRef.current = githubAccount;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Set when the user submits input (Enter); gates the "task completed" toast so it
@@ -3530,6 +3537,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             rows: term.rows || 24,
             cols: term.cols || 80,
             shellType: effectiveShellType,
+            githubAccount: githubAccountRef.current || undefined,
           });
           const currentState = terminalStates.get(terminalId);
           if (currentState) currentState.ptyCreated = true;

@@ -1009,6 +1009,7 @@ body.project-dragging * {
 
 /* hairline dividers between the stacked square buttons (no margin) */
 .project-selector-actions .project-theme-wrap,
+.project-selector-actions .project-selector-edit,
 .project-selector-actions .project-selector-close {
   border-top: 1px solid color-mix(in srgb, var(--text-color) 18%, transparent) !important;
 }
@@ -6404,6 +6405,18 @@ body.ftree-dragging * {
 .btn-secondary:hover {
   border-color: color-mix(in srgb, var(--text-color) 50%, transparent);
   color: var(--text-color);
+}
+
+/* Toggle groups (e.g. new-project Local/SSH) mark the selected option with .active */
+.btn-secondary.active {
+  border-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 14%, transparent);
+  color: var(--text-color);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btn-icon {

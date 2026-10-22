@@ -134,6 +134,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
+import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
   isKanbanLinkedEvent, notifyPlannerRefresh, syncTasksToGantt, taskUpdatesFromEvent,
@@ -775,6 +776,9 @@ interface Project {
   discordChannelId?: string;
   slackChannelId?: string;
   githubRepo?: string;
+  /** gh account pinned into this project's new terminals: undefined = auto-detect
+   *  from the origin remote, a login = that account, '__none__' = gh's active account. */
+  githubAccount?: string;
   terminalTiling?: {
     leftIds: string[];
     rightIds: string[];
@@ -1775,6 +1779,7 @@ function saveProjects(projects: Project[], activeId: string | null) {
       styleIndex: p.styleIndex,
       fontIndex: p.fontIndex,
       customFontFamily: p.customFontFamily || undefined,
+      githubAccount: p.githubAccount || undefined,
       terminalLayout: p.terminalLayout || undefined,
       terminalTiling: p.terminalTiling ? {
         leftIds: Array.isArray(p.terminalTiling.leftIds) ? p.terminalTiling.leftIds : [],
@@ -1887,6 +1892,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
         styleIndex: (typeof p.styleIndex === 'number' && p.styleIndex >= 0 && p.styleIndex < STYLES.length) ? p.styleIndex : 0,
         fontIndex: (typeof p.fontIndex === 'number' && p.fontIndex >= 0 && p.fontIndex < FONTS.length) ? p.fontIndex : 0,
         customFontFamily: typeof p.customFontFamily === 'string' && p.customFontFamily.trim() ? p.customFontFamily.trim() : undefined,
+        githubAccount: typeof p.githubAccount === 'string' && p.githubAccount.trim() ? p.githubAccount.trim() : undefined,
         terminals,
         activeTerminalId,
         terminalLayout,
@@ -2405,6 +2411,15 @@ function App() {
   const [newStyleIndex, setNewStyleIndex] = useState(0);
   const [newFontIndex, setNewFontIndex] = useState(0);
   const [showAllNewProjectThemes, setShowAllNewProjectThemes] = useState(false);
+  // Same modal edits an existing project when set (sidebar pencil / context menu).
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  // New-project theme/font picks to restore after an edit pre-filled them.
+  const preEditStyleFontRef = useRef<{ styleIndex: number; fontIndex: number } | null>(null);
+  // '' = auto-detect, a gh login, or GITHUB_ACCOUNT_NONE (see Project.githubAccount).
+  const [newProjectGithubAccount, setNewProjectGithubAccount] = useState('');
+  const [githubAccountsInfo, setGithubAccountsInfo] = useState<{ accounts: string[]; active: string | null }>({ accounts: [], active: null });
+  // undefined = not detected yet, null = auto falls back to gh's active account.
+  const [detectedGithubAccount, setDetectedGithubAccount] = useState<string | null | undefined>(undefined);
   const [showNewProjectAdvanced, setShowNewProjectAdvanced] = useState(false);
   const [fileTree, setFileTree] = useState<FileEntry[]>([]);
   const [fileTreeError, setFileTreeError] = useState<string | null>(null);
@@ -2446,6 +2461,53 @@ function App() {
     const id = setInterval(() => { void poll(); }, 3000);
     return () => { active = false; clearInterval(id); };
   }, [showNewProjectModal, newProjectMode]);
+
+  // GitHub account picker: logged-in gh accounts (logins only, never tokens).
+  useEffect(() => {
+    if (!showNewProjectModal) return;
+    let active = true;
+    invoke<{ accounts: string[]; active: string | null }>('list_github_accounts')
+      .then((info) => { if (active) setGithubAccountsInfo({ accounts: info?.accounts || [], active: info?.active ?? null }); })
+      .catch(() => { /* gh not installed / not logged in */ });
+    return () => { active = false; };
+  }, [showNewProjectModal]);
+
+  // Show which account auto-detection would pick for the chosen local folder.
+  useEffect(() => {
+    setDetectedGithubAccount(undefined);
+    const dir = newProjectPath.trim();
+    if (!showNewProjectModal || newProjectMode !== 'local' || !dir) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      invoke<string | null>('detect_github_account', { workDir: dir })
+        .then((login) => { if (active) setDetectedGithubAccount(login ?? null); })
+        .catch(() => { if (active) setDetectedGithubAccount(null); });
+    }, 400);
+    return () => { active = false; clearTimeout(timer); };
+  }, [showNewProjectModal, newProjectMode, newProjectPath]);
+
+  // Leaving edit mode: clear the fields that were pre-filled from the edited project
+  // so the next "new project" starts blank.
+  useEffect(() => {
+    if (showNewProjectModal || !editingProjectId) return;
+    setEditingProjectId(null);
+    setNewProjectMode('local');
+    setNewProjectPath('');
+    setNewProjectSshHost('');
+    setNewProjectSshPort(22);
+    setNewProjectSshUsername('');
+    setNewProjectSshIdentityFile('');
+    setNewProjectSshBasePath('');
+    setNewProjectSshStatus(null);
+    setNewProjectDisplayName('');
+    setNewProjectGithubAccount('');
+    const saved = preEditStyleFontRef.current;
+    preEditStyleFontRef.current = null;
+    if (saved) {
+      setNewStyleIndex(saved.styleIndex);
+      setNewFontIndex(saved.fontIndex);
+    }
+  }, [showNewProjectModal, editingProjectId]);
 
   useEffect(() => {
     if (!themePickerTerminalId) return;
@@ -5191,6 +5253,35 @@ Office project scaffold created by BBARIT Terminal.
       value: project.displayName || project.name || '',
     });
   }, []);
+  // Open the new-project modal in edit mode, pre-filled from the project.
+  const openEditProjectModal = useCallback((projectId: string) => {
+    const project = projectsRef.current.find((p) => p.id === projectId);
+    if (!project) return;
+    const ssh = parseSshVirtualPath(project.workDir);
+    if (ssh) {
+      setNewProjectMode('ssh');
+      setNewProjectPath('');
+      setNewProjectSshHost(ssh.host);
+      setNewProjectSshPort(ssh.port);
+      setNewProjectSshUsername(ssh.username);
+      setNewProjectSshIdentityFile(ssh.identityFile || '');
+      setNewProjectSshBasePath(ssh.basePath);
+    } else {
+      setNewProjectMode('local');
+      setNewProjectPath(project.workDir);
+    }
+    setNewProjectSshStatus(null);
+    setNewProjectDisplayName(project.displayName || project.name || '');
+    setNewProjectCategory(project.category || 'coding');
+    if (!preEditStyleFontRef.current) {
+      preEditStyleFontRef.current = { styleIndex: newStyleIndex, fontIndex: newFontIndex };
+    }
+    setNewStyleIndex(project.styleIndex >= 0 && project.styleIndex < STYLES.length ? project.styleIndex : 0);
+    setNewFontIndex(project.fontIndex >= 0 && project.fontIndex < FONTS.length ? project.fontIndex : 0);
+    setNewProjectGithubAccount(project.githubAccount || '');
+    setEditingProjectId(project.id);
+    setShowNewProjectModal(true);
+  }, [newStyleIndex, newFontIndex]);
   const renameTerminal = useCallback((projectId: string, terminalId: string) => {
     const project = projectsRef.current.find((p) => p.id === projectId);
     const terminal = project?.terminals.find((t) => t.id === terminalId);
@@ -8096,7 +8187,16 @@ Office project scaffold created by BBARIT Terminal.
           >
             <LucideIcons.Star size={14} fill={project.favorite ? 'currentColor' : 'none'} />
           </button>
-          {renderProjectThemePicker(project)}
+          <button
+            type="button"
+            className="project-selector-edit"
+            tabIndex={-1}
+            title={t('app.project.editTooltip' as any)}
+            aria-label={t('app.project.editTitle' as any)}
+            onClick={(e) => { e.stopPropagation(); openEditProjectModal(project.id); }}
+          >
+            <OctoPencil size={12} />
+          </button>
           <button
             type="button"
             className="project-selector-close"
@@ -13373,6 +13473,11 @@ Office project scaffold created by BBARIT Terminal.
   };
 
   const createProject = async () => {
+    const editingProject = editingProjectId ? projects.find((p) => p.id === editingProjectId) : undefined;
+    if (editingProjectId && !editingProject) {
+      setShowNewProjectModal(false);
+      return;
+    }
     let sourcePath = '';
     if (newProjectMode === 'ssh') {
       const host = newProjectSshHost.trim();
@@ -13385,44 +13490,56 @@ Office project scaffold created by BBARIT Terminal.
         return;
       }
 
-      setNewProjectSshChecking(true);
-      setNewProjectSshStatus(t('app.project.sshChecking' as any));
-      try {
-        // SSH 키 파일 권한 자동 수정 (600)
-        let fixedKeyPath = newProjectSshIdentityFile.trim() || null;
-        if (fixedKeyPath) {
-          try {
-            fixedKeyPath = await invoke<string>('ssh_fix_key_permissions', { keyPath: fixedKeyPath });
-          } catch (e) {
-            console.warn('[SSH] Key permission fix failed, using original:', e);
+      // Editing without touching the SSH location: keep it, no reconnect check.
+      const unchangedSshPath = editingProject && buildSshVirtualPath({
+        host,
+        port,
+        username,
+        basePath,
+        identityFile: newProjectSshIdentityFile.trim() || undefined,
+      }) === editingProject.workDir;
+      if (unchangedSshPath) {
+        sourcePath = editingProject.workDir;
+      } else {
+        setNewProjectSshChecking(true);
+        setNewProjectSshStatus(t('app.project.sshChecking' as any));
+        try {
+          // SSH 키 파일 권한 자동 수정 (600)
+          let fixedKeyPath = newProjectSshIdentityFile.trim() || null;
+          if (fixedKeyPath) {
+            try {
+              fixedKeyPath = await invoke<string>('ssh_fix_key_permissions', { keyPath: fixedKeyPath });
+            } catch (e) {
+              console.warn('[SSH] Key permission fix failed, using original:', e);
+            }
           }
-        }
-        const verifiedBase = await invoke<string>('ssh_validate_base', {
-          input: {
+          const verifiedBase = await invoke<string>('ssh_validate_base', {
+            input: {
+              host,
+              port,
+              username,
+              identity_file: fixedKeyPath,
+              base_path: basePath,
+            },
+          });
+          const verifiedBasePath = String(verifiedBase || '').trim();
+          if (!verifiedBasePath) {
+            throw new Error('SSH base path validation result is empty.');
+          }
+          sourcePath = buildSshVirtualPath({
             host,
             port,
             username,
-            identity_file: fixedKeyPath,
-            base_path: basePath,
-          },
-        });
-        const verifiedBasePath = String(verifiedBase || '').trim();
-        if (!verifiedBasePath) {
-          throw new Error('SSH base path validation result is empty.');
+            basePath: verifiedBasePath,
+            identityFile: newProjectSshIdentityFile.trim() || undefined,
+          });
+          setNewProjectSshStatus(t('app.project.sshVerified' as any));
+        } catch (err) {
+          setNewProjectSshStatus(formatSshConnectionError(err));
+          return;
+        } finally {
+          setNewProjectSshChecking(false);
         }
-        sourcePath = buildSshVirtualPath({
-          host,
-          port,
-          username,
-          basePath: verifiedBasePath,
-          identityFile: newProjectSshIdentityFile.trim() || undefined,
-        });
-        setNewProjectSshStatus(t('app.project.sshVerified' as any));
-      } catch (err) {
-        setNewProjectSshStatus(formatSshConnectionError(err));
-        return;
-      } finally {
-        setNewProjectSshChecking(false);
       }
     } else {
       if (!newProjectPath.trim()) return;
@@ -13432,6 +13549,44 @@ Office project scaffold created by BBARIT Terminal.
 
     const path = normalizeFsPath(sourcePath);
     if (!path) return;
+    // SSH projects run gh on the remote host; the per-tab account only applies locally.
+    const githubAccount = projectGithubAccountFor(path, newProjectGithubAccount);
+
+    if (editingProject) {
+      const { updates, displayName, workDirChanged } = projectEditUpdates(editingProject, {
+        path,
+        displayName: newProjectDisplayName,
+        styleIndex: newStyleIndex,
+        fontIndex: newFontIndex,
+        githubAccount: newProjectGithubAccount,
+      }, normalizeFsPath);
+      const duplicate = workDirChanged && projects.some((p) => p.id !== editingProject.id && normalizeFsPath(p.workDir) === path);
+      if (duplicate) {
+        setNewProjectSshStatus(t('app.project.editDuplicatePath' as any).replace('{path}', path));
+        return;
+      }
+      if (workDirChanged && newProjectMode === 'local') {
+        try {
+          await invoke('read_directory', { path });
+        } catch {
+          try { await invoke('create_directory', { path }); } catch (err) {
+            console.warn('[Project] Failed to create project directory:', err);
+          }
+        }
+      }
+      // Running terminals keep their PTY and cwd; a new workDir/account applies to new tabs.
+      updateProject(editingProject.id, updates);
+      recordRecentProject({
+        workDir: path,
+        displayName,
+        styleIndex: newStyleIndex,
+        fontIndex: newFontIndex,
+        customFontFamily: editingProject.customFontFamily,
+      });
+      setNewProjectSshStatus(null);
+      setShowNewProjectModal(false);
+      return;
+    }
 
     const projectCategory: ProjectCategory = 'coding';
 
@@ -13474,6 +13629,7 @@ Office project scaffold created by BBARIT Terminal.
         category: projectCategory,
         styleIndex,
         fontIndex,
+        githubAccount,
         terminals: [terminal],
         activeTerminalId: terminal.id
       };
@@ -13486,6 +13642,7 @@ Office project scaffold created by BBARIT Terminal.
     }
     openProjectTerminal(newId);
     setNewProjectDisplayName('');
+    setNewProjectGithubAccount('');
     setNewProjectCategory('coding');
     setNewProjectSshStatus(null);
     // recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, category: newProjectCategory });
@@ -14975,6 +15132,12 @@ Office project scaffold created by BBARIT Terminal.
     const canOpenProject = newProjectMode === 'ssh'
       ? Boolean(newProjectSshHost.trim() && newProjectSshUsername.trim()) && !newProjectSshChecking
       : Boolean(trimmedProjectPath) && !newProjectSshChecking;
+    const isEditingProject = Boolean(editingProjectId);
+    // Logged-in accounts, plus a saved login that is no longer logged in so it stays visible.
+    const githubAccountOptions = [...githubAccountsInfo.accounts];
+    if (newProjectGithubAccount && newProjectGithubAccount !== GITHUB_ACCOUNT_NONE && !githubAccountOptions.includes(newProjectGithubAccount)) {
+      githubAccountOptions.push(newProjectGithubAccount);
+    }
 
     return (
     <div className="modal-overlay" style={{ '--bg-color': selectedStyle.bg, '--text-color': selectedStyle.text, '--accent-color': selectedStyle.accent } as React.CSSProperties} onMouseDown={(e) => { if (e.target === e.currentTarget && projects.length > 0) setShowNewProjectModal(false); }}>
@@ -14983,7 +15146,7 @@ Office project scaffold created by BBARIT Terminal.
         <div className="new-project-form">
           <h2>
             <img className="new-project-bbarit-icon" src="/icons/bbarit-logo.png" alt="" aria-hidden="true" />
-            {t('app.newProject')}
+            {isEditingProject ? t('app.project.editTitle' as any) : t('app.newProject')}
           </h2>
 
           {/* Scrollable form area */}
@@ -14994,6 +15157,7 @@ Office project scaffold created by BBARIT Terminal.
                 <button
                   type="button"
                   className={`btn-secondary ${newProjectMode === 'local' ? 'active' : ''}`}
+                  disabled={isEditingProject && newProjectMode !== 'local'}
                   onClick={() => { setNewProjectMode('local'); setNewProjectSshStatus(null); }}
                   title={t('app.project.localBased' as any)}
                 >
@@ -15002,6 +15166,7 @@ Office project scaffold created by BBARIT Terminal.
                 <button
                   type="button"
                   className={`btn-secondary ${newProjectMode === 'ssh' ? 'active' : ''}`}
+                  disabled={isEditingProject && newProjectMode !== 'ssh'}
                   onClick={() => {
                     setNewProjectMode('ssh');
                     if (!sshConfigLoaded) {
@@ -15026,6 +15191,25 @@ Office project scaffold created by BBARIT Terminal.
                   <div className="new-project-field-note">
                     Project location <strong>{projectLocationPreview}</strong>
                   </div>
+                  {isEditingProject && (
+                    <div className="new-project-field-note">{t('app.project.editPathNote' as any)}</div>
+                  )}
+                  {newProjectSshStatus && (
+                    <div
+                      role="alert"
+                      style={{
+                        fontSize: 12,
+                        lineHeight: 1.4,
+                        padding: '8px 10px',
+                        borderRadius: 'var(--brutal-radius)',
+                        border: '1px solid rgba(148,163,184,0.35)',
+                        background: 'rgba(239,68,68,0.12)',
+                        wordBreak: 'break-word',
+                      }}
+                    >
+                      {newProjectSshStatus}
+                    </div>
+                  )}
                   {/*
                   <div style={{ display: 'grid', gap: 7 }}>
                     <span style={{ fontSize: 12, opacity: 0.9, fontWeight: 700, color: 'var(--text-color)' }}>프로젝트 종류</span>
@@ -15246,6 +15430,35 @@ Office project scaffold created by BBARIT Terminal.
               </div>
             </div>
 
+            {newProjectMode === 'local' && (
+              <div className="form-group">
+                <label>{t('app.project.githubAccount' as any)}</label>
+                <select
+                  value={newProjectGithubAccount}
+                  onChange={(e) => setNewProjectGithubAccount(e.target.value)}
+                  title={t('app.project.githubAccount' as any)}
+                  style={{ padding: '8px 10px', borderRadius: 'var(--brutal-radius)', fontSize: 13 }}
+                >
+                  <option value="">
+                    {detectedGithubAccount
+                      ? t('app.project.githubAutoDetected' as any).replace('{login}', detectedGithubAccount)
+                      : detectedGithubAccount === null
+                        ? t('app.project.githubAutoActive' as any)
+                        : t('app.project.githubAuto' as any)}
+                  </option>
+                  {githubAccountOptions.map((login) => (
+                    <option key={login} value={login}>
+                      {githubAccountsInfo.accounts.includes(login)
+                        ? login
+                        : t('app.project.githubNotLoggedIn' as any).replace('{login}', login)}
+                    </option>
+                  ))}
+                  <option value={GITHUB_ACCOUNT_NONE}>{t('app.project.githubNone' as any)}</option>
+                </select>
+                <div className="new-project-field-note">{t('app.project.githubHint' as any)}</div>
+              </div>
+            )}
+
             <div className="form-group">
               <label>{t('app.project.terminalStyle' as any)} ({selectedStyle.name})</label>
               <div
@@ -15321,13 +15534,14 @@ Office project scaffold created by BBARIT Terminal.
               </span>
             )}
             {projects.length > 0 && <button className="btn-secondary" onClick={() => setShowNewProjectModal(false)} title={t('common.cancel')}>{t('common.cancel')}</button>}
-            <button className="btn-primary" onClick={() => { void createProject(); }} disabled={!canOpenProject} title={t('app.openProject')}>
-              {newProjectSshChecking ? t('common.loading') : t('app.openProject')}
+            <button className="btn-primary" onClick={() => { void createProject(); }} disabled={!canOpenProject} title={isEditingProject ? t('common.save') : t('app.openProject')}>
+              {newProjectSshChecking ? t('common.loading') : isEditingProject ? t('common.save') : t('app.openProject')}
             </button>
           </div>
         </div>
 
-        {/* Right: Recent projects list */}
+        {/* Right: Recent projects list (hidden while editing an existing project) */}
+        {!isEditingProject && (
         <div className="recent-projects-panel">
           <h3>📂 {t('app.recent.title' as any)}</h3>
           {(() => {
@@ -15453,6 +15667,7 @@ Office project scaffold created by BBARIT Terminal.
             );
           })()}
         </div>
+        )}
       </div>
     </div>
     );
@@ -15636,6 +15851,7 @@ Office project scaffold created by BBARIT Terminal.
         terminalId={term.id}
         workDir={term.lastWorkDir || selProj?.workDir || ''}
         projectWorkDir={selProj?.workDir}
+        githubAccount={selProj?.githubAccount}
         isActive={active}
         isRestored={false}
         style={activeStyle}
@@ -16422,6 +16638,28 @@ Office project scaffold created by BBARIT Terminal.
             >
               <OctoPencil size={12} />
               <span>Rename</span>
+            </div>
+            <div
+              data-project-menu-action="edit"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 12px',
+                cursor: 'pointer',
+                fontSize: 12,
+                color: 'var(--text-primary, #ccc)',
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover, #2a2a2a)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+              onClick={() => {
+                const pid = projectContextMenu.projectId;
+                setProjectContextMenu(null);
+                openEditProjectModal(pid);
+              }}
+            >
+              <LucideIcons.SlidersHorizontal size={12} />
+              <span>{t('app.context.editProject' as any)}</span>
             </div>
             <div
               style={{
@@ -19626,7 +19864,16 @@ Office project scaffold created by BBARIT Terminal.
                         >
                           <LucideIcons.Star size={14} fill={project.favorite ? 'currentColor' : 'none'} />
                         </button>
-                        {renderProjectThemePicker(project)}
+                        <button
+                          type="button"
+                          className="project-selector-edit"
+                          tabIndex={-1}
+                          title={t('app.project.editTooltip' as any)}
+                          aria-label={t('app.project.editTitle' as any)}
+                          onClick={(e) => { e.stopPropagation(); openEditProjectModal(project.id); }}
+                        >
+                          <OctoPencil size={12} />
+                        </button>
                         <button
                           type="button"
                           className="project-selector-close"
@@ -20452,6 +20699,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            terminalId={terminal.id}
 			                            workDir={terminal.lastWorkDir || activeProject.workDir}
 			                            projectWorkDir={activeProject.workDir}
+			                            githubAccount={activeProject.githubAccount}
                             isActive={terminal.id === activeProject.activeTerminalId}
                             isRestored={!!terminal.lastWorkDir}
                             deferStart={shouldDeferStartupTerminal(terminal.id, terminal.id === activeProject.activeTerminalId)}
@@ -20843,6 +21091,7 @@ Office project scaffold created by BBARIT Terminal.
                             terminalId={terminal.id}
                             workDir={terminal.lastWorkDir || proj.workDir}
                             projectWorkDir={proj.workDir}
+                            githubAccount={proj.githubAccount}
                             isActive={isActiveTerminal}
                             isRestored={!!terminal.lastWorkDir}
                             deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
@@ -21148,6 +21397,7 @@ Office project scaffold created by BBARIT Terminal.
                                     terminalId={terminal.id}
                                     workDir={terminal.lastWorkDir || proj.workDir}
                                     projectWorkDir={proj.workDir}
+                                    githubAccount={proj.githubAccount}
                                     isActive={isActiveTerminal}
                                     isRestored={!!terminal.lastWorkDir}
                                     deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
@@ -21432,6 +21682,7 @@ Office project scaffold created by BBARIT Terminal.
 			                              terminalId={terminal.id}
 			                              workDir={terminal.lastWorkDir || activeProject.workDir}
 			                              projectWorkDir={activeProject.workDir}
+			                              githubAccount={activeProject.githubAccount}
 			                              isActive={isActiveTerminal}
 			                              isRestored={!!terminal.lastWorkDir}
 			                              deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
@@ -21773,6 +22024,7 @@ Office project scaffold created by BBARIT Terminal.
 		                                  terminalId={terminal.id}
 		                                  workDir={terminal.lastWorkDir || activeProject.workDir}
 		                                  projectWorkDir={activeProject.workDir}
+		                                  githubAccount={activeProject.githubAccount}
 		                                  isActive={isActiveTerminal}
 		                                  isRestored={!!terminal.lastWorkDir}
 		                                  deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
@@ -22085,6 +22337,7 @@ Office project scaffold created by BBARIT Terminal.
                           terminalId={terminal.id}
                           workDir={terminal.lastWorkDir || activeProject.workDir}
                           projectWorkDir={activeProject.workDir}
+                          githubAccount={activeProject.githubAccount}
                           isActive={isActiveTerminal}
                           isRestored={!!terminal.lastWorkDir}
                           deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
