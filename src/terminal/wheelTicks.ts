@@ -34,8 +34,11 @@ export const wheelToTicks = (
     return { ticks: sign * Math.max(1, Math.round(Math.abs(dy))) * Math.max(1, rows), remainder: 0 };
   }
   // Physical mouse wheel in pixel mode: one tick per notch, never swallowed.
+  // WebKit reports trackpad wheelDeltaY as 3×deltaY, so a 40px trackpad event
+  // also lands on 120 — those keep accumulating.
   const legacy = Math.abs(e.wheelDeltaY ?? 0);
-  if (legacy >= NOTCH && legacy % NOTCH === 0) {
+  const trackpadLike = legacy === Math.round(Math.abs(dy) * 3);
+  if (!trackpadLike && legacy >= NOTCH && legacy % NOTCH === 0) {
     return { ticks: sign * (legacy / NOTCH), remainder: 0 };
   }
   // Direction change drops the carry so reversing responds immediately.
