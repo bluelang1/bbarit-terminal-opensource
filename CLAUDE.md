@@ -77,6 +77,10 @@ Build/test gotchas:
   (insertDroppedPaths in XTerminal.tsx); paste keeps its own submit rules.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS
   CI runner set NODE_OPTIONS=--max-old-space-size=5120 or it aborts with OOM.
+- Full-screen TUIs (Claude `tui: fullscreen`, alt buffer) scroll through the wheel
+  bridge in XTerminal.tsx, not xterm scrollback; tick math lives in
+  src/terminal/wheelTicks.ts (accumulate trackpad pixels, one tick per notch).
+- A fresh worktree has no node_modules; symlink the main checkout's before vitest/tsc.
 - Plain `#[tauri::command] fn` runs on the main thread; any subprocess or network
   work in it freezes the whole UI. Use `#[tauri::command(async)]` or a thread.
 - PTY env is built twice (create_shell, create_cli_shell in main.rs); change both.
