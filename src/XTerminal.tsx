@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { advanceImeAnchor, shouldResyncImeAnchor } from './terminal/imeAnchor';
 import { routeKeyDuringComposition } from './terminal/imeEscape';
 import { applyWheelToScrollPin } from './terminal/scrollPin';
+import { wheelToTicks } from './terminal/wheelTicks';
 import { preserveTerminalViewport, writeXterm, shouldTrustScrollForPin, captureHiddenPin, restorePinAfterReveal, type HiddenPinSnapshot } from './terminal/scrollKeeper';
 import {
   readImage as clipboardReadImage,
@@ -4068,6 +4069,17 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     const term = termRef.current as any;
     if (!term?.element) return;
     const xtermEl = term.element as HTMLElement;
+    let wheelRemainder = 0;
+    const takeWheelTicks = (e: WheelEvent, cellH: number, rows: number) => {
+      const r = wheelToTicks(
+        { deltaY: e.deltaY, deltaMode: e.deltaMode, wheelDeltaY: (e as any).wheelDeltaY },
+        wheelRemainder,
+        cellH,
+        rows,
+      );
+      wheelRemainder = r.remainder;
+      return r.ticks;
+    };
 
     const handleWheel = (e: WheelEvent) => {
       const t = termRef.current as any;
@@ -4088,8 +4100,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           e.preventDefault();
           const dims = t._core?._renderService?.dimensions;
           const cellH = dims?.css?.cell?.height || 18;
-          const scrollLines = Math.max(1, Math.ceil(Math.abs(e.deltaY) / cellH));
-          const arrowKey = e.deltaY < 0 ? '\x1b[A' : '\x1b[B'; // Up / Down arrow
+          const ticks = takeWheelTicks(e, cellH, t.rows || 24);
+          const scrollLines = Math.abs(ticks);
+          const arrowKey = ticks < 0 ? '\x1b[A' : '\x1b[B'; // Up / Down arrow
           for (let i = 0; i < scrollLines; i++) {
             invoke('write_to_pty', { terminalId, data: arrowKey }).catch(() => {});
           }
@@ -4112,10 +4125,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const rowRaw = Math.floor((e.clientY - rect.top) / cellH) + 1;
       const col = Math.max(1, Math.min(colRaw, t.cols || 9999));
       const row = Math.max(1, Math.min(rowRaw, t.rows || 9999));
-      const scrollLines = Math.max(1, Math.ceil(Math.abs(e.deltaY) / cellH));
+      const ticks = takeWheelTicks(e, cellH, t.rows || 24);
+      const scrollLines = Math.abs(ticks);
+      if (scrollLines === 0) return;
 
       // SGR button: 64 = scroll up, 65 = scroll down (matches xterm.js eventCode for WHEEL)
-      const button = e.deltaY < 0 ? 64 : 65;
+      const button = ticks < 0 ? 64 : 65;
 
       if (activeEncoding === 'SGR') {
         // SGR format: CSI < button ; col ; row M  (col/row are 1-based)
