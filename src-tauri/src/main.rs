@@ -31,6 +31,7 @@ mod integrations;
 mod lan_discovery;
 mod learning_db;
 mod note_ops;
+mod pty_backend;
 mod db;
 mod webview_browser;
 // semble_rs에서 벤더링한 코드 검색 라이브러리 — graph/encoder/file_walker만 사용 중
@@ -41,9 +42,9 @@ mod video_edit;
 mod web_terminal;
 
 use futures::StreamExt;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::CommandBuilder;
 use serde::{Deserialize, Serialize};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::{
     collections::HashMap,
@@ -64,12 +65,6 @@ use std::time::Duration;
 use sysinfo::{Pid, System};
 use tokio::sync::Mutex as AsyncMutex;
 
-// Prevent unbounded memory growth when the frontend can't keep up with PTY output.
-// 1024 queued chunks is enough for bursty CLIs while keeping multi-harness memory bounded.
-const PTY_OUTPUT_QUEUE_CAPACITY: usize = 1024;
-// Limit how much we return per read to avoid huge allocations and renderer stalls
-// on bursty long-running output.
-const PTY_READ_MAX_BYTES: usize = 64 * 1024;
 // Avoid freezing the UI by dumping huge API responses to the terminal.
 const HTTP_BODY_MAX_BYTES: usize = 1024 * 1024;
 // Maximum file size allowed for read_file/write_file (10 MB) to prevent memory spikes.
@@ -126,28 +121,9 @@ fn shared_http_client() -> &'static reqwest::Client {
 
 type FileEntry = common::FileEntry;
 
-// per-terminal state
-struct PtyInstance {
-    writer: Box<dyn Write + Send>,
-    output_rx: Receiver<String>,
-    master: Box<dyn portable_pty::MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send>,
-    alive: Arc<AtomicBool>,
-    /// Accumulated output buffer — keeps a copy of all PTY output for later retrieval.
-    /// Used by orchestra plan to read output even though XTerminal consumes the channel.
-    output_buffer: Arc<Mutex<String>>,
-    /// Wall-clock time of the most recent PTY output. The broker uses idle-debounce
-    /// ("no output for N ms") as a model-agnostic readiness / turn-complete signal,
-    /// instead of fragile banner/prompt regex. Exposed via `pty_idle_ms`.
-    last_output_at: Arc<Mutex<std::time::Instant>>,
-    /// `BBARIT_TERM_SCOPE` value planted in this PTY's env. Processes that inherited it
-    /// (even ones that escaped the process tree via setsid/nohup) are swept on close.
-    /// docs/TERMINAL_SCOPE_SWEEP.md
-    scope_token: String,
-}
-
 struct AppState {
-    ptys: Mutex<HashMap<String, PtyInstance>>,
+    /// Tab PTYs (docs/PTY_HOLDER_DAEMON.md 3.4). The PTY commands only forward to it.
+    pty: Arc<dyn pty_backend::PtyBackend>,
     harness_jobs: Mutex<HashMap<String, HarnessJobRecord>>,
 }
 
@@ -2683,127 +2659,6 @@ fn parse_telegram_updates(
     })
 }
 
-fn spawn_utf8_reader_thread(
-    mut reader: Box<dyn Read + Send>,
-    tx: SyncSender<String>,
-    alive: Arc<AtomicBool>,
-    output_buffer: Option<Arc<Mutex<String>>>,
-    last_output_at: Option<Arc<Mutex<std::time::Instant>>>,
-) {
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
-        let mut dropped_output = false;
-        // Cap buffer below 1 MB to prevent long-running terminals from retaining
-        // too much historical output just for orchestra-side inspection.
-        // When the buffer exceeds this limit, trim the front half so that
-        // the most recent output (which usually contains the final JSON plan)
-        // is always preserved.
-        const OUTPUT_BUFFER_MAX: usize = 768 * 1024;
-
-        let mut try_send = |data: String| {
-            if data.is_empty() {
-                return true;
-            }
-
-            // Idle-debounce readiness: stamp the time of the most recent output so the
-            // broker can tell "settled / turn complete" from "still streaming".
-            if let Some(ref ts) = last_output_at {
-                if let Ok(mut t) = ts.lock() {
-                    *t = std::time::Instant::now();
-                }
-            }
-
-            // Also append to the output buffer if provided.
-            if let Some(ref buf_arc) = output_buffer {
-                if let Ok(mut buf) = buf_arc.lock() {
-                    buf.push_str(&data);
-                    // If buffer exceeds limit, trim the front half
-                    if buf.len() > OUTPUT_BUFFER_MAX {
-                        let trim_at = buf.len() / 2;
-                        // Find a safe UTF-8 boundary
-                        let safe_trim = buf.ceil_char_boundary(trim_at);
-                        let trimmed = buf.split_off(safe_trim);
-                        *buf = trimmed;
-                    }
-                }
-            }
-
-            // If we previously dropped output due to a full queue, try to emit a marker once we have space.
-            if dropped_output {
-                match tx.try_send("\r\n[output truncated]\r\n".to_string()) {
-                    Ok(()) => dropped_output = false,
-                    Err(TrySendError::Disconnected(_)) => return false,
-                    Err(TrySendError::Full(_)) => {
-                        // Still full, keep the dropped flag set.
-                    }
-                }
-            }
-
-            // Never block the reader thread for a full output queue. If the frontend
-            // falls behind, keep the PTY draining and mark the visible output as truncated.
-            match tx.try_send(data) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) => {
-                    dropped_output = true;
-                    true
-                }
-                Err(TrySendError::Disconnected(_)) => false,
-            }
-        };
-
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    pending.extend_from_slice(&buf[..n]);
-
-                    loop {
-                        match std::str::from_utf8(&pending) {
-                            Ok(s) => {
-                                if !try_send(s.to_string()) {
-                                    return;
-                                }
-                                pending.clear();
-                                break;
-                            }
-                            Err(e) => {
-                                let valid_up_to = e.valid_up_to();
-                                if valid_up_to > 0 {
-                                    let valid = &pending[..valid_up_to];
-                                    if !try_send(String::from_utf8_lossy(valid).to_string()) {
-                                        return;
-                                    }
-                                }
-
-                                if let Some(len) = e.error_len() {
-                                    // Drop invalid byte(s) and keep trying to decode the rest.
-                                    pending.drain(0..(valid_up_to + len));
-                                    if pending.is_empty() {
-                                        break;
-                                    }
-                                } else {
-                                    // Incomplete UTF-8 sequence at the end; keep it for the next read.
-                                    pending.drain(0..valid_up_to);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-
-        if !pending.is_empty() {
-            let _ = try_send(String::from_utf8_lossy(&pending).to_string());
-        }
-
-        // Signal that the PTY process has exited
-        alive.store(false, Ordering::Relaxed);
-    });
-}
-
 /// Owner segment of a github.com remote URL (https, ssh or scp-style), if any.
 #[cfg(not(target_os = "windows"))]
 fn github_remote_owner(remote_url: &str) -> Option<String> {
@@ -3368,120 +3223,16 @@ fn create_shell(
     shell_type: Option<String>,
     github_account: Option<String>,
 ) -> Result<(), String> {
-    // shell_type is only consulted in the #[cfg(windows)] branches below;
-    // keep the name (JS invoke arg `shellType`) and silence macOS unused warnings.
-    #[cfg(not(target_os = "windows"))]
-    let _ = &shell_type;
     // github_account (JS `githubAccount`) pins the per-tab gh identity on macOS/Linux.
     #[cfg(target_os = "windows")]
     let _ = &github_account;
-    let pty_system = native_pty_system();
-
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
-
-    let reader = pty_pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| e.to_string())?;
-    let writer = pty_pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    // Shell command setup
-    #[cfg(target_os = "windows")]
-    let is_ssh_pty = is_remote_ssh_path(&work_dir);
-
-    // On Windows, an ssh:// work dir spawns `ssh` directly as the PTY (see
-    // build_ssh_pty_command) instead of a local shell that would have to parse a
-    // POSIX-quoted ssh command. macOS/Linux keep typing the command into zsh.
-    #[cfg(target_os = "windows")]
-    let effective_shell_type = if !is_ssh_pty
-        && shell_type.as_deref() == Some("wsl")
-        && !wsl_distribution_installed()
-    {
-        None
-    } else {
-        shell_type.as_deref()
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = if is_ssh_pty {
-        build_ssh_pty_command(&work_dir)?
-    } else {
-        let shell_executable = match effective_shell_type {
-            Some("cmd") => "cmd.exe",
-            Some("gitbash") => "C:\\Program Files\\Git\\bin\\bash.exe",
-            Some("wsl") => "wsl.exe",
-            _ => "powershell.exe", // default
-        };
-        CommandBuilder::new(shell_executable)
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = CommandBuilder::new("/bin/zsh");
-
-    #[cfg(not(target_os = "windows"))]
-    cmd.arg("-l");
 
     let shell_work_dir = resolve_shell_work_dir(&work_dir);
-    #[cfg(target_os = "windows")]
-    configure_windows_pty_encoding(&mut cmd, effective_shell_type, is_ssh_pty);
-    #[cfg(target_os = "windows")]
-    if !is_ssh_pty && effective_shell_type == Some("wsl") {
-        if let Some(wsl_dir) = windows_path_to_wsl_path(std::path::Path::new(&shell_work_dir)) {
-            cmd.arg("--cd");
-            cmd.arg(wsl_dir);
-        }
-    }
-    cmd.cwd(&shell_work_dir);
-
-    // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
-    // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
     let claude_hook = claude_hook_file(&app, "session-start.sh");
-    apply_bbarit_terminal_env(&mut cmd, &terminal_id, claude_hook.as_deref());
-    // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
-    cmd.env_remove("NO_COLOR");
-    cmd.env_remove("COLOR");
-    cmd.env_remove("FORCE_COLOR");
-
-    // Disable interactive pagers/editors so commands the agent runs (git log/diff,
-    // gh, etc.) never block waiting for input the broker can't dismiss. (Cline does
-    // the same in StandaloneTerminalProcess.) Agents themselves use -m / their own
-    // flow, so this only neutralises blocking child prompts.
-    cmd.env("PAGER", "cat");
-    cmd.env("GIT_PAGER", "cat");
-    cmd.env("GH_PAGER", "cat");
-
-    // Per-terminal scope token; close_pty sweeps every process that still carries it.
-    let scope_token = new_scope_token();
-    cmd.env(SCOPE_ENV, &scope_token);
-    if let Some(ctl) = bbarit_ctl_path() {
-        cmd.env("BBARIT_CTL", ctl);
-    }
-
-    // ssh forwards TERM to the remote shell, so prefer a widely-supported value there.
-    #[cfg(target_os = "windows")]
-    cmd.env(
-        "TERM",
-        if is_ssh_pty || effective_shell_type == Some("wsl") {
-            "xterm-256color"
-        } else {
-            "cygwin"
-        },
-    );
+    let ctl_path = bbarit_ctl_path().map(str::to_string);
 
     #[cfg(not(target_os = "windows"))]
-    {
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("LANG", "ko_KR.UTF-8");
-        cmd.env("LC_ALL", "ko_KR.UTF-8");
-
+    let deps = {
         // Reliably get username and home directory in a GUI app
         // `id -un` works without environment variables
         let username = common::no_window_command("id")
@@ -3495,14 +3246,8 @@ fn create_shell(
 
         let home = format!("/Users/{}", username);
 
-        cmd.env("HOME", &home);
-        cmd.env("USER", &username);
-
-        // Remove npm_config_prefix for nvm compatibility and set PATH directly
-        cmd.env_remove("npm_config_prefix");
-
         // Auto-detect nvm node version
-        let nvm_node_path = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
+        let nvm_node_bin = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
             .ok()
             .and_then(|entries| {
                 entries
@@ -3514,81 +3259,43 @@ fn create_shell(
             .map(|p| format!("{}/bin", p.display()))
             .unwrap_or_else(|| format!("{}/.nvm/versions/node/v20.19.6/bin", home));
 
-        let path = format!(
-            "{}:{}/.local/bin:{}/.opencode/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            nvm_node_path, home, home
-        );
-
-        cmd.env("PATH", &path);
-        cmd.env("SHELL", "/bin/zsh");
-        cmd.env("NVM_DIR", format!("{}/.nvm", home));
-
-        // Load API keys from ~/.config/octo/.env
-        let env_path = format!("{}/.config/octo/.env", home);
-        if let Ok(content) = std::fs::read_to_string(&env_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some(eq_pos) = line.find('=') {
-                    let key = line[..eq_pos].trim();
-                    let mut value = line[eq_pos + 1..].trim();
-                    // strip quotes
-                    if (value.starts_with('"') && value.ends_with('"'))
-                        || (value.starts_with('\'') && value.ends_with('\''))
-                    {
-                        value = &value[1..value.len() - 1];
-                    }
-                    cmd.env(key, value);
-                }
-            }
-        }
-
+        let path = pty_backend::shell_path(&nvm_node_bin, &home);
+        // Load API keys from ~/.config/octo/.env (parsed by build_shell_command)
+        let env_file = std::fs::read_to_string(format!("{}/.config/octo/.env", home)).ok();
         let github_env =
             github_account_env(&work_dir, &home, Some(&path), github_account.as_deref());
-        if !github_env.is_empty() {
-            // gh prefers GH_TOKEN, but drop a stale GITHUB_TOKEN so nothing else picks it up.
-            cmd.env_remove("GITHUB_TOKEN");
+
+        pty_backend::ShellEnvDeps {
+            shell_work_dir,
+            claude_hook,
+            ctl_path,
+            username,
+            home,
+            nvm_node_bin,
+            env_file,
+            github_env,
         }
-        for (key, value) in github_env {
-            cmd.env(key, value);
-        }
-    }
-
-    let child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| e.to_string())?;
-
-    // Thread to read output
-    let (tx, rx) = mpsc::sync_channel::<String>(PTY_OUTPUT_QUEUE_CAPACITY);
-    let alive = Arc::new(AtomicBool::new(true));
-    let output_buffer = Arc::new(Mutex::new(String::new()));
-    let last_output_at = Arc::new(Mutex::new(std::time::Instant::now()));
-
-    spawn_utf8_reader_thread(
-        reader,
-        tx,
-        Arc::clone(&alive),
-        Some(Arc::clone(&output_buffer)),
-        Some(Arc::clone(&last_output_at)),
-    );
-
-    let instance = PtyInstance {
-        writer,
-        output_rx: rx,
-        master: pty_pair.master,
-        child,
-        alive,
-        output_buffer,
-        last_output_at,
-        scope_token,
     };
+    #[cfg(target_os = "windows")]
+    let deps = pty_backend::ShellEnvDeps { shell_work_dir, claude_hook, ctl_path };
 
-    state.ptys.lock().unwrap().insert(terminal_id, instance);
+    // Per-terminal scope token; close_pty sweeps every process that still carries it.
+    let scope_token = new_scope_token();
+    let spec = pty_backend::ShellSpawnSpec {
+        terminal_id: terminal_id.clone(),
+        work_dir,
+        shell_type,
+        scope_token: scope_token.clone(),
+    };
+    let cmd = pty_backend::build_shell_command(&spec, &deps)?;
 
-    Ok(())
+    state.pty.spawn(pty_backend::SpawnRequest {
+        terminal_id,
+        cmd,
+        rows,
+        cols,
+        scope_token,
+    })
 }
 
 // Write data to PTY
@@ -3598,17 +3305,7 @@ fn write_to_pty(
     terminal_id: String,
     data: String,
 ) -> Result<(), String> {
-    let mut ptys = state.ptys.lock().unwrap();
-    if let Some(instance) = ptys.get_mut(&terminal_id) {
-        instance
-            .writer
-            .write_all(data.as_bytes())
-            .map_err(|e| e.to_string())?;
-        instance.writer.flush().map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("PTY not found".to_string())
-    }
+    state.pty.write(&terminal_id, &data)
 }
 
 // Read data from PTY (non-blocking)
@@ -3617,30 +3314,7 @@ fn read_from_pty(
     state: State<'_, AppState>,
     terminal_id: String,
 ) -> Result<Option<String>, String> {
-    let ptys = state.ptys.lock().unwrap();
-    if let Some(instance) = ptys.get(&terminal_id) {
-        // Non-blocking read from channel; drain as much as possible to reduce invocations/queue backlog.
-        match instance.output_rx.try_recv() {
-            Ok(first) => {
-                let mut out = String::new();
-                out.push_str(&first);
-
-                while out.len() < PTY_READ_MAX_BYTES {
-                    match instance.output_rx.try_recv() {
-                        Ok(next) => out.push_str(&next),
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => break,
-                    }
-                }
-
-                Ok(Some(out))
-            }
-            Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Err("PTY disconnected".to_string()),
-        }
-    } else {
-        Err("PTY not found".to_string())
-    }
+    state.pty.read(&terminal_id)
 }
 
 // Resize PTY
@@ -3651,21 +3325,7 @@ fn resize_pty(
     rows: u16,
     cols: u16,
 ) -> Result<(), String> {
-    let ptys = state.ptys.lock().unwrap();
-    if let Some(instance) = ptys.get(&terminal_id) {
-        instance
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    } else {
-        Err("PTY not found".to_string())
-    }
+    state.pty.resize(&terminal_id, rows, cols)
 }
 
 // Reap an ENTIRE process subtree, not just the immediate PTY child. Agent CLIs (claude/codex/
@@ -3772,7 +3432,7 @@ fn bbarit_terminal_env(terminal_id: &str, hook_script: Option<&str>) -> Vec<(&'s
     env
 }
 
-/// Shared by create_shell and create_cli_shell: drop inherited Claude markers, add the hook env.
+/// Used by build_shell_command: drop inherited Claude markers, add the hook env.
 fn apply_bbarit_terminal_env(cmd: &mut CommandBuilder, terminal_id: &str, hook_script: Option<&str>) {
     for key in INHERITED_CLAUDE_MARKERS {
         cmd.env_remove(key);
@@ -4046,10 +3706,7 @@ fn sweep_all_scopes_on_exit(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
-    let tokens: Vec<String> = match state.ptys.lock() {
-        Ok(ptys) => ptys.values().map(|p| p.scope_token.clone()).collect(),
-        Err(_) => return,
-    };
+    let tokens: Vec<String> = state.pty.list().into_iter().map(|t| t.scope_token).collect();
     if tokens.is_empty() {
         return;
     }
@@ -4235,23 +3892,7 @@ mod scope_sweep_tests {
 
 #[tauri::command]
 fn close_pty(state: State<'_, AppState>, terminal_id: String) -> Result<(), String> {
-    if let Some(mut instance) = state.ptys.lock().unwrap().remove(&terminal_id) {
-        // Best-effort terminate the child process to prevent orphaned shells and memory leaks.
-        // Do this on a background thread so the invoke call doesn't block the UI thread.
-        let pid = instance.child.process_id();
-        thread::spawn(move || {
-            // Reap the whole subtree FIRST (grandchildren), then the immediate child.
-            if let Some(pid) = pid {
-                kill_process_tree(pid);
-            }
-            let _ = instance.child.kill();
-            let _ = instance.child.wait();
-            // Safety net for processes that left the tree (setsid/nohup/disown, reparented
-            // to launchd/init) but still carry this terminal's scope token.
-            sweep_scope(&instance.scope_token, &[]);
-        });
-    }
-    Ok(())
+    state.pty.close(&terminal_id)
 }
 
 // Backward-compatible alias (older frontend calls `destroy_pty`)
@@ -4920,295 +4561,6 @@ fn agent_rpc_status(panel_id: String) -> serde_json::Value {
 #[tauri::command]
 fn agent_rpc_stop(panel_id: String) {
     agent_rpc_stop_inner(&panel_id);
-}
-
-// Create shell via CLI tool (Claude, Codex, etc.). Async runtime for the same
-// reason as create_shell.
-#[tauri::command(async)]
-fn create_cli_shell(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    terminal_id: String,
-    work_dir: String,
-    cli_type: String,
-    auto_accept: bool,
-    prompt: Option<String>,
-    rows: u16,
-    cols: u16,
-    shell_type: Option<String>,
-    github_account: Option<String>,
-) -> Result<(), String> {
-    // shell_type is only consulted in the #[cfg(windows)] branches below;
-    // keep the name (JS invoke arg `shellType`) and silence macOS unused warnings.
-    #[cfg(not(target_os = "windows"))]
-    let _ = &shell_type;
-    // github_account (JS `githubAccount`) pins the per-tab gh identity on macOS/Linux.
-    #[cfg(target_os = "windows")]
-    let _ = &github_account;
-    let pty_system = native_pty_system();
-
-    let pty_pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| e.to_string())?;
-
-    let reader = pty_pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| e.to_string())?;
-    let writer = pty_pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    // Build CLI command as shell command
-    let cli_command = match cli_type.as_str() {
-        "claude" => {
-            let mut cmd_str = "claude".to_string();
-            if auto_accept {
-                cmd_str.push_str(" --dangerously-skip-permissions");
-            }
-            if let Some(p) = &prompt {
-                cmd_str.push_str(&format!(" -p \"{}\"", p.replace("\"", "\\\"")));
-            }
-            Some(cmd_str)
-        }
-        "codex" => {
-            // codex must run in a normal shell (None opens shell only)
-            None
-        }
-        "cursor" => {
-            let mut cmd_str = "cursor-agent".to_string();
-            if auto_accept {
-                cmd_str.push_str(" --force");
-            }
-            if let Some(p) = &prompt {
-                cmd_str.push_str(&format!(" \"{}\"", p.replace("\"", "\\\"")));
-            }
-            Some(cmd_str)
-        }
-        "aider" => {
-            let mut cmd_str = "aider".to_string();
-            if auto_accept {
-                cmd_str.push_str(" --yes");
-            }
-            Some(cmd_str)
-        }
-        "gemini" => None,
-        "qwen" => {
-            let mut cmd_str = "qwen".to_string();
-            if auto_accept {
-                cmd_str.push_str(" --approval-mode=yolo");
-            }
-            if let Some(p) = &prompt {
-                cmd_str.push_str(&format!(" --prompt-interactive \"{}\"", p.replace("\"", "\\\"")));
-            }
-            Some(cmd_str)
-        }
-        "reasonix" => Some("reasonix code".to_string()),
-        "octo" => {
-            // start interactive mode via octo chat
-            Some("octo chat".to_string())
-        }
-        _ => None,
-    };
-
-    // Always run via login shell (inherits PATH and other env vars)
-    #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
-    #[cfg(target_os = "windows")]
-    let effective_shell_type = if shell_type.as_deref() == Some("wsl") && !wsl_distribution_installed() {
-        None
-    } else {
-        shell_type.as_deref()
-    };
-
-    #[cfg(target_os = "windows")]
-    let shell_executable = match effective_shell_type {
-        Some("cmd") => "cmd.exe",
-        Some("gitbash") => "C:\\Program Files\\Git\\bin\\bash.exe",
-        Some("wsl") => "wsl.exe",
-        _ => "powershell.exe", // default
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = CommandBuilder::new(shell_executable);
-
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = CommandBuilder::new("/bin/zsh");
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        cmd.arg("-l"); // login shell
-        if let Some(cli_cmd) = cli_command {
-            cmd.arg("-c");
-            cmd.arg(cli_cmd);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    if let Some(cli_cmd) = cli_command.as_ref() {
-        let flag = match effective_shell_type {
-            Some("cmd") => "/c",
-            Some("gitbash") | Some("wsl") => "-c",
-            _ => "-Command",
-        };
-        cmd.arg(flag);
-        cmd.arg(match effective_shell_type {
-            Some("cmd") => format!("chcp 65001>nul && {}", cli_cmd),
-            Some("gitbash") | Some("wsl") => cli_cmd.to_string(),
-            _ => format!("[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null; {}", cli_cmd),
-        });
-    }
-
-    let shell_work_dir = resolve_shell_work_dir(&work_dir);
-    cmd.cwd(&shell_work_dir);
-
-    // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
-    // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
-    let claude_hook = claude_hook_file(&app, "session-start.sh");
-    apply_bbarit_terminal_env(&mut cmd, &terminal_id, claude_hook.as_deref());
-    // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
-    cmd.env_remove("NO_COLOR");
-    cmd.env_remove("COLOR");
-    cmd.env_remove("FORCE_COLOR");
-
-    // Disable interactive pagers/editors so commands the agent runs (git log/diff,
-    // gh, etc.) never block waiting for input the broker can't dismiss. (Cline does
-    // the same in StandaloneTerminalProcess.) Agents themselves use -m / their own
-    // flow, so this only neutralises blocking child prompts.
-    cmd.env("PAGER", "cat");
-    cmd.env("GIT_PAGER", "cat");
-    cmd.env("GH_PAGER", "cat");
-
-    // Per-terminal scope token; close_pty sweeps every process that still carries it.
-    let scope_token = new_scope_token();
-    cmd.env(SCOPE_ENV, &scope_token);
-    if let Some(ctl) = bbarit_ctl_path() {
-        cmd.env("BBARIT_CTL", ctl);
-    }
-
-    #[cfg(target_os = "windows")]
-    if cli_command.is_none() {
-        configure_windows_pty_encoding(&mut cmd, effective_shell_type, false);
-    }
-
-    #[cfg(target_os = "windows")]
-    cmd.env("TERM", "cygwin");
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("LANG", "ko_KR.UTF-8");
-        cmd.env("LC_ALL", "ko_KR.UTF-8");
-
-        // Reliably get username and home directory in a GUI app
-        // `id -un` works without environment variables
-        let username = common::no_window_command("id")
-            .arg("-un")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| std::env::var("USER").unwrap_or_else(|_| "unknown".to_string()));
-
-        let home = format!("/Users/{}", username);
-
-        cmd.env("HOME", &home);
-        cmd.env("USER", &username);
-
-        // Remove npm_config_prefix for nvm compatibility and set PATH directly
-        cmd.env_remove("npm_config_prefix");
-
-        // Auto-detect nvm node version
-        let nvm_node_path = std::fs::read_dir(format!("{}/.nvm/versions/node", home))
-            .ok()
-            .and_then(|entries| {
-                entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .map(|e| e.path())
-                    .max() // use latest version
-            })
-            .map(|p| format!("{}/bin", p.display()))
-            .unwrap_or_else(|| format!("{}/.nvm/versions/node/v20.19.6/bin", home));
-
-        let path = format!(
-            "{}:{}/.local/bin:{}/.opencode/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            nvm_node_path, home, home
-        );
-        cmd.env("PATH", &path);
-        cmd.env("SHELL", "/bin/zsh");
-        cmd.env("NVM_DIR", format!("{}/.nvm", home));
-
-        // Load API keys from ~/.config/octo/.env
-        let env_path = format!("{}/.config/octo/.env", home);
-        if let Ok(content) = std::fs::read_to_string(&env_path) {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                if let Some(eq_pos) = line.find('=') {
-                    let key = line[..eq_pos].trim();
-                    let mut value = line[eq_pos + 1..].trim();
-                    // strip quotes
-                    if (value.starts_with('"') && value.ends_with('"'))
-                        || (value.starts_with('\'') && value.ends_with('\''))
-                    {
-                        value = &value[1..value.len() - 1];
-                    }
-                    cmd.env(key, value);
-                }
-            }
-        }
-
-        let github_env =
-            github_account_env(&work_dir, &home, Some(&path), github_account.as_deref());
-        if !github_env.is_empty() {
-            // gh prefers GH_TOKEN, but drop a stale GITHUB_TOKEN so nothing else picks it up.
-            cmd.env_remove("GITHUB_TOKEN");
-        }
-        for (key, value) in github_env {
-            cmd.env(key, value);
-        }
-    }
-
-    let child = pty_pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| e.to_string())?;
-
-    // Thread to read output
-    let (tx, rx) = mpsc::sync_channel::<String>(PTY_OUTPUT_QUEUE_CAPACITY);
-    let alive = Arc::new(AtomicBool::new(true));
-    let output_buffer = Arc::new(Mutex::new(String::new()));
-    let last_output_at = Arc::new(Mutex::new(std::time::Instant::now()));
-
-    spawn_utf8_reader_thread(
-        reader,
-        tx,
-        Arc::clone(&alive),
-        Some(Arc::clone(&output_buffer)),
-        Some(Arc::clone(&last_output_at)),
-    );
-
-    let instance = PtyInstance {
-        writer,
-        output_rx: rx,
-        master: pty_pair.master,
-        child,
-        alive,
-        output_buffer,
-        last_output_at,
-        scope_token,
-    };
-
-    state.ptys.lock().unwrap().insert(terminal_id, instance);
-
-    Ok(())
 }
 
 // Search files by name and/or content
@@ -7106,13 +6458,7 @@ async fn save_clipboard_image_from_system_clipboard(
 /// running, so it never re-injects the start command into a live agent.
 #[tauri::command]
 fn pty_terminal_has_child(state: State<'_, AppState>, terminal_id: String) -> Result<bool, String> {
-    let shell_pid = {
-        let ptys = state.ptys.lock().unwrap();
-        let Some(instance) = ptys.get(&terminal_id) else {
-            return Err("PTY not found".to_string());
-        };
-        instance.child.process_id()
-    };
+    let shell_pid = state.pty.pid(&terminal_id)?;
     Ok(match shell_pid {
         Some(pid) => shell_has_descendant(pid),
         None => false, // shell already exited — nothing is running here
@@ -7148,12 +6494,8 @@ fn shell_has_descendant(shell_pid: u32) -> bool {
 
 #[tauri::command]
 fn get_pty_cwd(state: State<'_, AppState>, terminal_id: String) -> Result<Option<String>, String> {
-    let ptys = state.ptys.lock().unwrap();
-    let Some(instance) = ptys.get(&terminal_id) else {
-        return Ok(None);
-    };
-
-    let Some(pid) = instance.child.process_id() else {
+    // Unknown terminal and "OS gave no pid" both answer Ok(None), as before.
+    let Ok(Some(pid)) = state.pty.pid(&terminal_id) else {
         return Ok(None);
     };
 
@@ -8172,22 +7514,13 @@ fn clear_harness_job(state: State<'_, AppState>, job_id: String) -> Result<(), S
 /// prompt is quiet (timer grows). Far more robust than banner/prompt regex.
 #[tauri::command]
 fn pty_idle_ms(state: State<'_, AppState>, terminal_id: String) -> Result<u64, String> {
-    let ptys = state.ptys.lock().unwrap();
-    let Some(instance) = ptys.get(&terminal_id) else {
-        return Err("PTY not found".to_string());
-    };
-    let last = *instance.last_output_at.lock().unwrap();
-    Ok(last.elapsed().as_millis() as u64)
+    state.pty.idle_ms(&terminal_id)
 }
 
 // Check if a PTY process is still alive (reader thread running)
 #[tauri::command]
 fn check_pty_alive(state: State<'_, AppState>, terminal_id: String) -> bool {
-    let ptys = state.ptys.lock().unwrap();
-    match ptys.get(&terminal_id) {
-        Some(instance) => instance.alive.load(Ordering::Relaxed),
-        None => false,
-    }
+    state.pty.alive(&terminal_id)
 }
 
 /// Read the accumulated output buffer for a PTY.
@@ -8197,14 +7530,7 @@ fn read_pty_output_buffer(
     state: State<'_, AppState>,
     terminal_id: String,
 ) -> Result<String, String> {
-    let ptys = state.ptys.lock().unwrap();
-    match ptys.get(&terminal_id) {
-        Some(instance) => {
-            let buf = instance.output_buffer.lock().unwrap();
-            Ok(buf.clone())
-        }
-        None => Err("PTY not found".to_string()),
-    }
+    state.pty.tail(&terminal_id)
 }
 
 #[tauri::command]
@@ -10393,10 +9719,8 @@ fn main() {
                         }
 
                         let state = window.app_handle().state::<AppState>();
-                        let pids: Vec<u32> = {
-                            let ptys = state.ptys.lock().unwrap();
-                            ptys.values().filter_map(|i| i.child.process_id()).collect()
-                        };
+                        let pids: Vec<u32> =
+                            state.pty.list().into_iter().filter_map(|t| t.pid).collect();
                         let app_handle = window.app_handle().clone();
                         std::thread::spawn(move || {
                             for pid in pids {
@@ -10543,7 +9867,7 @@ fn main() {
             Ok(())
         })
         .manage(AppState {
-            ptys: Mutex::new(HashMap::new()),
+            pty: Arc::new(pty_backend::InProcessBackend::default()),
             harness_jobs: Mutex::new(HashMap::new()),
         })
         .manage(Arc::new(collab::CollabState::new()))
@@ -10592,7 +9916,6 @@ fn main() {
             agent_rpc_write,
             agent_rpc_status,
             agent_rpc_stop,
-            create_cli_shell,
             run_cli_oneshot,
             stream_cli_command,
             start_harness_job,

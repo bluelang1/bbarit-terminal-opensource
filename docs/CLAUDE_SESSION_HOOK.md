@@ -51,7 +51,7 @@ settings from a JSON file"). Claude 탭 실행 인자에만 붙는다.
   JSON 파싱은 `sed` 로 키별 값을 뽑는다(값은 uuid·경로·단어라 단순 정규식으로 충분).
   Windows 는 이번 범위에서 훅을 붙이지 않는다(`sh` 없음). 실기 검증도 하지 않는다.
 
-### 2. PTY 환경 (create_shell, create_cli_shell **둘 다**)
+### 2. PTY 환경 (당시 create_shell·create_cli_shell 둘 다, 지금은 `pty_backend::build_shell_command` 한 곳)
 
 - `BBARIT_TERMINAL_ID=<terminalId>`: 훅이 어느 탭인지 알리는 데 쓴다. 지금은 스코프 토큰만
   있고 터미널 id 환경변수가 없다.

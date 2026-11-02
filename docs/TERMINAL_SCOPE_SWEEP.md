@@ -23,7 +23,7 @@ herdr-core 의 `sweep.rs` 와 같은 방식으로 푼다. 터미널마다 고유
 ### 1. 토큰
 
 - 이름 `BBARIT_TERM_SCOPE`, 값 `<unix_ms>-<random 8 hex>`. 예 `1793700000000-9f3a1c2e`.
-- `create_shell` 과 `create_cli_shell` **둘 다**에서 `cmd.env(...)` 로 심는다(두 곳에서 PTY
+- 당시에는 `create_shell` 과 `create_cli_shell` **둘 다**에서 `cmd.env(...)` 로 심었다(지금은 `pty_backend::build_shell_command` 한 곳. 두 곳에서 PTY
   환경을 따로 만든다. CLAUDE.md 참고).
 - `PtyInstance` 에 `scope_token: String` 을 보관한다.
 - 토큰 생성·검증은 순수 함수로 두고 단위 테스트한다: `new_scope_token()`,

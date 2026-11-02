@@ -21,7 +21,7 @@ herdr-core 의 모델을 따른다.
 
 ## 설계
 
-### 1. 탭 안에서 ctl 에 닿기 (PTY 환경, create_shell·create_cli_shell 둘 다)
+### 1. 탭 안에서 ctl 에 닿기 (PTY 환경, 지금은 `pty_backend::build_shell_command` 한 곳)
 
 - `BBARIT_TERMINAL_ID`, `BBARIT_BRIDGE_PORT` — [CLAUDE_SESSION_HOOK.md](CLAUDE_SESSION_HOOK.md)
   브랜치가 추가한다. 이 브랜치는 그 값이 있다고 가정하고 **추가하지 않는다**(머지 충돌 방지).
