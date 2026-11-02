@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 초안, 구현 전.** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영), 구현 전.** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -29,10 +29,10 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
 
 | 구성 | 위치 | 비고 |
 |---|---|---|
-| PTY 생성 | `create_shell`(`main.rs:3361`), `create_cli_shell`(`:4928`) | `portable-pty 0.8`, 환경 구성이 두 함수에 중복 |
-| 읽기 | `spawn_utf8_reader_thread`(`:2686`) → `sync_channel(1024)` + `output_buffer`(768 KiB, 앞 절반 버림) | `read_from_pty` 가 **pull** 로 64 KiB 씩 비움(`:3616`). 이벤트 없음 |
+| PTY 생성 | `create_shell`(`main.rs:3361`), `create_cli_shell`(`:4928`) | `portable-pty 0.8`. `CommandBuilder` 는 **앱 환경을 상속**하고 거기서 `env_remove` 로 지우는 방식(`:3446-3450`). 두 함수에 중복. `create_cli_shell` 은 프런트 호출자가 없다 |
+| 읽기 | `spawn_utf8_reader_thread`(`:2686`) → `sync_channel(1024)` + `output_buffer`(768 KiB, 앞 절반 버림). 리더는 **절대 막히지 않고** 큐가 차면 버린다(`:2741-2751`). UTF-8 이어붙이기는 리더 안(`:2756-2780`) | `read_from_pty` 가 **pull** 로 64 KiB 씩 비움(`:3616`). main.rs 는 PTY 이벤트를 안 보냄(XTerminal 의 `pty-data-*` 리스너는 죽은 코드 대비 폴백) |
 | 쓰기·크기 | `write_to_pty`(`:3596`), `resize_pty`(`:3648`) | |
-| 종료 | `close_pty`(`:4237`): `kill_process_tree` → `child.kill` → `sweep_scope` | `RunEvent::Exit` 에서 전체 스코프 스윕(`:4044`) |
+| 종료 | `close_pty`(`:4237`): `kill_process_tree` → `child.kill` → `sweep_scope` | `RunEvent::Exit`(`:10826`)에서 `sweep_all_scopes_on_exit`(`:4045`). 비-macOS `CloseRequested`(`:10386-10405`)는 전체 트리 kill. 하네스 창은 pagehide 에서 PTY 를 닫음(`App.tsx:14614`) |
 | 생존·복원 | `check_pty_alive`, `read_pty_output_buffer`, `pty_idle_ms`(`:8174-8200`) | 프런트 `restoredPty.ts` 가 팝아웃 재부착에 사용, `replayingOutput` 로 재생 |
 | 프런트 루프 | `XTerminal.tsx:1025` `startReadLoop`, 33 ms 폴링, "PTY disconnected" 로 종료 감지 | |
 | 영속 | `App.tsx:1836-1861` 터미널 id·cliType·lastWorkDir·claudeSessionId 등 | `startupCommand` 는 저장 안 함(런타임 파생) |
@@ -67,7 +67,14 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
   - macOS: `launchctl bootstrap gui/<uid>` 로 **일회성 launchd 잡**(`RunAtLoad=true`,
     `KeepAlive=false`, `AbandonProcessGroup=true`, 레이블 `com.bbarit.terminal.pty-holder.<instance>`).
     herdr 가 확인한 대로 `setsid` 만으로는 앱의 coalition 에 남아, 앱 종료·업데이트 재시작 때
-    함께 정리될 수 있다. launchd 실패 시 `setsid` + 분리 spawn 으로 폴백한다.
+    함께 정리될 수 있다. launchd 실패 시 `setsid` + 분리 spawn 으로 폴백한다. 세부(herdr
+    `macos_launchd.rs` 에서 배운 것):
+    - 레이블은 **실행마다 고유**(pid+시각). `KeepAlive=false` 잡도 끝난 뒤 로드된 채 남아,
+      고정 레이블이면 다음 `bootstrap` 이 실패한다.
+    - 낡은 잡 정리는 `launchctl list` 에서 PID 칸이 `-` 인 것만 `bootout` 한다. 살아 있는 홀더를
+      bootout 하면 그 안의 모든 터미널이 SIGHUP 을 받는다.
+    - `ProcessType=Interactive` 로 백그라운드 스로틀을 피한다.
+    - launchd 는 앱 환경·rlimit 을 물려주지 않으므로 필요한 값은 HELLO/SPAWN 으로 넘긴다.
   - Linux: `systemd-run --user --collect --service-type=exec -p KillMode=process`. 실패 시
     `setsid` 폴백.
   - 홀더는 자기 pid 와 소켓 경로를 `<run>/pty-holder.<instance>.json` 에 쓴다.
@@ -89,7 +96,13 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
   tail 에는 터미널 출력이 들어 있으므로 `run/` 디렉터리는 비밀로 취급한다.
 - 제어 클라이언트는 한 번에 하나다. 새 HELLO 가 오면 이전 연결에 BYE 를 보내고 끊는다
   (앱이 두 개 뜨는 경우 대비. `tauri-plugin-single-instance` 가 이미 막지만 dev/설치본 동시
-  실행은 소켓 이름으로 분리된다).
+  실행은 소켓 이름으로 분리된다). 이 규칙은 **같은 uid 의 어떤 프로그램(탭 안의 에이전트 포함)도
+  앱을 밀어내고 다른 탭의 tail 을 읽을 수 있다**는 뜻이다. 브리지 19980 과 같은 신뢰 경계로
+  받아들인다.
+- 경로 규칙: macOS 는 `~/.config/octo/run/` 만 쓴다(`$TMPDIR` 는 주기 청소로 소켓이 지워질 수
+  있다). Linux 는 `$XDG_RUNTIME_DIR/bbarit/` 을 우선, 없으면 `~/.config/octo/run/`. `sun_path`
+  104바이트 제한을 넘는 경로는 거부한다.
+- 홀더 로그(`run/pty-holder.<instance>.log`)에 env 와 터미널 바이트를 남기지 않는다.
 
 ### 3.3 프로토콜 (herdr `holder_proto.rs` 를 단순화)
 
@@ -100,8 +113,8 @@ JSON, 데이터 프레임은 원시 바이트. `handle` 은 홀더가 배정하�
 | 방향 | kind | payload |
 |---|---|---|
 | app→holder | HELLO | `{version:1, client:"bbarit-app", pid, build:"1.1.60"}` |
-| holder→app | WELCOME | `{version, instance, terminals:[{handle,id,cwd,pid,rows,cols,exited,exit_code,scope,started_at}]}` 이어서 터미널마다 TAIL |
-| app→holder | SPAWN | `{id, program, args, cwd, env:{…}, rows, cols, scope}` (환경은 앱이 완성해서 보낸다) |
+| holder→app | WELCOME | `{version, instance, terminals:[{handle,id,cwd,pid,rows,cols,exited,exit_code,scope,started_at,dropped_bytes,modes}]}` 이어서 터미널마다 TAIL. `modes` 는 홀더가 추적한 DECSET 상태(1049 alt-screen, 2004 bracketed paste, 1000–1006 마우스, CSI-u 키보드) |
+| app→holder | SPAWN | `{id, argv, cwd, env:{…전체…}, rows, cols, scope}`. 홀더는 `env_clear()` 후 적용 |
 | holder→app | SPAWNED / SPAWN_FAILED | `{id, handle, pid}` / `{id, error}` |
 | app→holder | INPUT(handle, bytes) | 터미널별 writer 스레드 큐로. 막힌 프로그램은 자기 스레드만 막는다 |
 | holder→app | OUTPUT(handle, bytes) | |
@@ -109,15 +122,16 @@ JSON, 데이터 프레임은 원시 바이트. `handle` 은 홀더가 배정하�
 | app→holder | SIGNAL | `{sig:"TERM"|"KILL"|"HUP"|"INT"}`. 이미 거둔 터미널엔 보내지 않는다(pid 재사용 위험) |
 | app→holder | RELEASE | 트리 kill + 스코프 스윕 + 제거. `close_pty` 가 이걸 보낸다 |
 | holder→app | EXITED | `{code, signal}`. 거둔 뒤 200 ms 안에 남은 출력을 먼저 보낸다 |
-| holder→app | TAIL(handle, bytes) | 재부착용 마지막 1 MiB |
+| holder→app | TAIL(handle, bytes) | 재부착용 마지막 1 MiB. 헤더 JSON `{seq_start}` 뒤 원시 바이트 |
 | app→holder | GOODBYE | `{reason:"quit"|"handover"|"kill_all"}` |
 | app→holder | DRAIN | 새 SPAWN 거부, 마지막 터미널 종료 시 홀더 종료 |
 | 양방향 | PING/PONG | 10 초 간격, 30 초 무응답이면 연결 끊김으로 본다 |
 
-흐름 제어: 클라이언트가 붙어 있을 때 보내지 못한 OUTPUT 이 8 MiB 를 넘으면 그 터미널의
-pump 를 멈춘다(아무도 안 읽는 PTY 처럼 프로그램이 느려진다). **클라이언트가 없을 때는 멈추지
-않고** tail 만 유지한다. 앱이 꺼진 사이 작업이 멈추면 안 되기 때문이다. 이 점이 herdr 와
-다르다.
+흐름 제어: **어느 경우에도 pump 를 멈추지 않는다.** 지금 리더 스레드도 막히지 않고 버리는
+방식이고(`main.rs:2741-2751`), herdr 식으로 연결 하나의 backlog 를 공유하면 한 탭의 폭주가 다른
+탭까지 멈춘다. 대신 터미널별 1 MiB 링을 유지하고 넘친 바이트 수를 `dropped_bytes` 로 센다.
+WELCOME/TAIL 에 그 값을 실어 앱이 "[앱이 꺼진 동안 N MB 생략]" 한 줄을 재생 앞에 보여 준다.
+디스크에는 쓰지 않는다(출력에 비밀이 섞인다).
 
 ### 3.4 앱 쪽 `PtyBackend`
 
@@ -138,35 +152,67 @@ trait PtyBackend: Send + Sync {
 
 - `InProcessBackend`: 오늘 코드를 그대로 옮긴 것. 폴백이자 Windows 기본.
 - `HolderBackend`: 소켓 연결 스레드 하나가 OUTPUT 을 터미널별 `sync_channel(1024)` 과
-  tail 사본(768 KiB → 1 MiB 로 상향)에 넣는다. `read()` 는 그 채널을 비운다. 프런트가 보는
-  동작(33 ms 폴링, 64 KiB 드레인, "PTY disconnected")이 지금과 같다.
+  tail 사본(1 MiB 링)에 넣는다. `read()` 는 그 채널을 비운다. 프런트가 보는 동작(33 ms 폴링,
+  64 KiB 드레인, "PTY disconnected")이 지금과 같다.
+  - **중복 렌더 방지**: 바이트 스트림에 터미널별 단조 증가 `seq` 를 둔다. TAIL 은
+    `{seq_start, bytes}` 로 오고, 재생이 끝난 지점의 seq 를 기록해 `read()` 는 그 뒤 바이트만
+    돌려준다. 그렇지 않으면 연결 직후 들어온 OUTPUT 이 tail 과 채널 양쪽에 들어가 같은 바이트가
+    두 번 그려진다.
+  - UTF-8 이어붙이기(지금 `spawn_utf8_reader_thread` 안)는 홀더 pump 가 아니라 **앱 쪽 터미널별
+    디코더**에서 한다. 홀더는 바이트만 나른다.
 - 선택: 설정 `terminal.ptyHolder: "off" | "on"`. 2단계까지 기본 `off`, 3단계에서 `on`.
   홀더 연결 실패(소켓 없음·버전 불일치·권한)는 **조용히 InProcess 로 폴백**하고 상태바에
   "터미널이 앱 안에서 실행 중" 을 표시한다.
-- 환경 구성 함수 분리: `create_shell`/`create_cli_shell` 의 env 블록(PATH, nvm, `.env`,
-  GH_TOKEN, `BBARIT_*`, Claude 마커 제거)을 `build_pty_env(...) -> Vec<(String,String)>` 로
-  뽑아 두 백엔드가 공유한다. 이 리팩터링은 동작 변화가 없어야 하고 **1단계**에서 먼저 한다.
+- 명령 구성 함수 분리: `create_shell` 의 셸 선택·env 블록(PATH, nvm, `.env`, GH_TOKEN,
+  `BBARIT_*`, Claude 마커 제거)을 `build_shell_command(req, deps) -> CommandBuilder` 로 뽑는다.
+  `Vec<(String,String)>` 이 아니라 **`CommandBuilder`** 인 이유: 지금 코드는 앱 환경을 상속한
+  뒤 `env_remove` 로 지우는 방식이라, 추가 목록만으로는 "지우기" 를 표현할 수 없다. 홀더로
+  보낼 때는 `get_argv`/`get_cwd`/`iter_full_env_as_str` 로 **완성된 전체 환경**을 꺼내 SPAWN 에
+  싣고, 홀더는 `env_clear()` 뒤 그대로 적용한다. launchd 로 뜬 홀더의 기본 환경은 앱과 다르므로
+  홀더가 자기 환경을 섞으면 안 된다. 같은 이유로 홀더 자신은 `BBARIT_TERM_SCOPE` 를 물려받지
+  않아야 한다(dev 에서 앱을 빠릿 탭 안에서 띄우는 경우).
+  - `deps` 로 `AppHandle` 의존(훅 파일 경로)과 비결정적인 `github_account_env` 결과를
+    **주입**해 순수 함수로 만들고, 생성된 argv·cwd·env 키 집합을 스냅샷 테스트한다.
+  - `create_cli_shell` 은 합치지 않고 **삭제를 제안**한다(호출자 없음). 삭제가 부담이면 같은
+    빌더를 쓰게만 바꾼다.
+  - 이 리팩터링은 동작 변화가 없어야 하고 **1단계**에서 먼저 한다.
 
 ### 3.5 재부착 (앱 시작·재시작·업데이트 뒤)
 
-1. 앱이 뜨면 `HolderBackend` 가 소켓을 찾아 HELLO. WELCOME 의 터미널 목록을
-   `recoveredTerminals: Map<id, TerminalInfo>` 로 프런트에 넘긴다(새 커맨드 `pty_list_recovered`).
-2. 프런트 `XTerminal` 초기화: 그 id 가 `recoveredTerminals` 에 있으면 `create_shell` 과 시작 명령
-   주입을 **건너뛰고**, 기존 `restoredPty.ts` 경로(`check_pty_alive` → `read_pty_output_buffer`
-   → `replayingOutput` 재생)로 화면을 복원한다. 이 경로는 팝아웃 재부착으로 이미 검증돼 있고,
-   7501 재생 중 알림 억제도 이미 들어 있다.
-   - `isRestored` 판정을 `!!terminal.lastWorkDir` 휴리스틱에서 "홀더에 살아 있음" 으로 바꾼다.
-   - `deferStart`(비활성 복원 탭을 클릭 전까지 미룸)는 홀더 터미널에는 적용하지 않는다.
-     이미 돌고 있으니 미룰 게 없다. 단 화면 재생은 탭 활성화 때 한다.
-3. 저장된 프로젝트에 없는 홀더 터미널(프로젝트를 지웠거나 저장 전에 앱이 죽음)은 cwd 가
-   일치하는 프로젝트에 "복구됨" 탭으로 붙이고, 없으면 "복구된 터미널" 가상 프로젝트에 보여
-   준다. 자동으로 죽이지 않는다. 사용자가 닫으면 RELEASE 한다.
-4. 7501 상태: 앱이 꺼진 동안의 전이는 못 본다. TAIL 재생이 마지막 보고를 복원하므로 탭 색은
-   맞는다. 재생 중에는 알림이 나가지 않는다(`replayingOutput`). 재부착 직후 blocked 인 탭이
-   있으면 한 번 요약 토스트("대기 중인 에이전트 N개")를 띄운다.
-5. 에이전트 릴레이의 `agentLinks` 는 영속하지 않으므로 재부착 뒤 부모·자식 관계는 끊긴다.
-   `agent wait` 는 계속 동작한다(상태 조회는 터미널 id 기준). 노트 전달만 멈춘다. 2차 과제로
-   `agentLinks` 를 저장한다.
+순서가 중요하다. 지금 코드는 `deferStart` 판정(`XTerminal.tsx:3944`)이 `restoredPty` probe 보다
+먼저 일어나고, 비활성 복원 탭은 `startupDeferredIds`(`App.tsx:2236-2251`)에 들어가 클릭 전까지
+아무것도 하지 않는다. 그리고 probe 는 버퍼가 `looksLikeAgentUiReady` 로 보일 때만 "이미 시작됨"
+으로 표시하고, 아니면 `:3800-3803` 이 **실행 중인 에이전트에 시작 명령을 다시 친다.**
+
+1. 앱이 뜨면 `HolderBackend` 가 HELLO → WELCOME. 결과를 `pty_list_recovered` 로 노출한다.
+   **이 호출은 `applyRestoredProjects` 보다 먼저 끝나야 한다.** 복구 id 는 `startupDeferredIds`
+   에서 뺀다(이미 돌고 있으니 미룰 게 없다). 화면 재생만 탭 활성화 때 한다.
+2. `XTerminal` 초기화에서 그 id 가 복구 목록에 있으면 `create_shell` 과 시작 명령 주입을
+   건너뛴다. `autoStartedCliType` 를 **무조건** 설정해 `:3800-3803` 경로가 돌지 않게 한다.
+   화면은 기존 `restoredPty.ts` 경로(`check_pty_alive` → `read_pty_output_buffer` →
+   `replayingOutput` 재생)로 복원한다. 팝아웃 재부착으로 검증된 경로이고 7501 재생 중 알림
+   억제도 이미 들어 있다.
+   - 재생 앞에 WELCOME 의 `modes` 를 DECSET 시퀀스로 붙인다. 1 MiB tail 이 alt-screen·bracketed
+     paste·마우스 모드 설정 시점보다 뒤에서 잘리면 휠 브리지·붙여넣기·화면이 깨지기 때문이다.
+   - 재생 뒤 `cols-1 → cols` 로 **강제 리사이즈**해 TUI 가 다시 그리게 한다. 크기가 같으면
+     SIGWINCH 가 안 갈 수 있다(herdr 의 "nudge").
+   - `isRestored` 판정을 `!!terminal.lastWorkDir` 휴리스틱에서 "복구 목록에 있음" 으로 바꾼다.
+3. **앱이 꺼진 사이 끝난 터미널**(WELCOME 에 `exited:true`): `check_pty_alive` 가 false 라는
+   이유로 tail 을 버리고 같은 id 로 `create_shell` 을 다시 돌리면 안 된다. tail 을 재생하고
+   "종료됨 (code N)" 배너를 보여 준 뒤 RELEASE 한다. 새 셸은 사용자가 "다시 시작" 을 눌렀을 때만
+   띄운다(기존 재시작 경로).
+4. 저장된 프로젝트에 없는 홀더 터미널은 cwd 가 일치하는 프로젝트에 "복구됨" 탭으로 붙이고,
+   없으면 "복구된 터미널" 가상 프로젝트에 보여 준다. 자동으로 죽이지 않는다.
+5. 7501 상태: 꺼진 동안의 전이는 못 본다. TAIL 재생이 마지막 보고를 복원하므로 탭 색은 맞는다.
+   재부착 직후 blocked 인 탭이 있으면 요약 토스트("대기 중인 에이전트 N개") 한 번.
+6. **에이전트 릴레이**: `agentLinks` 는 지금 영속하지 않는다. 그대로 두면 재부착 뒤 `agent wait
+   --children` 은 빈 목록을 영원히 기다리다 타임아웃(exit 3)으로 끝나고(`bbarit-ctl.mjs:358`),
+   앱이 꺼진 동안에는 브리지 호출이 3번 연속 실패(약 6초, `:383`)하면 예외로 끝난다. 그래서
+   2단계 최소 범위에 (a) `agentLinks` 영속, (b) ctl 이 브리지 부재 시 포기하지 않고 재시도하는
+   변경을 넣는다. 부모·자식 노트 전달은 재부착 뒤 이어진다.
+7. **SessionStart 훅**: 앱이 꺼진 사이 Claude 가 `/clear` 로 세션을 바꾸면 훅의 curl 이 조용히
+   실패해 저장된 id 가 낡는다. 재부착 때 `claudeSessionDir` 로 transcript 를 다시 탐지해 최신
+   jsonl 로 보정한다.
 
 ### 3.6 종료·업데이트 의미
 
@@ -185,6 +231,9 @@ trait PtyBackend: Send + Sync {
 - **스코프 스윕**(`docs/TERMINAL_SCOPE_SWEEP.md`): 탭 닫기 스윕은 홀더가 한다(부모이므로
   자연스럽다). 앱 종료 시 전체 스윕은 **없앤다**. 터미널이 살아 있어야 하기 때문이다.
   `kill_all` 종료에서만 전체 스윕을 한다.
+- **다른 종료 경로도 백엔드로**: 비-macOS `CloseRequested` 의 전체 트리 kill(`main.rs:10386-10405`)
+  은 `kill_all` 일 때만 한다. 하네스 창의 pagehide 에서 닫는 PTY(`App.tsx:14614`)는 의도대로
+  RELEASE 한다(하네스 터미널은 창과 수명을 같이한다).
 
 ### 3.7 플랫폼 메모
 
@@ -202,9 +251,9 @@ trait PtyBackend: Send + Sync {
 | 단계 | 내용 | 산출물 | 위험 |
 |---|---|---|---|
 | **0** | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
-| **1** | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_pty_env` 분리, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: env 빌더 스냅샷 | `create_cli_shell` 과의 중복 제거 중 누락 |
-| **2** | 홀더 모드(`--mode pty-holder`), 프로토콜, `HolderBackend`, `setsid` 분리 spawn, 재부착(3.5), 종료 의미(3.6 의 quit/kill_all). 설정 기본 `off` | Rust ~2 k 줄, 프런트 ~300 줄. 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE | tail 재생 품질(TUI 전체화면), 느린 클라이언트 백프레셔 |
-| **3** | launchd/systemd 등록, 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~700 줄 | launchd 권한·coalition 실기 검증 |
+| **1** | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
+| **2** | 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 재부착(3.5 전체: 순서·exited 처리·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6). 설정 기본 `off` | Rust ~2.3 k 줄, 프런트 ~400 줄. 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·seq 중복 없음 | tail 재생 품질, 모드 추적 누락 |
+| **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
@@ -242,3 +291,11 @@ trait PtyBackend: Send + Sync {
 3. **단계 0 을 이번 릴리스 다음(1.1.61)에 바로 넣을지.** 제안: 예, 작고 독립적이다.
 4. **설정 기본값 전환 시점**: 3단계에서 `on`. 그 전까지는 설정에서 켠 사용자만.
 5. **웹 터미널(`web_terminal.rs`)** 도 홀더로 보낼지. 제안: 범위 밖, 별도 과제.
+6. **꺼진 사이 끝난 터미널 표시**: tail + "종료됨" 배너 후 사용자가 닫거나 재시작(제안) vs
+   자동으로 같은 폴더에 새 셸.
+7. **하네스(devreview) PTY 의 수명**: 창과 함께 끝남 유지(제안) vs 홀더에 남김.
+8. **앱이 꺼진 동안의 ctl / `agent wait` 의미**: 브리지가 없으니 ctl 은 대기·재시도만 가능.
+   홀더 소켓을 ctl 에 열지는 않는다(제안).
+9. **dev 홀더 정책**: 재빌드 때마다 홀더 바이너리가 바뀐다. dev 에서는 앱 종료 시 홀더도
+   함께 끝내는 옵션을 기본으로 둘지(제안: dev 는 `kill_all` 기본).
+10. **링 크기 설정**: 1 MiB 고정(제안) vs 설정.
