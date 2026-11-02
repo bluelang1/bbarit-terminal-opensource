@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영), 구현 전.** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2단계부터 구현 전.** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -250,13 +250,34 @@ trait PtyBackend: Send + Sync {
 
 | 단계 | 내용 | 산출물 | 위험 |
 |---|---|---|---|
-| **0** | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
-| **1** | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
+| **0** ✅ | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
+| **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
 | **2** | 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 재부착(3.5 전체: 순서·exited 처리·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6). 설정 기본 `off` | Rust ~2.3 k 줄, 프런트 ~400 줄. 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·seq 중복 없음 | tail 재생 품질, 모드 추적 누락 |
 | **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
 구현 메모: 0단계 완료 — `src/terminal/busyAgentTabs.ts`(순수 함수, 셸 탭 제외) + `src/App.tsx` `handleUpdate` 의 `ask()` 확인(네이티브 업데이트 경로만).
+
+구현 메모: 1단계 완료 — `src-tauri/src/pty_backend.rs`. 2절 표의 줄 번호는 1단계 이전 기준이다.
+- `PtyBackend` + `InProcessBackend`. `PtyInstance`·`spawn_utf8_reader_thread` 는 그대로 옮겼다.
+  `AppState.ptys` 는 `AppState.pty: Arc<dyn PtyBackend>` 가 됐고, PTY 커맨드는 이름·인자·
+  반환형·오류 문자열("PTY not found", "PTY disconnected")을 유지한 채 위임만 한다.
+- 3.4 스케치와 다른 시그니처: `tail`/`idle_ms` 는 `Result`(기존 커맨드가 "PTY not found" 를
+  돌려주므로), `pid` 는 `Result<Option<u32>>`(없는 id 와 "OS 가 pid 를 안 줌" 을 구분해야
+  `pty_terminal_has_child` 의 Err 와 `get_pty_cwd` 의 Ok(None) 을 그대로 낼 수 있다).
+  `list()` 는 `TerminalInfo { id, pid, scope_token }`. `SpawnRequest` 에 `scope_token` 을 따로
+  둔다(스윕은 env 를 다시 파싱하지 않는다).
+- `build_shell_command(&ShellSpawnSpec, &ShellEnvDeps) -> Result<CommandBuilder, String>`.
+  `Result` 인 이유는 Windows ssh:// 경로 파싱 실패(`build_ssh_pty_command`)다. `ShellEnvDeps` 는
+  cwd(`resolve_shell_work_dir` 결과), 훅 경로, ctl 경로, username·home(`/Users/<id -un>`),
+  nvm bin, `.env` 내용, GitHub 계정 env 를 주입받는다. Windows 의 `wsl_distribution_installed()`
+  는 주입하지 않고 빌더 안에서 기존처럼 필요할 때 한 번만 부른다(미리 계산하면 PowerShell 탭마다
+  `wsl.exe` 가 돈다). 테스트는 unix 만: argv·cwd·설정/제거 env 키 목록을 리터럴로 고정했다.
+- `create_cli_shell` 은 삭제했다(호출자 없음). 함께 죽는 헬퍼는 없었다.
+- 순서 차이(관찰 가능한 결과 동일): 명령을 먼저 만들고 `openpty` 를 나중에 한다. `openpty` 가
+  실패하면 예전과 달리 GitHub 계정 조회가 이미 돈 뒤다. `get_pty_cwd` 는 `lsof` 동안 PTY 맵
+  잠금을 쥐지 않는다. 잠금이 독(poison)이면 `CloseRequested` 가 패닉 대신 빈 목록으로 진행한다.
+- 손대지 않은 것: `.env` 값이 따옴표 한 글자(`KEY="`)면 `&value[1..0]` 으로 패닉하는 기존 버그.
 
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.
