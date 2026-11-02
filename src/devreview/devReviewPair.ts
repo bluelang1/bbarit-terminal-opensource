@@ -11,6 +11,7 @@
 // Roles: developer (agent) · reviewer (agent) · broker (BBARIT) · final approver (user).
 
 import { invoke } from '@tauri-apps/api/core';
+import { lastHumanInputAt, queueAutoInput, type AutoInputResult } from '../terminal/inputGate';
 import { ensureProjectWikiScaffold, getProjectWikiPaths, ensureSharedWikiScaffold, getSharedWikiPaths } from '../notes/wiki';
 import { codeGraphCliSource } from './codeGraphCli';
 import { judge as mechanicalJudge, snapshotSource, cycleTable, CYCLE_LABELS, type SourceBaseline, type CycleState } from './brokerMechanic';
@@ -362,31 +363,78 @@ async function sh(command: string, workDir: string, timeoutSecs: number): Promis
   return invoke<string>('run_cli_oneshot', { command, workDir, timeoutSecs, login: false });
 }
 
+// All broker→terminal writes go through the auto-input gate (terminal/inputGate.ts,
+// docs/AGENT_INPUT_GATE.md): it waits while the human is typing, refuses while the agent is
+// blocked on a permission/question dialog (OSC 7501), wraps text in bracketed paste, and
+// sends Enter separately. A popped-out / unmounted terminal falls back to a direct PTY write.
+const ptyWriter = (id: string) => (data: string) => {
+  void invoke('write_to_pty', { terminalId: id, data }).catch(() => {});
+};
+
 function submitTerminalInput(id: string): void {
   // Submit with a lone CR. Claude Code treats CRLF ("\r\n") as a newline INSERT, not
   // Enter, so the relayed briefing stayed in its input box unsubmitted (Codex still
   // submitted, hence the dev/reviewer asymmetry). A bare "\r" submits for Claude
   // Code, Codex, and shells alike — verified live.
-  void invoke('write_to_pty', { terminalId: id, data: '\r' }).catch(() => {
-    void invoke('write_to_pty', { terminalId: id, data: '\n' }).catch(() => {});
-  });
+  void queueAutoInput(id, '\r', { source: 'devreview', submit: false, fallbackWrite: ptyWriter(id) });
 }
 
-// Throw input into a terminal by id. Text and Enter are sent separately because
-// Claude Code / Codex treat a large multi-line write as a "[Pasted Content]" block
-// and would otherwise absorb a trailing \r instead of submitting it.
-function throwToTerminal(id: string, text: string): void {
-  void invoke('write_to_pty', { terminalId: id, data: text }).catch(() => {});
-  // Submit the typed text. Some agent CLIs (Kimi/K2.7 Code especially) buffer a longer
-  // input and absorb a TOO-EARLY carriage return into the text instead of submitting it,
-  // leaving the command sitting un-submitted in the input box. Wait long enough for the
-  // input to settle, then send several spaced CRs so the Enter reliably lands. A stray CR
-  // at an empty prompt is harmless. (Base delay raised to 1200ms — a live /help test
-  // submitted at ~1.2s but not at 0.8s.)
-  const submitDelayMs = Math.min(5000, Math.max(1200, 600 + Math.ceil(text.length / 2)));
-  for (const d of [submitDelayMs, submitDelayMs + 1500, submitDelayMs + 3500, submitDelayMs + 6000]) {
-    setTimeout(() => submitTerminalInput(id), d);
+// Throw input into a terminal by id. The gate sends the text and, after
+// max(200ms, terminalSubmitDelayMs(text)), one separate Enter — Claude Code / Codex treat a
+// large write as a "[Pasted Content]" block and would otherwise absorb a trailing \r.
+async function throwToTerminal(id: string, text: string, role?: DevReviewRole): Promise<AutoInputResult> {
+  const res = await queueAutoInput(id, text, { source: 'devreview', submit: true, fallbackWrite: ptyWriter(id) });
+  if (!res.ok) return res;
+  // Kimi (K2.7 Code) absorbs a too-early carriage return into the text instead of
+  // submitting it, so follow up with spaced CRs — for Kimi only. Each one is skipped if the
+  // human typed after our Enter (a stray CR would submit their half-typed prompt), and they
+  // go through the gate, so none of them lands on a blocked approval dialog.
+  if (role === 'kimi') {
+    const enterAt = Date.now();
+    for (const d of [1500, 3500, 6000]) {
+      setTimeout(() => {
+        if (lastHumanInputAt(id) > enterAt) return;
+        submitTerminalInput(id);
+      }, d);
+    }
   }
+  return res;
+}
+
+// Refused relays are retried on the relay-loop cadence, in order per terminal, so a message
+// the gate held back is delayed, never silently dropped. While the agent is blocked on an
+// approval dialog the relay waits as long as the harness runs; other refusals (human typing,
+// no writer) give up after RELAY_RETRY_LIMIT attempts and call onGiveUp.
+const RELAY_RETRY_MS = 6000;
+const RELAY_RETRY_LIMIT = 20;
+interface RelayWriterOptions {
+  roleOf: (id: string) => DevReviewRole | undefined;
+  isStopped: () => boolean;
+  onGiveUp: (id: string, text: string, reason: string) => void;
+}
+// One ordered chain per terminal, owned by a single harness (createRelayWriter per run).
+function createRelayWriter(opts: RelayWriterOptions): (id: string, text: string) => void {
+  const relayChains = new Map<string, Promise<void>>();
+  return (id: string, text: string): void => {
+    const prev = relayChains.get(id) ?? Promise.resolve();
+    const next: Promise<void> = prev.then(async () => {
+      let limited = 0;
+      // The first attempt always runs (final "merge complete" relays are sent right before stop).
+      for (let first = true; ; first = false) {
+        if (!first && opts.isStopped()) return;
+        const res = await throwToTerminal(id, text, opts.roleOf(id));
+        if (res.ok || res.reason === 'cancelled') return;
+        if (res.reason !== 'blocked') {
+          limited += 1;
+          if (limited >= RELAY_RETRY_LIMIT) { opts.onGiveUp(id, text, res.reason); return; }
+        }
+        await sleep(RELAY_RETRY_MS);
+      }
+    }).catch(() => {}).finally(() => {
+      if (relayChains.get(id) === next) relayChains.delete(id);
+    });
+    relayChains.set(id, next);
+  };
 }
 
 // Write a review patch file and VERIFY it landed apply-clean. buildReviewPatch already
@@ -994,7 +1042,20 @@ export async function startDevReviewPair(
   // so this is auto-only). PTY-death is detected in the relay loop, where escalateToHuman
   // is in scope; relay() stays a thin never-drop writer so a transient never swallows a
   // real relay.
-  const relay = (id: string, text: string): void => { throwToTerminal(id, text); };
+  // Late-bound: escalateToHuman lives inside the relay loop below.
+  let relayGiveUp: ((reason: string) => void) | null = null;
+  const relay = createRelayWriter({
+    roleOf: (id) => (id === devId ? config.developer : id === revId ? config.reviewer : undefined),
+    isStopped: () => stopped,
+    onGiveUp: (id, text, reason) => {
+      const who = id === devId ? 'developer' : 'reviewer';
+      emit({ kind: 'error', message: tt(
+        `Broker could not deliver a message to the ${who} terminal (${reason}): ${text.slice(0, 120)}`,
+        `브로커가 ${who === 'developer' ? '개발' : '리뷰'} 터미널에 메시지를 보내지 못했습니다 (${reason}): ${text.slice(0, 120)}`,
+      ) });
+      relayGiveUp?.(`relay to ${who} terminal refused (${reason})`);
+    },
+  });
   // PTY-death tracking: once a broker terminal's CLI is up (has a child process), if that
   // child later disappears the agent CLI exited — the harness cannot continue, so escalate
   // rather than relaying into a dead terminal forever.
@@ -1485,6 +1546,7 @@ export async function startDevReviewPair(
       emit({ kind: 'error', message: tt(`Broker halted (needs human decision): ${reason}. Restart the harness to continue, or stop it.`, `브로커 정지 (사람 결정 필요): ${reason}. 계속하려면 하네스를 재시작하거나 중단하세요.`) });
       stopped = true; // ends the while(!stopped) relay loop
     };
+    relayGiveUp = escalateToHuman;
     setCycle(
       restoredClosedStatus?.cycle || (restoredReviewDecision === 'approved' ? 'approved' : restoredReviewDecision === 'rework' ? 'addressing' : restoredPendingReview ? 'reviewing' : 'developing'),
       restoredClosedStatus?.reason || (restoredReviewDecision === 'approved'

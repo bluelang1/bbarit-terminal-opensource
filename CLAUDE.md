@@ -90,6 +90,17 @@ Build/test gotchas:
   gh accounts come from ~/.config/gh/hosts.yml; never return or log tokens.
 - Project edit reuses the new-project modal (editingProjectId); save logic lives in
   src/projectEdit.ts. Category is forced to `coding` on load/save.
+- Agent status comes from OSC 7501 (Claude Code >= 2.1.295 probes `ESC]7501;?`;
+  XTerminal answers and feeds `agentStatus`). Terminals that have reported 7501
+  skip the idle-timer done toast. Design: docs/AGENT_STATUS_OSC7501.md.
+- Never write into a user PTY directly from new features; use `queueAutoInput`
+  (src/terminal/inputGate.ts): refuses while blocked unless `force`, waits for
+  3 s of human quiet, bracketed paste, Enter sent separately. `force: true` only
+  for actions the user just clicked; `submit: false` sends raw bytes. Design:
+  docs/AGENT_INPUT_GATE.md.
+- Re-attaching a terminal replays saved PTY output through the parsers with
+  `replayingOutput` set; output-driven handlers must not alert or reply during it.
+- `bbarit-ctl term write` waits up to 40 s (gate) and takes `--force`.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.

@@ -42,7 +42,13 @@ import { FONTS, STYLES, DARK_STYLES, LIGHT_STYLES, WACKY_STYLES, getEffectiveFon
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { isInteractiveAgentTerminal, terminalSubmitDelayMs } from './terminal/terminalSubmit';
+import { MIN_SUBMIT_DELAY_MS, autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
+
+// Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
+const gateSubmitDelayFor = (cliType?: string): number | undefined => (
+  isInteractiveAgentTerminal(cliType) ? undefined : MIN_SUBMIT_DELAY_MS
+);
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
@@ -168,6 +174,8 @@ import { getCollabHandle, CollabPanel } from './collab/CollabPanel';
 import { getLoungeHandle } from './collab/loungeClient';
 import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, totalLoungeUnread, type LoungeUnreadCounts } from './collab/loungeNotifications';
 import { listenRemoteNoteChanges } from './collab/notesSync';
+import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
+import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -203,6 +211,33 @@ requestIdleCallback(() => {
 });
 
 const IS_WINDOWS = navigator.platform.toLowerCase().includes('win');
+
+// OS notification for task-complete / agent-waiting alerts. Follows the existing
+// settings: notifyWhenWaiting !== 'never', playOsNotifySound, osNotifySoundName.
+// macOS uses a named system sound; Windows plays its default toast sound when
+// none is set, so we only force silence there.
+type OsNotifySettings = { notifyWhenWaiting?: string; playOsNotifySound?: boolean; osNotifySoundName?: string };
+const sendAgentOsNotification = (title: string, body: string, settings: OsNotifySettings) => {
+  if (settings.notifyWhenWaiting === 'never') return;
+  void (async () => {
+    try {
+      let granted = await notifIsPermissionGranted();
+      if (!granted) granted = (await notifRequestPermission()) === 'granted';
+      if (!granted) return;
+      const opts: { title: string; body: string; sound?: string; silent?: boolean } = { title, body };
+      if (settings.playOsNotifySound !== false) {
+        if (!IS_WINDOWS) opts.sound = settings.osNotifySoundName || 'Glass';
+      } else if (IS_WINDOWS) {
+        opts.silent = true;
+      }
+      notifSend(opts);
+    } catch { /* notifications unavailable */ }
+  })();
+};
+
+// Per-terminal OSC 7501 status (docs/AGENT_STATUS_OSC7501.md). `done` drops to
+// `idle` once the user has looked at the terminal (seenTurn >= turn).
+type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number };
 const BROWSER_TOOLBAR_ENABLED = false;
 // GitHub repositories for the toolbar link and the "open release page" fallback
 // (VITE_BBARIT_RELEASE_REPO_MAC / _WIN, see src/config/endpoints.ts). The signed
@@ -2668,6 +2703,11 @@ function App() {
   const [pm2PanelSizes, setPm2PanelSizes] = useState<Record<string, number>>({}); // projectId -> flex ratio
 
   const terminalWritersRef = useRef<Record<string, (text: string) => void>>({});
+  // 자동 입력 게이트가 XTerminal 에 writer 가 없는 터미널을 위해 App 의 writer 를 찾는다.
+  useEffect(() => {
+    setInputGateFallbackWriter((id) => terminalWritersRef.current[id] ?? null);
+    return () => setInputGateFallbackWriter(null);
+  }, []);
   const promptLibraryPendingCommandsRef = useRef<Record<string, string>>({});
   const telegramOffsetRef = useRef<number>(0);
   const telegramPollInFlightRef = useRef<boolean>(false);
@@ -3506,14 +3546,34 @@ function App() {
 
   // Track which terminals have recent I/O activity (for status display)
   const [busyTerminals, setBusyTerminals] = useState<Set<string>>(new Set());
+  const [agentStatus, setAgentStatus] = useState<Map<string, AgentStatusEntry>>(() => new Map());
+  // Display state: OSC 7501 when the terminal reports it, else I/O activity (busyTerminals).
+  const agentStateOf = (terminalId: string): AgentTabState => {
+    const s = agentStatus.get(terminalId);
+    if (s) return s.state === 'done' && s.seenTurn >= s.turn ? 'idle' : s.state;
+    return busyTerminals.has(terminalId) ? 'working' : 'idle';
+  };
+  // Legacy `running`/`stopped` stays alongside so existing CSS keeps working.
+  const terminalStatusClass = (terminalId: string): string => {
+    const st = agentStateOf(terminalId);
+    return `${st === 'working' ? 'running' : 'stopped'} ${st}`;
+  };
+  // Dot/tab tooltip wording follows the display state (blocked names what it waits for).
+  const terminalStatusLabel = (terminalId: string): string => {
+    const st = agentStateOf(terminalId);
+    if (st === 'blocked') return BLOCKED_KIND_LABEL[agentStatus.get(terminalId)?.kind || ''] || '입력 대기';
+    return AGENT_STATE_LABEL[st];
+  };
+  const projectAgentStateOf = (terminals: { id: string }[]): AgentTabState =>
+    aggregateProjectAgentState(terminals.map((tm) => agentStateOf(tm.id)));
   const [terminalGitStatuses, setTerminalGitStatuses] = useState<Record<string, TerminalGitStatus>>({});
   // Filter terminals by activity: 'all' | 'running' | 'stopped'
   const [terminalActivityFilter, setTerminalActivityFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const isTerminalFiltered = useCallback((terminalId: string) => {
     if (terminalActivityFilter === 'all') return false; // not filtered out
-    const isBusy = busyTerminals.has(terminalId);
+    const isBusy = agentStateOf(terminalId) === 'working';
     return terminalActivityFilter === 'running' ? !isBusy : isBusy;
-  }, [terminalActivityFilter, busyTerminals]);
+  }, [terminalActivityFilter, busyTerminals, agentStatus]);
   // Mix jump mode: capture the next key press and zoom into the pane wearing
   // that letter badge. Esc cancels. Capture phase so xterm never sees the key.
   useEffect(() => {
@@ -4872,7 +4932,17 @@ Office project scaffold created by BBARIT Terminal.
       : project?.activeTerminalId || '';
     const write = terminalWritersRef.current[terminalId];
     if (!write) return { ok: false, error: 'no live terminal to run the command in' };
-    write(job.command + '\n');
+    // 게이트에 맡긴다(사람 입력 대기·blocked 거부). 결과는 비동기라 거부는 콘솔에만 남긴다.
+    const cliType = projectsRef.current.flatMap((p) => p.terminals).find((t) => t.id === terminalId)?.cliType;
+    void queueAutoInput(terminalId, job.command, { source: 'scheduler', submit: true, submitDelayMs: gateSubmitDelayFor(cliType) }).then(async (res) => {
+      if (res.ok) return;
+      console.warn('[scheduler] not sent:', job.command, res.reason);
+      try {
+        let granted = await notifIsPermissionGranted();
+        if (!granted) granted = (await notifRequestPermission()) === 'granted';
+        if (granted) notifSend({ title: '⏰ 스케줄 실행 실패', body: `${job.command} — ${autoInputRefusalMessage(res.reason)}` });
+      } catch { /* notifications unavailable */ }
+    });
     return { ok: true };
   }, []);
   const runSchedulerJobRef = useRef(runSchedulerJob);
@@ -5414,6 +5484,8 @@ Office project scaffold created by BBARIT Terminal.
     title: string;
     prompt: string;
     duration: string;
+    /** blocked = OSC 7501 입력 대기 알림(완료 말풍선 재사용). 없으면 완료 토스트. */
+    kind?: 'done' | 'blocked';
     leaving?: boolean;
   };
   type CompletedTaskTarget = Pick<TaskToast, 'id' | 'projectId' | 'terminalId' | 'title'>;
@@ -5555,34 +5627,91 @@ Office project scaffold created by BBARIT Terminal.
       }
 
       // Native OS notification + system sound on every completed task.
-      // macOS uses named system sounds ('Glass' etc.); Windows toasts play their
-      // default sound when none is given. macOS stays silent while the app is
-      // frontmost — the opt-in in-app beep (playSoundWhenDone) covers that case.
-      if (settings.notifyWhenWaiting !== 'never') {
-        void (async () => {
-          try {
-            let granted = await notifIsPermissionGranted();
-            if (!granted) granted = (await notifRequestPermission()) === 'granted';
-            if (!granted) return;
-            const opts: { title: string; body: string; sound?: string; silent?: boolean } = {
-              title,
-              body: [prompt, duration].filter(Boolean).join(' · '),
-            };
-            // OS notification sound: macOS uses a named system sound; Windows plays its
-            // default toast sound when none is set, so we only force silence there.
-            if (settings.playOsNotifySound !== false) {
-              if (!IS_WINDOWS) opts.sound = settings.osNotifySoundName || 'Glass';
-            } else if (IS_WINDOWS) {
-              opts.silent = true;
-            }
-            notifSend(opts);
-          } catch { /* notifications unavailable */ }
-        })();
-      }
+      // macOS stays silent while the app is frontmost — the opt-in in-app beep
+      // (playSoundWhenDone) covers that case.
+      sendAgentOsNotification(title, [prompt, duration].filter(Boolean).join(' · '), settings);
     };
     window.addEventListener('octo-task-toast', onToast as EventListener);
     return () => window.removeEventListener('octo-task-toast', onToast as EventListener);
   }, [dismissTaskToast, rememberCompletedTask]);
+
+  // OSC 7501 agent status (dispatched from XTerminal): keep the per-terminal state
+  // for tabs/dots and raise the "waiting" alert on a transition into `blocked`.
+  // `done` alerts arrive through octo-task-toast above. Spec: docs/AGENT_STATUS_OSC7501.md
+  const activeTerminalIdForStatus = activeProject?.activeTerminalId || '';
+  const activeTerminalIdForStatusRef = useRef(activeTerminalIdForStatus);
+  activeTerminalIdForStatusRef.current = activeTerminalIdForStatus;
+  useEffect(() => {
+    const onAgentStatus = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as AgentStatusEventDetail | undefined;
+      if (!d?.terminalId) return;
+      const tid = d.terminalId;
+      const looking = d.looking || isUserLooking(activeTerminalIdForStatusRef.current === tid);
+      setAgentStatus((prev) => {
+        const old = prev.get(tid);
+        if (d.cleared) {
+          if (!old) return prev;
+          const next = new Map(prev);
+          next.delete(tid);
+          return next;
+        }
+        const seenTurn = looking ? d.turn : (old?.seenTurn ?? -1);
+        if (old && old.state === d.state && old.kind === d.kind && old.msg === d.msg && old.turn === d.turn && old.seenTurn === seenTurn) return prev;
+        const next = new Map(prev);
+        next.set(tid, { state: d.state, kind: d.kind, msg: d.msg, turn: d.turn, seenTurn });
+        return next;
+      });
+
+      const blockedToastId = `agent-blocked:${tid}`;
+      if (d.state !== 'blocked') {
+        if (taskToastTimersRef.current[blockedToastId]) dismissTaskToast(blockedToastId);
+        return;
+      }
+      if (d.alert !== 'blocked') return;
+      const { projects: projs, agentSettings: settings } = taskNotifyRef.current;
+      let projectId = '', projectName = '', terminalName = '';
+      for (const p of projs) {
+        const term = p.terminals.find((tt) => tt.id === tid);
+        if (term) {
+          projectId = p.id;
+          projectName = p.displayName || p.name || '';
+          terminalName = term.name || '';
+          break;
+        }
+      }
+      const { title, body } = blockedAlertText(projectName, terminalName, d.kind, d.msg);
+      const toast: TaskToast = { id: blockedToastId, projectId, terminalId: tid, title, prompt: body.slice(0, 200), duration: '', kind: 'blocked' };
+      setTaskToasts((prev) => [...prev.filter((t) => t.id !== blockedToastId), toast].slice(-4));
+      if (taskToastTimersRef.current[blockedToastId]) window.clearTimeout(taskToastTimersRef.current[blockedToastId]);
+      taskToastTimersRef.current[blockedToastId] = window.setTimeout(() => dismissTaskToast(blockedToastId), 15000);
+      if (!looking) sendAgentOsNotification(title, body, settings);
+    };
+    window.addEventListener(AGENT_STATUS_EVENT, onAgentStatus as EventListener);
+    return () => window.removeEventListener(AGENT_STATUS_EVENT, onAgentStatus as EventListener);
+  }, [dismissTaskToast]);
+
+  // Mark the looked-at terminal's turn as seen (done → idle) on tab switch,
+  // window focus and visibility changes.
+  useEffect(() => {
+    const markSeen = () => {
+      const tid = activeTerminalIdForStatusRef.current;
+      if (!tid || !isUserLooking(true)) return;
+      setAgentStatus((prev) => {
+        const s = prev.get(tid);
+        if (!s || s.seenTurn >= s.turn) return prev;
+        const next = new Map(prev);
+        next.set(tid, { ...s, seenTurn: s.turn });
+        return next;
+      });
+    };
+    markSeen();
+    window.addEventListener('focus', markSeen);
+    document.addEventListener('visibilitychange', markSeen);
+    return () => {
+      window.removeEventListener('focus', markSeen);
+      document.removeEventListener('visibilitychange', markSeen);
+    };
+  }, [activeTerminalIdForStatus]);
 
   // Surface broker harness START FAILURES as a toast (always shown, not gated by the
   // task-complete setting) so the "+ does nothing" silent failure becomes visible + diagnosable.
@@ -6854,22 +6983,23 @@ Office project scaffold created by BBARIT Terminal.
             : null);
         if (!write) return { ok: false, error: `terminal not found: ${terminalId || '(none)'}` };
         const text = String(request?.text ?? '');
-        if (request?.submit === false) {
-          write(text);
-        } else {
-          const terminal = project?.terminals.find((item) => item.id === terminalId);
-          if (isInteractiveAgentTerminal(terminal?.cliType)) {
-            // Agent TUIs buffer pasted input. A trailing LF inserts a newline and an
-            // immediate CR can be absorbed into the paste, leaving the prompt idle.
-            // Write the text first, let it settle, then send one real Enter key.
-            write(text);
-            await new Promise((resolve) => setTimeout(resolve, terminalSubmitDelayMs(text)));
-            write('\r');
-          } else {
-            // Shells do not need the TUI paste delay, but still require CR (Enter),
-            // not LF (line insertion in Claude/Codex-style terminal widgets).
-            write(`${text}\r`);
-          }
+        // 자동 입력 게이트: 사람이 치는 중이면 기다리고, 에이전트가 승인 대기(blocked)면
+        // force 없이는 거부한다. Enter 는 게이트가 본문과 따로 보낸다.
+        const targetTerminal = projects.flatMap((p) => p.terminals).find((tt) => tt.id === terminalId);
+        const result = await queueAutoInput(terminalId, text, {
+          source: 'ctl',
+          submit: request?.submit !== false,
+          submitDelayMs: gateSubmitDelayFor(targetTerminal?.cliType),
+          force: request?.force === true,
+          fallbackWrite: write,
+        });
+        if (!result.ok) {
+          const error = result.reason === 'blocked'
+            ? 'agent is waiting for input'
+            : result.reason === 'typing'
+              ? 'user is typing'
+              : `terminal not writable: ${result.reason}`;
+          return { ok: false, error, reason: result.reason, terminalId };
         }
         return { ok: true, terminalId };
       }
@@ -8162,12 +8292,12 @@ Office project scaffold created by BBARIT Terminal.
               </span>
             )}
             {project.terminals.length > 0 && (
-              <span className="project-selector-terminal-dots">
+              <span className={`project-selector-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                 {project.terminals.map(tm => (
                   <span
                     key={tm.id}
-                    className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`}
-                    title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
+                    className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
+                    title={`${tm.name}: ${terminalStatusLabel(tm.id)}`}
                   />
                 ))}
               </span>
@@ -8893,65 +9023,31 @@ Office project scaffold created by BBARIT Terminal.
           }
         }
 
-        const writeToTerminalWhenReady = (proj: Project, term: TerminalInstance, command: string, chatId: string) => {
-          // Split multi-line input into individual lines, execute each with Enter
-          const lines = String(command || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-          if (lines.length === 0) return;
-          const startedAt = Date.now();
-          const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
-          const tryOnce = () => {
-            const write = terminalWritersRef.current[term.id];
-            if (!write) return false;
-            // Send each line with Enter, spaced apart so TUIs can process
-            let delay = 0;
-            for (const line of lines) {
-              window.setTimeout(() => {
-                const w = terminalWritersRef.current[term.id];
-                if (!w) return;
-                w(line + '\r');
-              }, delay);
-              delay += 80;
-            }
-            const summary = lines.length === 1 ? lines[0] : `${lines[0]} (+${lines.length - 1} lines)`;
-            telegramSend(`✅ ran (${label}): ${summary}`, chatId);
-            return true;
-          };
-
-          if (tryOnce()) return;
-
-          const tick = () => {
-            if (cancelled) return;
-            if (tryOnce()) return;
-            if (Date.now() - startedAt > 7000) {
-              telegramSend(`⚠️ terminal not ready (${label})`, chatId);
-              return;
-            }
-            setTimeout(tick, 200);
-          };
-          setTimeout(tick, 200);
+        // 자동 입력 게이트(terminal/inputGate.ts)로 보낸다: 여러 줄도 한 번의 bracketed
+        // paste + Enter 하나. 사람이 치는 중이면 기다리고, 에이전트가 승인 대기면 거부한다.
+        const replyAutoInputResult = (res: AutoInputResult, chatId: string, label: string, okText: string) => {
+          if (res.ok) telegramSend(okText, chatId);
+          else if (res.reason === 'no-writer') telegramSend(`⚠️ terminal not ready (${label})`, chatId);
+          else telegramSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${label})`, chatId);
         };
 
-        const writeRawToTerminalWhenReady = (proj: Project, term: TerminalInstance, data: string, chatId: string, labelText: string) => {
-          const startedAt = Date.now();
+        const writeToTerminalWhenReady = (proj: Project, term: TerminalInstance, command: string, chatId: string) => {
+          const text = String(command || '').replace(/\r\n?/g, '\n').trim();
+          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+          if (lines.length === 0) return;
           const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
-          const tryOnce = () => {
-            const write = terminalWritersRef.current[term.id];
-            if (!write) return false;
-            write(data);
-            telegramSend(`✅ sent (${label}): ${labelText}`, chatId);
-            return true;
-          };
-          if (tryOnce()) return;
-          const tick = () => {
-            if (cancelled) return;
-            if (tryOnce()) return;
-            if (Date.now() - startedAt > 7000) {
-              telegramSend(`⚠️ terminal not ready (${label})`, chatId);
-              return;
-            }
-            setTimeout(tick, 200);
-          };
-          setTimeout(tick, 200);
+          const summary = lines.length === 1 ? lines[0] : `${lines[0]} (+${lines.length - 1} lines)`;
+          void queueAutoInput(term.id, text, { source: 'telegram', submit: true, submitDelayMs: gateSubmitDelayFor(term.cliType) }).then((res) => {
+            replyAutoInputResult(res, chatId, label, `✅ ran (${label}): ${summary}`);
+          });
+        };
+
+        // Ctrl+C / Esc / Enter 버튼: 사용자가 명시적으로 누른 키라 blocked 여도 보낸다(원격 승인).
+        const writeRawToTerminalWhenReady = (proj: Project, term: TerminalInstance, data: string, chatId: string, labelText: string) => {
+          const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
+          void queueAutoInput(term.id, data, { source: 'telegram', submit: false, force: true }).then((res) => {
+            replyAutoInputResult(res, chatId, label, `✅ sent (${label}): ${labelText}`);
+          });
         };
 
         const sendTelegramKeyHelp = (chatId: string, boundLabel: string) => {
@@ -9385,18 +9481,24 @@ Office project scaffold created by BBARIT Terminal.
 
               // Special keys
               if (compact === 'ctrl+c' || compact === '!ctrlc' || compact === '^c') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x03'); discordSend('✅ sent Ctrl+C', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x03', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Ctrl+C' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'esc' || compact === 'escape' || compact === '!esc') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x1b'); discordSend('✅ sent Esc', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x1b', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Esc' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'enter' || compact === '!enter') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\r'); discordSend('✅ sent Enter', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\r', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Enter' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
 
@@ -9413,16 +9515,12 @@ Office project scaffold created by BBARIT Terminal.
                 setProjects(prev => prev.map(p => p.id !== binding!.project.id ? p : { ...p, activeTerminalId: binding!.terminal.id }));
               }
 
-              // Write command to terminal
-              const write = terminalWritersRef.current[binding.terminal.id];
-              if (write) {
-                write(cmd);
-                window.setTimeout(() => {
-                  const w = terminalWritersRef.current[binding!.terminal.id];
-                  if (w) w('\r');
-                }, 35);
-                discordSend(`✅ ran (${boundLabel}): ${cmd}`, channelId);
-              }
+              // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
+              const sentCmd = cmd;
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'discord', submit: true, submitDelayMs: gateSubmitDelayFor(binding.terminal.cliType) }).then((res) => {
+                if (res.ok) discordSend(`✅ ran (${boundLabel}): ${sentCmd}`, channelId);
+                else discordSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
+              });
             }
           } catch {
             // Ignore per-channel errors
@@ -9725,18 +9823,24 @@ Office project scaffold created by BBARIT Terminal.
               }
 
               if (compact === 'ctrl+c' || compact === '!ctrlc' || compact === '^c') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x03'); slackSend('sent Ctrl+C', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x03', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Ctrl+C' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'esc' || compact === 'escape' || compact === '!esc') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x1b'); slackSend('sent Esc', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x1b', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Esc' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'enter' || compact === '!enter') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\r'); slackSend('sent Enter', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\r', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Enter' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
 
@@ -9752,15 +9856,12 @@ Office project scaffold created by BBARIT Terminal.
                 setProjects(prev => prev.map(p => p.id !== binding!.project.id ? p : { ...p, activeTerminalId: binding!.terminal.id }));
               }
 
-              const write = terminalWritersRef.current[binding.terminal.id];
-              if (write) {
-                write(cmd);
-                window.setTimeout(() => {
-                  const w = terminalWritersRef.current[binding!.terminal.id];
-                  if (w) w('\r');
-                }, 35);
-                slackSend(`ran (${boundLabel}): ${cmd}`, channelId);
-              }
+              // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
+              const sentCmd = cmd;
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'slack', submit: true, submitDelayMs: gateSubmitDelayFor(binding.terminal.cliType) }).then((res) => {
+                if (res.ok) slackSend(`ran (${boundLabel}): ${sentCmd}`, channelId);
+                else slackSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
+              });
             }
           } catch {
             // Ignore per-channel errors
@@ -11238,14 +11339,13 @@ Office project scaffold created by BBARIT Terminal.
     updateActiveProject({ activeTerminalId: agentTerm.id });
     setViewMode('default');
     window.setTimeout(() => {
-      const write = terminalWritersRef.current[agentTerm.id];
-      const send = (data: string) => {
-        if (write) write(data);
-        else void invoke('write_to_pty', { terminalId: agentTerm.id, data });
-      };
-      send(prompt + '\n');
-      // Pasted multiline text lands in the TUI input without submitting — press Enter for it
-      window.setTimeout(() => send('\r'), 300);
+      // 사용자가 방금 클릭했다 → force. 게이트가 bracketed paste 와 따로 보내는 Enter 를 맡는다.
+      void queueAutoInput(agentTerm.id, prompt, {
+        source: 'hub',
+        submit: true,
+        force: true,
+        fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: agentTerm.id, data }); },
+      });
     }, 400);
   }, [projects, activeProjectId, updateActiveProject, setViewMode]);
 
@@ -15945,13 +16045,13 @@ Office project scaffold created by BBARIT Terminal.
         const proj = projects.find(p => p.id === activeProjectId);
         const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
         if (!tid) return;
-        void (async () => {
-          await invoke('write_to_pty', { terminalId: tid, data: prompt }).catch(() => {});
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-        })();
+        // 사용자가 방금 보낸 프롬프트 → force. Enter 는 게이트가 한 번 따로 보낸다.
+        void queueAutoInput(tid, prompt, {
+          source: 'editor',
+          submit: true,
+          force: true,
+          fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }).catch(() => {}); },
+        });
       }}
       onFileClose={handleFileClose}
       onFileSelect={handleFileSelect}
@@ -16461,9 +16561,9 @@ Office project scaffold created by BBARIT Terminal.
             )}
             {/* <ProjectCategoryBadge category={project.category} size="xs" iconOnly /> */}
             {project.terminals.length > 0 && (
-              <span className="project-terminal-dots">
+              <span className={`project-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                 {project.terminals.slice(0, 6).map(tm => (
-                  <span key={tm.id} className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`} title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`} />
+                  <span key={tm.id} className={`project-terminal-dot ${terminalStatusClass(tm.id)}`} title={`${tm.name}: ${terminalStatusLabel(tm.id)}`} />
                 ))}
                 {project.terminals.length > 6 && (
                   <span className="project-terminal-dots-more" title={`${project.terminals.length} terminals`}>
@@ -19528,8 +19628,8 @@ Office project scaffold created by BBARIT Terminal.
                     onSendToConsole={(prompt) => {
                       const proj = projects.find(p => p.id === activeProjectId);
                       if (!proj) return;
-                      const write = terminalWritersRef.current[proj.activeTerminalId];
-                      if (write) write(prompt + '\n');
+                      if (!terminalWritersRef.current[proj.activeTerminalId]) return;
+                      void queueAutoInput(proj.activeTerminalId, prompt, { source: 'kanban', submit: true, force: true });
                     }}
                   />
                 </React.Suspense>
@@ -19839,12 +19939,12 @@ Office project scaffold created by BBARIT Terminal.
 	                        <span className="project-selector-name-row">
                             <span className="project-selector-name">{project.displayName}</span>
                             {project.terminals.length > 0 && (
-                              <span className="project-selector-terminal-dots">
+                              <span className={`project-selector-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                                 {project.terminals.map(tm => (
                                   <span
                                     key={tm.id}
-                                    className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`}
-                                    title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
+                                    className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
+                                    title={`${tm.name}: ${terminalStatusLabel(tm.id)}`}
                                   />
                                 ))}
                               </span>
@@ -19952,7 +20052,14 @@ Office project scaffold created by BBARIT Terminal.
                           onSendToConsole={(prompt: string) => {
                             const proj = projects.find(p => p.id === activeProjectId);
                             const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
-                            if (tid) void invoke('write_to_pty', { terminalId: tid, data: prompt + '\n' });
+                            if (tid) {
+                              void queueAutoInput(tid, prompt, {
+                                source: 'kanban',
+                                submit: true,
+                                force: true,
+                                fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }); },
+                              });
+                            }
                           }}
                         />
                       </div>
@@ -20038,13 +20145,13 @@ Office project scaffold created by BBARIT Terminal.
                     const proj = projects.find(p => p.id === activeProjectId);
                     const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
                     if (!tid) return;
-                    void (async () => {
-                      await invoke('write_to_pty', { terminalId: tid, data: prompt }).catch(() => {});
-                      await new Promise((resolve) => setTimeout(resolve, 500));
-                      await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-                      await new Promise((resolve) => setTimeout(resolve, 300));
-                      await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-                    })();
+                    // 사용자가 방금 보낸 프롬프트 → force. Enter 는 게이트가 한 번 따로 보낸다.
+                    void queueAutoInput(tid, prompt, {
+                      source: 'editor',
+                      submit: true,
+                      force: true,
+                      fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }).catch(() => {}); },
+                    });
                   }}
                   onFileClose={handleFileClose}
                   onFileSelect={handleFileSelect}
@@ -20448,7 +20555,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={terminal.id}
                       data-terminal-tab-id={terminal.id}
-                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminalStatusClass(terminal.id)}`}
                       title={terminal.name}
                       style={isTerminalFiltered(terminal.id) ? { opacity: 0.25, pointerEvents: 'none' } : undefined}
                       onMouseDown={(e) => {
@@ -20517,7 +20624,10 @@ Office project scaffold created by BBARIT Terminal.
                       }}
                     >
                       <span className="terminal-tab-label">
-                        <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} title={busyTerminals.has(terminal.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)} />
+                        <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} title={terminalStatusLabel(terminal.id)} />
+                        {agentStateOf(terminal.id) === 'blocked' && (
+                          <span className="terminal-tab-agent-glyph" title={terminalStatusLabel(terminal.id)}>?</span>
+                        )}
                         <CliIcon cliType={terminal.cliType || 'shell'} />
                         <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} compact />
                         <span className="terminal-tab-name">{terminal.name}</span>
@@ -20606,7 +20716,7 @@ Office project scaffold created by BBARIT Terminal.
 			                        return (
 			                          <div
                                       data-terminal-tab-id={terminal.id}
-			                            className={`dashboard-drag-handle ${pinned ? 'pinned-handle' : ''} terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+			                            className={`dashboard-drag-handle ${pinned ? 'pinned-handle' : ''} terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                       title={terminal.name}
 			                            style={{
 			                              background: `color-mix(in srgb, ${projectStyle.bg} 80%, ${projectStyle.accent} 20%)`,
@@ -20622,7 +20732,7 @@ Office project scaffold created by BBARIT Terminal.
 			                              className="terminal-panel-title"
 			                              style={{ color: projectStyle.text }}
 			                            >
-			                              <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+			                              <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 			                              <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 			                              <CliIcon cliType={terminal.cliType || 'shell'} /> {terminal.name}
 			                              <TerminalLastCmd terminalId={terminal.id} />
@@ -20831,7 +20941,7 @@ Office project scaffold created by BBARIT Terminal.
                   });
                   const jumpLetterById: Record<string, string> = {};
                   if (mixJumpActive) visibleIds.slice(0, 26).forEach((id, i) => { jumpLetterById[id] = String.fromCharCode(65 + i); });
-                  const runningCount = allTerminals.filter((x) => busyTerminals.has(x.terminal.id)).length;
+                  const runningCount = allTerminals.filter((x) => agentStateOf(x.terminal.id) === 'working').length;
                   const idleCount = allTerminals.length - runningCount;
                   const setMixColumns = (n: number) => {
                     const clamped = Math.max(1, Math.min(8, n));
@@ -20959,7 +21069,7 @@ Office project scaffold created by BBARIT Terminal.
                         )}
 	                        <div
                             data-terminal-tab-id={terminal.id}
-                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                             title={terminal.name}
                             style={{ background: `color-mix(in srgb, ${projectStyle.bg} 80%, ${projectStyle.accent} 20%)`, borderBottom: `1px solid ${projectStyle.accent}44` }}
                             onDoubleClick={() => setMixZoomTerminalId((prev) => prev === terminal.id ? null : terminal.id)}
@@ -21004,7 +21114,7 @@ Office project scaffold created by BBARIT Terminal.
 	                            className="terminal-panel-title"
 	                            style={{ color: projectStyle.text }}
 	                          >
-	                            <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+	                            <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 	                            <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 	                            <span style={{ marginRight: '6px' }}>{proj.icon}</span>
 	                            <span style={{ opacity: 0.7, fontSize: '11px' }}>{proj.displayName}</span>
@@ -21285,7 +21395,6 @@ Office project scaffold created by BBARIT Terminal.
                                 </div>
                                 {proj.terminals.map((t) => {
                                   const selected = mixSelectedTerminals.size === 0 || mixSelectedTerminals.has(t.id);
-                                  const isBusy = busyTerminals.has(t.id);
                                   return (
                                     <div key={t.id} style={{
                                       padding: '6px 10px 6px 28px', fontSize: 13,
@@ -21305,7 +21414,7 @@ Office project scaffold created by BBARIT Terminal.
                                         return next;
                                       });
                                     }}>
-                                      <span className={`pty-status-dot ${isBusy ? 'running' : 'stopped'}`} style={{ width: 8, height: 8, flexShrink: 0 }} />
+                                      <span className={`pty-status-dot ${terminalStatusClass(t.id)}`} style={{ width: 8, height: 8, flexShrink: 0 }} />
                                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
                                       <CliIcon cliType={t.cliType || 'shell'} />
                                       <span style={{ width: 18, height: 18, borderRadius: 'var(--brutal-radius)', border: `2px solid ${selected ? ps.accent : `${activeStyle.text}20`}`, background: selected ? ps.accent : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: '#fff', flexShrink: 0 }}>
@@ -21369,7 +21478,7 @@ Office project scaffold created by BBARIT Terminal.
                                   borderBottom: `1px solid ${projectStyle.accent}55`, color: projectStyle.text,
                                 }}>
                                   <span style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-                                    <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+                                    <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
                                     <span>{proj.icon}</span>
                                     <span style={{ fontWeight: 600, color: projectStyle.accent }}>{proj.displayName}</span>
                                     <span style={{ opacity: 0.4 }}>·</span>
@@ -21511,7 +21620,7 @@ Office project scaffold created by BBARIT Terminal.
 				                        >
 				                          <div
                                     data-terminal-tab-id={terminal.id}
-				                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+				                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                     title={terminal.name}
 				                            draggable
 				                            onClick={() => {
@@ -21572,7 +21681,7 @@ Office project scaffold created by BBARIT Terminal.
 				                            <span
 				                              className="terminal-panel-title"
 				                            >
-				                              <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+				                              <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 				                              <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 				                              <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 				                              <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -21911,7 +22020,7 @@ Office project scaffold created by BBARIT Terminal.
 		                            >
 		                              <div
                                     data-terminal-tab-id={terminal.id}
-                                    className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                                    className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                     title={terminal.name}
                                     onContextMenu={(e) => {
                                       e.preventDefault();
@@ -21922,7 +22031,7 @@ Office project scaffold created by BBARIT Terminal.
 		                                <span
 		                                  className="terminal-panel-title"
 		                                >
-		                                  <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+		                                  <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 		                                  <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 		                                  <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 		                                  <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -22242,7 +22351,7 @@ Office project scaffold created by BBARIT Terminal.
 	                      {showHeader && (
 	                        <div
                             data-terminal-tab-id={terminal.id}
-                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                             title={terminal.name}
                             onContextMenu={(e) => {
                               e.preventDefault();
@@ -22253,7 +22362,7 @@ Office project scaffold created by BBARIT Terminal.
 	                          <span
 	                            className="terminal-panel-title"
 	                          >
-	                            <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+	                            <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 	                            <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 	                            <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 	                            <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -22968,7 +23077,7 @@ Office project scaffold created by BBARIT Terminal.
                   updateProject(project.id, { activeTerminalId: terminal.id });
                 }}
               >
-                <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+                <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
                 <span className="terminal-git-pill-name">{terminal.name}</span>
                 <TerminalLastCmd terminalId={terminal.id} />
                 <span className="terminal-git-pill-branch">{branchLabel}</span>
@@ -23105,14 +23214,14 @@ Office project scaffold created by BBARIT Terminal.
               key={toast.id}
               className={`task-bubble ${toast.leaving ? 'leaving' : ''}`}
               role="status"
-              title="Go to completed project"
+              title={toast.kind === 'blocked' ? 'Go to waiting agent' : 'Go to completed project'}
               onClick={() => openTaskCompleteTarget(toast)}
             >
               <div className="task-bubble-body">
                 <div className="task-bubble-title">{toast.title}</div>
                 {toast.prompt && <div className="task-bubble-prompt">{toast.prompt}</div>}
                 <div className="task-bubble-meta">
-                  <span className="task-bubble-done">Task complete</span>
+                  <span className="task-bubble-done">{toast.kind === 'blocked' ? '입력 대기' : 'Task complete'}</span>
                   {toast.duration && <span className="task-bubble-duration">⏱ {toast.duration}</span>}
                 </div>
               </div>

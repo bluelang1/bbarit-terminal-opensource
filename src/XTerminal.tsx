@@ -20,6 +20,22 @@ import { WebglAddon } from 'xterm-addon-webgl';
 import { SearchAddon, type ISearchResultChangeEvent } from '@xterm/addon-search';
 import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
+import { writePasteChunked } from './terminal/pasteChunks';
+import { disposeInputGate, setInputGateHost, writeHumanInput } from './terminal/inputGate';
+import {
+  createProgramStatusStore,
+  dropTransientProgramStatus,
+  rollupAgentState,
+  rollupRecord,
+  type ProgramStatusStore,
+} from './terminal/programStatus';
+import {
+  answerProgramStatusProbe,
+  handleProgramStatusOsc as handleProgramStatusOscCore,
+  isProgramStatusStale,
+  type ProgramStatusChange,
+} from './terminal/programStatusHandler';
+import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
 import { claudeSessionArgsToFlags, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
@@ -269,8 +285,83 @@ interface TerminalState {
   cliLaunchFailure?: CliLaunchFailureKind | null; // 미설치/깨진 설치 감지 시 재시도 중단 + 배너
   cliLaunchFailureHandler?: ((kind: CliLaunchFailureKind) => void) | null;
   agentReadyNotified?: boolean;
+  // OSC 7501 (Program Status Protocol) — docs/AGENT_STATUS_OSC7501.md
+  programStatus?: ProgramStatusStore;
+  pendingStatusProbe?: boolean;          // writer 등록 전에 온 지원 질의 — 등록되면 답한다
+  replayingOutput?: boolean;             // 저장된 PTY 출력 재생 중 — 7501 알림·질의 응답 금지
 }
 const terminalStates = new Map<string, TerminalState>();
+
+// ── OSC 7501 ─────────────────────────────────────────────────────
+// 마운트별 알림 처리기. terminalStates 항목은 생성 effect 가 나중에 만들므로 따로 둔다.
+const programStatusHandlers = new Map<string, (change: ProgramStatusChange) => void>();
+
+/** 상태 이벤트만 보낸다(알림 없음). 마운트별 처리기가 없을 때와 PTY 종료 시 쓴다. */
+const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extra?: Partial<AgentStatusEventDetail>) => {
+  const rec = rollupRecord(store);
+  const detail: AgentStatusEventDetail = {
+    terminalId,
+    state: rollupAgentState(store),
+    kind: rec?.kind,
+    app: rec?.app,
+    msg: rec?.msg,
+    turn: store.turn,
+    alert: null,
+    looking: false,
+    cleared: !store.root && store.children.size === 0,
+    ...extra,
+  };
+  window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
+};
+
+/** registerOscHandler(7501) 본체 — 로직은 terminal/programStatusHandler.ts. */
+const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
+  const st = terminalStates.get(terminalId);
+  if (!st) return true;
+  return handleProgramStatusOscCore(st, data, {
+    onChange: (change) => {
+      const handler = programStatusHandlers.get(terminalId);
+      if (handler) handler(change);
+      else dispatchAgentStatus(terminalId, change.store);
+    },
+    onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore()),
+  });
+};
+
+/** 재생이 끝날 때까지(파싱 완료) 기다린다. 터미널이 사라져도 묶이지 않게 상한을 둔다. */
+const waitForXtermParsed = (term: Terminal | null | undefined) => new Promise<void>((resolve) => {
+  if (!term) { resolve(); return; }
+  const timer = window.setTimeout(resolve, 10000);
+  try {
+    term.write('', () => { window.clearTimeout(timer); resolve(); });
+  } catch {
+    window.clearTimeout(timer);
+    resolve();
+  }
+});
+
+/** PTY 가 끝나면 working/blocked 는 버린다(done/error 는 남는다). */
+const dropProgramStatusOnExit = (terminalId: string) => {
+  const store = terminalStates.get(terminalId)?.programStatus;
+  if (!store?.reported) return;
+  const prev = rollupAgentState(store);
+  dropTransientProgramStatus(store);
+  const next = rollupAgentState(store);
+  if (prev !== next) dispatchAgentStatus(terminalId, store);
+};
+/** 이 터미널의 현재 7501 에이전트 상태. 보고가 없으면 undefined. */
+export const getTerminalAgentState = (terminalId: string) => {
+  const store = terminalStates.get(terminalId)?.programStatus;
+  return store?.reported ? rollupAgentState(store) : undefined;
+};
+
+// 자동 입력 게이트(docs/AGENT_INPUT_GATE.md)가 마운트된 터미널의 writer·상태·paste 모드를 읽는다.
+setInputGateHost({
+  getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
+  getAgentState: getTerminalAgentState,
+  isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
 // dev 전용 노출 — dev:screen js로 스크롤 핀 등 터미널 상태를 실측하기 위함
 if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__octoTerminalStates = terminalStates;
 
@@ -636,51 +727,7 @@ const parsePastedImagePathList = (text: string): string[] => {
   return lines;
 };
 
-// Bracketed paste mode: wrap pasted text with escape sequences so shells (bash, zsh, fish)
-// handle multi-line paste correctly instead of executing each line immediately.
-const BRACKETED_PASTE_START = '\x1b[200~';
-const BRACKETED_PASTE_END = '\x1b[201~';
-
-// Write large paste data in chunks to avoid shell buffer overflow.
-// Most terminal PTY buffers handle ~4KB at a time reliably.
-const PASTE_CHUNK_SIZE = 4096;
-const PASTE_CHUNK_DELAY_MS = 5;
-
-async function writePasteChunked(
-  writeFn: (data: string) => void,
-  text: string,
-  useBracketedPaste = true,
-) {
-  if (!text) return;
-  if (useBracketedPaste) {
-    writeFn(BRACKETED_PASTE_START);
-    await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-  }
-
-  if (text.length <= PASTE_CHUNK_SIZE) {
-    writeFn(text);
-  } else {
-    for (let i = 0; i < text.length; ) {
-      let end = Math.min(i + PASTE_CHUNK_SIZE, text.length);
-      // 서로게이트 페어(이모지 등) 한가운데서 자르면 IPC 직렬화에서 U+FFFD로 깨진다.
-      if (end < text.length) {
-        const c = text.charCodeAt(end - 1);
-        if (c >= 0xd800 && c <= 0xdbff) end -= 1;
-      }
-      writeFn(text.slice(i, end));
-      i = end;
-      await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-    }
-  }
-
-  // Do not append the bracketed-paste terminator in the same event-loop turn as
-  // the final payload chunk. Some PTY/WebView backends coalesce fast writes and
-  // interactive terminal apps can consume the end marker before the last bytes,
-  // which made the tail of pasted Korean/long text disappear.
-  await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-
-  if (useBracketedPaste) writeFn(BRACKETED_PASTE_END);
-}
+// Bracketed paste + chunking live in terminal/pasteChunks.ts (shared with the auto-input gate).
 
 const capTail = (text: string, maxChars: number) => (
   text.length > maxChars ? text.slice(-maxChars) : text
@@ -1015,6 +1062,7 @@ export { _stopReadLoop as stopReadLoop };
 
 // Fully dispose terminal (free memory)
 const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
+  if (closePty) disposeInputGate(terminalId);
   // Process asynchronously to avoid conflicts with React rendering
   setTimeout(() => {
     _stopReadLoop(terminalId);
@@ -1083,6 +1131,10 @@ const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
       state.outputChain = undefined;
       state.usesEventTransport = false;
       _terminalLastActivity.delete(terminalId);
+      // OSC 7501 상태는 터미널 런타임과 함께 사라진다 — App 의 표시도 비운다.
+      if (state.programStatus?.reported) dispatchAgentStatus(terminalId, createProgramStatusStore());
+      state.programStatus = undefined;
+      state.pendingStatusProbe = false;
       // DOM elements are managed by React, so don't remove directly
       // Remove from Map
       terminalStates.delete(terminalId);
@@ -1385,6 +1437,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         busy = false;
         // Only notify if the user actually started something (not the startup banner).
         if (!taskPendingRef.current) { recent = ''; return; }
+        // OSC 7501 을 보고하는 터미널은 7501 의 done 전이가 완료 알림을 대신한다.
+        if (terminalStates.get(terminalId)?.programStatus?.reported) { recent = ''; return; }
         taskPendingRef.current = false;
         recent = '';
         if (playSoundWhenDone) playBeep();
@@ -1410,6 +1464,57 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (st?.onOutputChunk === handler) st.onOutputChunk = undefined;
     };
   }, [cliType, playBeep, playSoundWhenDone, terminalId]);
+
+  // OSC 7501 상태 전이 → 알림 결정(decideAgentAlert) + App 으로 상태 이벤트.
+  // done 알림은 기존 완료 토스트(octo-task-toast)를 그대로 쓴다.
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  useEffect(() => {
+    const handler = (change: ProgramStatusChange) => {
+      const looking = isUserLooking(isActiveRef.current);
+      const alert = decideAgentAlert(change.prev, change.next, looking, change.firstReport);
+      dispatchAgentStatus(terminalId, change.store, { cliType, alert, looking });
+      if (!alert) return;
+      if (playSoundWhenDone) playBeep();
+      if (alert === 'done') {
+        taskPendingRef.current = false;
+        const durationMs = taskStartedAtRef.current ? Date.now() - taskStartedAtRef.current : 0;
+        window.dispatchEvent(new CustomEvent('octo-task-toast', {
+          detail: {
+            id: `${terminalId}-${Date.now()}`,
+            terminalId,
+            cliType,
+            prompt: taskPromptRef.current || '',
+            durationMs,
+          },
+        }));
+      }
+    };
+    programStatusHandlers.set(terminalId, handler);
+    return () => {
+      if (programStatusHandlers.get(terminalId) === handler) programStatusHandlers.delete(terminalId);
+    };
+  }, [cliType, playBeep, playSoundWhenDone, terminalId]);
+
+  // 셸 안의 에이전트만 죽으면 pty-exit 가 없어 working/blocked 가 남는다. 보고도 출력도
+  // 10분간 없으면 7501 상태를 버리고(reported 도 초기화) 기존 I/O 기반 표시·완료 토스트로 돌린다.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const store = terminalStates.get(terminalId)?.programStatus;
+      const now = Date.now();
+      // 보고 시각만으로 먼저 거른다(출력 유휴는 아직 모름 → 무한대로 가정).
+      if (!isProgramStatusStale(store, now, Number.POSITIVE_INFINITY)) return;
+      void invoke<number>('pty_idle_ms', { terminalId })
+        .catch(() => now - (_terminalLastActivity.get(terminalId) || 0))
+        .then((idleMs) => {
+          const st = terminalStates.get(terminalId);
+          if (!st || st.programStatus !== store || !isProgramStatusStale(store, Date.now(), idleMs)) return;
+          st.programStatus = createProgramStatusStore();
+          dispatchAgentStatus(terminalId, st.programStatus);
+        });
+    }, 60000);
+    return () => window.clearInterval(timer);
+  }, [terminalId]);
 
   // onOutput prop → state.onOutputExternal
   useEffect(() => {
@@ -1668,10 +1773,17 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try { st.term?.scrollToBottom(); } catch { /* ignore */ }
       }, 150);
     }
-    st?.writeToPty?.(data);
+    // 사람 입력 시각 기록 + 자동 입력 중이면 보류(Ctrl-C 제외) — terminal/inputGate.ts
+    if (st?.writeToPty) writeHumanInput(terminalId, data, st.writeToPty);
     enqueueTelegramCommandFromKeystrokes(terminalId, data);
     enqueueSlackCommandFromKeystrokes(terminalId, data);
   }, [terminalId, skills, onRunSkill, cliType, workDir]);
+
+  // IME 입력 막대·붙여넣기 이벤트 경로의 사람 입력(sendToPty 를 거치지 않는 곳).
+  const writeHumanToPty = useCallback((data: string) => {
+    const w = writeToPtyRef.current;
+    if (w) writeHumanInput(terminalId, data, w);
+  }, [terminalId]);
 
   // Native OS file drop routed from App.tsx (getCurrentWebview().onDragDropEvent).
   // The drop is matched to this terminal by id; we insert the real file paths.
@@ -2722,6 +2834,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try { existingState.ptyDataUnlisten?.(); } catch { /* ignore */ }
       try { existingState.ptyExitUnlisten?.(); } catch { /* ignore */ }
       try { existingState.term?.dispose(); } catch { /* ignore */ }
+      if (existingState.programStatus?.reported) dispatchAgentStatus(terminalId, createProgramStatusStore());
       terminalStates.delete(terminalId);
     }
 
@@ -2844,6 +2957,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         if (text) void writeClipboardTextSafe(text);
         return true;
       });
+      // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
+      // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
+      term.parser.registerOscHandler(7501, (data) => handleProgramStatusOsc(terminalId, data));
       term.unicode.activeVersion = '11';
 
       termRef.current = term;
@@ -3071,6 +3187,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     // Save writeToPty in global state (always keep latest function)
     const currentState = terminalStates.get(terminalId);
     if (currentState) currentState.writeToPty = writeToPty;
+    // writer 등록 전에 도착한 OSC 7501 질의가 있으면 지금 답한다.
+    if (currentState?.pendingStatusProbe) answerProgramStatusProbe(currentState);
 
     const ensurePtyListeners = async () => {
       const st = terminalStates.get(terminalId);
@@ -3094,6 +3212,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (!live) return;
           live.readLoopActive = false;
           _stopReadLoop(terminalId);
+          dropProgramStatusOnExit(terminalId);
         });
         st.ptyExitUnlisten = unlistenExit;
       } catch (err) {
@@ -3523,7 +3642,16 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             if (restoredProbe.markCliAutoStarted) restoredState.autoStartedCliType = cliType;
           }
           if (restoredProbe.bufferedOutput && !disposed) {
-            await processTerminalOutput(terminalId, restoredProbe.bufferedOutput);
+            // 재생되는 OSC 7501 보고는 과거 것이다: 상태는 반영하되 알림·질의 응답은 하지 않는다.
+            const replayState = terminalStates.get(terminalId);
+            if (replayState) replayState.replayingOutput = true;
+            try {
+              await processTerminalOutput(terminalId, restoredProbe.bufferedOutput);
+              await waitForXtermParsed(terminalStates.get(terminalId)?.term);
+            } finally {
+              const after = terminalStates.get(terminalId);
+              if (after) after.replayingOutput = false;
+            }
           }
         }
 
@@ -5328,9 +5456,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const insertAttachmentPath = (filePath: string) => {
         if (!writeToPtyRef.current) return;
         if (isBbaritAgentCli(cliType)) {
-          writeToPtyRef.current(bbaritImageToken(filePath));
+          writeHumanToPty(bbaritImageToken(filePath));
         } else {
-          writeToPtyRef.current(submitDroppedPaths([filePath]));
+          writeHumanToPty(submitDroppedPaths([filePath]));
         }
       };
       const saveAndInsertClipboardImage = async (base64: string, extension = 'png') => {
@@ -5347,13 +5475,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const pastedImagePaths = isBbaritAgentCli(cliType) ? parsePastedImagePathList(textPlain) : [];
       if (pastedImagePaths.length > 0 && writeToPtyRef.current) {
         e.preventDefault();
-        writeToPtyRef.current(pastedImagePaths.map(bbaritImageToken).join(''));
+        writeHumanToPty(pastedImagePaths.map(bbaritImageToken).join(''));
         return;
       }
       if (textPlain && writeToPtyRef.current) {
         e.preventDefault();
         const normalized = normalizeInputNewlines(textPlain);
-        void writePasteChunked(writeToPtyRef.current, normalized);
+        void writePasteChunked(writeHumanToPty, normalized);
         return;
       }
 
@@ -5365,7 +5493,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         const converted = htmlClipboardToText(textHtml);
         if (converted) {
           e.preventDefault();
-          void writePasteChunked(writeToPtyRef.current, normalizeInputNewlines(converted));
+          void writePasteChunked(writeHumanToPty, normalizeInputNewlines(converted));
           return;
         }
       }
@@ -5379,9 +5507,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (filePaths && filePaths.length > 0) {
             e.preventDefault();
             if (isBbaritAgentCli(cliType) && filePaths.every(isImagePath)) {
-              writeToPtyRef.current(filePaths.map(bbaritImageToken).join(''));
+              writeHumanToPty(filePaths.map(bbaritImageToken).join(''));
             } else {
-              writeToPtyRef.current(submitDroppedPaths(filePaths));
+              writeHumanToPty(submitDroppedPaths(filePaths));
             }
             return;
           }
@@ -5532,7 +5660,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // ESC 키는 바로 전송
       if (e.key === 'Escape' && writeToPtyRef.current) {
         e.preventDefault();
-        writeToPtyRef.current('\x1b');
+        writeHumanToPty('\x1b');
         return;
       }
 
@@ -5547,7 +5675,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         if (writeToPtyRef.current) {
           e.preventDefault();
           e.stopImmediatePropagation();
-          writeToPtyRef.current('\x0d');
+          writeHumanToPty('\x0d');
         }
         return;
       }
@@ -5567,7 +5695,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
   // Zed 스타일 키보드 이벤트 처리
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    const writeToPty = writeToPtyRef.current;
+    const writeToPty = writeToPtyRef.current ? writeHumanToPty : null;
     const submitLine = (value: string) => {
       const v = value ?? '';
       // Skill detection: /skillId, /skillName, or $skillId (Codex)
@@ -5595,7 +5723,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         const handled = await tryRunOctoCommand(v);
         if (handled) return;
         if (writeToPtyRef.current) {
-          writeToPtyRef.current(v + '\x0d');
+          writeHumanToPty(v + '\x0d');
         }
       })();
     };
@@ -5847,7 +5975,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     try {
       const text = await readClipboardTextSafe();
       if (text && writeToPtyRef.current) {
-        writeToPtyRef.current(normalizeInputNewlines(text));
+        writeHumanToPty(normalizeInputNewlines(text));
       }
     } catch { /* ignore */ }
     setCtxMenu(null);
@@ -5876,7 +6004,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // without executing it (the user presses Enter to run).
   const ctxInsertQuickCommand = useCallback((command: string) => {
     if (command && writeToPtyRef.current) {
-      writeToPtyRef.current(normalizeInputNewlines(command));
+      writeHumanToPty(normalizeInputNewlines(command));
     }
     setCtxMenu(null);
   }, []);
@@ -6740,7 +6868,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               const handled = await tryRunOctoCommand(value);
               if (handled) return;
               if (writeToPtyRef.current) {
-                writeToPtyRef.current(value + '\x0d');
+                writeHumanToPty(value + '\x0d');
               }
             })();
           }}

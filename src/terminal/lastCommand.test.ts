@@ -42,6 +42,13 @@ describe('terminal last command tracking', () => {
     dropLastCommand('t-empty');
   });
 
+  it('skips OSC replies written to the PTY', () => {
+    feedTerminalInput('t-osc', '\x1b]7501;?:states=idle,working:kinds=permission\x1b\\');
+    feedTerminalInput('t-osc', 'ls\x1b]0;title\x07 -la\r');
+    expect(lastCommandOf('t-osc')).toBe('ls -la');
+    dropLastCommand('t-osc');
+  });
+
   it('returns an empty string for unknown terminals', () => {
     expect(lastCommandOf('t-none')).toBe('');
   });

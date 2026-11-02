@@ -29,6 +29,11 @@ export function feedTerminalInput(terminalId: string, data: string) {
         while (i < data.length && !(data.charCodeAt(i) >= 0x40 && data.charCodeAt(i) <= 0x7e)) i++;
       } else if (next === 'O') {
         i += 2;
+      } else if (next === ']') {
+        // OSC (예: OSC 7501 질의 응답)는 BEL 또는 ST(ESC \) 까지 통째로 건너뛴다.
+        i += 2;
+        while (i < data.length && data[i] !== '\x07' && !(data[i] === '\x1b' && data[i + 1] === '\\')) i++;
+        if (data[i] === '\x1b') i++;
       } else {
         i += 1;
       }
