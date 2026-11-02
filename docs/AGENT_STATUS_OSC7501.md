@@ -114,7 +114,7 @@ tmux 안에서는 tmux 가 지원해야만 보고한다. 백그라운드 세션�
 
 ### 5. 바꾸지 않는 것
 
-- PTY 환경 구성(`create_shell`/`create_cli_shell`)과 Rust 쪽 코드. 7501 은 프론트에서 끝난다.
+- PTY 환경 구성(지금은 `pty_backend::build_shell_command`)과 Rust 쪽 코드. 7501 은 프론트에서 끝난다.
 - 기존 `busyTerminals` 계산. 7501 이 없는 터미널의 표시는 지금과 같아야 한다.
 - 설정 스키마. 새 키를 넣지 않는다.
 - Telegram/Slack/Discord 미러, 브로커/devreview 흐름.

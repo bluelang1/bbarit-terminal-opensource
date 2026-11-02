@@ -88,8 +88,10 @@ Build/test gotchas:
   src/terminal/wheelTicks.ts (accumulate trackpad pixels, one tick per notch).
 - Plain `#[tauri::command] fn` runs on the main thread; any subprocess or network
   work in it freezes the whole UI. Use `#[tauri::command(async)]` or a thread.
-- PTY env is built twice (create_shell, create_cli_shell in main.rs); change both.
-  create_cli_shell has no frontend caller today.
+- PTY env and shell choice live in `pty_backend::build_shell_command` (pure, deps
+  injected, snapshot-tested); `create_shell` only builds deps and calls the backend.
+  All PTY Tauri commands forward to `AppState.pty: Arc<dyn PtyBackend>`.
+  `create_cli_shell` was removed (no caller). Design: docs/PTY_HOLDER_DAEMON.md.
 - Per-tab GitHub account: create_shell sets GH_TOKEN from Project.githubAccount >
   ~/.config/octo/github-accounts.json `owners` > owner==gh login (local only); org
   detection (`gh api user/orgs`) runs in the background and caches hits to that file.
