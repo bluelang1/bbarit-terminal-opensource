@@ -252,7 +252,7 @@ trait PtyBackend: Send + Sync {
 |---|---|---|---|
 | **0** ✅ | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
 | **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
-| **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~2.4 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
+| **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~3.9 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
 | **2b** | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
 | **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
@@ -308,8 +308,9 @@ trait PtyBackend: Send + Sync {
   (상태바 표시는 2b). `pty_backend_info` 는 `{kind, socket?, recovered:[WELCOME 항목], fallbackReason?, lost?}`.
 - **2a 의 종료 의미**: 앱 종료(`RunEvent::Exit`)는 GOODBYE `kill_all` 이다(홀더가 트리 kill + 스코프 스윕 후 종료).
   재부착 UI 가 없으므로 오늘과 같은 의미를 유지했다. 터미널이 살아남는 것은 크래시·강제 종료 때뿐이다.
-  "종료해도 유지"(3.6)는 2b. 같은 id 로 `create_shell` 이 다시 오면 기존 터미널을 RELEASE 하고 새로 띄운다
-  (InProcess 가 같은 id 를 덮어쓰는 것과 같은 결과).
+  "종료해도 유지"(3.6)는 2b. 같은 id 로 `create_shell` 이 다시 오면 기존 터미널을 RELEASE(트리 kill + 스코프
+  스윕)하고 새로 띄운다. InProcess 는 같은 id 를 맵에서 덮어쓸 뿐 이전 프로세스를 kill·스윕하지 않았다(master 가
+  닫히며 SIGHUP 만 감). 홀더 쪽이 더 확실히 정리한다.
 - **스윕**: RELEASE·`kill_all` 때만 한다(자연 종료 때는 하지 않음, InProcess 와 동일). `kill_process_tree`·
   `sweep_scope(s)` 는 `main.rs` 에 그대로 두고 홀더가 `crate::` 로 부른다(같은 바이너리).
 - **흐름 제어**: pump 는 클라이언트를 기다리지 않는다. 클라이언트별 미전송 백로그가 32 MiB 를 넘으면 그 연결을
@@ -320,6 +321,19 @@ trait PtyBackend: Send + Sync {
 - **수명**: 유휴 종료는 "살아 있는(거두지 않은) 터미널 없음 + 클라이언트 없음" 60 초(`BBARIT_PTY_HOLDER_IDLE_EXIT_MS`
   로 조정, 테스트용). 끝났지만 RELEASE 안 된 터미널은 클라이언트가 없으면 홀더를 붙잡지 않는다.
   PING 10 초 / 읽기 타임아웃 30 초, HELLO 는 5 초 안에 와야 한다.
+- **pid 수명**: 홀더는 프로그램이 끝나면 바로 거둔다(wait). 그 뒤 pid 는 OS 가 재사용할 수 있으므로
+  `HolderBackend::pid()`·`list()` 는 EXITED(또는 홀더 상실) 뒤 pid 를 **None** 으로 돌려준다.
+  `CloseRequested` 의 `kill_process_tree`, `pty_terminal_has_child`, `get_pty_cwd` 같은 pid 사용처는 None 을
+  "프로세스 없음" 으로 다뤄야 한다. 홀더도 거둔 터미널에는 SIGNAL·트리 kill·`killer.kill()` 을 하지 않는다.
+- **리뷰 반영(2a 수정 커밋)**: run 디렉터리는 lstat 로 확인해 심볼릭 링크·다른 소유자·0700 이 아닌 경우 거부한다
+  (예전처럼 chmod 하고 넘어가지 않음). json 의 소켓이 run 디렉터리 밖이면 무시한다. 접속만 하고 HELLO 전인
+  연결도 "클라이언트 있음" 으로 쳐서 유휴 종료가 앱의 탐침과 HELLO 사이에 끼지 않는다. 밀린 클라이언트는
+  소켓을 직접 shutdown 한다. 핸들은 u32 가 한 바퀴 돌아도 쓰는 중인 값을 건너뛴다. 밀려난 클라이언트의
+  프레임은 HELLO 교체와 같은 잠금 아래에서 버린다. 앱 쪽은 연결·채택을 한 뮤텍스로 직렬화하고 현재 세대가
+  아닌 연결의 프레임을 버린다. 쓰기는 연결별 writer 스레드(쓰기 타임아웃 5 초)로 보내 메인 스레드 커맨드가
+  소켓에 막히지 않는다. `release_later` 는 WELCOME 마다 비우고 같은 id 로 spawn 하면 지운다. 기다리는 쪽이
+  없는 SPAWNED 는 RELEASE 하고, 응답을 잃은 SPAWN 은 다음 WELCOME 으로 해결한다. 모드 게이트는 `args_os`
+  를 쓴다. CI(ubuntu)에 `cargo test … pty_holder` 단계를 더했다.
 - **공용 헬퍼**: `pty_backend.rs` 의 UTF-8 이어붙이기·큐(드롭 + "[output truncated]")·64 KiB 드레인·출력 버퍼
   상한을 `Utf8Reassembler`/`OutputQueue`/`drain_output`/`append_output_buffer` 로 뽑아 두 백엔드가 같이 쓴다
   (InProcess 동작 동일). Windows 는 `pty_holder` 모듈을 컴파일하지 않고, 게이트는 오류를 찍고 2 로 끝난다.

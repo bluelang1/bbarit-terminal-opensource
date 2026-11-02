@@ -3915,17 +3915,21 @@ fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
         .map(String::from)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod pty_holder_gate_tests {
     use super::{pty_holder_mode, pty_holder_setting};
     use serde_json::json;
 
     #[test]
     fn holder_mode_needs_the_exact_flag_pair() {
-        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let args = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
         assert_eq!(pty_holder_mode(&args(&["octo-ui"])), None);
         assert_eq!(pty_holder_mode(&args(&["octo-ui", "--mode", "rpc"])), None);
         assert_eq!(pty_holder_mode(&args(&["octo-ui", "pty-holder", "--mode"])), None);
+        // Non-UTF-8 argv must not panic.
+        use std::os::unix::ffi::OsStringExt;
+        let odd = vec![std::ffi::OsString::from("octo-ui"), std::ffi::OsString::from_vec(vec![0xff, 0xfe])];
+        assert_eq!(pty_holder_mode(&odd), None);
     }
 
     #[test]
@@ -3939,7 +3943,7 @@ mod pty_holder_gate_tests {
 
 /// `--mode pty-holder --socket <path>`: run the PTY holder and exit, before anything
 /// GUI-, log- or agent-related starts. Returns the exit code when this is holder mode.
-fn pty_holder_mode(args: &[String]) -> Option<i32> {
+fn pty_holder_mode(args: &[std::ffi::OsString]) -> Option<i32> {
     if !args.windows(2).any(|w| w[0] == "--mode" && w[1] == "pty-holder") {
         return None;
     }
@@ -9628,7 +9632,8 @@ fn attach_parent_console_for_agent() {}
 fn main() {
     // PTY holder daemon (docs/PTY_HOLDER_DAEMON.md 3.1): same exe, no Tauri, no webview,
     // no stderr redirection (the spawner points stderr at the holder's own log).
-    if let Some(code) = pty_holder_mode(&std::env::args().collect::<Vec<_>>()) {
+    // args_os: a non-UTF-8 argument must not panic here (std::env::args would).
+    if let Some(code) = pty_holder_mode(&std::env::args_os().collect::<Vec<_>>()) {
         std::process::exit(code);
     }
 

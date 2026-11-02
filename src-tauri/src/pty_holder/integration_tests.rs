@@ -81,6 +81,10 @@ impl TestHolder {
 
 impl Drop for TestHolder {
     fn drop(&mut self) {
+        // A failed test must not leave `sleep 30` shells behind.
+        if self.serving.as_ref().is_some_and(|h| !h.is_finished()) {
+            self.holder.kill_all_for_test();
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -391,7 +395,57 @@ fn peer_uid_is_checked() {
     );
     let mut r = Raw::hello(&th.socket, &proto::Hello::current());
     let err = proto::read_frame(&mut r.stream).unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    // macOS reports EOF; Linux AF_UNIX may reset (our HELLO was unread when it closed).
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn garbage_oversized_and_truncated_frames_never_take_the_holder_down() {
+    let th = TestHolder::default();
+    let read_ends = |mut s: UnixStream| {
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut buf = Vec::new();
+        // The holder closes (or BYEs and closes) instead of hanging or panicking.
+        let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+        buf
+    };
+    // Not a HELLO.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&proto::encode(proto::PING, 0, b"x").unwrap())
+        .unwrap();
+    let reply = read_ends(s);
+    assert_eq!(reply.first(), Some(&proto::BYE));
+    // Random bytes that decode to a huge length.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&[0xff; 64]).unwrap();
+    read_ends(s);
+    // A header promising more than it sends, then EOF.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&[proto::HELLO, 0, 0, 0, 0, 100, 0, 0, 0, b'{'])
+        .unwrap();
+    s.shutdown(std::net::Shutdown::Write).unwrap();
+    read_ends(s);
+    // After a good HELLO: an oversized frame header, then a SPAWN with bad JSON.
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let mut header = vec![proto::INPUT, 1, 0, 0, 0];
+    header.extend_from_slice(&((proto::MAX_PAYLOAD as u32) + 1).to_le_bytes());
+    a.stream.write_all(&header).unwrap();
+    read_ends(a.stream.try_clone().unwrap());
+    let (mut b, _, _) = Raw::connect(&th.socket);
+    b.send(proto::SPAWN, 0, b"{not json");
+    read_ends(b.stream.try_clone().unwrap());
+    // Still serving.
+    let (mut c, welcome, _) = Raw::connect(&th.socket);
+    assert!(welcome.terminals.is_empty());
+    let (handle, _) = c.spawn("after-garbage", "echo alive; sleep 30", &[], "test-scope");
+    c.output_until(handle, "alive");
+    c.send(proto::RELEASE, handle, &[]);
 }
 
 #[test]
@@ -634,6 +688,51 @@ fn holder_backend_end_to_end_without_duplicates() {
 }
 
 #[test]
+fn racing_reconnects_deliver_no_duplicate_bytes() {
+    let th = TestHolder::default();
+    let backend = Arc::new(HolderBackend::connect(&th.socket).unwrap());
+    let b: &dyn PtyBackend = &*backend;
+    b.spawn(spawn_req(
+        "r1",
+        "printf 'M0\\n'; while read l; do printf 'M:%s\\n' \"$l\"; done",
+    ))
+    .unwrap();
+    let mut out = String::new();
+    read_until(b, "r1", "M0", &mut out);
+    for round in 0..5 {
+        let before = backend.live_connection().expect("connected");
+        th.holder.kick_client();
+        // The reader's own reconnect plus several callers (spawn's relink) at once.
+        let racers: Vec<_> = (0..4)
+            .map(|_| {
+                let be = Arc::clone(&backend);
+                thread::spawn(move || be.relink_for_test())
+            })
+            .collect();
+        for r in racers {
+            let _ = r.join();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while backend.live_connection().is_none_or(|g| g <= before) {
+            assert!(Instant::now() < deadline, "never reconnected");
+            thread::sleep(Duration::from_millis(10));
+        }
+        write_retrying(b, "r1", &format!("x{round}\n"));
+        read_until(b, "r1", &format!("M:x{round}"), &mut out);
+    }
+    assert!(
+        backend.lost_reason().is_none(),
+        "{:?}",
+        backend.lost_reason()
+    );
+    assert_eq!(out.matches("M0").count(), 1, "{out:?}");
+    for round in 0..5 {
+        assert_eq!(out.matches(&format!("M:x{round}")).count(), 1, "{out:?}");
+    }
+    b.close("r1").unwrap();
+}
+
+#[test]
 fn holder_backend_reports_exit_like_in_process() {
     let th = TestHolder::default();
     let backend = HolderBackend::connect(&th.socket).unwrap();
@@ -654,6 +753,9 @@ fn holder_backend_reports_exit_like_in_process() {
     assert!(!b.alive("e1"));
     assert!(b.tail("e1").unwrap().contains("done"));
     assert!(b.write("e1", "x").is_err());
+    // Reaped: the pid may already be someone else's, so it is no longer reported.
+    assert_eq!(b.pid("e1"), Ok(None));
+    assert!(b.list().iter().all(|t| t.pid.is_none()));
     // Respawning the same id replaces it (no reattach UI yet).
     b.spawn(spawn_req("e1", "printf again; sleep 30")).unwrap();
     let mut again = String::new();

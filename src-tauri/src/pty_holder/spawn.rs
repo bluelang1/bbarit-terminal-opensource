@@ -55,11 +55,13 @@ pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
     prune_old_logs(run_dir);
     for (info_path, info) in discover(run_dir) {
         let socket = PathBuf::from(&info.socket);
+        // Only sockets inside our private run dir are trusted (or cleaned up).
+        if socket.parent() != Some(run_dir) {
+            continue;
+        }
         if !super::pid_alive(info.pid) {
             let _ = std::fs::remove_file(&info_path);
-            if socket.parent() == Some(run_dir) {
-                let _ = std::fs::remove_file(&socket);
-            }
+            let _ = std::fs::remove_file(&socket);
             continue;
         }
         // Another version's holder keeps its terminals; DRAIN + a second holder is phase 3.

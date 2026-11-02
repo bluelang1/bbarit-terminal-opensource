@@ -3,41 +3,48 @@
 //! One socket connection; a reader thread routes OUTPUT into per-terminal queues
 //! (`sync_channel(1024)`, same never-blocking/truncation rules as `InProcessBackend`)
 //! and a per-terminal tail copy for `tail()`. UTF-8 reassembly happens here, per
-//! terminal; the holder only moves bytes.
+//! terminal; the holder only moves bytes. Frames go out through a writer thread, so
+//! a command (`write_to_pty` runs on the main thread) never blocks on the socket.
 //!
 //! No duplicate rendering: every terminal tracks `next_seq`, the stream offset of
 //! the next byte expected from the holder. After a reconnect, only the part of the
 //! TAIL at or past `next_seq` reaches the read queue. A terminal first seen in a
 //! WELCOME (the app restarted) gets its TAIL as `tail()` only; `read()` then
-//! returns just the bytes produced after it.
+//! returns just the bytes produced after it. Frames from any connection other than
+//! the current one are ignored, and only one connect runs at a time.
 
 use super::proto::{self, Frame, TerminalEntry};
 use crate::pty_backend::{
     append_output_buffer, drain_output, new_output_channel, OutputQueue, PtyBackend, SpawnRequest,
     TerminalInfo, Utf8Reassembler, PTY_DISCONNECTED, PTY_NOT_FOUND,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// A write the holder doesn't take within this long means the connection is gone.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 /// Three missed PONGs.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long to keep retrying the same socket after the connection drops.
 const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
+/// How long GOODBYE waits for the writer to flush (app exit).
+const GOODBYE_FLUSH: Duration = Duration::from_secs(1);
 
 struct Term {
     /// Holder handle; kept after EXITED (the holder keeps the tail until RELEASE),
     /// None once the holder lost the terminal.
     handle: Option<u32>,
+    /// None once the program was reaped: the pid may already belong to someone else.
     pid: Option<u32>,
     scope: String,
     /// None once the program exited or the holder lost it: `read()` then reports
@@ -87,6 +94,19 @@ impl Term {
         });
     }
 
+    /// TAIL bytes starting at `seq_start`: the part this app has not delivered yet goes
+    /// to the queue (a gap gets the truncation marker).
+    fn catch_up(&mut self, seq_start: u64, bytes: &[u8]) {
+        if self.next_seq < seq_start {
+            if let Some(q) = self.queue.as_mut() {
+                q.mark_truncated();
+            }
+            self.next_seq = seq_start;
+        }
+        let skip = (self.next_seq - seq_start).min(bytes.len() as u64) as usize;
+        self.deliver(&bytes[skip..]);
+    }
+
     /// Bytes the frontend replays itself via `tail()` (recovered terminal): no queue.
     fn seed(&mut self, bytes: &[u8], seq_end: u64) {
         let Term {
@@ -99,6 +119,7 @@ impl Term {
         self.next_seq = seq_end;
     }
 
+    /// The program ended (EXITED): no more output, and its pid is no longer ours.
     fn end(&mut self) {
         if let Some(rest) = self.decoder.finish() {
             append_output_buffer(&mut self.buffer, &rest);
@@ -108,6 +129,7 @@ impl Term {
         }
         self.alive = false;
         self.queue = None;
+        self.pid = None;
     }
 
     /// The holder no longer has it (holder gone, or a WELCOME without it).
@@ -121,22 +143,31 @@ impl Term {
 struct Shared {
     terms: HashMap<String, Term>,
     by_handle: HashMap<u32, String>,
-    /// SPAWN sent, reply pending: id → scope token.
-    pending: HashMap<String, String>,
+    /// SPAWN sent, reply pending: id → (scope token, connection it went out on).
+    pending: HashMap<String, (String, u64)>,
     replies: HashMap<String, Result<(), String>>,
     /// Terminals found in the first WELCOME (they outlived the previous app).
     recovered: Vec<TerminalEntry>,
     welcomed: bool,
     instance: Option<String>,
+    /// Connection whose frames are current; frames from any other are dropped.
+    generation: u64,
     /// Why the connection is gone (BYE reason, holder vanished), if it is.
     lost: Option<String>,
-    /// Closed while no connection was up: RELEASE them when a WELCOME lists them.
-    release_later: std::collections::HashSet<String>,
+    /// Closed while no connection was up: RELEASE them if the next WELCOME lists them.
+    release_later: HashSet<String>,
+}
+
+enum Out {
+    Frame(Vec<u8>),
+    /// Flush, shut the socket down, then signal.
+    Close(Option<Sender<()>>),
 }
 
 struct Link {
     generation: u64,
     stream: UnixStream,
+    out: Sender<Out>,
 }
 
 struct Inner {
@@ -146,6 +177,8 @@ struct Inner {
     shared: Mutex<Shared>,
     replied: Condvar,
     link: Mutex<Option<Link>>,
+    /// Held across connect + adopt so two reconnects never race.
+    connecting: Mutex<()>,
     next_generation: Mutex<u64>,
     closing: AtomicBool,
 }
@@ -167,6 +200,9 @@ fn connect_session(socket: &Path) -> Result<Session, String> {
         UnixStream::connect(socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;
     stream
         .set_read_timeout(Some(CONNECT_TIMEOUT))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(WRITE_TIMEOUT))
         .map_err(|e| e.to_string())?;
     let hello =
         proto::encode_json(proto::HELLO, 0, &proto::Hello::current()).map_err(|e| e.to_string())?;
@@ -208,6 +244,30 @@ fn connect_session(socket: &Path) -> Result<Session, String> {
     })
 }
 
+/// Writes queued frames in order; a failed or timed-out write closes the connection
+/// (the reader then sees EOF and reconnects).
+fn link_writer(mut stream: UnixStream, rx: Receiver<Out>) {
+    let mut ack = None;
+    for msg in rx {
+        match msg {
+            Out::Frame(bytes) => {
+                if stream.write_all(&bytes).is_err() {
+                    break;
+                }
+            }
+            Out::Close(done) => {
+                ack = done;
+                break;
+            }
+        }
+    }
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    if let Some(done) = ack {
+        let _ = done.send(());
+    }
+}
+
 impl HolderBackend {
     /// Attach to the holder listening on `socket` (no discovery, no respawn).
     #[cfg(test)]
@@ -229,6 +289,7 @@ impl HolderBackend {
             shared: Mutex::new(Shared::default()),
             replied: Condvar::new(),
             link: Mutex::new(None),
+            connecting: Mutex::new(()),
             next_generation: Mutex::new(0),
             closing: AtomicBool::new(false),
         });
@@ -256,7 +317,8 @@ impl HolderBackend {
         self.inner.lock_shared().lost.clone()
     }
 
-    /// GOODBYE {reason} ("quit" | "handover" | "kill_all") and disconnect.
+    /// GOODBYE {reason} ("quit" | "handover" | "kill_all") and disconnect. Waits briefly
+    /// for the frame to leave (the app is usually about to exit).
     pub fn goodbye(&self, reason: &str) {
         self.inner.closing.store(true, Ordering::SeqCst);
         if let Ok(f) = proto::encode_json(
@@ -266,15 +328,14 @@ impl HolderBackend {
                 reason: reason.to_string(),
             },
         ) {
-            let _ = self.inner.send(&f);
+            let _ = self.inner.send(f);
         }
-        if let Some(link) = self
-            .inner
-            .link
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        let link = self.inner.take_link();
+        if let Some(link) = link {
+            let (done, flushed) = mpsc::channel();
+            if link.out.send(Out::Close(Some(done))).is_ok() {
+                let _ = flushed.recv_timeout(GOODBYE_FLUSH);
+            }
             let _ = link.stream.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -288,6 +349,12 @@ impl HolderBackend {
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
             .map(|l| l.generation)
+    }
+
+    /// Test hook: what the reconnect paths call, from any thread.
+    #[cfg(test)]
+    pub fn relink_for_test(&self) -> Result<(), String> {
+        self.inner.relink()
     }
 
     fn handle_of(&self, id: &str) -> Result<u32, String> {
@@ -305,13 +372,8 @@ impl HolderBackend {
 impl Drop for HolderBackend {
     fn drop(&mut self) {
         self.inner.closing.store(true, Ordering::SeqCst);
-        if let Some(link) = self
-            .inner
-            .link
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        if let Some(link) = self.inner.take_link() {
+            let _ = link.out.send(Out::Close(None));
             let _ = link.stream.shutdown(std::net::Shutdown::Both);
         }
     }
@@ -322,13 +384,19 @@ impl Inner {
         self.shared.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Write one frame on the current connection.
-    fn send(&self, frame: &[u8]) -> Result<(), String> {
-        let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
-        let Some(l) = link.as_mut() else {
+    fn take_link(&self) -> Option<Link> {
+        self.link.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    /// Queue one frame on the current connection. Never blocks on the socket.
+    fn send(&self, frame: Vec<u8>) -> Result<(), String> {
+        let link = self.link.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(l) = link.as_ref() else {
             return Err(PTY_DISCONNECTED.to_string());
         };
-        l.stream.write_all(frame).map_err(|e| e.to_string())
+        l.out
+            .send(Out::Frame(frame))
+            .map_err(|_| PTY_DISCONNECTED.to_string())
     }
 
     fn is_linked(&self) -> bool {
@@ -338,7 +406,8 @@ impl Inner {
             .is_some()
     }
 
-    /// Take over a welcomed session: reconcile terminals, start its reader thread.
+    /// Take over a welcomed session: reconcile terminals, start its reader and writer.
+    /// Callers hold `connecting` (or are the constructor).
     fn adopt(self: &Arc<Self>, session: Session) -> Result<(), String> {
         let Session {
             stream,
@@ -346,6 +415,7 @@ impl Inner {
             tails,
         } = session;
         let reader = stream.try_clone().map_err(|e| e.to_string())?;
+        let writer = stream.try_clone().map_err(|e| e.to_string())?;
         let generation = {
             let mut g = self
                 .next_generation
@@ -354,14 +424,25 @@ impl Inner {
             *g += 1;
             *g
         };
+        let (out, queued) = mpsc::channel::<Out>();
+        thread::spawn(move || link_writer(writer, queued));
+        // The link is installed while `shared` is held, so no frame of this connection is
+        // processed (on_frame checks the generation) before the WELCOME is applied.
         let release = {
             let mut shared = self.lock_shared();
-            apply_welcome(&mut shared, &welcome, tails)
+            shared.generation = generation;
+            let release = apply_welcome(&mut shared, &welcome, tails, generation);
+            *self.link.lock().unwrap_or_else(|p| p.into_inner()) = Some(Link {
+                generation,
+                stream,
+                out,
+            });
+            self.replied.notify_all();
+            release
         };
-        *self.link.lock().unwrap_or_else(|p| p.into_inner()) = Some(Link { generation, stream });
         for handle in release {
             if let Ok(f) = proto::encode(proto::RELEASE, handle, &[]) {
-                let _ = self.send(&f);
+                let _ = self.send(f);
             }
         }
         let inner = Arc::clone(self);
@@ -380,12 +461,14 @@ impl Inner {
                 );
                 break;
             }
-            self.on_frame(frame);
+            self.on_frame(generation, frame);
         }
         {
             let mut link = self.link.lock().unwrap_or_else(|p| p.into_inner());
             if link.as_ref().is_some_and(|l| l.generation == generation) {
-                *link = None;
+                if let Some(l) = link.take() {
+                    let _ = l.out.send(Out::Close(None));
+                }
             } else {
                 return; // a newer connection already replaced this one
             }
@@ -395,7 +478,7 @@ impl Inner {
         }
         if let Some(reason) = bye {
             // Another app took the holder over; reconnecting would just steal it back.
-            self.mark_all_lost(format!("holder dropped this app: {reason}"));
+            self.mark_all_lost(generation, format!("holder dropped this app: {reason}"));
             return;
         }
         let socket = self
@@ -406,20 +489,32 @@ impl Inner {
         let deadline = Instant::now() + RECONNECT_WINDOW;
         let mut backoff = Duration::from_millis(100);
         while Instant::now() < deadline && !self.closing.load(Ordering::SeqCst) {
-            if let Ok(session) = connect_session(&socket) {
-                if self.adopt(session).is_ok() {
-                    safe_eprintln!("[pty-holder] reconnected to {}", socket.display());
-                    return;
+            {
+                let _connecting = self.connecting.lock().unwrap_or_else(|p| p.into_inner());
+                if self.is_linked() {
+                    return; // someone else (spawn's relink) already reconnected
+                }
+                if let Ok(session) = connect_session(&socket) {
+                    if self.adopt(session).is_ok() {
+                        safe_eprintln!("[pty-holder] reconnected to {}", socket.display());
+                        return;
+                    }
                 }
             }
             thread::sleep(backoff);
             backoff = (backoff * 2).min(Duration::from_secs(2));
         }
-        self.mark_all_lost(format!("holder at {} is gone", socket.display()));
+        self.mark_all_lost(
+            generation,
+            format!("holder at {} is gone", socket.display()),
+        );
     }
 
-    fn on_frame(&self, frame: Frame) {
+    fn on_frame(&self, generation: u64, frame: Frame) {
         let mut shared = self.lock_shared();
+        if shared.generation != generation {
+            return; // a stale connection's frame
+        }
         match frame.kind {
             proto::OUTPUT => {
                 let Some(id) = shared.by_handle.get(&frame.handle).cloned() else {
@@ -433,7 +528,11 @@ impl Inner {
                 let Ok(s) = proto::parse::<proto::Spawned>(&frame) else {
                     return;
                 };
-                let Some(scope) = shared.pending.remove(&s.id) else {
+                let Some((scope, _)) = shared.pending.remove(&s.id) else {
+                    // Nobody waits for it (timed out, or closed meanwhile): don't leak it.
+                    if let Ok(f) = proto::encode(proto::RELEASE, s.handle, &[]) {
+                        let _ = self.send(f);
+                    }
                     return;
                 };
                 if let Some(old) = shared.terms.get(&s.id).and_then(|t| t.handle) {
@@ -466,9 +565,13 @@ impl Inner {
         }
     }
 
-    fn mark_all_lost(&self, reason: String) {
-        safe_eprintln!("[pty-holder] {reason}");
+    /// Give up on the connection `generation` (no-op if a newer one is up).
+    fn mark_all_lost(&self, generation: u64, reason: String) {
         let mut shared = self.lock_shared();
+        if shared.generation != generation || self.is_linked() {
+            return;
+        }
+        safe_eprintln!("[pty-holder] {reason}");
         for term in shared.terms.values_mut() {
             term.lose();
         }
@@ -482,6 +585,7 @@ impl Inner {
 
     /// After losing the holder: find or start another (run-dir mode only).
     fn relink(self: &Arc<Self>) -> Result<(), String> {
+        let _connecting = self.connecting.lock().unwrap_or_else(|p| p.into_inner());
         if self.is_linked() {
             return Ok(());
         }
@@ -507,6 +611,7 @@ fn apply_welcome(
     shared: &mut Shared,
     welcome: &proto::Welcome,
     tails: Vec<(u32, proto::TailHeader, Vec<u8>)>,
+    generation: u64,
 ) -> Vec<u32> {
     let first = !shared.welcomed;
     shared.welcomed = true;
@@ -538,37 +643,57 @@ fn apply_welcome(
             Vec::new(),
         ));
         let seq_end = header.seq_start + bytes.len() as u64;
-        match shared.terms.get_mut(&entry.id) {
-            Some(term) if term.alive || term.handle.is_some() => {
-                // Reconnect: hand over only what this app has not delivered yet.
-                if term.next_seq < header.seq_start {
-                    if let Some(q) = term.queue.as_mut() {
-                        q.mark_truncated();
+        if let Some((scope, _)) = shared.pending.remove(&entry.id) {
+            // Our SPAWN went through but its SPAWNED was lost with the old connection:
+            // everything it printed is new to the frontend.
+            let mut term = Term::new(entry.handle, entry.pid, scope);
+            term.catch_up(header.seq_start, &bytes);
+            shared.terms.insert(entry.id.clone(), term);
+            shared.replies.insert(entry.id.clone(), Ok(()));
+        } else {
+            match shared.terms.get_mut(&entry.id) {
+                Some(term) if term.alive || term.handle.is_some() => {
+                    // Reconnect: hand over only what this app has not delivered yet.
+                    term.catch_up(header.seq_start, &bytes);
+                    term.handle = Some(entry.handle);
+                    if term.alive {
+                        term.pid = entry.pid;
                     }
-                    term.next_seq = header.seq_start;
                 }
-                let skip = (term.next_seq - header.seq_start).min(bytes.len() as u64) as usize;
-                term.deliver(&bytes[skip..]);
-                term.next_seq = seq_end;
-                term.handle = Some(entry.handle);
-                term.pid = entry.pid;
-            }
-            _ => {
-                // First sight (app restarted, or the id was closed here and lives on there).
-                let mut term = Term::new(entry.handle, entry.pid, entry.scope.clone());
-                term.seed(&bytes, seq_end);
-                shared.terms.insert(entry.id.clone(), term);
-                if first {
-                    shared.recovered.push(entry.clone());
+                _ => {
+                    // First sight (app restarted, or the id was closed here and lives on there).
+                    let mut term = Term::new(entry.handle, entry.pid, entry.scope.clone());
+                    term.seed(&bytes, seq_end);
+                    shared.terms.insert(entry.id.clone(), term);
+                    if first {
+                        shared.recovered.push(entry.clone());
+                    }
                 }
             }
         }
         let term = shared.terms.get_mut(&entry.id).expect("just inserted");
+        term.next_seq = seq_end;
         if entry.exited {
             term.end();
         } else {
             shared.by_handle.insert(entry.handle, entry.id.clone());
         }
+    }
+    // Only ids the very next WELCOME could still list are worth remembering.
+    shared.release_later.clear();
+    // SPAWNs sent on an older connection that this holder never started.
+    let stale: Vec<String> = shared
+        .pending
+        .iter()
+        .filter(|(_, (_, sent_on))| *sent_on < generation)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in stale {
+        shared.pending.remove(&id);
+        shared.replies.insert(
+            id,
+            Err("pty holder connection was lost during SPAWN".to_string()),
+        );
     }
     // Ours, but unknown to this holder: it lost them.
     for (id, term) in shared.terms.iter_mut() {
@@ -587,7 +712,7 @@ fn pinger(inner: Weak<Inner>) {
             return;
         }
         if let Ok(f) = proto::encode(proto::PING, 0, &[]) {
-            let _ = inner.send(&f);
+            let _ = inner.send(f);
         }
     }
 }
@@ -624,10 +749,15 @@ impl PtyBackend for HolderBackend {
         };
         let frame = proto::encode_json(proto::SPAWN, 0, &spawn).map_err(|e| e.to_string())?;
         let mut shared = self.inner.lock_shared();
+        // A fresh terminal under a reused id must never be RELEASEd for the old one.
+        shared.release_later.remove(&terminal_id);
         shared.replies.remove(&terminal_id);
-        shared.pending.insert(terminal_id.clone(), scope_token);
+        let generation = shared.generation;
+        shared
+            .pending
+            .insert(terminal_id.clone(), (scope_token, generation));
         drop(shared);
-        if let Err(e) = self.inner.send(&frame) {
+        if let Err(e) = self.inner.send(frame) {
             self.inner.lock_shared().pending.remove(&terminal_id);
             return Err(e);
         }
@@ -639,6 +769,7 @@ impl PtyBackend for HolderBackend {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                // A late SPAWNED finds no pending entry and is RELEASEd (on_frame).
                 shared.pending.remove(&terminal_id);
                 return Err("pty holder did not answer SPAWN".to_string());
             }
@@ -663,14 +794,14 @@ impl PtyBackend for HolderBackend {
         let handle = self.handle_of(id)?;
         let frame =
             proto::encode(proto::INPUT, handle, data.as_bytes()).map_err(|e| e.to_string())?;
-        self.inner.send(&frame)
+        self.inner.send(frame)
     }
 
     fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<(), String> {
         let handle = self.handle_of(id)?;
         let frame = proto::encode_json(proto::RESIZE, handle, &proto::Resize { rows, cols })
             .map_err(|e| e.to_string())?;
-        self.inner.send(&frame)
+        self.inner.send(frame)
     }
 
     fn close(&self, id: &str) -> Result<(), String> {
@@ -685,9 +816,9 @@ impl PtyBackend for HolderBackend {
         shared.by_handle.remove(&handle);
         let sent = proto::encode(proto::RELEASE, handle, &[])
             .map_err(|e| e.to_string())
-            .and_then(|f| self.inner.send(&f));
+            .and_then(|f| self.inner.send(f));
         if sent.is_err() {
-            // Mid-reconnect: release it as soon as the next WELCOME lists it.
+            // Mid-reconnect: release it if the next WELCOME lists it.
             shared.release_later.insert(id.to_string());
         }
         Ok(())
@@ -715,6 +846,7 @@ impl PtyBackend for HolderBackend {
         }
     }
 
+    /// None after the program ended: the holder reaped it and the pid may be reused.
     fn pid(&self, id: &str) -> Result<Option<u32>, String> {
         match self.inner.lock_shared().terms.get(id) {
             Some(term) => Ok(term.pid),
@@ -739,6 +871,15 @@ impl PtyBackend for HolderBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every call here is on one connection generation.
+    fn apply_welcome(
+        shared: &mut Shared,
+        welcome: &proto::Welcome,
+        tails: Vec<(u32, proto::TailHeader, Vec<u8>)>,
+    ) -> Vec<u32> {
+        super::apply_welcome(shared, welcome, tails, 1)
+    }
 
     fn entry(id: &str, handle: u32, exited: bool) -> TerminalEntry {
         TerminalEntry {
@@ -866,6 +1007,46 @@ mod tests {
     }
 
     #[test]
+    fn release_later_is_cleared_after_every_welcome() {
+        let mut shared = Shared::default();
+        // Closed while disconnected, but the holder no longer has it: forget it, so a
+        // later terminal under the same id is never released by mistake.
+        shared.release_later.insert("old".into());
+        let release = apply_welcome(&mut shared, &welcome(vec![]), vec![]);
+        assert!(release.is_empty());
+        assert!(shared.release_later.is_empty());
+        let release = apply_welcome(
+            &mut shared,
+            &welcome(vec![entry("old", 3, false)]),
+            vec![tail(3, 0, b"")],
+        );
+        assert!(release.is_empty());
+        assert!(shared.terms.contains_key("old"));
+    }
+
+    #[test]
+    fn a_spawn_whose_reply_was_lost_is_resolved_by_welcome() {
+        let mut shared = Shared::default();
+        shared.pending.insert("new".into(), ("scope".into(), 1));
+        shared.pending.insert("never".into(), ("scope".into(), 1));
+        super::apply_welcome(
+            &mut shared,
+            &welcome(vec![entry("new", 8, false)]),
+            vec![tail(8, 0, b"hello")],
+            2,
+        );
+        assert_eq!(shared.replies.get("new"), Some(&Ok(())));
+        assert!(shared.replies["never"].is_err());
+        assert!(shared.pending.is_empty());
+        assert_eq!(
+            drain(&shared, "new"),
+            "hello",
+            "a new terminal's output is all new"
+        );
+        assert!(shared.recovered.is_empty());
+    }
+
+    #[test]
     fn exited_and_missing_terminals_read_as_disconnected() {
         let mut shared = Shared::default();
         apply_welcome(
@@ -874,6 +1055,7 @@ mod tests {
             vec![tail(1, 0, b"bye"), tail(2, 0, b"")],
         );
         assert!(!shared.terms["done"].alive);
+        assert_eq!(shared.terms["done"].pid, None, "a reaped pid may be reused");
         assert_eq!(shared.terms["done"].handle, Some(1), "kept for RELEASE");
         assert_eq!(
             drain_output(&shared.terms["done"].rx),
@@ -882,6 +1064,7 @@ mod tests {
         // The holder no longer has "live" (it died with a previous holder).
         apply_welcome(&mut shared, &welcome(vec![]), vec![]);
         assert!(!shared.terms["live"].alive);
+        assert_eq!(shared.terms["live"].pid, None);
         assert_eq!(shared.terms["live"].handle, None);
     }
 }

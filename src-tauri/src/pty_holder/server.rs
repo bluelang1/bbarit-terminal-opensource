@@ -68,12 +68,12 @@ pub fn current_uid() -> u32 {
 }
 
 /// `--mode pty-holder --socket <path>` entry point. Returns the process exit code.
-pub fn main_from_args(args: &[String]) -> i32 {
+pub fn main_from_args(args: &[std::ffi::OsString]) -> i32 {
     let Some(socket) = arg_value(args, "--socket") else {
         safe_eprintln!("pty-holder: --socket <path> is required");
         return 2;
     };
-    match run(Path::new(&socket)) {
+    match run(&socket) {
         Ok(()) => 0,
         Err(e) => {
             safe_eprintln!("pty-holder: {e}");
@@ -82,11 +82,11 @@ pub fn main_from_args(args: &[String]) -> i32 {
     }
 }
 
-fn arg_value(args: &[String], name: &str) -> Option<String> {
+fn arg_value(args: &[std::ffi::OsString], name: &str) -> Option<std::path::PathBuf> {
     args.iter()
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
-        .cloned()
+        .map(std::path::PathBuf::from)
 }
 
 /// Bind `socket`, write the info file next to it, serve until the holder decides to
@@ -398,6 +398,8 @@ struct ClientLink {
     generation: u64,
     out: mpsc::Sender<Out>,
     backlog: Arc<AtomicUsize>,
+    /// Shut down directly when the client must go now: its writer may be stuck in write_all.
+    stream: UnixStream,
 }
 
 struct Term {
@@ -445,11 +447,15 @@ struct State {
     generation: u64,
     /// Since when there has been no client and no live terminal (for the idle exit).
     idle_since: Instant,
+    /// Open connections, HELLO'd or not: an app between its probe and HELLO counts.
+    conns: usize,
     draining: bool,
 }
 
 pub struct Holder {
     st: Mutex<State>,
+    /// One command at a time across connections (see serve_client).
+    dispatching: Mutex<()>,
     changed: Condvar,
     cfg: Config,
     shutdown: AtomicBool,
@@ -459,12 +465,14 @@ pub struct Holder {
 impl Holder {
     pub fn new(cfg: Config) -> Arc<Self> {
         Arc::new(Holder {
+            dispatching: Mutex::new(()),
             st: Mutex::new(State {
                 terms: HashMap::new(),
                 next_handle: 1,
                 client: None,
                 generation: 0,
                 idle_since: Instant::now(),
+                conns: 0,
                 draining: false,
             }),
             changed: Condvar::new(),
@@ -533,7 +541,11 @@ impl Holder {
             thread::sleep(tick);
             let st = self.lock();
             let live = st.terms.values().any(|t| !t.reaped);
-            if !live && st.client.is_none() && st.idle_since.elapsed() >= self.cfg.idle_exit {
+            if !live
+                && st.client.is_none()
+                && st.conns == 0
+                && st.idle_since.elapsed() >= self.cfg.idle_exit
+            {
                 drop(st);
                 self.begin_shutdown("idle: no terminals and no client");
             }
@@ -543,6 +555,14 @@ impl Holder {
     // ─── connection ───
 
     fn handle_conn(self: &Arc<Self>, stream: UnixStream) {
+        self.lock().conns += 1;
+        self.serve_conn(stream);
+        let mut st = self.lock();
+        st.conns -= 1;
+        st.idle_since = Instant::now();
+    }
+
+    fn serve_conn(self: &Arc<Self>, stream: UnixStream) {
         let _ = stream.set_nonblocking(false);
         match peer_uid(&stream) {
             Ok(uid) if uid == self.cfg.allowed_uid => {}
@@ -586,6 +606,7 @@ impl Holder {
         thread::spawn(move || client_writer(writer, rx, writer_backlog));
 
         let generation = {
+            let _turn = self.dispatching.lock().unwrap_or_else(|p| p.into_inner());
             let mut st = self.lock();
             if let Some(old) = st.client.take() {
                 if let Ok(bye) = proto::encode_json(
@@ -627,6 +648,7 @@ impl Holder {
                 generation,
                 out: tx,
                 backlog,
+                stream: stream.try_clone()?,
             });
             generation
         };
@@ -641,6 +663,9 @@ impl Holder {
                 Ok(f) => f,
                 Err(e) => break Err(e),
             };
+            // Checked and dispatched under `dispatching`, which a takeover HELLO also takes:
+            // a replaced client's frames are never acted on.
+            let _turn = self.dispatching.lock().unwrap_or_else(|p| p.into_inner());
             if !self.is_current(generation) {
                 break Ok(());
             }
@@ -663,6 +688,13 @@ impl Holder {
             st.idle_since = Instant::now();
         }
         result
+    }
+
+    /// Test hook: end every terminal (e.g. ones a failed test left behind) and stop.
+    #[cfg(test)]
+    pub fn kill_all_for_test(&self) {
+        self.kill_all();
+        self.begin_shutdown("test cleanup");
     }
 
     /// Test hook: drop the controlling client without BYE, as a broken socket would.
@@ -689,6 +721,7 @@ impl Holder {
         if queued > CLIENT_BACKLOG_MAX {
             safe_eprintln!("[pty-holder] client fell {queued} bytes behind; dropping it");
             if let Some(c) = st.client.take() {
+                let _ = c.stream.shutdown(std::net::Shutdown::Both);
                 let _ = c.out.send(Out::Close);
             }
             st.idle_since = Instant::now();
@@ -829,8 +862,12 @@ impl Holder {
         });
         let handle = {
             let mut st = self.lock();
-            let handle = st.next_handle;
-            st.next_handle = st.next_handle.checked_add(1).unwrap_or(1);
+            // Never 0, never a handle still in use (after a u32 wrap).
+            let mut handle = st.next_handle;
+            while handle == 0 || st.terms.contains_key(&handle) {
+                handle = handle.wrapping_add(1);
+            }
+            st.next_handle = handle.wrapping_add(1);
             st.terms.insert(
                 handle,
                 Term {
@@ -995,12 +1032,13 @@ impl Holder {
 }
 
 fn kill_term(mut term: Term, sweep: bool) {
+    // A reaped pid may already belong to another process: never signal it again.
     if !term.reaped {
         if let Some(pid) = term.pid {
             crate::kill_process_tree(pid);
         }
+        let _ = term.killer.kill();
     }
-    let _ = term.killer.kill();
     if sweep {
         crate::sweep_scope(&term.scope, &[]);
     }

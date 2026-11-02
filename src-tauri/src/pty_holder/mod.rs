@@ -55,12 +55,44 @@ fn default_run_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join(".config/octo/run"))
 }
 
-/// Create `dir` (and parents) and force it to 0700: tails and SPAWN envs pass through here.
+/// Make sure `dir` is a private directory: created 0700 when missing; an existing one
+/// must be a real directory (not a symlink) owned by us with mode 0700, else it is
+/// refused rather than "fixed" (tails and SPAWN envs pass through here).
 pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .map_err(|e| format!("chmod {}: {e}", dir.display()))
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    if std::fs::symlink_metadata(dir).is_err() {
+        if let Some(parent) = dir.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("create {}: {e}", dir.display())),
+        }
+        // umask may have cleared bits we asked for; never more than 0700 anyway.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod {}: {e}", dir.display()))?;
+    }
+    let meta =
+        std::fs::symlink_metadata(dir).map_err(|e| format!("stat {}: {e}", dir.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("{} is not a plain directory", dir.display()));
+    }
+    // SAFETY: geteuid never fails.
+    let me = unsafe { libc::geteuid() };
+    if meta.uid() != me {
+        return Err(format!(
+            "{} is owned by uid {}, not {me}",
+            dir.display(),
+            meta.uid()
+        ));
+    }
+    let mode = meta.mode() & 0o777;
+    if mode != 0o700 {
+        return Err(format!("{} has mode {mode:o}, expected 700", dir.display()));
+    }
+    Ok(())
 }
 
 /// Refuse socket paths `bind`/`connect` would truncate.
@@ -124,6 +156,24 @@ mod tests {
             info_path_for(Path::new("/r/pty-holder.dev.abcd1234.sock")),
             PathBuf::from("/r/pty-holder.dev.abcd1234.json")
         );
+    }
+
+    #[test]
+    fn unsafe_run_dirs_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("bbarit-rd-{}", new_instance_id()));
+        let open = base.join("open");
+        std::fs::create_dir_all(&open).unwrap();
+        std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(ensure_private_dir(&open).unwrap_err().contains("mode 755"));
+        let link = base.join("link");
+        let private = base.join("private");
+        ensure_private_dir(&private).unwrap();
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        assert!(ensure_private_dir(&link)
+            .unwrap_err()
+            .contains("not a plain directory"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
