@@ -139,7 +139,9 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 ## 이후 과제
 
 - 브리지 Rust 경로 게이트(`origin` 필드).
-- 버튼 클릭 경로를 `force: true` 로 통일.
+- ~~버튼 클릭 경로를 `force: true` 로 통일.~~ 완료: `source: 'button'` + `src/terminal/buttonInput.ts`
+  ([TERMINAL_SCOPE_SWEEP.md](TERMINAL_SCOPE_SWEEP.md) "버튼 클릭 경로" 구현 메모). XTerminal 내부의 스킬 가로채기·
+  `/clear` 단축·시작 명령은 아직 직접 쓴다.
 - OSC 133 수신 후 "셸 프롬프트에 있을 때만 제출" 같은 더 정확한 상태 기반 제출.
 
 ## 구현 메모
@@ -200,7 +202,8 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 - 칸반 → 콘솔: 예전 `prompt + '\n'` 은 Claude 에서 줄바꿈만 넣고 제출하지 않았다. 이제 게이트가
   Enter 를 따로 보내 자동 제출된다.
 
-이번에 바꾸지 않은 쓰기(다음 단계에서 `force: true` 로 옮길 후보):
+이번에 바꾸지 않은 쓰기(다음 단계에서 `force: true` 로 옮길 후보. App·페이지·컴포넌트의 버튼 경로는
+이후 `queueButtonInput` 으로 옮겼다):
 
 - XTerminal: 스킬 가로채기의 `\x15`, `/clear` 단축(`\x15/clear\r`), 입력 지우기(`\x05\x15`),
   시작 명령·재시도·tmux 자동 시작, SSH 수정 재주입, DSR/7501 응답.

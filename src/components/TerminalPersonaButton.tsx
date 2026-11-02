@@ -5,6 +5,7 @@
  */
 import { useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
 import { UserRound } from 'lucide-react';
 import { BbaritPersonaPickerModal } from './BbaritPersonaPickerModal';
 import type { BbaritPersonaEntry } from '../terminal/bbaritAgentPersonaProfile';
@@ -76,7 +77,7 @@ export function TerminalPersonaButton({ terminalId, cliType, accent, remote }: P
         const raw = await invoke<string>('read_file', { path: p.path });
         brief = `Fully adopt the persona below from now on: its expertise, judgment, and voice shape every decision and reply. Keep your tool usage and verification principles unchanged.\n\n${stripFrontMatter(raw).trim()}\n`;
       }
-      await invoke('write_to_pty', { terminalId, data: brief });
+      await queueButtonInput(terminalId, brief, { submit: false });
     } catch (e) {
       console.error('[TerminalPersonaButton] inject failed:', e);
     }

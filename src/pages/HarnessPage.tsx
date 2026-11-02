@@ -3,6 +3,8 @@
  */
 import { useState, useEffect, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
+import { MIN_SUBMIT_DELAY_MS } from '../terminal/inputGate';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AgentHarnessPanel } from '../components/AgentHarnessPanel';
 import { getSubWindowContext } from './windowUtils';
@@ -42,7 +44,7 @@ export default function HarnessPage() {
 
   const handleSendToConsole = useCallback((cmd: string) => {
     if (terminalId) {
-      void invoke('write_to_pty', { terminalId, data: cmd + '\n' });
+      void queueButtonInput(terminalId, cmd, { submit: true });
     } else {
       // Create a new shell and send command
       (async () => {
@@ -55,7 +57,7 @@ export default function HarnessPage() {
           });
           setTerminalId(newId);
           setTimeout(() => {
-            void invoke('write_to_pty', { terminalId: newId, data: cmd + '\n' });
+            void queueButtonInput(newId, cmd, { submit: true, submitDelayMs: MIN_SUBMIT_DELAY_MS });
           }, 500);
         } catch (e) {
           console.error('[HarnessPage] Failed to create shell:', e);

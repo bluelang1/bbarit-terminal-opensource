@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
 import { Loader2, Network, Sparkles, UserRound, X } from 'lucide-react';
 import { kvGet } from '../hooks/useKV';
 import { useTranslation } from '../i18n';
@@ -32,11 +33,8 @@ let assistPersonaCache: PersonaEntry[] | null = null;
 async function pasteToActiveTerminal(terminalId: string | undefined, text: string): Promise<void> {
   const id = terminalId ?? '';
   if (!id || !text) return;
-  try {
-    await invoke('write_to_pty', { terminalId: id, data: text });
-  } catch (e) {
-    console.error('[TerminalAssistBar] paste failed:', e);
-  }
+  const result = await queueButtonInput(id, text, { submit: false });
+  if (!result.ok) console.error('[TerminalAssistBar] paste failed:', result.reason);
 }
 
 const stripFrontMatter = (raw: string): string => {

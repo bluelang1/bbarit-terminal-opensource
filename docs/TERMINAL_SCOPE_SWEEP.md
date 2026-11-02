@@ -1,6 +1,6 @@
 # 탭 종료 시 스코프 토큰 스윕
 
-작성일 2026-11-03. 상태: 설계 확정, 구현 중. 같은 PR 에서 입력 게이트의 버튼 클릭 경로
+작성일 2026-11-03. 상태: 구현됨(아래 "구현 메모"). 같은 PR 에서 입력 게이트의 버튼 클릭 경로
 정리([AGENT_INPUT_GATE.md](AGENT_INPUT_GATE.md) "이후 과제")도 함께 한다.
 
 ## 배경
@@ -98,3 +98,68 @@ bracketed paste, Enter 분리, 사람 키 보류는 적용된다. 그래야 같�
 - 실기(macOS, 개발 빌드): 셸 탭에서 `setsid sleep 600 &` 와 `nohup python3 -m http.server 18099 &`
   를 띄운 뒤 탭을 닫고 `pgrep -f "sleep 600"`, `lsof -i :18099` 가 비는지 확인한다.
   `env -u BBARIT_TERM_SCOPE setsid sleep 600 &` 로 띄운 것은 남아야 한다.
+
+## 구현 메모
+
+### 스윕 (`src-tauri/src/main.rs`)
+
+- 토큰은 `create_shell`·`create_cli_shell` 의 `PAGER`/`GH_PAGER` 바로 뒤에서 `cmd.env` 로 심고
+  `PtyInstance.scope_token` 에 둔다. 순수 함수는 `new_scope_token`, `parse_scope_token_ms`,
+  `scope_env_matches` 다. 설계의 `scope_token_matches` 대신 `scope_env_matches(entry, token)` 이라는
+  이름을 썼다.
+- `sweep_scope(token, skip)` 는 `sweep_scopes(&[token], skip)` 의 얇은 래퍼다. 공유
+  `sysinfo_system()` 대신 매번 새 `System` 을 만들어 `ProcessRefreshKind::nothing().with_environ(Always)`
+  로 한 번 훑는다(다른 코드가 쓰는 공유 락을 오래 잡지 않고, 캐시된 environ 을 믿지 않기 위해).
+- 형식이 틀린 토큰(빈 문자열 포함)은 아무것도 죽이지 않는다. `BBARIT_TERM_SCOPE=` 만 있는 항목이
+  빈 토큰에 걸리는 것을 막는다.
+- 시작 시각 비교는 초 단위다(`sysinfo` 의 `start_time()` 이 초). 토큰의 초보다 먼저 시작한
+  프로세스만 건너뛴다.
+- 신호는 `kill_process_tree` 처럼 `kill` 명령을 띄우지 않고 `libc::kill` 을 직접 부른다(SIGTERM →
+  300 ms → `kill(pid, 0)` 로 살아 있으면 SIGKILL). Windows 는 `sysinfo` 의 `Process::kill()` 한 번.
+- 로그는 이 파일의 관례대로 `safe_eprintln!("[scope-sweep] ...")` 다(`log` 크레이트는 의존성에 없다).
+- 앱 종료: `sweep_all_scopes_on_exit` 가 열린 PTY 토큰을 모아 **한 번의** 프로세스 훑기로 처리하고,
+  별도 스레드 + `recv_timeout(2 s)` 로 상한을 둔다. 이때는 셸 자신도 토큰을 가지므로 함께 정리된다.
+- **macOS 한계(실측, macOS 27.0.1):** 커널이 Apple 플랫폼 바이너리(`/bin/sh`, `/bin/zsh`,
+  `/bin/sleep` 등)의 환경 변수를 다른 프로세스에 보여 주지 않는다(`KERN_PROCARGS2` 가 인자만 준다).
+  그래서 macOS 에서는 `nohup sleep 600 &` 같은 시스템 바이너리는 스윕되지 않는다. node, python.org/
+  Homebrew python, cargo 로 빌드한 바이너리 등 비플랫폼 바이너리는 보이며 스윕된다(개발 서버·
+  워처·브라우저 드라이버가 주 대상이라 목적은 지킨다). 그래서 실기 검증은 `sleep` 대신
+  `nohup python3 -m http.server 18099 &`(비플랫폼 python) 로 해야 한다. 셸 자체는 원래대로
+  `kill_process_tree` 가 정리한다.
+- 통합 테스트(`sweep_scope_kills_detached_child_with_token`)는 같은 이유로 `sh -c 'sleep 30'` 대신
+  테스트 바이너리 자신(`scope_sweep_sleeper` 테스트, 환경 변수가 있을 때만 30 초 대기)을 희생자로
+  띄우고, 다른 토큰을 가진 프로세스는 살아 있는지도 확인한다.
+- **열린 결정 — tmux 자동 시작:** XTerminal 의 `tmuxAutoStart` 는 `tmux new-session -A -s octo-<id>` 로
+  앱 재시작 뒤 다시 붙는 세션을 만든다. tmux 서버(Homebrew 바이너리라 macOS 에서도 environ 이 보인다)는
+  서버를 처음 띄운 탭의 토큰을 물려받으므로, 그 탭을 닫거나 앱을 종료하면 서버와 **모든** tmux 세션이
+  스윕된다. 설계 배경이 tmux 를 대상으로 적었으므로 지금은 그대로 두었다. 세션 유지를 지키려면
+  `tmux` 프로세스를 스윕에서 빼거나 자동 시작 명령을 `env -u BBARIT_TERM_SCOPE tmux ...` 로 바꾸는
+  결정이 필요하다.
+- 사람의 실기 검증(탭 닫기 후 `lsof -i :18099` 가 비는지, `env -u` 로 띄운 것은 남는지)은 하지 않았다.
+
+### 버튼 클릭 경로
+
+- 공통 함수 `src/terminal/buttonInput.ts` 의 `queueButtonInput(terminalId, text, { submit, submitDelayMs? })`
+  를 추가했다. `queueAutoInput(..., { source: 'button', submit, force: true, quietMs: 0 })` 에
+  `fallbackWrite`(직접 `write_to_pty`)를 붙인다. 설계대로 "3 초 대기도 건너뛰기" 위해 `quietMs: 0`
+  을 넘긴다(게이트의 `force` 는 blocked 검사만 건너뛴다). 별도 창(Scrum/Harness 페이지, 노트
+  모달이 띄운 리서치 창)과 팝아웃 터미널에는 이 창의 writer 가 없으므로 fallback 이 필요하다. 직접
+  쓰기가 실패하면(PTY 없음) 결과가 `no-writer` 다.
+- 셸이 대상인 곳은 `submitDelayMs: MIN_SUBMIT_DELAY_MS`(App 은 `gateSubmitDelayFor(cliType)`)로
+  Enter 지연을 200 ms 로 둔다. 대상 cliType 을 모르는 곳(프롬프트 라이브러리, Harness 페이지의
+  기존 터미널)은 기본값(에이전트 TUI 기준, 최소 1.2 초)이다.
+- 프롬프트 라이브러리: 대기 명령은 `no-writer` 면 남겨 두고 onReady/1.5 초 타이머가 다시 보낸다
+  (예전의 "invoke 실패 시 보류" 와 같다). 타이머와 onReady 가 겹쳐 두 번 보내지 않도록 터미널별
+  진행 중 표시를 둔다.
+- Scrum 페이지·노트 모달의 `writeAndSubmit` 은 예전 간격(본문 → 500 ms → Enter → 300 ms → Enter)을
+  지킨다. 첫 Enter 는 게이트(`submitDelayMs: 500`), 두 번째는 300 ms 뒤 `'\r'` 을 `submit: false` 로 보낸다.
+- 화면 캡처 경로 붙여넣기, 페르소나 브리프, 어시스트 바, 음성 입력(자동 Enter 꺼짐)은 `submit: false`
+  라 바이트 그대로 쓴다(예전과 같음).
+- **`\n` 이 실제 제출로 바뀐 곳**(예전엔 Claude 같은 에이전트 TUI 에서 줄바꿈만 들어가고 제출되지
+  않았다. 셸에서는 같다): 프롬프트 라이브러리 전송, 스킬 우클릭 실행·명령 선택기의 writer 미마운트
+  경로, 사이드바·스킬 상세의 셸 스킬 실행, PAKE 빌드, 빠른 명령 버튼, Harness 페이지의 콘솔 전송.
+  PM2 뷰어와 Scrum `startCli` 는 셸 대상이라 체감 변화가 없다. 음성 입력은 원래 `\r` 이었다.
+- 바꾸지 않은 것: XTerminal 의 사람 입력·마우스/휠 브리지·쿼리 응답, `terminalStates.ts` 의 쿼리
+  응답, 앞 단계(입력 게이트)에서 이미 게이트를 타는 경로의 `fallbackWrite`(App.tsx, devReviewPair.ts).
+  XTerminal 내부의 스킬 가로채기 `\x15`, `/clear` 단축, 시작 명령·tmux 자동 시작은 이번 대상 목록에
+  없어 그대로 두었다.

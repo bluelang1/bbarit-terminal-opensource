@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { currentMonitor } from '@tauri-apps/api/window';
 import { OctoX } from '../octoIcons';
@@ -779,12 +780,11 @@ export default function GenerateNoteModal({
       }
 
       // CLI 시작
+      // 버튼 입력 게이트(직렬 큐, Enter 분리). 예전 간격(본문 → 500 ms → Enter → 300 ms → Enter)은 유지한다.
       const writeAndSubmit = async (text: string) => {
-        await invoke('write_to_pty', { terminalId: termId, data: text }).catch(() => {});
-        await new Promise(r => setTimeout(r, 500));
-        await invoke('write_to_pty', { terminalId: termId, data: '\r' }).catch(() => {});
+        await queueButtonInput(termId, text, { submit: true, submitDelayMs: 500 });
         await new Promise(r => setTimeout(r, 300));
-        await invoke('write_to_pty', { terminalId: termId, data: '\r' }).catch(() => {});
+        await queueButtonInput(termId, '\r', { submit: false });
       };
 
       await writeAndSubmit(cliStart);
