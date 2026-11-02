@@ -256,6 +256,8 @@ trait PtyBackend: Send + Sync {
 | **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
+구현 메모: 0단계 완료 — `src/terminal/busyAgentTabs.ts`(순수 함수, 셸 탭 제외) + `src/App.tsx` `handleUpdate` 의 `ask()` 확인(네이티브 업데이트 경로만).
+
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.
 
