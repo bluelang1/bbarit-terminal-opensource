@@ -19,7 +19,9 @@ case "$input" in
 esac
 
 json_str() {
-  printf '%s' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" 2>/dev/null
+  # JSON string body with escapes kept verbatim (\" and \\ stay escaped), so the
+  # value can be embedded in the outgoing JSON as-is. Pure BRE for BSD sed.
+  printf '%s' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"\\\\]*\(\\\\.[^\"\\\\]*\)*\)\".*/\1/p" 2>/dev/null
 }
 
 sid=$(json_str session_id)
@@ -27,7 +29,7 @@ sid=$(json_str session_id)
 tp=$(json_str transcript_path)
 src=$(json_str source)
 
-curl -s -m 2 -o /dev/null -X POST "http://127.0.0.1:${BBARIT_BRIDGE_PORT}/api/claude-session" \
+curl -s -m 2 --noproxy '*' -o /dev/null -X POST "http://127.0.0.1:${BBARIT_BRIDGE_PORT}/api/claude-session" \
   -H 'Content-Type: application/json' \
   -d "{\"terminalId\":\"$BBARIT_TERMINAL_ID\",\"sessionId\":\"$sid\",\"transcriptPath\":\"$tp\",\"source\":\"$src\"}" \
   >/dev/null 2>&1
