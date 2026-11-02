@@ -168,6 +168,8 @@ import { getCollabHandle, CollabPanel } from './collab/CollabPanel';
 import { getLoungeHandle } from './collab/loungeClient';
 import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, totalLoungeUnread, type LoungeUnreadCounts } from './collab/loungeNotifications';
 import { listenRemoteNoteChanges } from './collab/notesSync';
+import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
+import { AGENT_STATUS_EVENT, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -203,6 +205,33 @@ requestIdleCallback(() => {
 });
 
 const IS_WINDOWS = navigator.platform.toLowerCase().includes('win');
+
+// OS notification for task-complete / agent-waiting alerts. Follows the existing
+// settings: notifyWhenWaiting !== 'never', playOsNotifySound, osNotifySoundName.
+// macOS uses a named system sound; Windows plays its default toast sound when
+// none is set, so we only force silence there.
+type OsNotifySettings = { notifyWhenWaiting?: string; playOsNotifySound?: boolean; osNotifySoundName?: string };
+const sendAgentOsNotification = (title: string, body: string, settings: OsNotifySettings) => {
+  if (settings.notifyWhenWaiting === 'never') return;
+  void (async () => {
+    try {
+      let granted = await notifIsPermissionGranted();
+      if (!granted) granted = (await notifRequestPermission()) === 'granted';
+      if (!granted) return;
+      const opts: { title: string; body: string; sound?: string; silent?: boolean } = { title, body };
+      if (settings.playOsNotifySound !== false) {
+        if (!IS_WINDOWS) opts.sound = settings.osNotifySoundName || 'Glass';
+      } else if (IS_WINDOWS) {
+        opts.silent = true;
+      }
+      notifSend(opts);
+    } catch { /* notifications unavailable */ }
+  })();
+};
+
+// Per-terminal OSC 7501 status (docs/AGENT_STATUS_OSC7501.md). `done` drops to
+// `idle` once the user has looked at the terminal (seenTurn >= turn).
+type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number };
 const BROWSER_TOOLBAR_ENABLED = false;
 // GitHub repositories for the toolbar link and the "open release page" fallback
 // (VITE_BBARIT_RELEASE_REPO_MAC / _WIN, see src/config/endpoints.ts). The signed
@@ -3506,14 +3535,28 @@ function App() {
 
   // Track which terminals have recent I/O activity (for status display)
   const [busyTerminals, setBusyTerminals] = useState<Set<string>>(new Set());
+  const [agentStatus, setAgentStatus] = useState<Map<string, AgentStatusEntry>>(() => new Map());
+  // Display state: OSC 7501 when the terminal reports it, else I/O activity (busyTerminals).
+  const agentStateOf = (terminalId: string): AgentTabState => {
+    const s = agentStatus.get(terminalId);
+    if (s) return s.state === 'done' && s.seenTurn >= s.turn ? 'idle' : s.state;
+    return busyTerminals.has(terminalId) ? 'working' : 'idle';
+  };
+  // Legacy `running`/`stopped` stays alongside so existing CSS keeps working.
+  const terminalStatusClass = (terminalId: string): string => {
+    const st = agentStateOf(terminalId);
+    return `${st === 'working' ? 'running' : 'stopped'} ${st}`;
+  };
+  const projectAgentStateOf = (terminals: { id: string }[]): AgentTabState =>
+    aggregateProjectAgentState(terminals.map((tm) => agentStateOf(tm.id)));
   const [terminalGitStatuses, setTerminalGitStatuses] = useState<Record<string, TerminalGitStatus>>({});
   // Filter terminals by activity: 'all' | 'running' | 'stopped'
   const [terminalActivityFilter, setTerminalActivityFilter] = useState<'all' | 'running' | 'stopped'>('all');
   const isTerminalFiltered = useCallback((terminalId: string) => {
     if (terminalActivityFilter === 'all') return false; // not filtered out
-    const isBusy = busyTerminals.has(terminalId);
+    const isBusy = agentStateOf(terminalId) === 'working';
     return terminalActivityFilter === 'running' ? !isBusy : isBusy;
-  }, [terminalActivityFilter, busyTerminals]);
+  }, [terminalActivityFilter, busyTerminals, agentStatus]);
   // Mix jump mode: capture the next key press and zoom into the pane wearing
   // that letter badge. Esc cancels. Capture phase so xterm never sees the key.
   useEffect(() => {
@@ -5555,34 +5598,91 @@ Office project scaffold created by BBARIT Terminal.
       }
 
       // Native OS notification + system sound on every completed task.
-      // macOS uses named system sounds ('Glass' etc.); Windows toasts play their
-      // default sound when none is given. macOS stays silent while the app is
-      // frontmost — the opt-in in-app beep (playSoundWhenDone) covers that case.
-      if (settings.notifyWhenWaiting !== 'never') {
-        void (async () => {
-          try {
-            let granted = await notifIsPermissionGranted();
-            if (!granted) granted = (await notifRequestPermission()) === 'granted';
-            if (!granted) return;
-            const opts: { title: string; body: string; sound?: string; silent?: boolean } = {
-              title,
-              body: [prompt, duration].filter(Boolean).join(' · '),
-            };
-            // OS notification sound: macOS uses a named system sound; Windows plays its
-            // default toast sound when none is set, so we only force silence there.
-            if (settings.playOsNotifySound !== false) {
-              if (!IS_WINDOWS) opts.sound = settings.osNotifySoundName || 'Glass';
-            } else if (IS_WINDOWS) {
-              opts.silent = true;
-            }
-            notifSend(opts);
-          } catch { /* notifications unavailable */ }
-        })();
-      }
+      // macOS stays silent while the app is frontmost — the opt-in in-app beep
+      // (playSoundWhenDone) covers that case.
+      sendAgentOsNotification(title, [prompt, duration].filter(Boolean).join(' · '), settings);
     };
     window.addEventListener('octo-task-toast', onToast as EventListener);
     return () => window.removeEventListener('octo-task-toast', onToast as EventListener);
   }, [dismissTaskToast, rememberCompletedTask]);
+
+  // OSC 7501 agent status (dispatched from XTerminal): keep the per-terminal state
+  // for tabs/dots and raise the "waiting" alert on a transition into `blocked`.
+  // `done` alerts arrive through octo-task-toast above. Spec: docs/AGENT_STATUS_OSC7501.md
+  const activeTerminalIdForStatus = activeProject?.activeTerminalId || '';
+  const activeTerminalIdForStatusRef = useRef(activeTerminalIdForStatus);
+  activeTerminalIdForStatusRef.current = activeTerminalIdForStatus;
+  useEffect(() => {
+    const onAgentStatus = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as AgentStatusEventDetail | undefined;
+      if (!d?.terminalId) return;
+      const tid = d.terminalId;
+      const looking = d.looking || isUserLooking(activeTerminalIdForStatusRef.current === tid);
+      setAgentStatus((prev) => {
+        const old = prev.get(tid);
+        if (d.cleared) {
+          if (!old) return prev;
+          const next = new Map(prev);
+          next.delete(tid);
+          return next;
+        }
+        const seenTurn = looking ? d.turn : (old?.seenTurn ?? -1);
+        if (old && old.state === d.state && old.kind === d.kind && old.msg === d.msg && old.turn === d.turn && old.seenTurn === seenTurn) return prev;
+        const next = new Map(prev);
+        next.set(tid, { state: d.state, kind: d.kind, msg: d.msg, turn: d.turn, seenTurn });
+        return next;
+      });
+
+      const blockedToastId = `agent-blocked:${tid}`;
+      if (d.state !== 'blocked') {
+        if (taskToastTimersRef.current[blockedToastId]) dismissTaskToast(blockedToastId);
+        return;
+      }
+      if (d.alert !== 'blocked') return;
+      const { projects: projs, agentSettings: settings } = taskNotifyRef.current;
+      let projectId = '', projectName = '', terminalName = '';
+      for (const p of projs) {
+        const term = p.terminals.find((tt) => tt.id === tid);
+        if (term) {
+          projectId = p.id;
+          projectName = p.displayName || p.name || '';
+          terminalName = term.name || '';
+          break;
+        }
+      }
+      const { title, body } = blockedAlertText(projectName, terminalName, d.kind, d.msg);
+      const toast: TaskToast = { id: blockedToastId, projectId, terminalId: tid, title, prompt: body.slice(0, 200), duration: '' };
+      setTaskToasts((prev) => [...prev.filter((t) => t.id !== blockedToastId), toast].slice(-4));
+      if (taskToastTimersRef.current[blockedToastId]) window.clearTimeout(taskToastTimersRef.current[blockedToastId]);
+      taskToastTimersRef.current[blockedToastId] = window.setTimeout(() => dismissTaskToast(blockedToastId), 15000);
+      if (!looking) sendAgentOsNotification(title, body, settings);
+    };
+    window.addEventListener(AGENT_STATUS_EVENT, onAgentStatus as EventListener);
+    return () => window.removeEventListener(AGENT_STATUS_EVENT, onAgentStatus as EventListener);
+  }, [dismissTaskToast]);
+
+  // Mark the looked-at terminal's turn as seen (done → idle) on tab switch,
+  // window focus and visibility changes.
+  useEffect(() => {
+    const markSeen = () => {
+      const tid = activeTerminalIdForStatusRef.current;
+      if (!tid || !isUserLooking(true)) return;
+      setAgentStatus((prev) => {
+        const s = prev.get(tid);
+        if (!s || s.seenTurn >= s.turn) return prev;
+        const next = new Map(prev);
+        next.set(tid, { ...s, seenTurn: s.turn });
+        return next;
+      });
+    };
+    markSeen();
+    window.addEventListener('focus', markSeen);
+    document.addEventListener('visibilitychange', markSeen);
+    return () => {
+      window.removeEventListener('focus', markSeen);
+      document.removeEventListener('visibilitychange', markSeen);
+    };
+  }, [activeTerminalIdForStatus]);
 
   // Surface broker harness START FAILURES as a toast (always shown, not gated by the
   // task-complete setting) so the "+ does nothing" silent failure becomes visible + diagnosable.
@@ -8162,11 +8262,11 @@ Office project scaffold created by BBARIT Terminal.
               </span>
             )}
             {project.terminals.length > 0 && (
-              <span className="project-selector-terminal-dots">
+              <span className={`project-selector-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                 {project.terminals.map(tm => (
                   <span
                     key={tm.id}
-                    className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`}
+                    className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
                     title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
                   />
                 ))}
@@ -16461,9 +16561,9 @@ Office project scaffold created by BBARIT Terminal.
             )}
             {/* <ProjectCategoryBadge category={project.category} size="xs" iconOnly /> */}
             {project.terminals.length > 0 && (
-              <span className="project-terminal-dots">
+              <span className={`project-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                 {project.terminals.slice(0, 6).map(tm => (
-                  <span key={tm.id} className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`} title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`} />
+                  <span key={tm.id} className={`project-terminal-dot ${terminalStatusClass(tm.id)}`} title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`} />
                 ))}
                 {project.terminals.length > 6 && (
                   <span className="project-terminal-dots-more" title={`${project.terminals.length} terminals`}>
@@ -19839,11 +19939,11 @@ Office project scaffold created by BBARIT Terminal.
 	                        <span className="project-selector-name-row">
                             <span className="project-selector-name">{project.displayName}</span>
                             {project.terminals.length > 0 && (
-                              <span className="project-selector-terminal-dots">
+                              <span className={`project-selector-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                                 {project.terminals.map(tm => (
                                   <span
                                     key={tm.id}
-                                    className={`project-terminal-dot ${busyTerminals.has(tm.id) ? 'running' : 'stopped'}`}
+                                    className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
                                     title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
                                   />
                                 ))}
@@ -20448,7 +20548,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={terminal.id}
                       data-terminal-tab-id={terminal.id}
-                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminalStatusClass(terminal.id)}`}
                       title={terminal.name}
                       style={isTerminalFiltered(terminal.id) ? { opacity: 0.25, pointerEvents: 'none' } : undefined}
                       onMouseDown={(e) => {
@@ -20517,7 +20617,10 @@ Office project scaffold created by BBARIT Terminal.
                       }}
                     >
                       <span className="terminal-tab-label">
-                        <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} title={busyTerminals.has(terminal.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)} />
+                        <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} title={busyTerminals.has(terminal.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)} />
+                        {agentStateOf(terminal.id) === 'blocked' && (
+                          <span className="terminal-tab-agent-glyph" title={blockedAlertText('', '', agentStatus.get(terminal.id)?.kind).body || undefined}>?</span>
+                        )}
                         <CliIcon cliType={terminal.cliType || 'shell'} />
                         <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} compact />
                         <span className="terminal-tab-name">{terminal.name}</span>
@@ -20606,7 +20709,7 @@ Office project scaffold created by BBARIT Terminal.
 			                        return (
 			                          <div
                                       data-terminal-tab-id={terminal.id}
-			                            className={`dashboard-drag-handle ${pinned ? 'pinned-handle' : ''} terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+			                            className={`dashboard-drag-handle ${pinned ? 'pinned-handle' : ''} terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                       title={terminal.name}
 			                            style={{
 			                              background: `color-mix(in srgb, ${projectStyle.bg} 80%, ${projectStyle.accent} 20%)`,
@@ -20622,7 +20725,7 @@ Office project scaffold created by BBARIT Terminal.
 			                              className="terminal-panel-title"
 			                              style={{ color: projectStyle.text }}
 			                            >
-			                              <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+			                              <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 			                              <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 			                              <CliIcon cliType={terminal.cliType || 'shell'} /> {terminal.name}
 			                              <TerminalLastCmd terminalId={terminal.id} />
@@ -20831,7 +20934,7 @@ Office project scaffold created by BBARIT Terminal.
                   });
                   const jumpLetterById: Record<string, string> = {};
                   if (mixJumpActive) visibleIds.slice(0, 26).forEach((id, i) => { jumpLetterById[id] = String.fromCharCode(65 + i); });
-                  const runningCount = allTerminals.filter((x) => busyTerminals.has(x.terminal.id)).length;
+                  const runningCount = allTerminals.filter((x) => agentStateOf(x.terminal.id) === 'working').length;
                   const idleCount = allTerminals.length - runningCount;
                   const setMixColumns = (n: number) => {
                     const clamped = Math.max(1, Math.min(8, n));
@@ -20959,7 +21062,7 @@ Office project scaffold created by BBARIT Terminal.
                         )}
 	                        <div
                             data-terminal-tab-id={terminal.id}
-                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                             title={terminal.name}
                             style={{ background: `color-mix(in srgb, ${projectStyle.bg} 80%, ${projectStyle.accent} 20%)`, borderBottom: `1px solid ${projectStyle.accent}44` }}
                             onDoubleClick={() => setMixZoomTerminalId((prev) => prev === terminal.id ? null : terminal.id)}
@@ -21004,7 +21107,7 @@ Office project scaffold created by BBARIT Terminal.
 	                            className="terminal-panel-title"
 	                            style={{ color: projectStyle.text }}
 	                          >
-	                            <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+	                            <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 	                            <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 	                            <span style={{ marginRight: '6px' }}>{proj.icon}</span>
 	                            <span style={{ opacity: 0.7, fontSize: '11px' }}>{proj.displayName}</span>
@@ -21285,7 +21388,6 @@ Office project scaffold created by BBARIT Terminal.
                                 </div>
                                 {proj.terminals.map((t) => {
                                   const selected = mixSelectedTerminals.size === 0 || mixSelectedTerminals.has(t.id);
-                                  const isBusy = busyTerminals.has(t.id);
                                   return (
                                     <div key={t.id} style={{
                                       padding: '6px 10px 6px 28px', fontSize: 13,
@@ -21305,7 +21407,7 @@ Office project scaffold created by BBARIT Terminal.
                                         return next;
                                       });
                                     }}>
-                                      <span className={`pty-status-dot ${isBusy ? 'running' : 'stopped'}`} style={{ width: 8, height: 8, flexShrink: 0 }} />
+                                      <span className={`pty-status-dot ${terminalStatusClass(t.id)}`} style={{ width: 8, height: 8, flexShrink: 0 }} />
                                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
                                       <CliIcon cliType={t.cliType || 'shell'} />
                                       <span style={{ width: 18, height: 18, borderRadius: 'var(--brutal-radius)', border: `2px solid ${selected ? ps.accent : `${activeStyle.text}20`}`, background: selected ? ps.accent : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: '#fff', flexShrink: 0 }}>
@@ -21369,7 +21471,7 @@ Office project scaffold created by BBARIT Terminal.
                                   borderBottom: `1px solid ${projectStyle.accent}55`, color: projectStyle.text,
                                 }}>
                                   <span style={{ display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
-                                    <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+                                    <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
                                     <span>{proj.icon}</span>
                                     <span style={{ fontWeight: 600, color: projectStyle.accent }}>{proj.displayName}</span>
                                     <span style={{ opacity: 0.4 }}>·</span>
@@ -21511,7 +21613,7 @@ Office project scaffold created by BBARIT Terminal.
 				                        >
 				                          <div
                                     data-terminal-tab-id={terminal.id}
-				                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+				                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                     title={terminal.name}
 				                            draggable
 				                            onClick={() => {
@@ -21572,7 +21674,7 @@ Office project scaffold created by BBARIT Terminal.
 				                            <span
 				                              className="terminal-panel-title"
 				                            >
-				                              <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+				                              <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 				                              <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 				                              <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 				                              <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -21911,7 +22013,7 @@ Office project scaffold created by BBARIT Terminal.
 		                            >
 		                              <div
                                     data-terminal-tab-id={terminal.id}
-                                    className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                                    className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                                     title={terminal.name}
                                     onContextMenu={(e) => {
                                       e.preventDefault();
@@ -21922,7 +22024,7 @@ Office project scaffold created by BBARIT Terminal.
 		                                <span
 		                                  className="terminal-panel-title"
 		                                >
-		                                  <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+		                                  <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 		                                  <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 		                                  <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 		                                  <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -22242,7 +22344,7 @@ Office project scaffold created by BBARIT Terminal.
 	                      {showHeader && (
 	                        <div
                             data-terminal-tab-id={terminal.id}
-                            className={`terminal-panel-header ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`}
+                            className={`terminal-panel-header ${terminalStatusClass(terminal.id)}`}
                             title={terminal.name}
                             onContextMenu={(e) => {
                               e.preventDefault();
@@ -22253,7 +22355,7 @@ Office project scaffold created by BBARIT Terminal.
 	                          <span
 	                            className="terminal-panel-title"
 	                          >
-	                            <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+	                            <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
 	                            <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} />
 	                            <span style={{ marginRight: '6px' }}>{activeProject.icon}</span>
 	                            <span style={{ opacity: 0.7, fontSize: '11px' }}>{activeProject.displayName}</span>
@@ -22968,7 +23070,7 @@ Office project scaffold created by BBARIT Terminal.
                   updateProject(project.id, { activeTerminalId: terminal.id });
                 }}
               >
-                <span className={`pty-status-dot ${busyTerminals.has(terminal.id) ? 'running' : 'stopped'}`} />
+                <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} />
                 <span className="terminal-git-pill-name">{terminal.name}</span>
                 <TerminalLastCmd terminalId={terminal.id} />
                 <span className="terminal-git-pill-branch">{branchLabel}</span>

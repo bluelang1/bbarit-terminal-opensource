@@ -20,6 +20,18 @@ import { WebglAddon } from 'xterm-addon-webgl';
 import { SearchAddon, type ISearchResultChangeEvent } from '@xterm/addon-search';
 import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
+import {
+  applyProgramStatusReport,
+  createProgramStatusStore,
+  dropTransientProgramStatus,
+  parseProgramStatus,
+  programStatusQueryReply,
+  rollupAgentState,
+  rollupRecord,
+  type AgentTabState,
+  type ProgramStatusStore,
+} from './terminal/programStatus';
+import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
 import { claudeSessionArgsToFlags, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
@@ -269,8 +281,81 @@ interface TerminalState {
   cliLaunchFailure?: CliLaunchFailureKind | null; // 미설치/깨진 설치 감지 시 재시도 중단 + 배너
   cliLaunchFailureHandler?: ((kind: CliLaunchFailureKind) => void) | null;
   agentReadyNotified?: boolean;
+  // OSC 7501 (Program Status Protocol) — docs/AGENT_STATUS_OSC7501.md
+  programStatus?: ProgramStatusStore;
+  pendingStatusProbe?: boolean;          // writer 등록 전에 온 지원 질의 — 등록되면 답한다
 }
 const terminalStates = new Map<string, TerminalState>();
+
+// ── OSC 7501 ─────────────────────────────────────────────────────
+interface ProgramStatusChange {
+  prev: AgentTabState;
+  next: AgentTabState;
+  firstReport: boolean;
+  store: ProgramStatusStore;
+}
+// 마운트별 알림 처리기. terminalStates 항목은 생성 effect 가 나중에 만들므로 따로 둔다.
+const programStatusHandlers = new Map<string, (change: ProgramStatusChange) => void>();
+
+/** 상태 이벤트만 보낸다(알림 없음). 마운트별 처리기가 없을 때와 PTY 종료 시 쓴다. */
+const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extra?: Partial<AgentStatusEventDetail>) => {
+  const rec = rollupRecord(store);
+  const detail: AgentStatusEventDetail = {
+    terminalId,
+    state: rollupAgentState(store),
+    kind: rec?.kind,
+    app: rec?.app,
+    msg: rec?.msg,
+    turn: store.turn,
+    alert: null,
+    looking: false,
+    cleared: !store.root && store.children.size === 0,
+    ...extra,
+  };
+  window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
+};
+
+const answerProgramStatusProbe = (terminalId: string): boolean => {
+  const st = terminalStates.get(terminalId);
+  if (!st?.writeToPty) return false;
+  st.writeToPty(programStatusQueryReply());
+  st.pendingStatusProbe = false;
+  return true;
+};
+
+const notifyProgramStatusChange = (terminalId: string, change: ProgramStatusChange) => {
+  const handler = programStatusHandlers.get(terminalId);
+  if (handler) handler(change);
+  else dispatchAgentStatus(terminalId, change.store);
+};
+
+/** registerOscHandler(7501) 본체: 질의는 응답하고, 보고는 저장소에 반영한다. */
+const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
+  const parsed = parseProgramStatus(data);
+  if (!parsed) return true; // 잘못된 보고는 조용히 삼킨다
+  const st = terminalStates.get(terminalId);
+  if (!st) return true;
+  if ('query' in parsed) {
+    if (!answerProgramStatusProbe(terminalId)) st.pendingStatusProbe = true;
+    return true;
+  }
+  const store = st.programStatus ?? (st.programStatus = createProgramStatusStore());
+  const firstReport = !store.reported;
+  const prev = rollupAgentState(store);
+  applyProgramStatusReport(store, parsed);
+  notifyProgramStatusChange(terminalId, { prev, next: rollupAgentState(store), firstReport, store });
+  return true;
+};
+
+/** PTY 가 끝나면 working/blocked 는 버린다(done/error 는 남는다). */
+const dropProgramStatusOnExit = (terminalId: string) => {
+  const store = terminalStates.get(terminalId)?.programStatus;
+  if (!store?.reported) return;
+  const prev = rollupAgentState(store);
+  dropTransientProgramStatus(store);
+  const next = rollupAgentState(store);
+  if (prev !== next) dispatchAgentStatus(terminalId, store);
+};
 // dev 전용 노출 — dev:screen js로 스크롤 핀 등 터미널 상태를 실측하기 위함
 if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__octoTerminalStates = terminalStates;
 
@@ -1083,6 +1168,10 @@ const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
       state.outputChain = undefined;
       state.usesEventTransport = false;
       _terminalLastActivity.delete(terminalId);
+      // OSC 7501 상태는 터미널 런타임과 함께 사라진다 — App 의 표시도 비운다.
+      if (state.programStatus?.reported) dispatchAgentStatus(terminalId, createProgramStatusStore());
+      state.programStatus = undefined;
+      state.pendingStatusProbe = false;
       // DOM elements are managed by React, so don't remove directly
       // Remove from Map
       terminalStates.delete(terminalId);
@@ -1385,6 +1474,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         busy = false;
         // Only notify if the user actually started something (not the startup banner).
         if (!taskPendingRef.current) { recent = ''; return; }
+        // OSC 7501 을 보고하는 터미널은 7501 의 done 전이가 완료 알림을 대신한다.
+        if (terminalStates.get(terminalId)?.programStatus?.reported) { recent = ''; return; }
         taskPendingRef.current = false;
         recent = '';
         if (playSoundWhenDone) playBeep();
@@ -1408,6 +1499,37 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (idleTimer != null) window.clearTimeout(idleTimer);
       const st = terminalStates.get(terminalId);
       if (st?.onOutputChunk === handler) st.onOutputChunk = undefined;
+    };
+  }, [cliType, playBeep, playSoundWhenDone, terminalId]);
+
+  // OSC 7501 상태 전이 → 알림 결정(decideAgentAlert) + App 으로 상태 이벤트.
+  // done 알림은 기존 완료 토스트(octo-task-toast)를 그대로 쓴다.
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  useEffect(() => {
+    const handler = (change: ProgramStatusChange) => {
+      const looking = isUserLooking(isActiveRef.current);
+      const alert = decideAgentAlert(change.prev, change.next, looking, change.firstReport);
+      dispatchAgentStatus(terminalId, change.store, { cliType, alert, looking });
+      if (!alert) return;
+      if (playSoundWhenDone) playBeep();
+      if (alert === 'done') {
+        taskPendingRef.current = false;
+        const durationMs = taskStartedAtRef.current ? Date.now() - taskStartedAtRef.current : 0;
+        window.dispatchEvent(new CustomEvent('octo-task-toast', {
+          detail: {
+            id: `${terminalId}-${Date.now()}`,
+            terminalId,
+            cliType,
+            prompt: taskPromptRef.current || '',
+            durationMs,
+          },
+        }));
+      }
+    };
+    programStatusHandlers.set(terminalId, handler);
+    return () => {
+      if (programStatusHandlers.get(terminalId) === handler) programStatusHandlers.delete(terminalId);
     };
   }, [cliType, playBeep, playSoundWhenDone, terminalId]);
 
@@ -2722,6 +2844,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try { existingState.ptyDataUnlisten?.(); } catch { /* ignore */ }
       try { existingState.ptyExitUnlisten?.(); } catch { /* ignore */ }
       try { existingState.term?.dispose(); } catch { /* ignore */ }
+      if (existingState.programStatus?.reported) dispatchAgentStatus(terminalId, createProgramStatusStore());
       terminalStates.delete(terminalId);
     }
 
@@ -2844,6 +2967,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         if (text) void writeClipboardTextSafe(text);
         return true;
       });
+      // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
+      // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
+      term.parser.registerOscHandler(7501, (data) => handleProgramStatusOsc(terminalId, data));
       term.unicode.activeVersion = '11';
 
       termRef.current = term;
@@ -3071,6 +3197,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     // Save writeToPty in global state (always keep latest function)
     const currentState = terminalStates.get(terminalId);
     if (currentState) currentState.writeToPty = writeToPty;
+    // writer 등록 전에 도착한 OSC 7501 질의가 있으면 지금 답한다.
+    if (currentState?.pendingStatusProbe) answerProgramStatusProbe(terminalId);
 
     const ensurePtyListeners = async () => {
       const st = terminalStates.get(terminalId);
@@ -3094,6 +3222,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (!live) return;
           live.readLoopActive = false;
           _stopReadLoop(terminalId);
+          dropProgramStatusOnExit(terminalId);
         });
         st.ptyExitUnlisten = unlistenExit;
       } catch (err) {
