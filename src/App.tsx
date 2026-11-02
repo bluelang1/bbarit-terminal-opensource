@@ -21,6 +21,7 @@ import { ClampedMenu } from './components/ClampedMenu';
 import StatusBarStats from './components/StatusBarStats';
 import { type OnMount } from '@monaco-editor/react';
 import { XTerminal, disposeTerminal, releaseTerminalRuntime, getTerminalRecentOutput, isTerminalBusy } from './XTerminal';
+import { getTerminalAgentState, isTerminalAgentUiReady, isTerminalPtyStarted, PTY_EXITED_EVENT } from './XTerminal';
 import { useRestoreFocusOnWindowFocus } from './hooks/useRestoreFocusOnWindowFocus';
 import { BROKER_AGENT_ROLES, startDevReviewPair, ROLE_LABEL as BROKER_ROLE_LABEL, normalizeBrokerAgentRole, shouldAcceptBrokerStatusUpdate, type BrokerReviewMode, type DevReviewRole, type BrokerStatusSnapshot, type PairEvent } from './devreview/devReviewPair';
 import { performAgentRestart } from './devreview/restartAgents';
@@ -178,6 +179,7 @@ import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, 
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, runAgentBrief, wrapAgentMessage, type AgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -955,6 +957,23 @@ function appendOpenFileWithTabCap(openFiles: OpenFile[], nextFile: OpenFile, kee
   const [evicted] = next.splice(removableIndex, 1);
   next.push(nextFile);
   return { files: next, accepted: true, evictedPath: evicted?.path };
+}
+
+/**
+ * 터미널 버퍼의 마지막 N 줄. 마운트된 xterm 이 있으면 그 리더(XTerminal 이 등록하는
+ * __BBARIT_TERM_READERS__), 없으면(팝아웃 등) 백엔드 출력 버퍼를 ANSI 를 지워 읽는다.
+ */
+async function readTerminalTail(terminalId: string, lines: number): Promise<string> {
+  const readers = (window as unknown as { __BBARIT_TERM_READERS__?: Record<string, (lines?: number) => string> }).__BBARIT_TERM_READERS__;
+  const reader = readers?.[terminalId];
+  if (reader) return reader(lines);
+  const backendBuffer = await invoke<string>('read_pty_output_buffer', { terminalId }).catch(() => '');
+  const plain = backendBuffer
+    .replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '')
+    .replace(/\r/g, '');
+  const tail = plain.split('\n');
+  while (tail.length > 0 && !tail[tail.length - 1].trim()) tail.pop();
+  return tail.slice(-lines).join('\n');
 }
 
 function createTerminal(
@@ -5698,6 +5717,200 @@ Office project scaffold created by BBARIT Terminal.
     return () => window.removeEventListener(AGENT_STATUS_EVENT, onAgentStatus as EventListener);
   }, [dismissTaskToast]);
 
+  // ── 에이전트 간 위임(docs/AGENT_RELAY.md) ── 자식 → 부모 링크, 부모별 노트 대기열, 7501
+  // 스냅샷. 렌더에 쓰지 않으므로 ref 에 두고 영속하지 않는다. 아래 함수들은 ref 만 읽어서
+  // 처음 등록한 리스너가 그대로 써도 된다.
+  const agentLinksRef = useRef<Map<string, AgentLink>>(new Map());
+  const agentNoteQueueRef = useRef<PendingNotes>(new Map());
+  const agentRelayStatusRef = useRef<Map<string, AgentStatusSnapshot>>(new Map());
+  const agentNoteFlushingRef = useRef<Set<string>>(new Set());
+  const findTerminalAnywhere = (terminalId: string): TerminalInstance | undefined => {
+    for (const p of projectsRef.current) {
+      const term = p.terminals.find((tt) => tt.id === terminalId);
+      if (term) return term;
+    }
+    return undefined;
+  };
+  const agentPtyFallbackWrite = (terminalId: string) => (data: string) => {
+    void invoke('write_to_pty', { terminalId, data }).catch(() => {});
+  };
+  const flushAgentNotes = async (parentId: string): Promise<void> => {
+    if (agentNoteFlushingRef.current.has(parentId)) return;
+    if (!canDeliverToParent(getTerminalAgentState(parentId))) return;
+    agentNoteFlushingRef.current.add(parentId);
+    let again = false;
+    try {
+      const res = await flushNotes(agentNoteQueueRef.current, parentId, async (note) => {
+        const parent = findTerminalAnywhere(parentId);
+        if (!parent) return { ok: false, reason: 'disposed' };
+        const r = await queueAutoInput(parentId, note, {
+          source: 'agent',
+          submit: true,
+          submitDelayMs: gateSubmitDelayFor(parent.cliType),
+          fallbackWrite: agentPtyFallbackWrite(parentId),
+        });
+        return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+      });
+      // 사람이 치는 중이었거나 터미널이 아직 준비되지 않았다 → 잠시 뒤 다시. blocked 는 부모가
+      // blocked 를 벗어나는 상태 보고에서 다시 보낸다.
+      if (res.stoppedBy === 'typing' || res.stoppedBy === 'no-writer' || res.stoppedBy === 'cancelled') {
+        window.setTimeout(() => { void flushAgentNotes(parentId); }, 5000);
+      }
+      // 보내는 동안 새로 쌓인 노트.
+      again = !res.stoppedBy && agentNoteQueueRef.current.has(parentId);
+    } finally {
+      agentNoteFlushingRef.current.delete(parentId);
+    }
+    if (again) void flushAgentNotes(parentId);
+  };
+  const deliverAgentNote = async (link: AgentLink, state: AgentNoteState, snap?: AgentStatusSnapshot): Promise<void> => {
+    if (!link.parentId) return;
+    // 부모가 셸 탭이거나 최근 7501 보고(working/blocked/done)가 없으면 넣지 않는다 — 에이전트가
+    // 떠난 셸 프롬프트에 명령으로 들어갈 수 있다.
+    const parent = findTerminalAnywhere(link.parentId);
+    if (!parentAcceptsNotes({
+      cliType: parent?.cliType,
+      state: getTerminalAgentState(link.parentId),
+      lastReportAt: agentRelayStatusRef.current.get(link.parentId)?.at,
+      now: Date.now(),
+    })) return;
+    const child = findTerminalAnywhere(link.childId);
+    const tail = state === 'blocked' && snap?.msg ? '' : await readTerminalTail(link.childId, 40).catch(() => '');
+    const note = formatAgentNote({
+      childId: link.childId,
+      childName: child?.name || link.name,
+      state,
+      turn: snap?.turn,
+      kind: snap?.kind,
+      msg: snap?.msg,
+      tail,
+    });
+    enqueueNote(agentNoteQueueRef.current, link.parentId, note);
+    await flushAgentNotes(link.parentId);
+  };
+  useEffect(() => {
+    const onRelayStatus = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as AgentStatusEventDetail | undefined;
+      if (!d?.terminalId) return;
+      const tid = d.terminalId;
+      const snap: AgentStatusSnapshot = { state: d.state, kind: d.kind, msg: d.msg, turn: d.turn, cleared: d.cleared, at: Date.now() };
+      if (d.cleared) agentRelayStatusRef.current.delete(tid);
+      else agentRelayStatusRef.current.set(tid, snap);
+      const link = agentLinksRef.current.get(tid);
+      if (link) {
+        const { note, link: next } = decideAgentNote(link, snap);
+        agentLinksRef.current.set(tid, next);
+        if (note) void deliverAgentNote(next, note, snap);
+      }
+      // 이 터미널이 부모라면 blocked 를 벗어날 때 쌓인 노트를 보낸다.
+      if (!d.cleared && d.state !== 'blocked' && agentNoteQueueRef.current.has(tid)) void flushAgentNotes(tid);
+    };
+    window.addEventListener(AGENT_STATUS_EVENT, onRelayStatus as EventListener);
+    // PTY 종료는 XTerminal 이 read_from_pty 의 'PTY disconnected' 로 알아채 보낸다.
+    const onPtyExited = (ev: Event) => {
+      const tid = String((ev as CustomEvent).detail?.terminalId || '');
+      const link = tid ? agentLinksRef.current.get(tid) : undefined;
+      if (!link) return;
+      const { note, link: next } = decideExitNote(link);
+      agentLinksRef.current.set(tid, next);
+      if (note) void deliverAgentNote(next, note);
+    };
+    window.addEventListener(PTY_EXITED_EVENT, onPtyExited as EventListener);
+    return () => {
+      window.removeEventListener(AGENT_STATUS_EVENT, onRelayStatus as EventListener);
+      window.removeEventListener(PTY_EXITED_EVENT, onPtyExited as EventListener);
+    };
+  }, []);
+  // 탭이 닫히면: 부모가 사라진 링크와 대기열은 버린다(자식 탭은 그대로 둔다). 닫힌 자식의 링크도 버린다.
+  useEffect(() => {
+    const alive = new Set(projects.flatMap((p) => p.terminals.map((tt) => tt.id)));
+    for (const [childId, link] of agentLinksRef.current) {
+      if (!alive.has(childId) || (link.parentId && !alive.has(link.parentId))) agentLinksRef.current.delete(childId);
+    }
+    for (const parentId of [...agentNoteQueueRef.current.keys()]) {
+      if (!alive.has(parentId)) dropParent(agentNoteQueueRef.current, parentId);
+    }
+    for (const tid of [...agentRelayStatusRef.current.keys()]) {
+      if (!alive.has(tid)) agentRelayStatusRef.current.delete(tid);
+    }
+  }, [projects]);
+  /** agent.run: 자식 에이전트가 준비되면(7501 idle 또는 화면 휴리스틱) 첫 메시지를 게이트로 넣는다. */
+  const injectAgentBrief = async (terminalId: string, cliType: string, prompt: string, parentId?: string, parentName?: string): Promise<void> => {
+    const outcome = await runAgentBrief({
+      exists: () => !!findTerminalAnywhere(terminalId),
+      ptyStarted: () => isTerminalPtyStarted(terminalId),
+      getState: () => getTerminalAgentState(terminalId),
+      getTurn: () => agentRelayStatusRef.current.get(terminalId)?.turn ?? 0,
+      uiReady: () => isTerminalAgentUiReady(terminalId, cliType as Parameters<typeof isTerminalAgentUiReady>[1]),
+      inject: async (text) => {
+        const r = await queueAutoInput(terminalId, text, {
+          source: 'agent',
+          submit: true,
+          force: false,
+          submitDelayMs: gateSubmitDelayFor(cliType),
+          fallbackWrite: agentPtyFallbackWrite(terminalId),
+        });
+        return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+      },
+      sleep: (ms) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); }),
+      now: () => Date.now(),
+    }, { cliType, text: formatAgentBrief({ parentId, parentName, prompt, cliType }) });
+    if (outcome.kind === 'gone') { agentLinksRef.current.delete(terminalId); return; }
+    const link = agentLinksRef.current.get(terminalId);
+    if (!link) return;
+    if (outcome.kind === 'not-ready') {
+      // 에이전트가 안 떴다(맨 셸일 수 있다) — 여러 줄 프롬프트를 셸에 넣지 않는다.
+      agentLinksRef.current.set(terminalId, { ...link, pending: false, briefError: 'agent not ready' });
+      return;
+    }
+    agentLinksRef.current.set(terminalId, {
+      ...link,
+      pending: false,
+      sentAt: Date.now(),
+      sentTurn: outcome.sentTurn,
+      sentWhileBlocked: outcome.sentWhileBlocked,
+      briefError: outcome.ok ? undefined : autoInputRefusalMessage(outcome.reason as Parameters<typeof autoInputRefusalMessage>[0]),
+    });
+  };
+  /** agent.status / agent.list 의 항목 하나. */
+  const describeAgentTerminal = async (terminalId: string, withLines: boolean) => {
+    const term = findTerminalAnywhere(terminalId);
+    const link = agentLinksRef.current.get(terminalId);
+    const snap = agentRelayStatusRef.current.get(terminalId);
+    const reported = getTerminalAgentState(terminalId);
+    const exited = !term || !!link?.exited;
+    const state: AgentTabState = reported ?? (term && isTerminalBusy(terminalId) ? 'working' : 'idle');
+    const turn = snap?.turn ?? 0;
+    const cliType = term?.cliType || link?.cliType || '';
+    const tail = term && (withLines || reported === undefined) ? await readTerminalTail(terminalId, 12).catch(() => '') : '';
+    const settledBy = link?.briefError ? 'error' : agentSettledBy({
+      state, turn, reported: reported !== undefined, exited, now: Date.now(), cliType,
+      quiet: !isTerminalBusy(terminalId, UNREPORTED_SETTLE_MS),
+      shellPromptBack: looksLikePlainShellPrompt(tail),
+      link: link && { pending: link.pending, sentAt: link.sentAt, sentTurn: link.sentTurn, sentWhileBlocked: link.sentWhileBlocked },
+    });
+    const settled = settledBy !== null;
+    const entry: Record<string, unknown> = {
+      terminalId,
+      name: term?.name || link?.name || '',
+      cliType,
+      state,
+      ...(state === 'blocked' && snap?.kind ? { kind: snap.kind } : {}),
+      ...(state === 'blocked' && snap?.msg ? { msg: snap.msg } : {}),
+      exited,
+      ...(term ? {} : { closed: true }),
+      settled,
+      ...(settledBy === 'quiet' ? { settledBy } : {}),
+      turn,
+      reported: reported !== undefined,
+      ...(link?.parentId ? { parentId: link.parentId } : {}),
+      ...(link?.pending ? { pending: true } : {}),
+      ...(link?.briefError ? { error: link.briefError } : {}),
+    };
+    if (withLines) entry.lastLines = tail ? tail.split('\n') : [];
+    return entry;
+  };
+
   // Mark the looked-at terminal's turn as seen (done → idle) on tab switch,
   // window focus and visibility changes.
   useEffect(() => {
@@ -7015,21 +7228,13 @@ Office project scaffold created by BBARIT Terminal.
         const project = projects.find((p) => p.id === activeProjectId);
         const terminalId = String(request?.terminalId || project?.activeTerminalId || '').trim();
         const readers = (window as unknown as { __BBARIT_TERM_READERS__?: Record<string, (lines?: number) => string> }).__BBARIT_TERM_READERS__;
-        const reader = readers?.[terminalId];
         const lines = Math.max(1, Math.min(2000, Number(request?.lines) || 80));
-        if (reader) return { ok: true, terminalId, text: reader(lines) };
-        // Popped-out terminals have no xterm in this window — fall back to the
-        // raw backend output buffer, ANSI stripped.
-        if (!projects.some((p) => p.terminals.some((tt) => tt.id === terminalId))) {
+        // Popped-out terminals have no xterm in this window — readTerminalTail falls back
+        // to the raw backend output buffer, ANSI stripped.
+        if (!readers?.[terminalId] && !projects.some((p) => p.terminals.some((tt) => tt.id === terminalId))) {
           return { ok: false, error: `terminal not mounted: ${terminalId || '(none)'}` };
         }
-        const backendBuffer = await invoke<string>('read_pty_output_buffer', { terminalId }).catch(() => '');
-        const plain = backendBuffer
-          .replace(/\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/g, '')
-          .replace(/\r/g, '');
-        const tail = plain.split('\n');
-        while (tail.length > 0 && !tail[tail.length - 1].trim()) tail.pop();
-        return { ok: true, terminalId, text: tail.slice(-lines).join('\n') };
+        return { ok: true, terminalId, text: await readTerminalTail(terminalId, lines) };
       }
       case 'terminal.activate': {
         const terminalId = String(request?.terminalId || '').trim();
@@ -7044,6 +7249,95 @@ Office project scaffold created by BBARIT Terminal.
         if (!project?.terminals.some((t) => t.id === terminalId)) return { ok: false, error: 'terminal not found' };
         closeTerminal(terminalId, true);
         return { ok: true };
+      }
+      // ── 에이전트 간 위임(docs/AGENT_RELAY.md) ── agent.wait 는 ctl 이 agent.status 를 폴링한다.
+      case 'agent.run': {
+        const cliType = String(request?.cliType || 'claude').trim();
+        const allowed = ['shell', 'claude', 'codex', 'cursor', 'opencode', 'kimi', 'gemini', 'qwen', 'pi', 'reasonix', 'bbarit', 'bbarit-oss', 'gajae'];
+        if (!allowed.includes(cliType)) return { ok: false, error: `invalid cliType: ${cliType} (${allowed.join('/')})` };
+        const prompt = String(request?.prompt ?? '').trim();
+        if (!prompt) return { ok: false, error: 'prompt required' };
+        const caller = String(request?.caller || '').trim();
+        const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
+        if (caller && !callerTerm) return { ok: false, error: `caller not found: ${caller}` };
+        // 자식은 caller 의 프로젝트에, cwd = workDir || caller 의 마지막 cwd || 그 프로젝트 폴더.
+        // caller 가 있으면 caller 탭에서 포커스를 빼앗지 않는다.
+        const callerProject = caller ? projects.find((p) => p.terminals.some((tt) => tt.id === caller)) : undefined;
+        const projectId = callerProject?.id || activeProjectId;
+        if (!projectId) return { ok: false, error: 'no active project' };
+        const workDir = (request?.workDir ? String(request.workDir).trim() : '')
+          || callerTerm?.lastWorkDir || callerProject?.workDir || undefined;
+        // Claude 자식은 전용 세션 — `--continue` 로 부모 대화를 이어받지 않게 한다.
+        const spec = agentRunTerminalSpec(cliType, request?.name ? String(request.name) : undefined);
+        const name = spec.name;
+        const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name, workDir, {
+          projectId,
+          activate: !caller,
+          freshClaudeSession: spec.freshClaudeSession,
+        });
+        if (!terminalId) return { ok: false, error: 'failed to create terminal' };
+        // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
+        agentLinksRef.current.set(terminalId, {
+          childId: terminalId,
+          parentId: caller,
+          name,
+          cliType,
+          createdAt: Date.now(),
+          lastNotifiedTurn: -1,
+          pending: true,
+        });
+        void injectAgentBrief(terminalId, cliType, prompt, caller || undefined, callerTerm?.name);
+        return { ok: true, terminalId };
+      }
+      case 'agent.send': {
+        const terminalId = String(request?.terminalId || '').trim();
+        const target = terminalId ? findTerminalAnywhere(terminalId) : undefined;
+        if (!target) return { ok: false, error: `terminal not found: ${terminalId || '(none)'}` };
+        const text = String(request?.text ?? '');
+        if (!text.trim()) return { ok: false, error: 'text required' };
+        const caller = String(request?.caller || '').trim();
+        const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
+        const wrapped = wrapAgentMessage(text, caller || undefined, callerTerm?.name);
+        const sentTurn = agentRelayStatusRef.current.get(terminalId)?.turn ?? 0;
+        const sentWhileBlocked = getTerminalAgentState(terminalId) === 'blocked';
+        const result = await queueAutoInput(terminalId, wrapped, {
+          source: 'agent',
+          submit: true,
+          force: request?.force === true,
+          submitDelayMs: gateSubmitDelayFor(target.cliType),
+          fallbackWrite: terminalWritersRef.current[terminalId] || agentPtyFallbackWrite(terminalId),
+        });
+        if (!result.ok) {
+          const error = result.reason === 'blocked'
+            ? 'agent is waiting for input'
+            : result.reason === 'typing'
+              ? 'user is typing'
+              : `terminal not writable: ${result.reason}`;
+          return { ok: false, error, reason: result.reason, terminalId };
+        }
+        const link = agentLinksRef.current.get(terminalId);
+        if (link) agentLinksRef.current.set(terminalId, { ...link, sentAt: Date.now(), sentTurn, sentWhileBlocked });
+        // 자식이 부모에게 직접 보고했다 → 이 턴이 끝날 때의 done 노트는 중복이라 건너뛴다.
+        // 보고 중(working)이면 턴 번호는 working 을 떠날 때 하나 오른다.
+        const reporter = caller ? agentLinksRef.current.get(caller) : undefined;
+        if (reporter && reporter.parentId === terminalId) {
+          const callerTurn = agentRelayStatusRef.current.get(caller)?.turn ?? 0;
+          const lastSendTurn = getTerminalAgentState(caller) === 'working' ? callerTurn + 1 : callerTurn;
+          agentLinksRef.current.set(caller, { ...reporter, lastSendTurn });
+        }
+        return { ok: true, terminalId };
+      }
+      case 'agent.status':
+      case 'agent.list': {
+        const terminalId = String(request?.terminalId || '').trim();
+        const caller = String(request?.caller || '').trim();
+        const ids = terminalId
+          ? [terminalId]
+          : [...agentLinksRef.current.values()]
+            .filter((l) => (caller ? l.parentId === caller : !!l.parentId))
+            .map((l) => l.childId);
+        const agents = await Promise.all(ids.map((id) => describeAgentTerminal(id, cmd === 'agent.status')));
+        return { ok: true, agents };
       }
       case 'terminal.layout.set': {
         const layout = String(request?.layout || '').trim();
@@ -13803,12 +14097,15 @@ Office project scaffold created by BBARIT Terminal.
     recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, customFontFamily });
   };
 
-  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string, options?: { freshClaudeSession?: boolean }): string | undefined => {
-    if (!activeProjectId) return undefined;
+  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string, options?: { freshClaudeSession?: boolean; projectId?: string; activate?: boolean }): string | undefined => {
+    // projectId: 다른 프로젝트에 만든다(기본 활성 프로젝트). activate:false: 새 탭으로 포커스를 옮기지 않는다.
+    const targetProjectId = options?.projectId || activeProjectId;
+    if (!targetProjectId) return undefined;
+    const activate = options?.activate !== false;
     // "Side" keeps an existing terminal beside the editor, but a newly created
     // terminal needs usable width. Promote only this transition to the full
     // terminal view; users who intentionally select another layout keep it.
-    if (viewMode === 'side') setViewMode('project-terminal');
+    if (activate && viewMode === 'side') setViewMode('project-terminal');
     const resolvedCliType = cliType;
     const cliNames: Record<string, string> = {
       shell: t('terminal.shell'),
@@ -13856,39 +14153,37 @@ Office project scaffold created by BBARIT Terminal.
     const freshClaude = resolvedCliType === 'claude' && !!options?.freshClaudeSession;
     const termName = nameOverride || (freshClaude ? t('terminal.claudeNew' as any) : `${cliNames[resolvedCliType]}`);
     const preCount = (terminalSplitMode === 'tree'
-      ? (projects.find(p => p.id === activeProjectId)?.terminals ?? [])
-      : (projects.find(p => p.id === activeProjectId)?.terminals ?? [])
+      ? (projects.find(p => p.id === targetProjectId)?.terminals ?? [])
+      : (projects.find(p => p.id === targetProjectId)?.terminals ?? [])
     ).filter(t => t.cliType === resolvedCliType && isDedicatedClaudeTab(t) === freshClaude).length + 1;
     const terminal = createTerminal(nameOverride ? termName : `${termName} ${preCount}`, resolvedCliType, shouldAutoAccept, startupMode);
     // A dedicated Claude session: the tab launches `claude --session-id <uuid>` and
     // later `--resume <uuid>`, so it never shares a conversation with other tabs.
-    if (freshClaude) {
-      terminal.claudeSessionId = newClaudeSessionId();
-      terminal.claudeSessionSource = 'app';
-    }
+    Object.assign(terminal, dedicatedClaudeSessionFields(freshClaude, newClaudeSessionId));
     // Optional per-terminal working directory (e.g. a Broker Harness git worktree),
     // so the CLI launches inside that isolated dir instead of the project root.
     if (workDirOverride && workDirOverride.trim()) terminal.lastWorkDir = workDirOverride.trim();
 
     // In tree mode, new terminals should appear as a new pane by splitting the active pane.
     if (terminalSplitMode === 'tree') {
-      updateActiveLayout((p) => {
+      setProjects((prev) => prev.map((p) => {
+        if (p.id !== targetProjectId) return p;
         const ids = p.terminals.map((t) => t.id);
         const nextLayout = buildEvenTerminalLayout([...ids, terminal.id])
           || buildDefaultLayout([...ids, terminal.id], terminal.id);
         return {
           ...p,
           terminals: [...p.terminals, terminal],
-          activeTerminalId: terminal.id,
+          activeTerminalId: activate ? terminal.id : p.activeTerminalId,
           terminalLayout: nextLayout,
         };
-      });
+      }));
       return terminal.id;
     }
 
     setProjects((prev) => prev.map((p) => {
-      if (p.id !== activeProjectId) return p;
-      return { ...p, terminals: [...p.terminals, terminal], activeTerminalId: terminal.id };
+      if (p.id !== targetProjectId) return p;
+      return { ...p, terminals: [...p.terminals, terminal], activeTerminalId: activate ? terminal.id : p.activeTerminalId };
     }));
     return terminal.id;
   };

@@ -30,6 +30,11 @@ export const GATEWAY_UI_COMMAND_DOCS: GatewayUiCommandDoc[] = [
   { group: 'Terminals', cmd: 'terminal.activate', args: 'terminalId', desc: 'Focus a terminal tab' },
   { group: 'Terminals', cmd: 'terminal.close', args: 'terminalId', desc: 'Close a terminal (no confirm)' },
 
+  { group: 'Agents', cmd: 'agent.run', args: 'cliType=claude|codex|shell|…, prompt, caller?, workDir?, name?', desc: 'Start an agent in a new terminal and hand it the prompt once it is ready (returns terminalId at once). With caller, the child is told how to report back and its blocked/done/exit notes are typed into the caller' },
+  { group: 'Agents', cmd: 'agent.send', args: 'terminalId, text, caller?, force?=false', desc: 'Type a message into an agent terminal (wrapped as <bbarit from="caller"> when caller is set); same gate as terminal.write' },
+  { group: 'Agents', cmd: 'agent.status', args: 'caller?, terminalId?', desc: 'One terminal, or every child of caller: state (OSC 7501 or activity), kind, exited, settled, last 12 lines' },
+  { group: 'Agents', cmd: 'agent.list', args: 'caller?', desc: 'Like agent.status without the last lines' },
+
   { group: 'Editor', cmd: 'editor.open', args: 'path', desc: 'Open a file in the built-in editor (office files included)' },
   { group: 'Editor', cmd: 'editor.list', args: '-', desc: 'Open editor tabs of the active project (path / modified / active)' },
   { group: 'Editor', cmd: 'editor.close', args: 'path', desc: 'Close an open editor tab (no confirm, discards unsaved changes)' },

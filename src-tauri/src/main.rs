@@ -3460,6 +3460,9 @@ fn create_shell(
     // Per-terminal scope token; close_pty sweeps every process that still carries it.
     let scope_token = new_scope_token();
     cmd.env(SCOPE_ENV, &scope_token);
+    if let Some(ctl) = bbarit_ctl_path() {
+        cmd.env("BBARIT_CTL", ctl);
+    }
 
     // ssh forwards TERM to the remote shell, so prefer a widely-supported value there.
     #[cfg(target_os = "windows")]
@@ -4329,6 +4332,57 @@ fn resolve_browser_cli(app: tauri::AppHandle) -> Option<String> {
         .map(|p| strip_extended_length_prefix(p.to_string_lossy().to_string()))
 }
 
+// Absolute path of bbarit-ctl.mjs, exported to every PTY as `BBARIT_CTL` so an agent in a
+// tab can run `node "$BBARIT_CTL" agent …` (docs/AGENT_RELAY.md). Resolved once at setup:
+// a debug build prefers the source checkout's scripts/ (CARGO_MANIFEST_DIR, then the
+// exe-derived repo), a release build the bundled
+// resource (`../scripts/bbarit-ctl.mjs` lands under `<resource>/_up_/scripts/`).
+static BBARIT_CTL_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+fn init_bbarit_ctl_path(app: &AppHandle) {
+    BBARIT_CTL_PATH.get_or_init(|| {
+        let rel = ["scripts", "bbarit-ctl.mjs"];
+        let mut resource: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            resource.push(
+                std::iter::once("_up_")
+                    .chain(rel.iter().copied())
+                    .fold(resource_dir.clone(), |p, s| p.join(s)),
+            );
+            resource.push(rel.iter().fold(resource_dir, |p, s| p.join(s)));
+        }
+        // dev: exe is <repo>/src-tauri/target/<profile>/octo-ui → 4 levels up = repo.
+        let repo: Vec<std::path::PathBuf> = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.ancestors().nth(4).map(|r| r.to_path_buf()))
+            .map(|r| rel.iter().fold(r, |p, s| p.join(s)))
+            .into_iter()
+            .collect();
+        let ordered: Vec<std::path::PathBuf> = if cfg!(debug_assertions) {
+            // The checkout this binary was compiled from comes first: with CARGO_TARGET_DIR
+            // pointing elsewhere (shared cache, worktrees) the exe-derived repo is wrong.
+            let source = std::path::PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../scripts/bbarit-ctl.mjs"
+            ));
+            std::iter::once(source)
+                .chain(repo)
+                .chain(resource)
+                .collect()
+        } else {
+            resource.into_iter().chain(repo).collect()
+        };
+        ordered
+            .into_iter()
+            .find(|p| p.is_file())
+            .map(|p| strip_extended_length_prefix(p.to_string_lossy().to_string()))
+    });
+}
+
+fn bbarit_ctl_path() -> Option<&'static str> {
+    BBARIT_CTL_PATH.get().and_then(|p| p.as_deref())
+}
+
 // mcp-bridge base port of THIS running app (dev 9323 / installed 9223). The agent
 // gets this as TAURI_DEV_BASE_PORT so its browser CLI targets the app that
 // launched it — matching the dev/installed split in the plugin config above.
@@ -5030,6 +5084,9 @@ fn create_cli_shell(
     // Per-terminal scope token; close_pty sweeps every process that still carries it.
     let scope_token = new_scope_token();
     cmd.env(SCOPE_ENV, &scope_token);
+    if let Some(ctl) = bbarit_ctl_path() {
+        cmd.env("BBARIT_CTL", ctl);
+    }
 
     #[cfg(target_os = "windows")]
     if cli_command.is_none() {
@@ -10427,6 +10484,9 @@ fn main() {
                         }
                     });
                 }
+
+                // BBARIT_CTL for every PTY (agent relay, docs/AGENT_RELAY.md).
+                init_bbarit_ctl_path(app.handle());
 
                 if std::env::var_os("BBARIT_DISABLE_BUNDLED_SKILLS_INSTALL").is_none() {
                     // Ship bundled SEO/GEO skills to this user's ~/.claude/skills (every installed copy).

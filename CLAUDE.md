@@ -116,6 +116,12 @@ Build/test gotchas:
 - Button-click terminal sends use `queueButtonInput` (src/terminal/buttonInput.ts):
   force, no quiet wait, but still queued/bracketed. `setsid` does not exist on macOS;
   use `(cmd &)` double-fork when a test needs a process outside the PTY tree.
+- Agent relay: tabs can run `node "$BBARIT_CTL" agent run|send|wait|status|list`
+  (docs/AGENT_RELAY.md). Children open as background tabs in the caller's project with
+  their own Claude session; blocked/done/exit notes are typed into the parent as one
+  `<bbarit from=… state=…>` line through the input gate (never into plain shells).
+  `agent.*` stays off the remote secretary allowlist. Dev builds resolve BBARIT_CTL from
+  CARGO_MANIFEST_DIR, so a shared CARGO_TARGET_DIR still points at the right checkout.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.

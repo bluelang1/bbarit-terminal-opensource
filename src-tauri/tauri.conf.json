@@ -54,7 +54,8 @@
       "resources/claude-hooks/session-start.sh",
       "../agent-browser-cli/bin/bbarit-browser-control.mjs",
       "../bbarit-agent/personas/**/*",
-      "../scripts/tauri-dev-screen.mjs"
+      "../scripts/tauri-dev-screen.mjs",
+      "../scripts/bbarit-ctl.mjs"
     ],
     "icon": [
       "icons/32x32.png",

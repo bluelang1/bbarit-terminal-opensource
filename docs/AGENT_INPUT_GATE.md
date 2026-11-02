@@ -39,7 +39,7 @@ herdr-core 의 `input.rs` 가 같은 문제를 푼 방식을 따른다: 터미�
 ```ts
 export type AutoInputSource =
   | 'ctl' | 'scheduler' | 'telegram' | 'discord' | 'slack'
-  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'other';
+  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'agent' | 'other';
 
 export interface AutoInputOptions {
   submit?: boolean;        // 기본 true. 텍스트 뒤에 Enter 를 보낸다
