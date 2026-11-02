@@ -174,10 +174,14 @@ dev → 9323, tried before the port scan) are read when present; outside a tab p
 `bbarit-agents` (installed to `~/.claude/skills`) teaches the same to Claude Code.
 
 #### `agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]`
-`agent.run`: new terminal in the active project; once the agent is ready (OSC 7501
-`idle` or its welcome screen, max 60 s) the prompt is typed through the input gate,
-prefixed with a `<bbarit from="<caller>" reach="…">` block telling the child how to
-report back (shell children get the prompt alone). Waits by default — polls
+`agent.run`: new background tab (focus stays on the caller) in the caller's project
+(active project without a caller), cwd = `--workdir` || the caller's cwd || the project
+folder. Once the agent is ready (OSC 7501 `idle` or its welcome screen, max 60 s after
+its shell starts) the prompt is typed through the input gate, prefixed with a
+`<bbarit from="<caller>" reach="…">` block telling the child to report back when stuck
+(and when done if the prompt asks). If an agent child is not ready in time nothing is
+typed (it may be a bare shell) and status shows `error: agent not ready`; shell children
+get the prompt alone, also after the timeout. Waits by default — polls
 `agent.status` every 2 s until the child is done, blocked or exited, then prints its
 state and last 12 lines. Exit code `0` done/exited, `2` blocked, `3` timeout, `1`
 error. `--bg` prints the terminalId and returns.
@@ -196,10 +200,15 @@ children (default) of the caller are settled. Exit code `0`, `2` if a child is b
 `agent.status` / `agent.list`: one terminal, or every child of the caller — `state`
 (7501 rollup, or `working`/`idle` from output activity), `kind`/`msg` when blocked,
 `exited`, `settled` (finished since the last message it was sent), `turn`, and for
-status the last 12 lines.
+status the last 12 lines. Children without 7501 settle only after 30 s of silence (a
+shell also needs its prompt back); those carry `settledBy: "quiet"`, shown as
+`yes (quiet-heuristic)`.
 
-**Notes typed into the parent tab** (only when the parent's agent reports OSC 7501;
-blocked, done and exit, once per turn; held while the parent itself is blocked):
+**Notes typed into the parent tab** (only into an agent tab — not `shell` — whose OSC 7501
+state is working/blocked/done with a report in the last 30 min; blocked, done and exit,
+once per turn, no done note for a turn in which the child already reported with
+`agent send`; held while the parent itself is blocked; shell metacharacters
+`` ` $ ; | & < > \ `` in bodies are replaced by look-alike characters):
 ```text
 <bbarit from="<id> <name>" state="done" turn="2">last 3 lines — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
 <bbarit from="<id> <name>" state="blocked" kind="question">question — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>

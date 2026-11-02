@@ -276,6 +276,7 @@ interface TerminalState {
   lastPinRestoreAt?: number; // 마지막 프로그램적 스크롤 복원 시각 — 직후 onScroll 오감지 방지
   _idleCount?: number;       // adaptive polling: consecutive empty reads
   _readErrorStreak?: number; // 연속 read 실패 수 — 10회면 죽은 PTY로 보고 루프 중단
+  _ptyExitDispatched?: boolean; // PTY_EXITED_EVENT 를 이번 PTY 에 대해 이미 보냈다
   usesEventTransport?: boolean;
   ptyDataUnlisten?: (() => void) | null;
   ptyExitUnlisten?: (() => void) | null;
@@ -360,6 +361,19 @@ const waitForXtermParsed = (term: Terminal | null | undefined) => new Promise<vo
   }
 });
 
+/**
+ * PTY 프로세스가 끝났다 — 7501 working/blocked 를 버리고 `octo-pty-exited` 를 한 번 보낸다.
+ * main.rs 의 PTY 는 이벤트를 쏘지 않으므로 read_from_pty 의 `PTY disconnected` 가 신호다.
+ */
+export const PTY_EXITED_EVENT = 'octo-pty-exited';
+const notifyPtyExited = (terminalId: string) => {
+  const state = terminalStates.get(terminalId);
+  if (!state || state._ptyExitDispatched) return;
+  state._ptyExitDispatched = true;
+  dropProgramStatusOnExit(terminalId);
+  window.dispatchEvent(new CustomEvent(PTY_EXITED_EVENT, { detail: { terminalId } }));
+};
+
 /** PTY 가 끝나면 working/blocked 는 버린다(done/error 는 남는다). */
 const dropProgramStatusOnExit = (terminalId: string) => {
   const store = terminalStates.get(terminalId)?.programStatus;
@@ -374,6 +388,9 @@ export const getTerminalAgentState = (terminalId: string) => {
   const store = terminalStates.get(terminalId)?.programStatus;
   return store?.reported ? rollupAgentState(store) : undefined;
 };
+
+/** 이 터미널의 PTY 가 만들어졌는가(마운트돼 셸이 떴다). */
+export const isTerminalPtyStarted = (terminalId: string) => !!terminalStates.get(terminalId)?.ptyCreated;
 
 // 자동 입력 게이트(docs/AGENT_INPUT_GATE.md)가 마운트된 터미널의 writer·상태·paste 모드를 읽는다.
 setInputGateHost({
@@ -1024,10 +1041,13 @@ const startReadLoop = (terminalId: string) => {
       const data = await invoke<string | null>('read_from_pty', { terminalId });
       if (data && state.term) {
         hasData = true;
+        state._ptyExitDispatched = false;
         await processTerminalOutput(terminalId, data);
       }
       state._readErrorStreak = 0;
     } catch (err) {
+      // 리더 스레드가 끝나 채널이 닫혔다(출력을 다 읽은 뒤) = PTY 프로세스 종료.
+      if (String(err).includes('PTY disconnected')) notifyPtyExited(terminalId);
       // 죽은 PTY를 영원히 폴링하던 누수: 에러가 연속되면 루프를 멈춘다.
       // (설치본에서 죽은 에이전트/셸 탭들이 각각 5Hz로 무한 폴링하며
       //  웹뷰 CPU를 상시 점유하던 실측 원인)
@@ -3240,7 +3260,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (!live) return;
           live.readLoopActive = false;
           _stopReadLoop(terminalId);
-          dropProgramStatusOnExit(terminalId);
+          notifyPtyExited(terminalId);
         });
         st.ptyExitUnlisten = unlistenExit;
       } catch (err) {

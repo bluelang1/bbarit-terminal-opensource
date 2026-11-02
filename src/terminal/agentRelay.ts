@@ -20,8 +20,13 @@ export interface AgentLink {
   sentAt?: number;
   sentTurn?: number;
   sentWhileBlocked?: boolean;
-  /** 브리프 주입이 거부된 사유. */
+  /** 브리프 주입이 거부된 사유(준비 시간 초과 포함). */
   briefError?: string;
+  /**
+   * 자식이 `agent send` 로 부모에게 직접 보고한 턴(그 보고가 끝나는 턴 번호). 그 턴의 done
+   * 노트는 중복이라 보내지 않는다.
+   */
+  lastSendTurn?: number;
 }
 
 export type AgentNoteState = 'blocked' | 'done' | 'exited';
@@ -33,6 +38,8 @@ export interface AgentStatusSnapshot {
   msg?: string;
   turn: number;
   cleared?: boolean;
+  /** 보고를 받은 시각(ms). 부모가 "최근에" 7501 을 보고했는지 판단한다. */
+  at?: number;
 }
 
 /** 노트·브리프의 `from` 에 쓰는 짧은 표시 이름. */
@@ -42,15 +49,24 @@ export function agentLabel(id: string, name?: string): string {
 }
 
 function sanitizeAttr(value: string): string {
-  return value.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim();
+  return neutralizeShell(value).replace(/[\x00-\x1f\x7f]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim();
 }
 
-/** 본문을 한 줄로: 제어 문자 제거, 공백 접기, `</bbarit` 무력화, 길이 제한. */
+// 노트 본문은 에이전트 입력창에 타이핑된다. 혹시 셸에 들어가도 명령이 되지 않도록 셸
+// 메타문자를 비슷하게 생긴 안전한 글자로 바꾼다(`<` `>` 는 `</bbarit>` 위조도 막는다).
+const SHELL_SAFE: Record<string, string> = {
+  '`': 'ˋ', $: '＄', ';': '；', '|': '｜', '&': '＆', '<': '‹', '>': '›', '\\': '＼',
+};
+
+export function neutralizeShell(text: string): string {
+  return text.replace(/[`$;|&<>\\]/g, (c) => SHELL_SAFE[c] || '');
+}
+
+/** 본문을 한 줄로: 제어 문자 제거, 공백 접기, 셸 메타문자 무력화, 길이 제한. */
 export function oneLine(text: string, max = 300): string {
-  const flat = text
+  const flat = neutralizeShell(text
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
-    .replace(/[\x00-\x1f\x7f]/g, ' ')
-    .replace(/<\/?bbarit/gi, (m) => m.replace('<', '‹'))
+    .replace(/[\x00-\x1f\x7f]/g, ' '))
     .replace(/\s+/g, ' ')
     .trim();
   if (Array.from(flat).length <= max) return flat;
@@ -75,8 +91,9 @@ export function formatAgentBrief(opts: { parentId?: string; parentName?: string;
   const reach = `${CTL_REF} agent send ${opts.parentId} "<message>"`;
   return [
     `<bbarit from="${label}" reach="${reach.replace(/"/g, '\\"')}">`,
-    `You were started by another agent (terminal ${label}). When you finish or get stuck, report back`,
-    'with the reach command above (one short message with the result or the question).',
+    `You were started by another agent (terminal ${label}). If you get stuck or need a decision,`,
+    'report back with the reach command above (one short message with the question). When you',
+    'finish, report back the same way only if the task below asks for a report.',
     '</bbarit>',
     prompt,
   ].join('\n');
@@ -120,6 +137,10 @@ export function decideAgentNote(link: AgentLink, s: AgentStatusSnapshot): { note
   const next: AgentLink = { ...link, lastState: s.state };
   if (s.state !== 'blocked' && s.state !== 'done') return { note: null, link: next };
   if (s.state === 'done' && link.pending) return { note: null, link: next };
+  // 이번 턴 결과는 자식이 agent send 로 이미 직접 보고했다.
+  if (s.state === 'done' && link.lastSendTurn === s.turn) {
+    return { note: null, link: { ...next, lastNotifiedTurn: s.turn, lastNotifiedState: s.state } };
+  }
   if (link.lastNotifiedTurn === s.turn && link.lastNotifiedState === s.state) return { note: null, link: next };
   return { note: s.state, link: { ...next, lastNotifiedTurn: s.turn, lastNotifiedState: s.state } };
 }
@@ -163,6 +184,19 @@ export function canDeliverToParent(parentState: AgentTabState | undefined): bool
   return parentState !== undefined && parentState !== 'blocked';
 }
 
+/** 부모의 7501 보고가 이보다 오래됐으면 에이전트가 떠났을 수 있다(셸만 남음) — 노트를 넣지 않는다. */
+export const PARENT_REPORT_MAX_AGE_MS = 30 * 60 * 1000;
+
+/**
+ * 노트를 쌓을지: 부모가 셸 탭이 아니고, 7501 루트 상태가 working/blocked/done 이며 마지막
+ * 보고가 30 분 안이다. idle(입력 대기 프롬프트일 수도, 에이전트가 끝나 셸일 수도)과 보고 없음은 거절.
+ */
+export function parentAcceptsNotes(p: { cliType?: string; state?: AgentTabState; lastReportAt?: number; now: number }): boolean {
+  if (!p.cliType || p.cliType === 'shell') return false;
+  if (p.state !== 'working' && p.state !== 'blocked' && p.state !== 'done') return false;
+  return typeof p.lastReportAt === 'number' && p.now - p.lastReportAt <= PARENT_REPORT_MAX_AGE_MS;
+}
+
 /**
  * 순서대로 보낸다. 거부되면(blocked/typing/no-writer) 남은 노트를 대기열 앞으로 되돌리고
  * 멈춘다. 터미널이 사라졌으면(disposed) 버린다. 반환: 보낸 개수.
@@ -184,8 +218,11 @@ export async function flushNotes(
 }
 
 // ── 자식이 "끝났는지" ────────────────────────────────────────────────────
-/** 7501 을 보고하지 않는 자식(셸 등)은 입력 뒤 이만큼 조용하면 끝난 것으로 본다. */
-export const UNREPORTED_SETTLE_MS = 5000;
+/**
+ * 7501 을 보고하지 않는 자식(셸 등)은 마지막 입력과 마지막 출력 뒤 이만큼 조용하면 끝난 것으로
+ * 본다(셸은 프롬프트가 다시 보여야 한다). 추정이므로 결과에 `settledBy: 'quiet'` 를 붙인다.
+ */
+export const UNREPORTED_SETTLE_MS = 30000;
 
 export interface AgentSettleInput {
   state: AgentTabState;
@@ -195,24 +232,107 @@ export interface AgentSettleInput {
   exited?: boolean;
   link?: Pick<AgentLink, 'pending' | 'sentAt' | 'sentTurn' | 'sentWhileBlocked'>;
   now: number;
+  cliType?: string;
+  /** 마지막 출력 뒤 UNREPORTED_SETTLE_MS 이상 조용했다(7501 없는 자식용). */
+  quiet?: boolean;
+  /** 셸 프롬프트가 다시 보인다(7501 없는 셸 자식용). */
+  shellPromptBack?: boolean;
 }
+
+export type AgentSettledBy = 'exited' | 'blocked' | 'done' | 'turn' | 'quiet';
 
 /**
- * agent wait / run 이 멈출 조건. 종료됐거나, blocked 거나, 마지막 입력 뒤 턴이 끝났다(done/idle).
- * 마지막 입력 시점에 이미 blocked 였고 같은 턴이면 아직 처리 전으로 본다.
- * 링크가 없는 터미널은 exited/blocked/done 만 끝으로 본다.
+ * agent wait / run 이 멈출 조건과 근거(아니면 null). 종료됐거나, blocked 거나, 마지막 입력 뒤
+ * 턴이 끝났다(done/idle). 마지막 입력 시점에 이미 blocked 였고 같은 턴이면 아직 처리 전으로
+ * 본다. 링크가 없는 터미널은 exited/blocked/done 만 끝으로 본다.
  */
-export function isAgentSettled(s: AgentSettleInput): boolean {
-  if (s.exited) return true;
+export function agentSettledBy(s: AgentSettleInput): AgentSettledBy | null {
+  if (s.exited) return 'exited';
   const link = s.link;
-  if (!link) return s.state === 'blocked' || s.state === 'done';
-  if (link.pending) return s.state === 'blocked';
+  if (!link) return s.state === 'blocked' ? 'blocked' : s.state === 'done' ? 'done' : null;
+  if (link.pending) return s.state === 'blocked' ? 'blocked' : null;
   const sentTurn = link.sentTurn ?? -1;
-  if (s.state === 'blocked') return !(link.sentWhileBlocked && s.turn === sentTurn);
-  if (s.state === 'working') return false;
-  if (s.reported) return s.turn > sentTurn;
-  return s.now - (link.sentAt ?? 0) >= UNREPORTED_SETTLE_MS;
+  if (s.state === 'blocked') return link.sentWhileBlocked && s.turn === sentTurn ? null : 'blocked';
+  if (s.state === 'working') return null;
+  if (s.reported) return s.turn > sentTurn ? 'turn' : null;
+  if (!s.quiet || s.now - (link.sentAt ?? 0) < UNREPORTED_SETTLE_MS) return null;
+  if (s.cliType === 'shell' && !s.shellPromptBack) return null;
+  return 'quiet';
 }
 
-/** agent.run readiness: 7501 idle 보고 또는 기존 화면 휴리스틱. */
+export function isAgentSettled(s: AgentSettleInput): boolean {
+  return agentSettledBy(s) !== null;
+}
+
+// ── agent.run: 준비되면 첫 메시지 주입 ─────────────────────────────────────
+/** 셸이 뜬 뒤 에이전트 준비(7501 idle 또는 화면 휴리스틱)를 기다리는 최대 시간. */
 export const AGENT_READY_TIMEOUT_MS = 60000;
+/** 탭이 아직 마운트되지 않은(다른 프로젝트에 만든) 경우 셸이 뜨기를 기다리는 최대 시간. */
+export const AGENT_START_TIMEOUT_MS = 10 * 60 * 1000;
+/** 새 탭이 React 상태에 반영되기 전이라 안 보일 수 있다 — 이 시간 동안은 "사라짐" 으로 보지 않는다. */
+export const AGENT_GONE_GRACE_MS = 2000;
+export const AGENT_READY_POLL_MS = 300;
+
+export interface AgentBriefDeps {
+  /** 탭이 (아직) 있는가. */
+  exists: () => boolean;
+  /** PTY(셸)가 떴는가 — 준비 대기 시계는 이때부터 잰다. */
+  ptyStarted: () => boolean;
+  /** 7501 롤업 상태(보고 없으면 undefined). */
+  getState: () => AgentTabState | undefined;
+  getTurn: () => number;
+  /** 화면 휴리스틱(looksLikeAgentUiReady). */
+  uiReady: () => boolean;
+  inject: (text: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+}
+
+export type AgentBriefOutcome =
+  | { kind: 'gone' }
+  | { kind: 'not-ready' }
+  | { kind: 'sent'; ok: boolean; reason?: string; readyBy: '7501' | 'ui' | 'timeout'; sentTurn: number; sentWhileBlocked: boolean };
+
+/**
+ * 준비를 기다렸다가 브리프+프롬프트를 넣는다. 첫 검사는 첫 sleep 뒤에 하고, 탭이 안 보여도
+ * AGENT_GONE_GRACE_MS 동안은 기다린다(addTerminal 직후 projectsRef 에 아직 없다). 준비 시간이
+ * 지나면 셸 자식은 그냥 넣지만, 에이전트 자식은 맨 셸일 수 있어 넣지 않는다(`not-ready`).
+ */
+export async function runAgentBrief(
+  deps: AgentBriefDeps,
+  opts: { cliType: string; text: string; readyTimeoutMs?: number; startTimeoutMs?: number },
+): Promise<AgentBriefOutcome> {
+  const readyTimeoutMs = opts.readyTimeoutMs ?? AGENT_READY_TIMEOUT_MS;
+  const startTimeoutMs = opts.startTimeoutMs ?? AGENT_START_TIMEOUT_MS;
+  const createdAt = deps.now();
+  let ptyAt: number | null = null;
+  let readyBy: '7501' | 'ui' | 'timeout' = 'timeout';
+  for (;;) {
+    await deps.sleep(AGENT_READY_POLL_MS);
+    const now = deps.now();
+    if (!deps.exists()) {
+      if (now - createdAt >= AGENT_GONE_GRACE_MS) return { kind: 'gone' };
+      continue;
+    }
+    if (ptyAt === null) {
+      if (!deps.ptyStarted()) {
+        if (now - createdAt >= startTimeoutMs) break;
+        continue;
+      }
+      ptyAt = now;
+    }
+    if (deps.getState() === 'idle') { readyBy = '7501'; break; }
+    if (deps.uiReady()) { readyBy = 'ui'; break; }
+    if (now - ptyAt >= readyTimeoutMs) break;
+  }
+  if (readyBy === 'timeout' && opts.cliType !== 'shell') return { kind: 'not-ready' };
+  // 화면 휴리스틱은 환영 문구를 본 시점이라 입력창이 아직 안 그려졌을 수 있다.
+  await deps.sleep(readyBy === '7501' ? 300 : 1500);
+  if (!deps.exists()) return { kind: 'gone' };
+  const sentTurn = deps.getTurn();
+  const sentWhileBlocked = deps.getState() === 'blocked';
+  const res = await deps.inject(opts.text);
+  return res.ok
+    ? { kind: 'sent', ok: true, readyBy, sentTurn, sentWhileBlocked }
+    : { kind: 'sent', ok: false, reason: res.reason, readyBy, sentTurn, sentWhileBlocked };
+}

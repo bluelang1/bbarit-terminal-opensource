@@ -129,28 +129,51 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 
 - **순수 로직**: `src/terminal/agentRelay.ts`(+ `agentRelay.test.ts`). 브리프·노트 포맷, 전이
   필터(`decideAgentNote`/`decideExitNote`), 부모별 대기열(`enqueueNote`/`flushNotes`/
-  `requeueFront`/`dropParent`), 끝남 판정(`isAgentSettled`). App 은 상태와 게이트 연결만 한다.
+  `requeueFront`/`dropParent`), 끝남 판정(`agentSettledBy`), 준비·주입(`runAgentBrief`), 부모 판정(`parentAcceptsNotes`). App 은 상태와 게이트 연결만 한다.
 - **`from` 표시**: `<id> <name>`(이름이 없으면 id). 문서 예시 `t3 reviewer` 와 같은 모양이다.
   `reach`·`agent send`·`term read` 에는 항상 터미널 id 를 쓴다(이름은 겹칠 수 있다).
 - **`agentLinks` 위치**: 렌더에 쓰지 않으므로 App 의 `useRef<Map>` 에 둔다(영속 안 함).
   caller 없는 `agent.run` 도 `parentId: ''` 항목을 둔다 — wait 판정용 주입 기록만 하고 노트·
   `agent.list` 대상은 아니다. 닫힌 자식, 부모가 닫힌 링크, 사라진 부모의 대기열은 `projects`
   변경 때 버린다(자식 탭은 그대로).
-- **준비 판정**: 300 ms 간격으로 7501 `idle`(→ 300 ms 뒤 주입) 또는 `isTerminalAgentUiReady`
-  (환영 문구, 입력창이 그려질 시간으로 1.5 s 뒤 주입). 60 s 가 지나면 그냥 주입한다. 셸 자식은
-  여러 줄 브리프가 명령으로 실행되므로 프롬프트만 넣는다. 주입이 거부되면 `agent.status` 의
-  `error` 로 보이고 ctl 은 종료 코드 1.
-- **끝남(`settled`) 판정**: App 이 `agent.status` 에 넣고 ctl 은 any/all 만 본다. 종료됐거나,
-  blocked 거나, 마지막 입력(브리프·`agent.send`) 이후 7501 턴이 넘어가 done/idle 이면 끝.
-  `done` 은 다음 working 까지 남으므로 턴 비교가 필요하다. blocked 인 자식에 답을 보낸 직후의
-  같은 턴 blocked 는 아직 처리 전으로 본다. 7501 이 없는 자식(셸 등)은 입력 뒤 5 s 이상 출력이
-  없으면 끝으로 본다(긴 무출력 명령은 오판할 수 있다). 링크 없는 `--id` 는 exited/blocked/done.
-- **노트 세부**: 브리프 주입 전(`pending`)의 done 은 무시한다(시작 직후 보고). "마지막 3 줄" 은 글자·숫자가
-  없는 줄(TUI 입력창 테두리 등)을 건너뛴다. blocked 본문은
-  7501 `msg`, 없으면 마지막 3 줄. 종료 노트는 `state="exited"`. 노트·대기열 전달은 부모가 7501
-  을 보고하고 blocked 가 아닐 때만 하고, 게이트가 `typing`/`no-writer`/`cancelled` 로 거부하면
-  5 s 뒤 다시, `blocked` 면 부모의 다음 비-blocked 상태 보고 때 다시 보낸다. 본문 안의
-  `</bbarit` 는 `‹/bbarit` 로 바꾼다. 게이트 출처는 `'agent'`(`AutoInputSource` 에 추가).
+- **자식 위치**: caller 가 있으면 caller 탭이 있는 프로젝트에, cwd 는 `workDir` || caller 의
+  `lastWorkDir` || 그 프로젝트 폴더로 만들고 포커스를 옮기지 않는다(`addTerminal` 에
+  `projectId`·`activate` 옵션 추가, 기존 호출은 그대로). caller 가 없으면 예전처럼 활성
+  프로젝트에 만들고 활성화한다.
+- **준비 판정**(`runAgentBrief`, 의존성 주입으로 테스트): 300 ms 간격, 첫 검사는 첫 sleep 뒤다.
+  addTerminal 직후에는 탭이 `projectsRef` 에 아직 없으므로 2 s 동안은 "사라짐" 으로 보지 않는다.
+  60 s 시계는 PTY 가 뜬 때부터 잰다(다른 프로젝트에 만든 탭은 그 프로젝트를 볼 때 마운트된다,
+  최대 10 분). 7501 `idle` → 300 ms 뒤, `isTerminalAgentUiReady`(환영 문구) → 1.5 s 뒤 주입.
+  시간이 지나면 셸 자식은 프롬프트만 넣고, 에이전트 자식은 **넣지 않는다**(맨 셸일 수 있다) —
+  `agent.status` 의 `error: "agent not ready"`, ctl 종료 코드 1. 게이트 거부도 `error` 로 보인다.
+  셸 자식에는 여러 줄 브리프 없이 프롬프트만 넣는다.
+- **브리프 문구**: 막히면 보고, 끝났을 때는 부모 프롬프트가 보고를 요구할 때만 보고하라고 쓴다.
+- **끝남(`settled`) 판정**(`agentSettledBy`): App 이 `agent.status` 에 넣고 ctl 은 any/all 만
+  본다. 종료됐거나, blocked 거나, 마지막 입력(브리프·`agent.send`) 이후 7501 턴이 넘어가
+  done/idle 이면 끝. `done` 은 다음 working 까지 남으므로 턴 비교가 필요하다. blocked 인 자식에
+  답을 보낸 직후의 같은 턴 blocked 는 아직 처리 전으로 본다. 7501 이 없는 자식은 마지막 입력과
+  마지막 출력 뒤 30 s 가 지나야 끝이고, 셸은 프롬프트가 다시 보여야 한다
+  (`looksLikePlainShellPrompt`). 이 추정은 `settledBy: "quiet"` 로 표시하고 ctl 표에
+  `yes (quiet-heuristic)` 로 보인다. 링크 없는 `--id` 는 exited/blocked/done.
+- **노트 받는 부모**: 부모 탭 `cliType` 이 `shell` 이 아니고, 7501 롤업이 working/blocked/done 이며
+  마지막 보고가 30 분 안일 때만 쌓는다(`parentAcceptsNotes`). idle·보고 없음·오래된 보고는
+  에이전트가 떠나 셸만 남았을 수 있어 버린다.
+- **노트 세부**: 브리프 주입 전(`pending`)의 done 은 무시한다(시작 직후 보고). "마지막 3 줄" 은
+  글자·숫자가 없는 줄(TUI 입력창 테두리 등)을 건너뛴다. blocked 본문은 7501 `msg`, 없으면
+  마지막 3 줄. 종료 노트는 `state="exited"`. 본문과 이름의 셸 메타문자
+  `` ` $ ; | & < > \ `` 는 비슷한 모양의 안전한 글자(ˋ ＄ ； ｜ ＆ ‹ › ＼)로 바꾼다(`</bbarit` 위조도
+  막힌다). 자식이 같은 턴에 `agent send` 로 부모에게 직접 보고했으면 그 턴의 done 노트는
+  보내지 않는다(`lastSendTurn`: 보고가 working 중이면 턴+1, working 을 떠날 때 턴이 오르므로).
+  게이트가 `typing`/`no-writer`/`cancelled` 로 거부하면 5 s 뒤 다시, `blocked` 면 부모의 다음
+  비-blocked 상태 보고 때 다시 보낸다. 게이트 출처는 `'agent'`(`AutoInputSource` 에 추가).
+- **PTY 종료 신호**: `pty-exit` 이벤트는 `mod` 트리 밖인 `pty.rs` 에서만 나와 실제로 오지 않는다.
+  main.rs 의 리더 스레드가 끝나면 채널 송신단이 사라져 `read_from_pty` 가 출력을 다 준 뒤
+  `PTY disconnected` 를 돌려준다. XTerminal 이 이 에러를 받으면 7501 working/blocked 를 버리고
+  `octo-pty-exited`(`PTY_EXITED_EVENT`, detail `{ terminalId }`)를 한 번 보낸다(새 출력이 오면
+  다시 보낼 수 있게 초기화). App 은 이 이벤트로 종료 노트를 만든다. 셸 안의 에이전트만 끝나면
+  PTY 는 살아 있으므로 종료 노트는 없다(7501 done 이 대신한다).
+- **게이트웨이 비서**: `agent.run`/`agent.send` 는 `SECRETARY_ALLOWED_CMDS` 에 없고, 그대로
+  거부되는지 `agent_gateway.rs` 테스트(`secretary_commands_deny_shell_reach`)가 고정한다.
 - **`BBARIT_CTL` 경로**: setup 에서 한 번 계산해 `OnceLock` 에 둔다(`init_bbarit_ctl_path`).
   debug 빌드는 리포 `scripts/` 를, release 는 번들 리소스(`<resource>/_up_/scripts/`)를 먼저
   찾는다. `cmd.env("BBARIT_CTL", …)` 는 두 빌더 모두 `BBARIT_TERM_SCOPE` 바로 다음 줄이다.
@@ -163,6 +186,8 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 
 ### 알려진 한계
 
-- 자식은 caller 의 프로젝트가 아니라 **활성 프로젝트**에 열리고, 새 탭이 활성 탭이 된다.
+- caller 가 활성 프로젝트가 아닌 프로젝트에 있으면 자식은 그 프로젝트를 화면에 띄울 때까지
+  시작되지 않는다(터미널은 활성 프로젝트 것만 마운트된다). 10 분이 지나면 `agent not ready`.
+- 7501 없는 자식의 끝남은 30 s 무출력 추정이라 긴 무출력 작업을 오판할 수 있다.
 - 실기 확인(macOS 개발 빌드)은 하지 않았다. 단위 테스트, build, lint, `--audit`,
-  `check:bundled-scripts`, `cargo check` 만 통과.
+  `check:bundled-scripts`, `cargo test` 만 통과.

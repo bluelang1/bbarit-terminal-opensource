@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   agentExitCode,
+  agentRow,
   bridgePortCandidates,
   evaluateAgentWait,
   mcpPortFromEnv,
@@ -73,4 +74,11 @@ test('BBARIT_BRIDGE_PORT maps to the mcp-bridge port and is tried first', () => 
   assert.equal(order[1], 9323);
   assert.deepEqual(bridgePortCandidates(9323, 9330).slice(0, 2), [9330, 9323]);
   assert.equal(bridgePortCandidates().length, 101);
+});
+
+test('agentRow marks quiet-heuristic settles', () => {
+  assert.equal(agentRow({ ...done }).settled, 'yes');
+  assert.equal(agentRow({ ...done, state: 'idle', settledBy: 'quiet' }).settled, 'yes (quiet-heuristic)');
+  assert.equal(agentRow(working).settled, '-');
+  assert.equal(agentRow(blocked).state, 'blocked:question');
 });

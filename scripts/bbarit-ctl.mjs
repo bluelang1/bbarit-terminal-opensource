@@ -306,10 +306,12 @@ bbarit-ctl agent — delegate work to another agent tab and get the result back
 Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs node)
 
   agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>=600]
-      Open a new tab running <cliType> (claude|codex|gemini|…|shell) in the active
-      project and type <prompt> once the agent is ready. The child is told which tab
-      started it and how to report back. Without --bg it waits until the child is done,
-      blocked or exited, then prints its state and last 12 lines.
+      Open a background tab running <cliType> (claude|codex|gemini|…|shell) in this
+      tab's project (cwd: --workdir, else this tab's cwd) and type <prompt> once the agent
+      is ready (if it is not ready within 60 s the prompt is NOT typed: error "agent not
+      ready"). The child is told which tab started it and to report back when stuck (and
+      when done if your prompt asks for a report). Without --bg it waits until the child
+      is done, blocked or exited, then prints its state and last 12 lines.
       Exit code: 0 done/exited · 2 blocked (child needs an answer) · 3 timed out · 1 error.
       --bg prints the new terminalId and returns at once.
   agent send <terminalId> <text…> [--force]
@@ -319,6 +321,8 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
   agent wait [--id <terminalId> | --children any|all] [--timeout <s>=600]
       Poll every 2 s until one child (any) / every child (all, default) of this tab — or
       the one --id — is done, blocked or exited. Prints the states (--json for JSON).
+      A child without OSC 7501 status counts as done after 30 s of silence (a shell only
+      once its prompt is back), shown as "yes (quiet-heuristic)".
       Exit code: 0 · 2 if a child is blocked · 3 timed out.
   agent status [terminalId]
       State (working|blocked|done|idle), kind, exited, settled and the last 12 lines —
@@ -329,8 +333,9 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
 Caller  BBARIT_TERMINAL_ID (set in every BBARIT tab) is sent as the caller; outside a tab
         pass --caller <terminalId>. Children link to their caller's tab.
 
-Notes from children (typed into this tab automatically — only tabs whose agent reports
-OSC 7501 status, e.g. Claude Code; plain shells get none, use agent wait):
+Notes from children (typed into this tab automatically — only agent tabs whose agent
+reported OSC 7501 working/blocked/done in the last 30 min, e.g. Claude Code; plain shells
+get none, use agent wait). Shell metacharacters in note bodies are replaced by look-alikes:
   <bbarit from="<id> <name>" state="done" turn="2">last lines… — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
   <bbarit from="<id> <name>" state="blocked" kind="question">question… — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>
   <bbarit from="<id> <name>" state="exited">last lines… — 전체: …</bbarit>
@@ -406,18 +411,20 @@ function pickBoolFrom(list, name) {
   return true;
 }
 
+/** Table row for one agent. A settle guessed from 30 s of silence (no OSC 7501) is marked. */
+export function agentRow(a) {
+  return {
+    ...a,
+    state: a.state === 'blocked' && a.kind ? `blocked:${a.kind}` : a.state,
+    exited: a.exited ? 'yes' : '-',
+    settled: a.settled ? (a.settledBy === 'quiet' ? 'yes (quiet-heuristic)' : 'yes') : '-',
+  };
+}
+
 function printAgents(agents, withLines) {
   if (flags.json) { console.log(JSON.stringify(agents, null, 2)); return; }
   if (!agents.length) { console.log('(no child agents)'); return; }
-  table(
-    agents.map((a) => ({
-      ...a,
-      state: a.state === 'blocked' && a.kind ? `blocked:${a.kind}` : a.state,
-      exited: a.exited ? 'yes' : '-',
-      settled: a.settled ? 'yes' : '-',
-    })),
-    ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited'],
-  );
+  table(agents.map(agentRow), ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited']);
   for (const a of agents) {
     if (a.error) console.log(`\n✗ ${a.terminalId}: ${a.error}`);
     if (a.state === 'blocked' && a.msg) console.log(`\n? ${a.terminalId} asks: ${a.msg}`);
