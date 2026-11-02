@@ -140,6 +140,10 @@ struct PtyInstance {
     /// ("no output for N ms") as a model-agnostic readiness / turn-complete signal,
     /// instead of fragile banner/prompt regex. Exposed via `pty_idle_ms`.
     last_output_at: Arc<Mutex<std::time::Instant>>,
+    /// `BBARIT_TERM_SCOPE` value planted in this PTY's env. Processes that inherited it
+    /// (even ones that escaped the process tree via setsid/nohup) are swept on close.
+    /// docs/TERMINAL_SCOPE_SWEEP.md
+    scope_token: String,
 }
 
 struct AppState {
@@ -3450,6 +3454,10 @@ fn create_shell(
     cmd.env("GIT_PAGER", "cat");
     cmd.env("GH_PAGER", "cat");
 
+    // Per-terminal scope token; close_pty sweeps every process that still carries it.
+    let scope_token = new_scope_token();
+    cmd.env(SCOPE_ENV, &scope_token);
+
     // ssh forwards TERM to the remote shell, so prefer a widely-supported value there.
     #[cfg(target_os = "windows")]
     cmd.env(
@@ -3569,6 +3577,7 @@ fn create_shell(
         alive,
         output_buffer,
         last_output_at,
+        scope_token,
     };
 
     state.ptys.lock().unwrap().insert(terminal_id, instance);
@@ -3713,6 +3722,271 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
+// ─── Terminal scope-token sweep (docs/TERMINAL_SCOPE_SWEEP.md) ───
+// Every PTY gets `BBARIT_TERM_SCOPE=<unix_ms>-<8 hex>`. Env vars are inherited, so a process
+// that escaped the tree (setsid/nohup/disown, reparented to launchd/init) still carries the
+// token; close_pty and app exit kill every process with an exact match. Opt out with
+// `env -u BBARIT_TERM_SCOPE <cmd>`.
+const SCOPE_ENV: &str = "BBARIT_TERM_SCOPE";
+/// Overall cap for the sweep on app exit.
+const EXIT_SWEEP_CAP: Duration = Duration::from_secs(2);
+
+fn new_scope_token() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    format!("{}-{:08x}", ms, rand::random::<u32>())
+}
+
+/// Millisecond timestamp of a well-formed token, or None (an invalid token must never sweep).
+fn parse_scope_token_ms(token: &str) -> Option<u64> {
+    let (ms, hex) = token.split_once('-')?;
+    if ms.is_empty() || !ms.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if hex.len() != 8 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    ms.parse::<u64>().ok()
+}
+
+/// True only for the exact entry `BBARIT_TERM_SCOPE=<token>` (no prefix/suffix matches).
+fn scope_env_matches(entry: &str, token: &str) -> bool {
+    entry
+        .strip_prefix(SCOPE_ENV)
+        .and_then(|rest| rest.strip_prefix('='))
+        .is_some_and(|value| value == token)
+}
+
+/// Pids (other than ours and `skip`) whose environ carries one of `tokens` and that started
+/// no earlier than that token's second. Unreadable environs (other users, some Windows
+/// processes) are empty and therefore skipped.
+fn scope_sweep_targets(tokens: &[&str], skip: &[u32]) -> Vec<u32> {
+    let valid: Vec<(&str, u64)> = tokens
+        .iter()
+        .filter_map(|t| parse_scope_token_ms(t).map(|ms| (*t, ms / 1000)))
+        .collect();
+    if valid.is_empty() {
+        return Vec::new();
+    }
+    let self_pid = std::process::id();
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::Always),
+    );
+    let mut targets = Vec::new();
+    for (pid, process) in sys.processes() {
+        let pid = pid.as_u32();
+        if pid == 0 || pid == self_pid || skip.contains(&pid) {
+            continue;
+        }
+        let hit = process.environ().iter().find_map(|entry| {
+            let entry = entry.to_str()?;
+            valid
+                .iter()
+                .find(|(token, _)| scope_env_matches(entry, token))
+                .map(|(_, token_secs)| *token_secs)
+        });
+        // Started before the token existed → copied the env from elsewhere; leave it alone.
+        if let Some(token_secs) = hit {
+            if process.start_time() >= token_secs {
+                targets.push(pid);
+            }
+        }
+    }
+    targets
+}
+
+/// TERM, then KILL after 300 ms whatever is still alive (Windows: kill once). Best-effort.
+fn terminate_pids(pids: &[u32]) {
+    if pids.is_empty() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        for &pid in pids {
+            // SAFETY: plain kill(2) on a positive pid; failure (ESRCH/EPERM) is ignored.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        for &pid in pids {
+            // SAFETY: as above; signal 0 only probes for existence.
+            unsafe {
+                if libc::kill(pid as libc::pid_t, 0) == 0 {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let mut sys = System::new();
+        let list: Vec<Pid> = pids.iter().map(|p| Pid::from_u32(*p)).collect();
+        sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&list), true);
+        for pid in &list {
+            if let Some(process) = sys.process(*pid) {
+                let _ = process.kill();
+            }
+        }
+    }
+}
+
+/// Kill every process carrying any of `tokens`. Returns how many pids were signalled.
+fn sweep_scopes(tokens: &[&str], skip: &[u32]) -> usize {
+    let targets = scope_sweep_targets(tokens, skip);
+    terminate_pids(&targets);
+    if !targets.is_empty() {
+        safe_eprintln!("[scope-sweep] killed {} process(es): {:?}", targets.len(), targets);
+    }
+    targets.len()
+}
+
+fn sweep_scope(token: &str, skip: &[u32]) -> usize {
+    sweep_scopes(&[token], skip)
+}
+
+/// On app exit, sweep every open PTY's token in one pass, capped at EXIT_SWEEP_CAP.
+fn sweep_all_scopes_on_exit(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let tokens: Vec<String> = match state.ptys.lock() {
+        Ok(ptys) => ptys.values().map(|p| p.scope_token.clone()).collect(),
+        Err(_) => return,
+    };
+    if tokens.is_empty() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let refs: Vec<&str> = tokens.iter().map(String::as_str).collect();
+        sweep_scopes(&refs, &[]);
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(EXIT_SWEEP_CAP);
+}
+
+#[cfg(test)]
+mod scope_sweep_tests {
+    use super::{new_scope_token, parse_scope_token_ms, scope_env_matches};
+
+    #[test]
+    fn new_token_is_ms_dash_8_hex_and_parses() {
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let token = new_scope_token();
+        let (ms, hex) = token.split_once('-').unwrap();
+        assert_eq!(hex.len(), 8);
+        assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
+        let parsed = parse_scope_token_ms(&token).unwrap();
+        assert_eq!(parsed.to_string(), ms);
+        assert!(parsed >= before && parsed < before + 60_000);
+        assert_ne!(new_scope_token(), new_scope_token());
+    }
+
+    #[test]
+    fn parse_rejects_malformed_tokens() {
+        assert_eq!(parse_scope_token_ms("1793700000000-9f3a1c2e"), Some(1_793_700_000_000));
+        for bad in [
+            "",
+            "-",
+            "1793700000000",
+            "1793700000000-",
+            "-9f3a1c2e",
+            "1793700000000-9f3a1c2",
+            "1793700000000-9f3a1c2e0",
+            "1793700000000-9f3a1c2g",
+            "17937x0000000-9f3a1c2e",
+            "+1793700000000-9f3a1c2e",
+            "1793700000000-9f3a-1c2",
+        ] {
+            assert_eq!(parse_scope_token_ms(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn env_match_is_exact_only() {
+        let t = "1793700000000-9f3a1c2e";
+        assert!(scope_env_matches("BBARIT_TERM_SCOPE=1793700000000-9f3a1c2e", t));
+        // prefix / suffix / other-var / empty-token cases must not match
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE=1793700000000-9f3a1c2e0", t));
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE=1793700000000-9f3a1c2", t));
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE_X=1793700000000-9f3a1c2e", t));
+        assert!(!scope_env_matches("XBBARIT_TERM_SCOPE=1793700000000-9f3a1c2e", t));
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE 1793700000000-9f3a1c2e", t));
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE=", t));
+        assert!(!scope_env_matches("BBARIT_TERM_SCOPE=1793700000000-9f3a1c2e", ""));
+    }
+
+    #[test]
+    fn invalid_token_sweeps_nothing() {
+        assert_eq!(super::sweep_scope("", &[]), 0);
+        assert_eq!(super::sweep_scope("not-a-token", &[]), 0);
+    }
+
+    /// Victim body for the sweep test: idles only when spawned by it (env set), else no-op.
+    #[test]
+    fn scope_sweep_sleeper() {
+        if std::env::var_os("BBARIT_SCOPE_SWEEP_SLEEPER").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    }
+
+    // The victim is this test binary itself, not `sh -c 'sleep 30'`: macOS hides the environ of
+    // Apple platform binaries (/bin/sh, /bin/sleep) from other processes, so the sweep cannot
+    // see them there. Non-platform binaries (node, python, cargo-built ones) are visible.
+    #[cfg(unix)]
+    #[test]
+    fn sweep_scope_kills_detached_child_with_token() {
+        use std::process::{Child, Command, Stdio};
+        use std::time::{Duration, Instant};
+        fn spawn_sleeper(token: &str) -> Child {
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "scope_sweep_tests::scope_sweep_sleeper", "--test-threads=1"])
+                .env("BBARIT_SCOPE_SWEEP_SLEEPER", "1")
+                .env(super::SCOPE_ENV, token)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn sleeper")
+        }
+        let token = new_scope_token();
+        let other = new_scope_token();
+        let mut victim = spawn_sleeper(&token);
+        let mut bystander = spawn_sleeper(&other);
+        // Let exec settle so the kernel exposes the new process's environ.
+        std::thread::sleep(Duration::from_millis(300));
+        let killed = super::sweep_scope(&token, &[]);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = victim.try_wait().unwrap() {
+                break Some(status);
+            }
+            if Instant::now() > deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let bystander_alive = bystander.try_wait().unwrap().is_none();
+        let _ = victim.kill();
+        let _ = bystander.kill();
+        let _ = victim.wait();
+        let _ = bystander.wait();
+        assert!(killed >= 1, "expected sweep to kill the victim, killed={killed}");
+        let status = status.expect("victim still running after sweep");
+        assert!(!status.success(), "victim should die by signal: {status:?}");
+        assert!(bystander_alive, "a different token must not be swept");
+    }
+}
+
 #[tauri::command]
 fn close_pty(state: State<'_, AppState>, terminal_id: String) -> Result<(), String> {
     if let Some(mut instance) = state.ptys.lock().unwrap().remove(&terminal_id) {
@@ -3726,6 +4000,9 @@ fn close_pty(state: State<'_, AppState>, terminal_id: String) -> Result<(), Stri
             }
             let _ = instance.child.kill();
             let _ = instance.child.wait();
+            // Safety net for processes that left the tree (setsid/nohup/disown, reparented
+            // to launchd/init) but still carry this terminal's scope token.
+            sweep_scope(&instance.scope_token, &[]);
         });
     }
     Ok(())
@@ -4504,6 +4781,10 @@ fn create_cli_shell(
     cmd.env("GIT_PAGER", "cat");
     cmd.env("GH_PAGER", "cat");
 
+    // Per-terminal scope token; close_pty sweeps every process that still carries it.
+    let scope_token = new_scope_token();
+    cmd.env(SCOPE_ENV, &scope_token);
+
     #[cfg(target_os = "windows")]
     if cli_command.is_none() {
         configure_windows_pty_encoding(&mut cmd, effective_shell_type, false);
@@ -4619,6 +4900,7 @@ fn create_cli_shell(
         alive,
         output_buffer,
         last_output_at,
+        scope_token,
     };
 
     state.ptys.lock().unwrap().insert(terminal_id, instance);
@@ -10233,6 +10515,7 @@ fn main() {
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
                 agent_rpc_stop_all();
+                sweep_all_scopes_on_exit(_app_handle);
             }
         });
 }
