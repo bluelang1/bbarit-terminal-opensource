@@ -27,8 +27,8 @@ npm run ctl -- menu        # full menu
 | `--port <n>` | Target port (installed build: `9223`) |
 | `--json` | Raw JSON instead of human tables |
 | `--window <label>` | Target window label (default `main`) |
-| `--timeout <ms>` | Response timeout (default 20000; 40000 for `term write`) |
-| `--force` | `term write`: send even while the agent waits for approval (OSC 7501 `blocked`) |
+| `--timeout <ms>` | Response timeout (default 20000; 40000 for `term write` / `agent send`). For `agent run` / `agent wait` it is the total wait in seconds |
+| `--force` | `term write` / `agent send`: send even while the agent waits for approval (OSC 7501 `blocked`) |
 
 ---
 
@@ -155,6 +155,63 @@ long-lived daemons are never swept even with the token (case-insensitive name ma
 ID=$(npm run ctl --silent -- --json term create shell | python3 -c "import sys,json;print(json.load(sys.stdin)['terminalId'])")
 npm run ctl -- term write --id "$ID" "npm run build"
 sleep 60 && npm run ctl -- term read 30 --id "$ID"
+```
+
+---
+
+### ■ Agent relay (one agent delegates to another)
+
+An agent running in a BBARIT tab can open another agent tab, hand it a task, and get
+the result back — design in [AGENT_RELAY.md](AGENT_RELAY.md). Every PTY gets
+`BBARIT_CTL` (absolute path of this CLI: `scripts/bbarit-ctl.mjs` in a dev build, the
+bundled resource in an installed build), so inside a tab call it as
+`node "$BBARIT_CTL" agent …` (requires `node`). `BBARIT_TERMINAL_ID` (the calling tab,
+sent as `caller`) and `BBARIT_BRIDGE_PORT` (19980 installed → mcp-bridge 9223, 19981
+dev → 9323, tried before the port scan) are read when present; outside a tab pass
+`--caller <terminalId>`. For `agent run`/`agent wait`, `--timeout` is the total wait in
+**seconds** (default 600); each request keeps the 20 s response timeout.
+`node "$BBARIT_CTL" agent --help` prints the full guide; the bundled Claude skill
+`bbarit-agents` (installed to `~/.claude/skills`) teaches the same to Claude Code.
+
+#### `agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]`
+`agent.run`: new terminal in the active project; once the agent is ready (OSC 7501
+`idle` or its welcome screen, max 60 s) the prompt is typed through the input gate,
+prefixed with a `<bbarit from="<caller>" reach="…">` block telling the child how to
+report back (shell children get the prompt alone). Waits by default — polls
+`agent.status` every 2 s until the child is done, blocked or exited, then prints its
+state and last 12 lines. Exit code `0` done/exited, `2` blocked, `3` timeout, `1`
+error. `--bg` prints the terminalId and returns.
+
+#### `agent send <terminalId> <text…> [--force]`
+`agent.send`: type `<text>` + Enter, wrapped as `<bbarit from="<caller>">…</bbarit>` when
+a caller is known. Same gate and refusals as `term write` (`--force` to answer a
+blocked agent); waits up to 40 s by default.
+
+#### `agent wait [--id <terminalId> | --children any|all] [--timeout <s>]`
+Client-side: polls `agent.status` every 2 s until the one terminal, any child, or all
+children (default) of the caller are settled. Exit code `0`, `2` if a child is blocked,
+`3` on timeout.
+
+#### `agent status [terminalId]` / `agent list`
+`agent.status` / `agent.list`: one terminal, or every child of the caller — `state`
+(7501 rollup, or `working`/`idle` from output activity), `kind`/`msg` when blocked,
+`exited`, `settled` (finished since the last message it was sent), `turn`, and for
+status the last 12 lines.
+
+**Notes typed into the parent tab** (only when the parent's agent reports OSC 7501;
+blocked, done and exit, once per turn; held while the parent itself is blocked):
+```text
+<bbarit from="<id> <name>" state="done" turn="2">last 3 lines — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
+<bbarit from="<id> <name>" state="blocked" kind="question">question — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>
+<bbarit from="<id> <name>" state="exited">last 3 lines — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
+```
+
+**Example — parallel reviewers from a Claude tab:**
+```bash
+node "$BBARIT_CTL" agent run claude "Review the diff on this branch for bugs. Reply with a list." --bg --name reviewer
+node "$BBARIT_CTL" agent run codex "Run npm test and report failures." --bg --name tester
+node "$BBARIT_CTL" agent wait --children all --timeout 900
+node "$BBARIT_CTL" agent status
 ```
 
 ---
