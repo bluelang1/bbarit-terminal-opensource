@@ -20,6 +20,8 @@ import { WebglAddon } from 'xterm-addon-webgl';
 import { SearchAddon, type ISearchResultChangeEvent } from '@xterm/addon-search';
 import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
+import { writePasteChunked } from './terminal/pasteChunks';
+import { disposeInputGate, setInputGateHost, writeHumanInput } from './terminal/inputGate';
 import {
   createProgramStatusStore,
   dropTransientProgramStatus,
@@ -347,6 +349,19 @@ const dropProgramStatusOnExit = (terminalId: string) => {
   const next = rollupAgentState(store);
   if (prev !== next) dispatchAgentStatus(terminalId, store);
 };
+/** 이 터미널의 현재 7501 에이전트 상태. 보고가 없으면 undefined. */
+export const getTerminalAgentState = (terminalId: string) => {
+  const store = terminalStates.get(terminalId)?.programStatus;
+  return store?.reported ? rollupAgentState(store) : undefined;
+};
+
+// 자동 입력 게이트(docs/AGENT_INPUT_GATE.md)가 마운트된 터미널의 writer·상태·paste 모드를 읽는다.
+setInputGateHost({
+  getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
+  getAgentState: getTerminalAgentState,
+  isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
 // dev 전용 노출 — dev:screen js로 스크롤 핀 등 터미널 상태를 실측하기 위함
 if (import.meta.env.DEV) (window as unknown as Record<string, unknown>).__octoTerminalStates = terminalStates;
 
@@ -712,51 +727,7 @@ const parsePastedImagePathList = (text: string): string[] => {
   return lines;
 };
 
-// Bracketed paste mode: wrap pasted text with escape sequences so shells (bash, zsh, fish)
-// handle multi-line paste correctly instead of executing each line immediately.
-const BRACKETED_PASTE_START = '\x1b[200~';
-const BRACKETED_PASTE_END = '\x1b[201~';
-
-// Write large paste data in chunks to avoid shell buffer overflow.
-// Most terminal PTY buffers handle ~4KB at a time reliably.
-const PASTE_CHUNK_SIZE = 4096;
-const PASTE_CHUNK_DELAY_MS = 5;
-
-async function writePasteChunked(
-  writeFn: (data: string) => void,
-  text: string,
-  useBracketedPaste = true,
-) {
-  if (!text) return;
-  if (useBracketedPaste) {
-    writeFn(BRACKETED_PASTE_START);
-    await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-  }
-
-  if (text.length <= PASTE_CHUNK_SIZE) {
-    writeFn(text);
-  } else {
-    for (let i = 0; i < text.length; ) {
-      let end = Math.min(i + PASTE_CHUNK_SIZE, text.length);
-      // 서로게이트 페어(이모지 등) 한가운데서 자르면 IPC 직렬화에서 U+FFFD로 깨진다.
-      if (end < text.length) {
-        const c = text.charCodeAt(end - 1);
-        if (c >= 0xd800 && c <= 0xdbff) end -= 1;
-      }
-      writeFn(text.slice(i, end));
-      i = end;
-      await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-    }
-  }
-
-  // Do not append the bracketed-paste terminator in the same event-loop turn as
-  // the final payload chunk. Some PTY/WebView backends coalesce fast writes and
-  // interactive terminal apps can consume the end marker before the last bytes,
-  // which made the tail of pasted Korean/long text disappear.
-  await new Promise(r => setTimeout(r, PASTE_CHUNK_DELAY_MS));
-
-  if (useBracketedPaste) writeFn(BRACKETED_PASTE_END);
-}
+// Bracketed paste + chunking live in terminal/pasteChunks.ts (shared with the auto-input gate).
 
 const capTail = (text: string, maxChars: number) => (
   text.length > maxChars ? text.slice(-maxChars) : text
@@ -1091,6 +1062,7 @@ export { _stopReadLoop as stopReadLoop };
 
 // Fully dispose terminal (free memory)
 const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
+  if (closePty) disposeInputGate(terminalId);
   // Process asynchronously to avoid conflicts with React rendering
   setTimeout(() => {
     _stopReadLoop(terminalId);
@@ -1801,10 +1773,17 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try { st.term?.scrollToBottom(); } catch { /* ignore */ }
       }, 150);
     }
-    st?.writeToPty?.(data);
+    // 사람 입력 시각 기록 + 자동 입력 중이면 보류(Ctrl-C 제외) — terminal/inputGate.ts
+    if (st?.writeToPty) writeHumanInput(terminalId, data, st.writeToPty);
     enqueueTelegramCommandFromKeystrokes(terminalId, data);
     enqueueSlackCommandFromKeystrokes(terminalId, data);
   }, [terminalId, skills, onRunSkill, cliType, workDir]);
+
+  // IME 입력 막대·붙여넣기 이벤트 경로의 사람 입력(sendToPty 를 거치지 않는 곳).
+  const writeHumanToPty = useCallback((data: string) => {
+    const w = writeToPtyRef.current;
+    if (w) writeHumanInput(terminalId, data, w);
+  }, [terminalId]);
 
   // Native OS file drop routed from App.tsx (getCurrentWebview().onDragDropEvent).
   // The drop is matched to this terminal by id; we insert the real file paths.
@@ -5477,9 +5456,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const insertAttachmentPath = (filePath: string) => {
         if (!writeToPtyRef.current) return;
         if (isBbaritAgentCli(cliType)) {
-          writeToPtyRef.current(bbaritImageToken(filePath));
+          writeHumanToPty(bbaritImageToken(filePath));
         } else {
-          writeToPtyRef.current(submitDroppedPaths([filePath]));
+          writeHumanToPty(submitDroppedPaths([filePath]));
         }
       };
       const saveAndInsertClipboardImage = async (base64: string, extension = 'png') => {
@@ -5496,13 +5475,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const pastedImagePaths = isBbaritAgentCli(cliType) ? parsePastedImagePathList(textPlain) : [];
       if (pastedImagePaths.length > 0 && writeToPtyRef.current) {
         e.preventDefault();
-        writeToPtyRef.current(pastedImagePaths.map(bbaritImageToken).join(''));
+        writeHumanToPty(pastedImagePaths.map(bbaritImageToken).join(''));
         return;
       }
       if (textPlain && writeToPtyRef.current) {
         e.preventDefault();
         const normalized = normalizeInputNewlines(textPlain);
-        void writePasteChunked(writeToPtyRef.current, normalized);
+        void writePasteChunked(writeHumanToPty, normalized);
         return;
       }
 
@@ -5514,7 +5493,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         const converted = htmlClipboardToText(textHtml);
         if (converted) {
           e.preventDefault();
-          void writePasteChunked(writeToPtyRef.current, normalizeInputNewlines(converted));
+          void writePasteChunked(writeHumanToPty, normalizeInputNewlines(converted));
           return;
         }
       }
@@ -5528,9 +5507,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (filePaths && filePaths.length > 0) {
             e.preventDefault();
             if (isBbaritAgentCli(cliType) && filePaths.every(isImagePath)) {
-              writeToPtyRef.current(filePaths.map(bbaritImageToken).join(''));
+              writeHumanToPty(filePaths.map(bbaritImageToken).join(''));
             } else {
-              writeToPtyRef.current(submitDroppedPaths(filePaths));
+              writeHumanToPty(submitDroppedPaths(filePaths));
             }
             return;
           }
@@ -5681,7 +5660,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // ESC 키는 바로 전송
       if (e.key === 'Escape' && writeToPtyRef.current) {
         e.preventDefault();
-        writeToPtyRef.current('\x1b');
+        writeHumanToPty('\x1b');
         return;
       }
 
@@ -5696,7 +5675,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         if (writeToPtyRef.current) {
           e.preventDefault();
           e.stopImmediatePropagation();
-          writeToPtyRef.current('\x0d');
+          writeHumanToPty('\x0d');
         }
         return;
       }
@@ -5716,7 +5695,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
   // Zed 스타일 키보드 이벤트 처리
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    const writeToPty = writeToPtyRef.current;
+    const writeToPty = writeToPtyRef.current ? writeHumanToPty : null;
     const submitLine = (value: string) => {
       const v = value ?? '';
       // Skill detection: /skillId, /skillName, or $skillId (Codex)
@@ -5744,7 +5723,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         const handled = await tryRunOctoCommand(v);
         if (handled) return;
         if (writeToPtyRef.current) {
-          writeToPtyRef.current(v + '\x0d');
+          writeHumanToPty(v + '\x0d');
         }
       })();
     };
@@ -5996,7 +5975,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     try {
       const text = await readClipboardTextSafe();
       if (text && writeToPtyRef.current) {
-        writeToPtyRef.current(normalizeInputNewlines(text));
+        writeHumanToPty(normalizeInputNewlines(text));
       }
     } catch { /* ignore */ }
     setCtxMenu(null);
@@ -6025,7 +6004,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // without executing it (the user presses Enter to run).
   const ctxInsertQuickCommand = useCallback((command: string) => {
     if (command && writeToPtyRef.current) {
-      writeToPtyRef.current(normalizeInputNewlines(command));
+      writeHumanToPty(normalizeInputNewlines(command));
     }
     setCtxMenu(null);
   }, []);
@@ -6889,7 +6868,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               const handled = await tryRunOctoCommand(value);
               if (handled) return;
               if (writeToPtyRef.current) {
-                writeToPtyRef.current(value + '\x0d');
+                writeHumanToPty(value + '\x0d');
               }
             })();
           }}

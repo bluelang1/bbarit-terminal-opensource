@@ -11,6 +11,7 @@
 // Roles: developer (agent) · reviewer (agent) · broker (BBARIT) · final approver (user).
 
 import { invoke } from '@tauri-apps/api/core';
+import { queueAutoInput } from '../terminal/inputGate';
 import { ensureProjectWikiScaffold, getProjectWikiPaths, ensureSharedWikiScaffold, getSharedWikiPaths } from '../notes/wiki';
 import { codeGraphCliSource } from './codeGraphCli';
 import { judge as mechanicalJudge, snapshotSource, cycleTable, CYCLE_LABELS, type SourceBaseline, type CycleState } from './brokerMechanic';
@@ -362,31 +363,57 @@ async function sh(command: string, workDir: string, timeoutSecs: number): Promis
   return invoke<string>('run_cli_oneshot', { command, workDir, timeoutSecs, login: false });
 }
 
+// All broker→terminal writes go through the auto-input gate (terminal/inputGate.ts,
+// docs/AGENT_INPUT_GATE.md): it waits while the human is typing, refuses while the agent is
+// blocked on a permission/question dialog (OSC 7501), wraps text in bracketed paste, and
+// sends Enter separately. A popped-out / unmounted terminal falls back to a direct PTY write.
+const ptyWriter = (id: string) => (data: string) => {
+  void invoke('write_to_pty', { terminalId: id, data }).catch(() => {});
+};
+
 function submitTerminalInput(id: string): void {
   // Submit with a lone CR. Claude Code treats CRLF ("\r\n") as a newline INSERT, not
   // Enter, so the relayed briefing stayed in its input box unsubmitted (Codex still
   // submitted, hence the dev/reviewer asymmetry). A bare "\r" submits for Claude
   // Code, Codex, and shells alike — verified live.
-  void invoke('write_to_pty', { terminalId: id, data: '\r' }).catch(() => {
-    void invoke('write_to_pty', { terminalId: id, data: '\n' }).catch(() => {});
-  });
+  void queueAutoInput(id, '\r', { source: 'devreview', submit: false, fallbackWrite: ptyWriter(id) });
 }
 
-// Throw input into a terminal by id. Text and Enter are sent separately because
-// Claude Code / Codex treat a large multi-line write as a "[Pasted Content]" block
-// and would otherwise absorb a trailing \r instead of submitting it.
-function throwToTerminal(id: string, text: string): void {
-  void invoke('write_to_pty', { terminalId: id, data: text }).catch(() => {});
-  // Submit the typed text. Some agent CLIs (Kimi/K2.7 Code especially) buffer a longer
-  // input and absorb a TOO-EARLY carriage return into the text instead of submitting it,
-  // leaving the command sitting un-submitted in the input box. Wait long enough for the
-  // input to settle, then send several spaced CRs so the Enter reliably lands. A stray CR
-  // at an empty prompt is harmless. (Base delay raised to 1200ms — a live /help test
-  // submitted at ~1.2s but not at 0.8s.)
-  const submitDelayMs = Math.min(5000, Math.max(1200, 600 + Math.ceil(text.length / 2)));
-  for (const d of [submitDelayMs, submitDelayMs + 1500, submitDelayMs + 3500, submitDelayMs + 6000]) {
+// Throw input into a terminal by id. The gate sends the text and, after
+// max(200ms, terminalSubmitDelayMs(text)), one separate Enter — Claude Code / Codex treat a
+// large write as a "[Pasted Content]" block and would otherwise absorb a trailing \r.
+// Resolves false when the gate refused (human typing / agent blocked) so the caller retries.
+async function throwToTerminal(id: string, text: string): Promise<boolean> {
+  const res = await queueAutoInput(id, text, { source: 'devreview', submit: true, fallbackWrite: ptyWriter(id) });
+  if (!res.ok) return false;
+  // Some agent CLIs (Kimi/K2.7 Code especially) absorb a too-early carriage return into the
+  // text instead of submitting it. Follow up with spaced CRs; they go through the gate too,
+  // so none of them lands on a blocked approval dialog. A stray CR at an empty prompt is harmless.
+  for (const d of [1500, 3500, 6000]) {
     setTimeout(() => submitTerminalInput(id), d);
   }
+  return true;
+}
+
+// Refused relays are retried on the relay-loop cadence, in order per terminal, so a message
+// the gate held back (human typing / agent waiting for approval) is delayed, never dropped.
+const RELAY_RETRY_MS = 6000;
+const RELAY_RETRY_LIMIT = 20;
+// One ordered chain per terminal, owned by a single harness (createRelayWriter per run).
+function createRelayWriter(): (id: string, text: string) => void {
+  const relayChains = new Map<string, Promise<void>>();
+  return (id: string, text: string): void => {
+    const prev = relayChains.get(id) ?? Promise.resolve();
+    const next: Promise<void> = prev.then(async () => {
+      for (let attempt = 0; attempt < RELAY_RETRY_LIMIT; attempt += 1) {
+        if (await throwToTerminal(id, text)) return;
+        await sleep(RELAY_RETRY_MS);
+      }
+    }).catch(() => {}).finally(() => {
+      if (relayChains.get(id) === next) relayChains.delete(id);
+    });
+    relayChains.set(id, next);
+  };
 }
 
 // Write a review patch file and VERIFY it landed apply-clean. buildReviewPatch already
@@ -994,7 +1021,7 @@ export async function startDevReviewPair(
   // so this is auto-only). PTY-death is detected in the relay loop, where escalateToHuman
   // is in scope; relay() stays a thin never-drop writer so a transient never swallows a
   // real relay.
-  const relay = (id: string, text: string): void => { throwToTerminal(id, text); };
+  const relay = createRelayWriter();
   // PTY-death tracking: once a broker terminal's CLI is up (has a child process), if that
   // child later disappears the agent CLI exited — the harness cannot continue, so escalate
   // rather than relaying into a dead terminal forever.

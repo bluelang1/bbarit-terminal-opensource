@@ -39,8 +39,12 @@ import {
   trimFeedForArchive,
   workflowBriefing,
 } from './devReviewPair';
+import { resetInputGate, setInputGateHost } from '../terminal/inputGate';
 
 beforeEach(() => {
+  // Broker writes go through the per-terminal auto-input gate; a chain left waiting on a
+  // previous test's fake timer would otherwise stall every later write to the same id.
+  resetInputGate();
   invokeMock.mockReset();
   invokeMock.mockResolvedValue('');
 });
@@ -1160,6 +1164,9 @@ describe('devReviewPair managed worktree retention', () => {
       await vi.advanceTimersByTimeAsync(100);
       devFeed = 'DONE: staged update\n';
       await vi.advanceTimersByTimeAsync(9000);
+      // The auto-input gate serializes writes per terminal and sends Enter separately, so a
+      // review request queued behind the reviewer standby lands one submit delay later.
+      await vi.advanceTimersByTimeAsync(3000);
 
       expect(handle).toBeTruthy();
       expect(writes.some(isActualReviewRequestWrite)).toBe(true);
@@ -1559,6 +1566,9 @@ describe('devReviewPair managed worktree retention', () => {
 
       await vi.advanceTimersByTimeAsync(100);
       await vi.advanceTimersByTimeAsync(9000);
+      // The auto-input gate serializes writes per terminal and sends Enter separately, so a
+      // review request queued behind the reviewer standby lands one submit delay later.
+      await vi.advanceTimersByTimeAsync(3000);
 
       expect(handle).toBeTruthy();
       expect(writes.some(isActualReviewRequestWrite)).toBe(true);
@@ -1798,6 +1808,9 @@ describe('devReviewPair managed worktree retention', () => {
       await vi.advanceTimersByTimeAsync(100);
       devFeed = 'DONE: first change\n';
       await vi.advanceTimersByTimeAsync(9000);
+      // The auto-input gate serializes writes per terminal and sends Enter separately, so a
+      // review request queued behind the reviewer standby lands one submit delay later.
+      await vi.advanceTimersByTimeAsync(3000);
       expect(writes.filter(isActualReviewRequestWrite)).toHaveLength(1);
 
       reviewFeed = 'APPROVED\n';
@@ -1894,6 +1907,9 @@ describe('devReviewPair managed worktree retention', () => {
       await vi.advanceTimersByTimeAsync(100);
       devFeed = 'DONE: first attempt\n';
       await vi.advanceTimersByTimeAsync(9000);
+      // The auto-input gate serializes writes per terminal and sends Enter separately, so a
+      // review request queued behind the reviewer standby lands one submit delay later.
+      await vi.advanceTimersByTimeAsync(3000);
       expect(writes.filter(isActualReviewRequestWrite)).toHaveLength(1);
 
       reviewFeed = 'REWORK: fix the returned value\n';
@@ -2171,5 +2187,49 @@ describe('devReviewPair source encoding guard', () => {
     expect(source).not.toMatch(/[\uFFFD\u0080-\u009F]/);
     expect(source).not.toMatch(/(^|\s|\/\/|\/\*)\?\?[A-Za-z]|[A-Za-z]\?\?[A-Za-z]/);
     expect(source).not.toMatch(/[\uC338\uBD31]/);
+  });
+});
+
+describe('devReviewPair auto-input gate', () => {
+  it('holds a relay while the agent is blocked and delivers it in order once unblocked', async () => {
+    vi.useFakeTimers();
+    const writes: Array<Record<string, unknown>> = [];
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'write_to_pty') writes.push(args || {});
+      return '';
+    });
+    let revBlocked = true;
+    setInputGateHost({ getAgentState: (id) => (id === 'rev-term' && revBlocked ? 'blocked' : undefined) });
+
+    try {
+      const handle = await startDevReviewPair(
+        {
+          developer: 'claude',
+          reviewer: 'codex',
+          goal: 'gate the broker relay',
+          workDir: '/repo/.octo-tmp/broker-wt-gate',
+          projectName: 'test-project',
+          autoRelay: false,
+        },
+        () => ({ developerId: 'dev-term', reviewerId: 'rev-term' }),
+        () => {},
+        { managed: { branch: 'broker/gate', worktreeDir: '/repo/.octo-tmp/broker-wt-gate', repoDir: '/repo' } },
+      );
+
+      await vi.advanceTimersByTimeAsync(12000);
+      const revWrites = () => writes.filter((w) => w.terminalId === 'rev-term');
+      expect(revWrites()).toEqual([]);
+      expect(writes.some((w) => w.terminalId === 'dev-term' && String(w.data || '').includes('This terminal is the DEV AGENT'))).toBe(true);
+
+      revBlocked = false;
+      await vi.advanceTimersByTimeAsync(12000);
+      const data = revWrites().map((w) => String(w.data || ''));
+      const standby = data.findIndex((d) => d.includes('This terminal is the REVIEW AGENT'));
+      expect(standby).toBeGreaterThanOrEqual(0);
+      expect(data[standby + 1]).toBe('\r');
+      handle?.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

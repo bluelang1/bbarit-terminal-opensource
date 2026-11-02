@@ -25,7 +25,7 @@ export const GATEWAY_UI_COMMAND_DOCS: GatewayUiCommandDoc[] = [
 
   { group: 'Terminals', cmd: 'terminal.list', args: '-', desc: 'Terminals of the active project (id / name / cliType / active)' },
   { group: 'Terminals', cmd: 'terminal.create', args: 'cliType?=shell|claude|codex|…, workDir?', desc: 'Create a new terminal' },
-  { group: 'Terminals', cmd: 'terminal.write', args: 'text, terminalId?, submit?=true', desc: 'Type into a terminal (defaults: active terminal, Enter appended)' },
+  { group: 'Terminals', cmd: 'terminal.write', args: 'text, terminalId?, submit?=true, force?=false', desc: 'Type into a terminal (defaults: active terminal, Enter appended). Waits until the user has stopped typing (up to 20s); refused while the agent waits for approval unless force=true' },
   { group: 'Terminals', cmd: 'terminal.read', args: 'terminalId?, lines?=80', desc: 'Read the last N lines of a terminal buffer' },
   { group: 'Terminals', cmd: 'terminal.activate', args: 'terminalId', desc: 'Focus a terminal tab' },
   { group: 'Terminals', cmd: 'terminal.close', args: 'terminalId', desc: 'Close a terminal (no confirm)' },

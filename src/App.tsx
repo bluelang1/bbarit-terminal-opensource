@@ -42,7 +42,7 @@ import { FONTS, STYLES, DARK_STYLES, LIGHT_STYLES, WACKY_STYLES, getEffectiveFon
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { isInteractiveAgentTerminal, terminalSubmitDelayMs } from './terminal/terminalSubmit';
+import { autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
@@ -2697,6 +2697,11 @@ function App() {
   const [pm2PanelSizes, setPm2PanelSizes] = useState<Record<string, number>>({}); // projectId -> flex ratio
 
   const terminalWritersRef = useRef<Record<string, (text: string) => void>>({});
+  // 자동 입력 게이트가 XTerminal 에 writer 가 없는 터미널을 위해 App 의 writer 를 찾는다.
+  useEffect(() => {
+    setInputGateFallbackWriter((id) => terminalWritersRef.current[id] ?? null);
+    return () => setInputGateFallbackWriter(null);
+  }, []);
   const promptLibraryPendingCommandsRef = useRef<Record<string, string>>({});
   const telegramOffsetRef = useRef<number>(0);
   const telegramPollInFlightRef = useRef<boolean>(false);
@@ -4921,7 +4926,16 @@ Office project scaffold created by BBARIT Terminal.
       : project?.activeTerminalId || '';
     const write = terminalWritersRef.current[terminalId];
     if (!write) return { ok: false, error: 'no live terminal to run the command in' };
-    write(job.command + '\n');
+    // 게이트에 맡긴다(사람 입력 대기·blocked 거부). 결과는 비동기라 거부는 콘솔에만 남긴다.
+    void queueAutoInput(terminalId, job.command, { source: 'scheduler', submit: true }).then(async (res) => {
+      if (res.ok) return;
+      console.warn('[scheduler] not sent:', job.command, res.reason);
+      try {
+        let granted = await notifIsPermissionGranted();
+        if (!granted) granted = (await notifRequestPermission()) === 'granted';
+        if (granted) notifSend({ title: '⏰ 스케줄 실행 실패', body: `${job.command} — ${autoInputRefusalMessage(res.reason)}` });
+      } catch { /* notifications unavailable */ }
+    });
     return { ok: true };
   }, []);
   const runSchedulerJobRef = useRef(runSchedulerJob);
@@ -6960,22 +6974,21 @@ Office project scaffold created by BBARIT Terminal.
             : null);
         if (!write) return { ok: false, error: `terminal not found: ${terminalId || '(none)'}` };
         const text = String(request?.text ?? '');
-        if (request?.submit === false) {
-          write(text);
-        } else {
-          const terminal = project?.terminals.find((item) => item.id === terminalId);
-          if (isInteractiveAgentTerminal(terminal?.cliType)) {
-            // Agent TUIs buffer pasted input. A trailing LF inserts a newline and an
-            // immediate CR can be absorbed into the paste, leaving the prompt idle.
-            // Write the text first, let it settle, then send one real Enter key.
-            write(text);
-            await new Promise((resolve) => setTimeout(resolve, terminalSubmitDelayMs(text)));
-            write('\r');
-          } else {
-            // Shells do not need the TUI paste delay, but still require CR (Enter),
-            // not LF (line insertion in Claude/Codex-style terminal widgets).
-            write(`${text}\r`);
-          }
+        // 자동 입력 게이트: 사람이 치는 중이면 기다리고, 에이전트가 승인 대기(blocked)면
+        // force 없이는 거부한다. Enter 는 게이트가 본문과 따로 보낸다.
+        const result = await queueAutoInput(terminalId, text, {
+          source: 'ctl',
+          submit: request?.submit !== false,
+          force: request?.force === true,
+          fallbackWrite: write,
+        });
+        if (!result.ok) {
+          const error = result.reason === 'blocked'
+            ? 'agent is waiting for input'
+            : result.reason === 'typing'
+              ? 'user is typing'
+              : `terminal not writable: ${result.reason}`;
+          return { ok: false, error, reason: result.reason, terminalId };
         }
         return { ok: true, terminalId };
       }
@@ -8999,65 +9012,31 @@ Office project scaffold created by BBARIT Terminal.
           }
         }
 
-        const writeToTerminalWhenReady = (proj: Project, term: TerminalInstance, command: string, chatId: string) => {
-          // Split multi-line input into individual lines, execute each with Enter
-          const lines = String(command || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-          if (lines.length === 0) return;
-          const startedAt = Date.now();
-          const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
-          const tryOnce = () => {
-            const write = terminalWritersRef.current[term.id];
-            if (!write) return false;
-            // Send each line with Enter, spaced apart so TUIs can process
-            let delay = 0;
-            for (const line of lines) {
-              window.setTimeout(() => {
-                const w = terminalWritersRef.current[term.id];
-                if (!w) return;
-                w(line + '\r');
-              }, delay);
-              delay += 80;
-            }
-            const summary = lines.length === 1 ? lines[0] : `${lines[0]} (+${lines.length - 1} lines)`;
-            telegramSend(`✅ ran (${label}): ${summary}`, chatId);
-            return true;
-          };
-
-          if (tryOnce()) return;
-
-          const tick = () => {
-            if (cancelled) return;
-            if (tryOnce()) return;
-            if (Date.now() - startedAt > 7000) {
-              telegramSend(`⚠️ terminal not ready (${label})`, chatId);
-              return;
-            }
-            setTimeout(tick, 200);
-          };
-          setTimeout(tick, 200);
+        // 자동 입력 게이트(terminal/inputGate.ts)로 보낸다: 여러 줄도 한 번의 bracketed
+        // paste + Enter 하나. 사람이 치는 중이면 기다리고, 에이전트가 승인 대기면 거부한다.
+        const replyAutoInputResult = (res: AutoInputResult, chatId: string, label: string, okText: string) => {
+          if (res.ok) telegramSend(okText, chatId);
+          else if (res.reason === 'no-writer') telegramSend(`⚠️ terminal not ready (${label})`, chatId);
+          else telegramSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${label})`, chatId);
         };
 
-        const writeRawToTerminalWhenReady = (proj: Project, term: TerminalInstance, data: string, chatId: string, labelText: string) => {
-          const startedAt = Date.now();
+        const writeToTerminalWhenReady = (proj: Project, term: TerminalInstance, command: string, chatId: string) => {
+          const text = String(command || '').replace(/\r\n?/g, '\n').trim();
+          const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+          if (lines.length === 0) return;
           const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
-          const tryOnce = () => {
-            const write = terminalWritersRef.current[term.id];
-            if (!write) return false;
-            write(data);
-            telegramSend(`✅ sent (${label}): ${labelText}`, chatId);
-            return true;
-          };
-          if (tryOnce()) return;
-          const tick = () => {
-            if (cancelled) return;
-            if (tryOnce()) return;
-            if (Date.now() - startedAt > 7000) {
-              telegramSend(`⚠️ terminal not ready (${label})`, chatId);
-              return;
-            }
-            setTimeout(tick, 200);
-          };
-          setTimeout(tick, 200);
+          const summary = lines.length === 1 ? lines[0] : `${lines[0]} (+${lines.length - 1} lines)`;
+          void queueAutoInput(term.id, text, { source: 'telegram', submit: true }).then((res) => {
+            replyAutoInputResult(res, chatId, label, `✅ ran (${label}): ${summary}`);
+          });
+        };
+
+        // Ctrl+C / Esc / Enter 버튼: 사용자가 명시적으로 누른 키라 blocked 여도 보낸다(원격 승인).
+        const writeRawToTerminalWhenReady = (proj: Project, term: TerminalInstance, data: string, chatId: string, labelText: string) => {
+          const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
+          void queueAutoInput(term.id, data, { source: 'telegram', submit: false, force: true }).then((res) => {
+            replyAutoInputResult(res, chatId, label, `✅ sent (${label}): ${labelText}`);
+          });
         };
 
         const sendTelegramKeyHelp = (chatId: string, boundLabel: string) => {
@@ -9491,18 +9470,24 @@ Office project scaffold created by BBARIT Terminal.
 
               // Special keys
               if (compact === 'ctrl+c' || compact === '!ctrlc' || compact === '^c') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x03'); discordSend('✅ sent Ctrl+C', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x03', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Ctrl+C' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'esc' || compact === 'escape' || compact === '!esc') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x1b'); discordSend('✅ sent Esc', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x1b', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Esc' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'enter' || compact === '!enter') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\r'); discordSend('✅ sent Enter', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\r', { source: 'discord', submit: false, force: true }).then((res) => {
+                  discordSend(res.ok ? '✅ sent Enter' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
 
@@ -9519,16 +9504,12 @@ Office project scaffold created by BBARIT Terminal.
                 setProjects(prev => prev.map(p => p.id !== binding!.project.id ? p : { ...p, activeTerminalId: binding!.terminal.id }));
               }
 
-              // Write command to terminal
-              const write = terminalWritersRef.current[binding.terminal.id];
-              if (write) {
-                write(cmd);
-                window.setTimeout(() => {
-                  const w = terminalWritersRef.current[binding!.terminal.id];
-                  if (w) w('\r');
-                }, 35);
-                discordSend(`✅ ran (${boundLabel}): ${cmd}`, channelId);
-              }
+              // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
+              const sentCmd = cmd;
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'discord', submit: true }).then((res) => {
+                if (res.ok) discordSend(`✅ ran (${boundLabel}): ${sentCmd}`, channelId);
+                else discordSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
+              });
             }
           } catch {
             // Ignore per-channel errors
@@ -9831,18 +9812,24 @@ Office project scaffold created by BBARIT Terminal.
               }
 
               if (compact === 'ctrl+c' || compact === '!ctrlc' || compact === '^c') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x03'); slackSend('sent Ctrl+C', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x03', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Ctrl+C' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'esc' || compact === 'escape' || compact === '!esc') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\x1b'); slackSend('sent Esc', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\x1b', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Esc' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
               if (compact === 'enter' || compact === '!enter') {
-                const write = terminalWritersRef.current[binding.terminal.id];
-                if (write) { write('\r'); slackSend('sent Enter', channelId); }
+                // 명시적 키 명령: blocked 여도 보낸다(원격 승인). 게이트로 직렬화만 한다.
+                void queueAutoInput(binding.terminal.id, '\r', { source: 'slack', submit: false, force: true }).then((res) => {
+                  slackSend(res.ok ? 'sent Enter' : `⚠️ ${autoInputRefusalMessage(res.reason)}`, channelId);
+                });
                 continue;
               }
 
@@ -9858,15 +9845,12 @@ Office project scaffold created by BBARIT Terminal.
                 setProjects(prev => prev.map(p => p.id !== binding!.project.id ? p : { ...p, activeTerminalId: binding!.terminal.id }));
               }
 
-              const write = terminalWritersRef.current[binding.terminal.id];
-              if (write) {
-                write(cmd);
-                window.setTimeout(() => {
-                  const w = terminalWritersRef.current[binding!.terminal.id];
-                  if (w) w('\r');
-                }, 35);
-                slackSend(`ran (${boundLabel}): ${cmd}`, channelId);
-              }
+              // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
+              const sentCmd = cmd;
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'slack', submit: true }).then((res) => {
+                if (res.ok) slackSend(`ran (${boundLabel}): ${sentCmd}`, channelId);
+                else slackSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
+              });
             }
           } catch {
             // Ignore per-channel errors
@@ -11344,14 +11328,13 @@ Office project scaffold created by BBARIT Terminal.
     updateActiveProject({ activeTerminalId: agentTerm.id });
     setViewMode('default');
     window.setTimeout(() => {
-      const write = terminalWritersRef.current[agentTerm.id];
-      const send = (data: string) => {
-        if (write) write(data);
-        else void invoke('write_to_pty', { terminalId: agentTerm.id, data });
-      };
-      send(prompt + '\n');
-      // Pasted multiline text lands in the TUI input without submitting — press Enter for it
-      window.setTimeout(() => send('\r'), 300);
+      // 사용자가 방금 클릭했다 → force. 게이트가 bracketed paste 와 따로 보내는 Enter 를 맡는다.
+      void queueAutoInput(agentTerm.id, prompt, {
+        source: 'hub',
+        submit: true,
+        force: true,
+        fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: agentTerm.id, data }); },
+      });
     }, 400);
   }, [projects, activeProjectId, updateActiveProject, setViewMode]);
 
@@ -16051,13 +16034,13 @@ Office project scaffold created by BBARIT Terminal.
         const proj = projects.find(p => p.id === activeProjectId);
         const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
         if (!tid) return;
-        void (async () => {
-          await invoke('write_to_pty', { terminalId: tid, data: prompt }).catch(() => {});
-          await new Promise((resolve) => setTimeout(resolve, 500));
-          await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-          await new Promise((resolve) => setTimeout(resolve, 300));
-          await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-        })();
+        // 사용자가 방금 보낸 프롬프트 → force. Enter 는 게이트가 한 번 따로 보낸다.
+        void queueAutoInput(tid, prompt, {
+          source: 'editor',
+          submit: true,
+          force: true,
+          fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }).catch(() => {}); },
+        });
       }}
       onFileClose={handleFileClose}
       onFileSelect={handleFileSelect}
@@ -19634,8 +19617,8 @@ Office project scaffold created by BBARIT Terminal.
                     onSendToConsole={(prompt) => {
                       const proj = projects.find(p => p.id === activeProjectId);
                       if (!proj) return;
-                      const write = terminalWritersRef.current[proj.activeTerminalId];
-                      if (write) write(prompt + '\n');
+                      if (!terminalWritersRef.current[proj.activeTerminalId]) return;
+                      void queueAutoInput(proj.activeTerminalId, prompt, { source: 'kanban', submit: true, force: true });
                     }}
                   />
                 </React.Suspense>
@@ -20058,7 +20041,14 @@ Office project scaffold created by BBARIT Terminal.
                           onSendToConsole={(prompt: string) => {
                             const proj = projects.find(p => p.id === activeProjectId);
                             const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
-                            if (tid) void invoke('write_to_pty', { terminalId: tid, data: prompt + '\n' });
+                            if (tid) {
+                              void queueAutoInput(tid, prompt, {
+                                source: 'kanban',
+                                submit: true,
+                                force: true,
+                                fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }); },
+                              });
+                            }
                           }}
                         />
                       </div>
@@ -20144,13 +20134,13 @@ Office project scaffold created by BBARIT Terminal.
                     const proj = projects.find(p => p.id === activeProjectId);
                     const tid = proj?.activeTerminalId || proj?.terminals[0]?.id;
                     if (!tid) return;
-                    void (async () => {
-                      await invoke('write_to_pty', { terminalId: tid, data: prompt }).catch(() => {});
-                      await new Promise((resolve) => setTimeout(resolve, 500));
-                      await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-                      await new Promise((resolve) => setTimeout(resolve, 300));
-                      await invoke('write_to_pty', { terminalId: tid, data: '\r' }).catch(() => {});
-                    })();
+                    // 사용자가 방금 보낸 프롬프트 → force. Enter 는 게이트가 한 번 따로 보낸다.
+                    void queueAutoInput(tid, prompt, {
+                      source: 'editor',
+                      submit: true,
+                      force: true,
+                      fallbackWrite: (data) => { void invoke('write_to_pty', { terminalId: tid, data }).catch(() => {}); },
+                    });
                   }}
                   onFileClose={handleFileClose}
                   onFileSelect={handleFileSelect}
