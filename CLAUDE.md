@@ -101,6 +101,15 @@ Build/test gotchas:
 - Re-attaching a terminal replays saved PTY output through the parsers with
   `replayingOutput` set; output-driven handlers must not alert or reply during it.
 - `bbarit-ctl term write` waits up to 40 s (gate) and takes `--force`.
+- Every PTY gets `BBARIT_TERM_SCOPE=<ms>-<hex>`; closing a tab (and app exit) sweeps
+  processes still carrying that token, even after setsid/nohup reparenting. Daemons
+  in `scope_sweep_excluded` (tmux, pm2, Electron/Code, colima, docker, ollama…) are
+  spared; start anything else that must outlive the tab with `env -u BBARIT_TERM_SCOPE`.
+  macOS hides Apple platform binaries' environ, so /bin/sleep-style leftovers are
+  not swept. Design: docs/TERMINAL_SCOPE_SWEEP.md.
+- Button-click terminal sends use `queueButtonInput` (src/terminal/buttonInput.ts):
+  force, no quiet wait, but still queued/bracketed. `setsid` does not exist on macOS;
+  use `(cmd &)` double-fork when a test needs a process outside the PTY tree.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
