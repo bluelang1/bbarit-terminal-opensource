@@ -3759,8 +3759,70 @@ fn scope_env_matches(entry: &str, token: &str) -> bool {
         .is_some_and(|value| value == token)
 }
 
-/// Pids (other than ours and `skip`) whose environ carries one of `tokens` and that started
-/// no earlier than that token's second. Unreadable environs (other users, some Windows
+/// sysinfo rounds start times down to whole seconds (Linux: btime + ticks/hz), so a process
+/// started in the token's own second can read as up to ~1 s early. Allow 2 s of slack; the
+/// guard only exists to skip processes that copied the env long before the token existed.
+fn scope_start_ok(start_secs: u64, token_secs: u64) -> bool {
+    start_secs + 2 >= token_secs
+}
+
+/// Long-lived daemons a user starts once from a tab and keeps using (tmux server, PM2 God
+/// daemon, editors, VMs, agents). Never swept even if they carry the token. Entries ending in
+/// `*` are prefixes; others match the whole name or the name followed by a space (so
+/// `PM2 v5.3.0: God Daemon` and `Code Helper (Renderer)` match `PM2` / `Code Helper`).
+const SCOPE_SWEEP_EXCLUDES: &[&str] = &[
+    "tmux",
+    "pm2",
+    "electron",
+    "code",
+    "code helper",
+    "colima",
+    "limactl",
+    "qemu-system*",
+    "gpg-agent",
+    "ssh-agent",
+    "docker",
+    "com.docker.*",
+    "ollama",
+];
+
+fn scope_sweep_excluded(name: &str) -> bool {
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    SCOPE_SWEEP_EXCLUDES.iter().any(|entry| match entry.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => {
+            name == *entry
+                || name
+                    .strip_prefix(entry)
+                    .is_some_and(|rest| rest.starts_with(' '))
+        }
+    })
+}
+
+/// Process name, exe file name, or argv[0] file name (PM2 rewrites its title there) is excluded.
+fn scope_process_excluded(process: &sysinfo::Process) -> bool {
+    let file_name = |p: &std::path::Path| {
+        p.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    if scope_sweep_excluded(&process.name().to_string_lossy()) {
+        return true;
+    }
+    if process.exe().is_some_and(|exe| scope_sweep_excluded(&file_name(exe))) {
+        return true;
+    }
+    process.cmd().first().is_some_and(|arg0| {
+        let arg0 = arg0.to_string_lossy();
+        scope_sweep_excluded(&arg0) || scope_sweep_excluded(&file_name(std::path::Path::new(arg0.as_ref())))
+    })
+}
+
+/// Pids (other than ours and `skip`) whose environ carries one of `tokens`, that started
+/// no earlier than that token (with slack), and that are not an excluded daemon. Unreadable environs (other users, some Windows
 /// processes) are empty and therefore skipped.
 fn scope_sweep_targets(tokens: &[&str], skip: &[u32]) -> Vec<u32> {
     let valid: Vec<(&str, u64)> = tokens
@@ -3775,10 +3837,17 @@ fn scope_sweep_targets(tokens: &[&str], skip: &[u32]) -> Vec<u32> {
     sys.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
         true,
-        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::Always),
+        sysinfo::ProcessRefreshKind::nothing()
+            .with_environ(sysinfo::UpdateKind::Always)
+            .with_exe(sysinfo::UpdateKind::Always)
+            .with_cmd(sysinfo::UpdateKind::Always),
     );
     let mut targets = Vec::new();
     for (pid, process) in sys.processes() {
+        // Linux lists threads as tasks; signal processes only.
+        if process.thread_kind().is_some() {
+            continue;
+        }
         let pid = pid.as_u32();
         if pid == 0 || pid == self_pid || skip.contains(&pid) {
             continue;
@@ -3792,7 +3861,7 @@ fn scope_sweep_targets(tokens: &[&str], skip: &[u32]) -> Vec<u32> {
         });
         // Started before the token existed → copied the env from elsewhere; leave it alone.
         if let Some(token_secs) = hit {
-            if process.start_time() >= token_secs {
+            if scope_start_ok(process.start_time(), token_secs) && !scope_process_excluded(process) {
                 targets.push(pid);
             }
         }
@@ -3873,7 +3942,58 @@ fn sweep_all_scopes_on_exit(app: &AppHandle) {
 
 #[cfg(test)]
 mod scope_sweep_tests {
-    use super::{new_scope_token, parse_scope_token_ms, scope_env_matches};
+    use super::{
+        new_scope_token, parse_scope_token_ms, scope_env_matches, scope_start_ok,
+        scope_sweep_excluded,
+    };
+
+    #[test]
+    fn start_guard_allows_two_seconds_of_slack() {
+        let token = 1_793_700_000;
+        assert!(scope_start_ok(token, token), "same second");
+        assert!(scope_start_ok(token - 1, token), "1 s before (rounding)");
+        assert!(!scope_start_ok(token - 3, token), "3 s before");
+        assert!(scope_start_ok(token + 5, token), "after");
+    }
+
+    #[test]
+    fn daemon_exclusions_match_names_case_insensitively() {
+        for name in [
+            "tmux",
+            "TMUX",
+            "PM2",
+            "pm2",
+            "PM2 v5.3.0: God Daemon (/Users/me/.pm2)",
+            "Electron",
+            "Code",
+            "Code Helper",
+            "Code Helper (Renderer)",
+            "colima",
+            "limactl",
+            "qemu-system-aarch64",
+            "gpg-agent",
+            "ssh-agent",
+            "docker",
+            "com.docker.backend",
+            "ollama",
+        ] {
+            assert!(scope_sweep_excluded(name), "{name:?} should be excluded");
+        }
+        for name in [
+            "",
+            "node",
+            "python3",
+            "next-server",
+            "tmuxinator",
+            "codex",
+            "code-server",
+            "dockerd-rootless",
+            "qemu-img",
+            "sleep",
+        ] {
+            assert!(!scope_sweep_excluded(name), "{name:?} must stay sweepable");
+        }
+    }
 
     #[test]
     fn new_token_is_ms_dash_8_hex_and_parses() {
@@ -3947,8 +4067,16 @@ mod scope_sweep_tests {
     fn sweep_scope_kills_detached_child_with_token() {
         use std::process::{Child, Command, Stdio};
         use std::time::{Duration, Instant};
-        fn spawn_sleeper(token: &str) -> Child {
-            Command::new(std::env::current_exe().unwrap())
+        /// Kills the sleeper on drop so a failed assertion never leaves a 30 s process behind.
+        struct KillOnDrop(Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        fn spawn_sleeper(token: &str) -> KillOnDrop {
+            KillOnDrop(Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "scope_sweep_tests::scope_sweep_sleeper", "--test-threads=1"])
                 .env("BBARIT_SCOPE_SWEEP_SLEEPER", "1")
                 .env(super::SCOPE_ENV, token)
@@ -3956,7 +4084,7 @@ mod scope_sweep_tests {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .expect("spawn sleeper")
+                .expect("spawn sleeper"))
         }
         let token = new_scope_token();
         let other = new_scope_token();
@@ -3967,7 +4095,7 @@ mod scope_sweep_tests {
         let killed = super::sweep_scope(&token, &[]);
         let deadline = Instant::now() + Duration::from_secs(3);
         let status = loop {
-            if let Some(status) = victim.try_wait().unwrap() {
+            if let Some(status) = victim.0.try_wait().unwrap() {
                 break Some(status);
             }
             if Instant::now() > deadline {
@@ -3975,11 +4103,7 @@ mod scope_sweep_tests {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
-        let bystander_alive = bystander.try_wait().unwrap().is_none();
-        let _ = victim.kill();
-        let _ = bystander.kill();
-        let _ = victim.wait();
-        let _ = bystander.wait();
+        let bystander_alive = bystander.0.try_wait().unwrap().is_none();
         assert!(killed >= 1, "expected sweep to kill the victim, killed={killed}");
         let status = status.expect("victim still running after sweep");
         assert!(!status.success(), "victim should die by signal: {status:?}");

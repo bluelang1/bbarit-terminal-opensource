@@ -116,8 +116,18 @@ bracketed paste, Enter 분리, 사람 키 보류는 적용된다. 그래야 같�
   로 한 번 훑는다(다른 코드가 쓰는 공유 락을 오래 잡지 않고, 캐시된 environ 을 믿지 않기 위해).
 - 형식이 틀린 토큰(빈 문자열 포함)은 아무것도 죽이지 않는다. `BBARIT_TERM_SCOPE=` 만 있는 항목이
   빈 토큰에 걸리는 것을 막는다.
-- 시작 시각 비교는 초 단위다(`sysinfo` 의 `start_time()` 이 초). 토큰의 초보다 먼저 시작한
-  프로세스만 건너뛴다.
+- 시작 시각 비교는 `scope_start_ok(start_secs, token_secs)`(`start_secs + 2 >= token_secs`)다.
+  `sysinfo` 의 `start_time()` 은 초 단위로 내림(Linux 는 btime + ticks/hz)이라 토큰과 같은 초에
+  시작한 프로세스가 1 초 이르게 읽힐 수 있어 2 초 여유를 둔다. 그보다 먼저 시작한 것만 건너뛴다.
+- Linux 의 스레드 항목(`process.thread_kind().is_some()`)은 건너뛴다. 프로세스에만 신호를 보낸다.
+- **상주 데몬 제외 목록**(`SCOPE_SWEEP_EXCLUDES`, `scope_sweep_excluded`): 탭에서 한 번 띄워 계속
+  쓰는 데몬은 토큰이 있어도 죽이지 않는다. `tmux`, `PM2`/`pm2`, `Electron`, `Code`, `Code Helper`,
+  `colima`, `limactl`, `qemu-system*`, `gpg-agent`, `ssh-agent`, `docker`, `com.docker.*`, `ollama`.
+  대소문자를 무시하고 프로세스 이름, exe 파일 이름, argv[0](및 그 파일 이름)에 맞춘다. `*` 로 끝나면
+  접두 일치, 아니면 이름 전체가 같거나 이름 뒤에 공백이 이어질 때 일치한다. argv[0] 과 "뒤에 공백"
+  규칙은 리뷰 지시(이름·exe)에 더한 것이다: PM2 God 데몬은 exe 가 `node` 이고 제목을
+  `PM2 v5.3.0: God Daemon (...)` 으로 바꾸며, VS Code 헬퍼는 `Code Helper (Renderer)` 같은 이름이다.
+  목록에 없는 데몬은 `env -u BBARIT_TERM_SCOPE <명령>` 으로 띄우면 스윕되지 않는다.
 - 신호는 `kill_process_tree` 처럼 `kill` 명령을 띄우지 않고 `libc::kill` 을 직접 부른다(SIGTERM →
   300 ms → `kill(pid, 0)` 로 살아 있으면 SIGKILL). Windows 는 `sysinfo` 의 `Process::kill()` 한 번.
 - 로그는 이 파일의 관례대로 `safe_eprintln!("[scope-sweep] ...")` 다(`log` 크레이트는 의존성에 없다).
@@ -130,6 +140,7 @@ bracketed paste, Enter 분리, 사람 키 보류는 적용된다. 그래야 같�
   워처·브라우저 드라이버가 주 대상이라 목적은 지킨다). 그래서 실기 검증은 `sleep` 대신
   `nohup python3 -m http.server 18099 &`(비플랫폼 python) 로 해야 한다. 셸 자체는 원래대로
   `kill_process_tree` 가 정리한다.
+- 통합 테스트의 희생 프로세스는 Drop 에서 kill 하는 가드로 감싸 단언이 실패해도 30 초짜리가 남지 않는다.
 - 통합 테스트(`sweep_scope_kills_detached_child_with_token`)는 같은 이유로 `sh -c 'sleep 30'` 대신
   테스트 바이너리 자신(`scope_sweep_sleeper` 테스트, 환경 변수가 있을 때만 30 초 대기)을 희생자로
   띄우고, 다른 토큰을 가진 프로세스는 살아 있는지도 확인한다.
@@ -149,7 +160,9 @@ bracketed paste, Enter 분리, 사람 키 보류는 적용된다. 그래야 같�
   `fallbackWrite`(직접 `write_to_pty`)를 붙인다. 설계대로 "3 초 대기도 건너뛰기" 위해 `quietMs: 0`
   을 넘긴다(게이트의 `force` 는 blocked 검사만 건너뛴다). 별도 창(Scrum/Harness 페이지, 노트
   모달이 띄운 리서치 창)과 팝아웃 터미널에는 이 창의 writer 가 없으므로 fallback 이 필요하다. 직접
-  쓰기가 실패하면(PTY 없음) 결과가 `no-writer` 다.
+  쓰기가 실패하면(PTY 없음) 결과가 `no-writer` 다. 본문 직접 쓰기가 거부되면 다음 fallback 호출이
+  던져 게이트가 `disposed` 로 끝나므로 따로 보내는 Enter 는 나가지 않는다(빈 입력창에 Enter 만 들어가지
+  않게). 프롬프트 라이브러리는 이 `no-writer` 를 보고 명령을 남겨 두었다가 다시 보낸다.
 - 셸이 대상인 곳은 `submitDelayMs: MIN_SUBMIT_DELAY_MS`(App 은 `gateSubmitDelayFor(cliType)`)로
   Enter 지연을 200 ms 로 둔다. 대상 cliType 을 모르는 곳(프롬프트 라이브러리, Harness 페이지의
   기존 터미널)은 기본값(에이전트 TUI 기준, 최소 1.2 초)이다.

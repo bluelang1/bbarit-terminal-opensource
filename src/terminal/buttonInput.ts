@@ -15,6 +15,8 @@ export interface ButtonInputOptions {
 /**
  * 버튼 클릭 쓰기. 이 창에 마운트된 writer 가 없으면(팝아웃·별도 창·자체 PTY) 예전처럼
  * `write_to_pty` 로 PTY 에 직접 쓴다. 그 직접 쓰기가 실패하면(PTY 없음) `no-writer` 를 돌려준다.
+ * 본문 쓰기가 거부되면 다음 fallback 호출(따로 보내는 Enter)이 던져 게이트가 `disposed` 로 끝나고
+ * Enter 는 나가지 않는다 — 빈 입력창에 Enter 만 들어가지 않게.
  */
 export async function queueButtonInput(
   terminalId: string,
@@ -22,15 +24,24 @@ export async function queueButtonInput(
   opts: ButtonInputOptions,
 ): Promise<AutoInputResult> {
   const direct: Promise<unknown>[] = [];
+  let rejected = false;
   const result = await queueAutoInput(terminalId, text, {
     source: 'button',
     submit: opts.submit,
     force: true,
     quietMs: 0,
     submitDelayMs: opts.submitDelayMs,
-    fallbackWrite: (data) => { direct.push(invoke('write_to_pty', { terminalId, data })); },
+    fallbackWrite: (data) => {
+      if (rejected) throw new Error('write_to_pty rejected an earlier write');
+      const write = invoke('write_to_pty', { terminalId, data }).catch((err: unknown) => {
+        rejected = true;
+        throw err;
+      });
+      write.catch(() => {}); // 결과는 아래 allSettled 가 본다 — 그 전에 unhandled 로 잡히지 않게.
+      direct.push(write);
+    },
   });
   const settled = await Promise.allSettled(direct);
-  if (result.ok && settled.some((s) => s.status === 'rejected')) return { ok: false, reason: 'no-writer' };
+  if (settled.some((s) => s.status === 'rejected')) return { ok: false, reason: 'no-writer' };
   return result;
 }

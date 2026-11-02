@@ -172,6 +172,8 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 - `AutoInputOptions.fallbackWrite` 추가. ctl 의 팝아웃 터미널, 허브·에디터·칸반·devreview 의
   기존 `invoke('write_to_pty')` 직접 쓰기를 마운트되지 않은 터미널용 마지막 수단으로 남긴다.
   이 경우 blocked/bracketed 정보는 없다.
+- 공백 없는 슬래시/달러 명령 하나(`/^[\/$][\w:.-]+$/`, 예 `/review`, `$skill`)도 bracketed paste
+  없이 키로 보낸다(`isCommandToken`). Claude/Codex 슬래시 자동완성이 키 입력을 봐야 한다.
 - 키 입력 판정: 제어 문자·이스케이프 시퀀스로만 된 텍스트나 한 글자(`\x03`, `\x1b`, `\r`, `y`
   등)는 bracketed paste 로 감싸지 않고 그대로 보낸다. 감싸면 키가 아니라 글자로 붙여넣어진다.
   `submit: false`(ctl `write-raw`) 도 바이트 그대로 보낸다 — 안에 든 `\r` 은 예전처럼 제출된다.

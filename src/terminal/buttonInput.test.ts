@@ -69,6 +69,16 @@ describe('queueButtonInput', () => {
     ]);
   });
 
+  it('does not send the separate Enter when the direct body write was rejected', async () => {
+    invokeMock.mockRejectedValue('PTY not found');
+    const done = queueButtonInput('not-yet-1', 'hello world', { submit: true, submitDelayMs: MIN_SUBMIT_DELAY_MS });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(done).resolves.toEqual({ ok: false, reason: 'no-writer' });
+    expect(invokeMock.mock.calls).toEqual([
+      ['write_to_pty', { terminalId: 'not-yet-1', data: 'hello world' }],
+    ]);
+  });
+
   it('reports no-writer when the direct PTY write fails', async () => {
     invokeMock.mockRejectedValue('PTY not found');
     const done = queueButtonInput('gone-1', 'hello', { submit: false });
