@@ -11,7 +11,7 @@
 | 로컬 제어 `terminal.write` (bbarit-ctl, 브리지 UI 커맨드) | `src/App.tsx` `case 'terminal.write'` | 텍스트 쓰고 `terminalSubmitDelayMs` 뒤 `\r` |
 | 스케줄러 잡 | `src/App.tsx` `runSchedulerJob` | `command + '\n'` 즉시 |
 | Telegram 수신 | `src/App.tsx` `writeToTerminalWhenReady` | 줄마다 `\r`, 80 ms 간격 |
-| Discord / Slack 수신 | `src/App.tsx` Discord·Slack 폴러 | `\x03`, `\x1b`, `\r` 보낸 뒤 명령, 타이머 뒤 `\r` |
+| Discord / Slack 수신 | `src/App.tsx` Discord·Slack 폴러 | 명령 텍스트 쓰고 타이머 뒤 `\r`. `ctrl+c`/`esc`/`enter` 는 사용자가 명시한 커맨드일 때만 `\x03`/`\x1b`/`\r` |
 | 개발/리뷰어 쌍 릴레이 | `src/devreview/devReviewPair.ts` `throwToTerminal`, `submitTerminalInput` | 텍스트, 지연 뒤 `\r`. 6 초마다 |
 | 허브 항목 → 에이전트 터미널 | `src/App.tsx` 허브 주입 | setTimeout 으로 `\r` |
 | 에디터 → 터미널 프롬프트 | `src/App.tsx` `onTerminalPrompt` | 텍스트, 500 ms, `\r` |
@@ -100,8 +100,9 @@ export function queueAutoInput(terminalId: string, text: string, opts: AutoInput
 | devreview 릴레이 | `devreview` | `true` | `false`. 거부되면 다음 틱에 재시도 |
 | 허브 주입, 에디터 프롬프트, 칸반 전송 | 각각 | `true` | `true` (사용자가 방금 클릭했다) |
 
-Discord·Slack 이 지금 보내는 선행 `\x03`, `\x1b` 는 **없앤다**. 진행 중인 작업을 끊는
-행동은 명시적 커맨드로만 해야 한다. 이 변경은 동작 변화이므로 문서의 "구현 메모" 에 적는다.
+Discord·Slack·Telegram 의 `ctrl+c`/`esc`/`enter` 커맨드는 사용자가 명시적으로 보낸 것이므로
+게이트를 `submit: false, force: true` 로 통과시킨다. 원격에서 권한 프롬프트에 Enter 로 답하는
+경로를 막지 않기 위해서다. (초안에는 "선행 제어문자를 없앤다" 고 썼으나 그런 코드는 없었다.)
 
 단순 버튼 클릭(스킬 실행, 저장된 명령, PM2 뷰어, 페르소나 브리프 등)은 사용자가 그 자리에
 있으므로 이번에는 바꾸지 않는다. 다음 단계에서 `force: true` 로 옮길 수 있다.
