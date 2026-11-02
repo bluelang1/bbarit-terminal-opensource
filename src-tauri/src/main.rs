@@ -32,6 +32,8 @@ mod lan_discovery;
 mod learning_db;
 mod note_ops;
 mod pty_backend;
+#[cfg(unix)]
+mod pty_holder;
 mod db;
 mod webview_browser;
 // semble_rs에서 벤더링한 코드 검색 라이브러리 — graph/encoder/file_walker만 사용 중
@@ -3887,6 +3889,23 @@ mod scope_sweep_tests {
         let status = status.expect("victim still running after sweep");
         assert!(!status.success(), "victim should die by signal: {status:?}");
         assert!(bystander_alive, "a different token must not be swept");
+    }
+}
+
+/// `--mode pty-holder --socket <path>`: run the PTY holder and exit, before anything
+/// GUI-, log- or agent-related starts. Returns the exit code when this is holder mode.
+fn pty_holder_mode(args: &[String]) -> Option<i32> {
+    if !args.windows(2).any(|w| w[0] == "--mode" && w[1] == "pty-holder") {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        Some(pty_holder::server::main_from_args(args))
+    }
+    #[cfg(not(unix))]
+    {
+        eprintln!("pty-holder mode is not supported on Windows");
+        Some(2)
     }
 }
 
@@ -9562,6 +9581,12 @@ fn attach_parent_console_for_agent() {
 fn attach_parent_console_for_agent() {}
 
 fn main() {
+    // PTY holder daemon (docs/PTY_HOLDER_DAEMON.md 3.1): same exe, no Tauri, no webview,
+    // no stderr redirection (the spawner points stderr at the holder's own log).
+    if let Some(code) = pty_holder_mode(&std::env::args().collect::<Vec<_>>()) {
+        std::process::exit(code);
+    }
+
     // Internalized BBARIT agent: when launched with BBARIT_AGENT_MODE set, this
     // same binary runs the embedded coding-agent TUI in-process instead of the
     // GUI app — so the terminal launches *our own executable*, never a separate
