@@ -5,6 +5,7 @@ import {
   MIN_SUBMIT_DELAY_MS,
   QUIET_MS,
   WRITER_WAIT_MS,
+  isCommandToken,
   isHumanTyping,
   isNonTypingInput,
   isWriting,
@@ -138,6 +139,19 @@ describe('queueAutoInput', () => {
     expect(out.endsWith(BRACKETED_PASTE_END)).toBe(true);
     expect(out.split(BRACKETED_PASTE_END)).toHaveLength(2); // only the closing marker
     expect(out).toBe(`${BRACKETED_PASTE_START}line1\revilrm -rf${BRACKETED_PASTE_END}`);
+  });
+
+  it('sends a single slash/dollar command token as raw keys in bracketed mode', async () => {
+    const t = fakeTerminal({ bracketed: true });
+    const p = queueAutoInput(T, '/review', { source: 'button', force: true, submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['/review', '\r']);
+    expect(isCommandToken('$my-skill')).toBe(true);
+    expect(isCommandToken('/mcp:list')).toBe(true);
+    expect(isCommandToken('/review this PR')).toBe(false);
+    expect(isCommandToken('/tmp/a')).toBe(false);
+    expect(isCommandToken('review')).toBe(false);
   });
 
   it('sends control-key text raw even in bracketed mode', async () => {

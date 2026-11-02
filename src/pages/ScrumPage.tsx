@@ -7,6 +7,8 @@
  */
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
+import { MIN_SUBMIT_DELAY_MS } from '../terminal/inputGate';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import ScrumModal from '../components/ScrumModal';
@@ -182,7 +184,7 @@ export default function ScrumPage() {
     if (!cmd) throw new Error(`Failed to build agent CLI command: ${agent}`);
 
     const before = await readOutputBuffer(terminalId);
-    await invoke('write_to_pty', { terminalId, data: `${cmd}\n` });
+    await queueButtonInput(terminalId, cmd, { submit: true, submitDelayMs: MIN_SUBMIT_DELAY_MS });
 
     const beforeLen = before.length;
     for (let i = 0; i < 30; i++) {
@@ -199,19 +201,12 @@ export default function ScrumPage() {
     }
   }, [ensureCliInstalled, readOutputBuffer]);
 
-  // Orchestra-style writeAndSubmit: write text, wait, double Enter
+  // Orchestra-style writeAndSubmit: write text, wait, double Enter — through the button
+  // input gate (serial queue, Enter sent separately), keeping the 500 ms / 300 ms spacing.
   const writeAndSubmit = useCallback(async (terminalId: string, text: string) => {
-    try {
-      await invoke('write_to_pty', { terminalId, data: text });
-    } catch { /* ignore */ }
-    await sleep(500);
-    try {
-      await invoke('write_to_pty', { terminalId, data: '\r' });
-    } catch { /* ignore */ }
+    await queueButtonInput(terminalId, text, { submit: true, submitDelayMs: 500 });
     await sleep(300);
-    try {
-      await invoke('write_to_pty', { terminalId, data: '\r' });
-    } catch { /* ignore */ }
+    await queueButtonInput(terminalId, '\r', { submit: false });
   }, []);
 
   // Detect CLI completion by checking PTY alive + shell prompt pattern

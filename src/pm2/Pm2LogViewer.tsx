@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { queueButtonInput } from '../terminal/buttonInput';
+import { MIN_SUBMIT_DELAY_MS } from '../terminal/inputGate';
 import { Terminal } from 'xterm';
 import { kvGet } from '../hooks/useKV';
 import { useTranslation } from '../i18n';
@@ -328,13 +330,13 @@ export const Pm2LogViewer: React.FC<Props> = ({ workDir, appName, theme, fontFam
       if (isSsh) {
         const sshCmd = buildSshLogCommand(workDir, effectiveName);
         if (!sshCmd) throw new Error(t('pm2.sshParseFailed'));
-        cmd = sshCmd + '\n';
+        cmd = sshCmd;
       } else {
         const appPart = effectiveName ? ` ${effectiveName}` : '';
-        cmd = `pm2 logs${appPart} --lines 200 --raw\n`;
+        cmd = `pm2 logs${appPart} --lines 200 --raw`;
       }
 
-      await invoke('write_to_pty', { terminalId, data: cmd });
+      await queueButtonInput(terminalId, cmd, { submit: true, submitDelayMs: MIN_SUBMIT_DELAY_MS });
       setStatus('streaming');
 
       // Read loop

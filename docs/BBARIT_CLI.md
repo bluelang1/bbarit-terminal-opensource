@@ -142,6 +142,14 @@ Focus a terminal tab / close a terminal (no confirmation).
 > ⚠️ Right after a session restore, old terminals may not have a live PTY yet and
 > writes are silently dropped. Run `term use <id>` first to attach the PTY.
 
+Closing a terminal also kills every process that still carries its
+`BBARIT_TERM_SCOPE` env token, including ones detached with `nohup`/`setsid`/`disown`
+([TERMINAL_SCOPE_SWEEP.md](TERMINAL_SCOPE_SWEEP.md)). To keep a daemon alive past the
+tab, start it without the token: `env -u BBARIT_TERM_SCOPE <command> &`. Common
+long-lived daemons are never swept even with the token (case-insensitive name match):
+`tmux`, `PM2`/`pm2`, `Electron`, `Code`, `Code Helper`, `colima`, `limactl`,
+`qemu-system*`, `gpg-agent`, `ssh-agent`, `docker`, `com.docker.*`, `ollama`.
+
 **Example — remote build runner:**
 ```bash
 ID=$(npm run ctl --silent -- --json term create shell | python3 -c "import sys,json;print(json.load(sys.stdin)['terminalId'])")

@@ -15,7 +15,7 @@ export const MIN_SUBMIT_DELAY_MS = 200;
 
 export type AutoInputSource =
   | 'ctl' | 'scheduler' | 'telegram' | 'discord' | 'slack'
-  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'other';
+  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'other';
 
 export type PtyWriter = (data: string) => void;
 
@@ -134,6 +134,14 @@ export function isKeyInput(text: string): boolean {
   return KEY_SEQUENCE.test(text) || Array.from(text).length === 1;
 }
 
+// 공백 없는 슬래시/달러 명령 하나(`/review`, `$skill`, `/mcp:list`)는 키 입력으로 보낸다.
+// bracketed paste 로 감싸면 Claude/Codex 의 슬래시 자동완성이 키 입력을 보지 못한다.
+const COMMAND_TOKEN = /^[/$][\w:.-]+$/;
+
+export function isCommandToken(text: string): boolean {
+  return COMMAND_TOKEN.test(text);
+}
+
 export function noteHumanInput(terminalId: string, at: number = clock.now()): void {
   gateFor(terminalId).lastHumanAt = at;
 }
@@ -236,7 +244,7 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
   try {
     // 4. 본문. submit:false(write-raw)는 바이트 그대로 — 안의 \r 은 예전처럼 제출된다.
     if (text) {
-      if (!submit || isKeyInput(text)) {
+      if (!submit || isKeyInput(text) || isCommandToken(text)) {
         write(text);
       } else {
         const bracketed = !!host?.isBracketedPaste?.(terminalId);

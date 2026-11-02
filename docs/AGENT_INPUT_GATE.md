@@ -139,7 +139,9 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 ## 이후 과제
 
 - 브리지 Rust 경로 게이트(`origin` 필드).
-- 버튼 클릭 경로를 `force: true` 로 통일.
+- ~~버튼 클릭 경로를 `force: true` 로 통일.~~ 완료: `source: 'button'` + `src/terminal/buttonInput.ts`
+  ([TERMINAL_SCOPE_SWEEP.md](TERMINAL_SCOPE_SWEEP.md) "버튼 클릭 경로" 구현 메모). XTerminal 내부의 스킬 가로채기·
+  `/clear` 단축·시작 명령은 아직 직접 쓴다.
 - OSC 133 수신 후 "셸 프롬프트에 있을 때만 제출" 같은 더 정확한 상태 기반 제출.
 
 ## 구현 메모
@@ -170,6 +172,8 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 - `AutoInputOptions.fallbackWrite` 추가. ctl 의 팝아웃 터미널, 허브·에디터·칸반·devreview 의
   기존 `invoke('write_to_pty')` 직접 쓰기를 마운트되지 않은 터미널용 마지막 수단으로 남긴다.
   이 경우 blocked/bracketed 정보는 없다.
+- 공백 없는 슬래시/달러 명령 하나(`/^[\/$][\w:.-]+$/`, 예 `/review`, `$skill`)도 bracketed paste
+  없이 키로 보낸다(`isCommandToken`). Claude/Codex 슬래시 자동완성이 키 입력을 봐야 한다.
 - 키 입력 판정: 제어 문자·이스케이프 시퀀스로만 된 텍스트나 한 글자(`\x03`, `\x1b`, `\r`, `y`
   등)는 bracketed paste 로 감싸지 않고 그대로 보낸다. 감싸면 키가 아니라 글자로 붙여넣어진다.
   `submit: false`(ctl `write-raw`) 도 바이트 그대로 보낸다 — 안에 든 `\r` 은 예전처럼 제출된다.
@@ -200,7 +204,8 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 - 칸반 → 콘솔: 예전 `prompt + '\n'` 은 Claude 에서 줄바꿈만 넣고 제출하지 않았다. 이제 게이트가
   Enter 를 따로 보내 자동 제출된다.
 
-이번에 바꾸지 않은 쓰기(다음 단계에서 `force: true` 로 옮길 후보):
+이번에 바꾸지 않은 쓰기(다음 단계에서 `force: true` 로 옮길 후보. App·페이지·컴포넌트의 버튼 경로는
+이후 `queueButtonInput` 으로 옮겼다):
 
 - XTerminal: 스킬 가로채기의 `\x15`, `/clear` 단축(`\x15/clear\r`), 입력 지우기(`\x05\x15`),
   시작 명령·재시도·tmux 자동 시작, SSH 수정 재주입, DSR/7501 응답.

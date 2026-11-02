@@ -43,6 +43,7 @@ import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentR
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
 import { MIN_SUBMIT_DELAY_MS, autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { queueButtonInput } from './terminal/buttonInput';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 
 // Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
@@ -2709,6 +2710,7 @@ function App() {
     return () => setInputGateFallbackWriter(null);
   }, []);
   const promptLibraryPendingCommandsRef = useRef<Record<string, string>>({});
+  const promptLibraryFlushingRef = useRef<Set<string>>(new Set());
   const telegramOffsetRef = useRef<number>(0);
   const telegramPollInFlightRef = useRef<boolean>(false);
   const discordLastMessageIdsRef = useRef<Record<string, string>>({});
@@ -2812,19 +2814,19 @@ function App() {
   const flushPromptLibraryCommand = useCallback(async (terminalId: string) => {
     const pending = promptLibraryPendingCommandsRef.current[terminalId];
     if (!pending) return false;
-    const payload = pending.endsWith('\n') ? pending : `${pending}\n`;
-    const writer = terminalWritersRef.current[terminalId];
-    if (writer) {
-      writer(payload);
-      delete promptLibraryPendingCommandsRef.current[terminalId];
-      return true;
-    }
+    // onReady 와 1.5 초 타이머가 겹쳐 불러도 한 번만 보낸다.
+    if (promptLibraryFlushingRef.current.has(terminalId)) return false;
+    promptLibraryFlushingRef.current.add(terminalId);
     try {
-      await invoke('write_to_pty', { terminalId, data: payload });
-      delete promptLibraryPendingCommandsRef.current[terminalId];
-      return true;
-    } catch {
-      return false;
+      // 버튼 입력 게이트: PTY 가 아직 없으면(no-writer) 남겨 두었다가 onReady/타이머가 다시 보낸다.
+      const result = await queueButtonInput(terminalId, pending.replace(/\n+$/, ''), { submit: true });
+      if (!result.ok && result.reason === 'no-writer') return false;
+      if (promptLibraryPendingCommandsRef.current[terminalId] === pending) {
+        delete promptLibraryPendingCommandsRef.current[terminalId];
+      }
+      return result.ok;
+    } finally {
+      promptLibraryFlushingRef.current.delete(terminalId);
     }
   }, []);
 
@@ -4317,8 +4319,9 @@ function App() {
         return proj?.activeTerminalId || null;
       })();
       if (activeTid) {
-        // Best-effort: write to PTY as if typed.
-        await invoke('write_to_pty', { terminalId: activeTid, data: cleaned + (autoEnter ? '\r' : '') });
+        // Best-effort: write to PTY as if typed (button gate: serial queue, Enter sent separately).
+        const activeTerm = projects.find((p) => p.id === activeProjectId)?.terminals.find((tt) => tt.id === activeTid);
+        await queueButtonInput(activeTid, cleaned, { submit: autoEnter, submitDelayMs: gateSubmitDelayFor(activeTerm?.cliType) });
       }
     } catch (e) {
       setMicError(e instanceof Error ? e.message : String(e));
@@ -7735,12 +7738,7 @@ Office project scaffold created by BBARIT Terminal.
           const pastedPath = targetTerminal?.cliType === 'bbarit' || targetTerminal?.cliType === 'bbarit-oss'
             ? `@${filePath} `
             : quotePathForTerminal(filePath, targetTerminal);
-          const write = terminalWritersRef.current[termId];
-          if (write) {
-            write(pastedPath);
-          } else {
-            await invoke('write_to_pty', { terminalId: termId, data: pastedPath });
-          }
+          await queueButtonInput(termId, pastedPath, { submit: false });
         }
       }
     } catch (err) {
@@ -18168,12 +18166,10 @@ Office project scaffold created by BBARIT Terminal.
                         return async () => {
                           const termId = activeProject?.activeTerminalId;
                           if (!termId) return;
-                          const writer = terminalWritersRef.current[termId];
                           const activeTerm = activeProject?.terminals.find(t => t.id === termId);
                           const prefix = activeTerm?.cliType === 'codex' ? '$' : '/';
                           const cmd = `${prefix}${dirName}`;
-                          if (writer) writer(cmd + '\r');
-                          else void invoke('write_to_pty', { terminalId: termId, data: cmd + '\n' });
+                          void queueButtonInput(termId, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(activeTerm?.cliType) });
                         };
                       }
                       return async () => {
@@ -18190,12 +18186,10 @@ Office project scaffold created by BBARIT Terminal.
                           if (!skillName) return;
                           const termId = activeProject?.activeTerminalId;
                           if (!termId) return;
-                          const writer = terminalWritersRef.current[termId];
                           const activeTerm = activeProject?.terminals.find(t => t.id === termId);
                           const prefix = activeTerm?.cliType === 'codex' ? '$' : '/';
                           const cmd = `${prefix}${skillName}`;
-                          if (writer) writer(cmd + '\r');
-                          else void invoke('write_to_pty', { terminalId: termId, data: cmd + '\n' });
+                          void queueButtonInput(termId, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(activeTerm?.cliType) });
                         } catch (err) {
                           console.error('Failed to run skill from file:', err);
                         }
@@ -19517,7 +19511,8 @@ Office project scaffold created by BBARIT Terminal.
                                     const cmd = ((skill as any).originalCommand || skill.command || '').trim();
                                     if (!cmd) return;
                                     const tid = activeProject?.activeTerminalId;
-                                    if (tid) void invoke('write_to_pty', { terminalId: tid, data: cmd + '\n' });
+                                    const tidTerm = activeProject?.terminals.find((tt) => tt.id === tid);
+                                    if (tid) void queueButtonInput(tid, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(tidTerm?.cliType) });
                                   } else {
                                     void handleSidebarSkillInstall(skill);
                                   }
@@ -22796,9 +22791,8 @@ Office project scaffold created by BBARIT Terminal.
             setShowCommandPicker(false);
             const termId = activeProject?.activeTerminalId;
             if (!termId) return;
-            const writer = terminalWritersRef.current[termId];
-            if (writer) writer(cmd + '\r');
-            else void invoke('write_to_pty', { terminalId: termId, data: cmd + '\n' });
+            const pickTerm = activeProject?.terminals.find((tt) => tt.id === termId);
+            void queueButtonInput(termId, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(pickTerm?.cliType) });
             void savePromptToLibrary(cmd, activeProject?.workDir);
           }}
           userSkills={allSkills}
@@ -22816,7 +22810,8 @@ Office project scaffold created by BBARIT Terminal.
             onBuild={(cmd) => {
               const termId = activeProject?.activeTerminalId;
               if (termId) {
-                void invoke('write_to_pty', { terminalId: termId, data: cmd + '\n' });
+                const pakeTerm = activeProject?.terminals.find((tt) => tt.id === termId);
+                void queueButtonInput(termId, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(pakeTerm?.cliType) });
               }
             }}
           />
@@ -23029,7 +23024,8 @@ Office project scaffold created by BBARIT Terminal.
                   const proj = projects.find((p) => p.id === activeProjectId);
                   const tid = proj?.activeTerminalId;
                   if (tid && cmd.command) {
-                    invoke('write_to_pty', { terminalId: tid, data: cmd.command + '\n' }).catch(() => {});
+                    const quickTerm = proj?.terminals.find((tt) => tt.id === tid);
+                    void queueButtonInput(tid, cmd.command, { submit: true, submitDelayMs: gateSubmitDelayFor(quickTerm?.cliType) });
                   }
                 }}
                 title={`${commandName}\n${cmd.command}`}
@@ -23487,7 +23483,8 @@ Office project scaffold created by BBARIT Terminal.
                   const cmd = ((skillDetailModal as any).originalCommand || skillDetailModal.command || '').trim();
                   if (!cmd) return;
                   const tid = activeProject?.activeTerminalId;
-                  if (tid) void invoke('write_to_pty', { terminalId: tid, data: cmd + '\n' });
+                  const tidTerm = activeProject?.terminals.find((tt) => tt.id === tid);
+                  if (tid) void queueButtonInput(tid, cmd, { submit: true, submitDelayMs: gateSubmitDelayFor(tidTerm?.cliType) });
                   setSkillDetailModal(null);
                 }}>
                   <Play size={12} /> {t('app.skills.runInTerminal' as any)}
