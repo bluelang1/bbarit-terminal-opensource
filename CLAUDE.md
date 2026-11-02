@@ -68,11 +68,17 @@ Build/test gotchas:
   first and com.octo.terminal as fallback; BBARIT_BRIDGE_APP_ID pins one.
 - Claude Code stores sessions in ~/.claude/projects/<cwd with every
   non-alphanumeric char replaced by "-">/*.jsonl; src/terminal/claudeSessionDir.ts
-  probes it so `--continue` is only added when a transcript exists (sessions
-  relocated with CLAUDE_CONFIG_DIR are not detected, so resume is skipped).
-- "Claude (new session)" tabs carry TerminalInstance.claudeSessionId (uuid) and
-  launch `claude --session-id <id>` first, `--resume <id>` afterwards; plain
-  Claude tabs keep the shared `--continue` behavior.
+  probes it so `--continue` is only added when a transcript exists. It looks
+  under $CLAUDE_CONFIG_DIR/projects when that is visible to the app process or
+  ~/.config/octo/.env (read_env_var); a shell-rc-only export is not seen.
+- "Claude (new session)" tabs carry TerminalInstance.claudeSessionId (uuid,
+  claudeSessionSource 'app') and launch `claude --session-id <id>` first,
+  `--resume <id>` afterwards; plain Claude tabs keep the shared `--continue`.
+- Claude tabs launch with `--settings <bundled bbarit-session.json>` whose
+  SessionStart hook POSTs the session id to `/api/claude-session`
+  (src-tauri/resources/claude-hooks/); the id is stored with source 'hook' and
+  resumed only when resumeLastSession is on. PTYs carry BBARIT_TERMINAL_ID /
+  BBARIT_BRIDGE_PORT / BBARIT_CLAUDE_HOOK. Never write ~/.claude/settings.json.
 - Terminal drops insert quoted paths + a space and never press Enter
   (insertDroppedPaths in XTerminal.tsx); paste keeps its own submit rules.
 - `vite build` needs a ~5 GB Node heap (peak RSS 4.8 GB); on the 7 GB macOS

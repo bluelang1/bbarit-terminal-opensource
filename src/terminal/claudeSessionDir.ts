@@ -17,7 +17,16 @@ export function isLocalWorkDir(workDir: string | undefined | null): workDir is s
   return value.length > 0 && !/^ssh:\/\//i.test(value);
 }
 
-export function claudeProjectSessionDir(home: string, cwd: string): string {
+/**
+ * Claude Code's per-project session folder. Sessions live under
+ * `$CLAUDE_CONFIG_DIR/projects/` when that variable is set, else `~/.claude/projects/`.
+ */
+export function claudeProjectSessionDir(home: string, cwd: string, configDir?: string | null): string {
+  const config = String(configDir || '').trim().replace(/[\\/]+$/, '');
+  if (config) {
+    const sep = config.includes('\\') && !config.includes('/') ? '\\' : '/';
+    return `${config}${sep}projects${sep}${encodeClaudeProjectDir(cwd)}`;
+  }
   const base = String(home || '').replace(/[\\/]+$/, '');
   const sep = base.includes('\\') && !base.includes('/') ? '\\' : '/';
   return `${base}${sep}.claude${sep}projects${sep}${encodeClaudeProjectDir(cwd)}`;
@@ -33,20 +42,35 @@ export function hasClaudeSessionFiles(entries: readonly DirEntryLike[]): boolean
 export type ClaudeContinueProbe = {
   getHomeDir: () => Promise<string>;
   readDirectory: (path: string) => Promise<readonly DirEntryLike[]>;
+  /** CLAUDE_CONFIG_DIR as the app sees it; absent/empty means ~/.claude. */
+  getClaudeConfigDir?: () => Promise<string | null | undefined>;
 };
+
+/** Session folder for this probe, honouring CLAUDE_CONFIG_DIR. A failed lookup falls back to ~/.claude. */
+async function probeSessionDir(probe: ClaudeContinueProbe, workDir: string): Promise<string> {
+  let configDir: string | null | undefined = null;
+  try {
+    configDir = probe.getClaudeConfigDir ? await probe.getClaudeConfigDir() : null;
+  } catch {
+    configDir = null;
+  }
+  // The home dir is only needed without CLAUDE_CONFIG_DIR.
+  const home = String(configDir || '').trim() ? '' : await probe.getHomeDir();
+  return claudeProjectSessionDir(home, workDir, configDir);
+}
 
 /**
  * Decide whether `--continue` is safe for this work dir. Remote (ssh://) and
  * empty work dirs keep the previous behavior and return true. A lookup failure
  * returns false: read_directory rejects on a missing folder, which is the
  * normal first-run case, and starting without the flag never breaks the launch.
- * Known gap: sessions kept elsewhere via CLAUDE_CONFIG_DIR are not seen.
+ * CLAUDE_CONFIG_DIR is honoured only when the app process itself sees it
+ * (a variable exported only in the shell rc is not visible here).
  */
 export async function shouldContinueClaudeSession(workDir: string | undefined, probe: ClaudeContinueProbe): Promise<boolean> {
   if (!isLocalWorkDir(workDir)) return true;
   try {
-    const home = await probe.getHomeDir();
-    const entries = await probe.readDirectory(claudeProjectSessionDir(home, workDir));
+    const entries = await probe.readDirectory(await probeSessionDir(probe, workDir));
     return hasClaudeSessionFiles(entries);
   } catch {
     // The projects folder does not exist yet (first ever Claude run on this
@@ -83,6 +107,13 @@ export function newClaudeSessionId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/**
+ * Where a tab's session id came from: 'app' = "Claude (new session)" created it (always
+ * resumed), 'hook' = the SessionStart hook reported it (resumed only with resumeLastSession).
+ * Ids saved before the hook existed have no source and count as 'app'.
+ */
+export type ClaudeSessionSource = 'app' | 'hook';
+
 export type ClaudeSessionArgs =
   | { kind: 'resume'; sessionId: string }
   | { kind: 'new'; sessionId: string }
@@ -94,18 +125,19 @@ export type ClaudeSessionArgs =
  * - a tab with its own session id resumes that exact conversation when its
  *   transcript exists and otherwise creates it with `--session-id`, so the
  *   tab never shares a conversation with sibling tabs;
- * - a tab without an id keeps the shared "continue the latest" behavior.
+ * - a tab without an id keeps the shared "continue the latest" behavior;
+ * - a hook-reported id follows resumeLastSession: off means a fresh session (no flag).
  */
 export async function resolveClaudeSessionArgs(
-  options: { workDir?: string; sessionId?: string | null; resumeLastSession: boolean },
+  options: { workDir?: string; sessionId?: string | null; sessionSource?: ClaudeSessionSource | null; resumeLastSession: boolean },
   probe: ClaudeContinueProbe,
 ): Promise<ClaudeSessionArgs> {
   const sessionId = isClaudeSessionId(options.sessionId) ? options.sessionId : null;
+  if (sessionId && options.sessionSource === 'hook' && !options.resumeLastSession) return { kind: 'none' };
   if (sessionId) {
     if (!isLocalWorkDir(options.workDir)) return { kind: 'new', sessionId };
     try {
-      const home = await probe.getHomeDir();
-      const entries = await probe.readDirectory(claudeProjectSessionDir(home, options.workDir));
+      const entries = await probe.readDirectory(await probeSessionDir(probe, options.workDir));
       return hasClaudeSessionFile(entries, sessionId) ? { kind: 'resume', sessionId } : { kind: 'new', sessionId };
     } catch {
       return { kind: 'new', sessionId };

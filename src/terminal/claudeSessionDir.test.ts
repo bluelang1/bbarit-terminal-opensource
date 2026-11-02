@@ -111,11 +111,71 @@ describe('dedicated claude sessions', () => {
       .toEqual({ kind: 'none' });
   });
 
+  it('starts fresh for a hook-reported id when resumeLastSession is off', async () => {
+    const withTranscript = probeWith([{ name: `${ID}.jsonl`, is_dir: false }]);
+    expect(await resolveClaudeSessionArgs({ workDir: '/Users/me/repo', sessionId: ID, sessionSource: 'hook', resumeLastSession: false }, withTranscript))
+      .toEqual({ kind: 'none' });
+    expect(await resolveClaudeSessionArgs({ workDir: '/Users/me/repo', sessionId: ID, sessionSource: 'hook', resumeLastSession: true }, withTranscript))
+      .toEqual({ kind: 'resume', sessionId: ID });
+  });
+
+  it('always resumes an app-created id regardless of resumeLastSession', async () => {
+    const withTranscript = probeWith([{ name: `${ID}.jsonl`, is_dir: false }]);
+    for (const sessionSource of ['app', undefined, null] as const) {
+      expect(await resolveClaudeSessionArgs({ workDir: '/Users/me/repo', sessionId: ID, sessionSource, resumeLastSession: false }, withTranscript))
+        .toEqual({ kind: 'resume', sessionId: ID });
+    }
+    expect(await resolveClaudeSessionArgs({ workDir: '/Users/me/repo', sessionId: ID, sessionSource: 'app', resumeLastSession: false }, probeWith([])))
+      .toEqual({ kind: 'new', sessionId: ID });
+  });
+
   it('renders the flags Claude Code expects', () => {
     expect(claudeSessionArgsToFlags({ kind: 'resume', sessionId: ID })).toBe(` --resume ${ID}`);
     expect(claudeSessionArgsToFlags({ kind: 'new', sessionId: ID })).toBe(` --session-id ${ID}`);
     expect(claudeSessionArgsToFlags({ kind: 'continue' })).toBe(' --continue');
     expect(claudeSessionArgsToFlags({ kind: 'none' })).toBe('');
+  });
+});
+
+describe('CLAUDE_CONFIG_DIR', () => {
+  const ID = '0f4b2c1e-7d3a-4c5b-9e8f-1a2b3c4d5e6f';
+
+  it('builds the projects path under the config dir when it is set', () => {
+    expect(claudeProjectSessionDir('/Users/me', '/Users/me/repo', '/Users/me/.claude-work')).toBe('/Users/me/.claude-work/projects/-Users-me-repo');
+    expect(claudeProjectSessionDir('/Users/me', '/Users/me/repo', '/cfg/')).toBe('/cfg/projects/-Users-me-repo');
+    expect(claudeProjectSessionDir('C:\\Users\\me', 'C:\\repo', 'D:\\claude')).toBe('D:\\claude\\projects\\C--repo');
+    expect(claudeProjectSessionDir('/Users/me', '/Users/me/repo', '  ')).toBe('/Users/me/.claude/projects/-Users-me-repo');
+    expect(claudeProjectSessionDir('/Users/me', '/Users/me/repo', null)).toBe('/Users/me/.claude/projects/-Users-me-repo');
+  });
+
+  it('probes the config dir instead of ~/.claude', async () => {
+    const seen: string[] = [];
+    const probe = (configDir: string | null | Error) => ({
+      getHomeDir: async () => '/Users/me',
+      getClaudeConfigDir: async () => { if (configDir instanceof Error) throw configDir; return configDir; },
+      readDirectory: async (dir: string) => { seen.push(dir); return [{ name: `${ID}.jsonl`, is_dir: false }]; },
+    });
+    expect(await resolveClaudeSessionArgs({ workDir: '/Users/me/repo', sessionId: ID, resumeLastSession: false }, probe('/cfg')))
+      .toEqual({ kind: 'resume', sessionId: ID });
+    expect(await shouldContinueClaudeSession('/Users/me/repo', probe('/cfg'))).toBe(true);
+    // unset or unreadable falls back to ~/.claude
+    await shouldContinueClaudeSession('/Users/me/repo', probe(null));
+    await shouldContinueClaudeSession('/Users/me/repo', probe(new Error('no command')));
+    expect(seen).toEqual([
+      '/cfg/projects/-Users-me-repo',
+      '/cfg/projects/-Users-me-repo',
+      '/Users/me/.claude/projects/-Users-me-repo',
+      '/Users/me/.claude/projects/-Users-me-repo',
+    ]);
+  });
+
+  it('does not need the home dir when the config dir is set', async () => {
+    const probe = {
+      getHomeDir: async () => { throw new Error('no home'); },
+      getClaudeConfigDir: async () => '/cfg',
+      readDirectory: async () => [{ name: 'x.jsonl', is_dir: false }],
+    };
+    expect(await shouldContinueClaudeSession('/repo', probe)).toBe(true);
   });
 });
 
@@ -127,6 +187,14 @@ describe('claudeSessionId persistence in App.tsx', () => {
   it('is written by saveProjects and validated by loadProjects', () => {
     expect(appSource).toContain('claudeSessionId: t.claudeSessionId || undefined,');
     expect(appSource).toContain("claudeSessionId: isClaudeSessionId(t?.claudeSessionId) ? t.claudeSessionId : undefined,");
+  });
+
+  it('persists claudeSessionSource and treats legacy ids as app-created', () => {
+    expect(appSource).toContain("claudeSessionSource: t.claudeSessionId ? (t.claudeSessionSource || undefined) : undefined,");
+    expect(appSource).toContain("claudeSessionSource: isClaudeSessionId(t?.claudeSessionId) ? (t?.claudeSessionSource === 'hook' ? 'hook' : 'app') : undefined,");
+    const resumeSites = appSource.match(/resumeLastSession=\{agentSettings\.resumeLastSession \?\? false\}/g) || [];
+    const sourceSites = appSource.match(/claudeSessionSource=\{terminal\.claudeSessionSource\}/g) || [];
+    expect(sourceSites.length).toBe(resumeSites.length);
   });
 
   it('is passed to every XTerminal that receives resumeLastSession', () => {

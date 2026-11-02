@@ -33,13 +33,14 @@ import {
 import {
   answerProgramStatusProbe,
   handleProgramStatusOsc as handleProgramStatusOscCore,
+  handleShellIntegrationOsc as handleShellIntegrationOscCore,
   isProgramStatusStale,
   type ProgramStatusChange,
 } from './terminal/programStatusHandler';
 import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
-import { claudeSessionArgsToFlags, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
+import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
@@ -89,8 +90,10 @@ interface XTerminalProps {
   startupMode?: 'normal' | 'auto-accept' | 'bypass-permissions' | 'auto-edit' | 'full-auto' | 'yolo';
   codexWebSearch?: boolean;
   resumeLastSession?: boolean;
-  /** Dedicated Claude Code session for this tab (uuid); undefined = shared `--continue` tab. */
+  /** Claude Code session for this tab (uuid); undefined = shared `--continue` tab. */
   claudeSessionId?: string;
+  /** 'hook' ids are resumed only when resumeLastSession is on; 'app' (or absent) always. */
+  claudeSessionSource?: ClaudeSessionSource;
   extraFlags?: string[];
   modelId?: string;
   mcpConfigPath?: string;
@@ -290,6 +293,10 @@ interface TerminalState {
   programStatus?: ProgramStatusStore;
   pendingStatusProbe?: boolean;          // writer 등록 전에 온 지원 질의 — 등록되면 답한다
   replayingOutput?: boolean;             // 저장된 PTY 출력 재생 중 — 7501 알림·질의 응답 금지
+  // OSC 133 셸 통합 — docs/SHELL_PROMPT_OSC133.md (기록만, 표시는 범위 밖)
+  lastPromptAt?: number;
+  lastCommandStartAt?: number;
+  lastCommandExitCode?: number | null;
 }
 const terminalStates = new Map<string, TerminalState>();
 
@@ -326,6 +333,18 @@ const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
       else dispatchAgentStatus(terminalId, change.store);
     },
     onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore()),
+  });
+};
+
+/**
+ * registerOscHandler(133) 본체 — 로직은 terminal/programStatusHandler.ts.
+ * A(새 프롬프트)는 7501 working/blocked 를 버리고 상태 이벤트만 보낸다(알림 없음).
+ */
+const handleShellIntegrationOsc = (terminalId: string, data: string): boolean => {
+  const st = terminalStates.get(terminalId);
+  if (!st) return true;
+  return handleShellIntegrationOscCore(st, data, {
+    onChange: (change) => dispatchAgentStatus(terminalId, change.store),
   });
 };
 
@@ -1168,7 +1187,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1195,6 +1214,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // Read at PTY creation only; changing it must not restart a running tab.
   const githubAccountRef = useRef(githubAccount);
   githubAccountRef.current = githubAccount;
+  // Read at launch time only. The SessionStart hook updates the id while Claude runs
+  // (docs/CLAUDE_SESSION_HOOK.md); as an effect dep that would restart the terminal.
+  const claudeSessionIdRef = useRef(claudeSessionId);
+  claudeSessionIdRef.current = claudeSessionId;
+  const claudeSessionSourceRef = useRef(claudeSessionSource);
+  claudeSessionSourceRef.current = claudeSessionSource;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Set when the user submits input (Enter); gates the "task completed" toast so it
@@ -2961,6 +2986,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
       // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
       term.parser.registerOscHandler(7501, (data) => handleProgramStatusOsc(terminalId, data));
+      // OSC 133 셸 통합: 셸 프롬프트로 돌아오면(A) 남은 7501 working/blocked 를 정리한다.
+      term.parser.registerOscHandler(133, (data) => handleShellIntegrationOsc(terminalId, data));
       term.unicode.activeVersion = '11';
 
       termRef.current = term;
@@ -3443,14 +3470,23 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // exists: on a fresh project the flag makes Claude exit with
       // "No conversation found to continue".
       let claudeSessionFlags = '';
+      // Bundled SessionStart hook settings (`--settings`): reports this tab's session id
+      // so the next launch resumes it. Local, non-Windows work dirs only.
+      let claudeHookSettings = '';
       if (cliType === 'claude') {
         claudeSessionFlags = claudeSessionArgsToFlags(await resolveClaudeSessionArgs(
-          { workDir, sessionId: claudeSessionId, resumeLastSession },
+          { workDir, sessionId: claudeSessionIdRef.current, sessionSource: claudeSessionSourceRef.current, resumeLastSession },
           {
             getHomeDir: () => invoke<string>('get_home_dir'),
             readDirectory: (path) => invoke<Array<{ name: string; is_dir: boolean }>>('read_directory', { path }),
+            getClaudeConfigDir: () => invoke<string | null>('read_env_var', { name: 'CLAUDE_CONFIG_DIR' }),
           },
         ));
+        if (!isWindows && isLocalWorkDir(workDir)) {
+          try {
+            claudeHookSettings = (await invoke<string | null>('claude_hook_settings_path')) || '';
+          } catch { /* older host or missing resource: launch without the hook */ }
+        }
       }
 
       const cliCommands: Record<string, string> = {
@@ -3468,6 +3504,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // Inject --mcp-config if set and not already in flags
           if (mcpConfigPath && !hasFlag('--mcp-config') && !normalizedFlags.some(f => f.startsWith('--mcp-config'))) {
             cmd += ` --mcp-config ${shellQuoteArg(mcpConfigPath, argShell)}`;
+          }
+          // Session hook settings, unless the user passes their own --settings
+          if (claudeHookSettings && !hasFlag('--settings') && !normalizedFlags.some(f => f.startsWith('--settings'))) {
+            cmd += ` --settings ${shellQuoteArg(claudeHookSettings, argShell)}`;
           }
           cmd += flagsToString(normalizedFlags);
           return wrapCliCheck(cmd, 'claude', 'npm i -g @anthropic-ai/claude-code');
@@ -3929,7 +3969,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       onDispose?.();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, claudeSessionId, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
+  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
 
   const enableDirectInput = useCallback(() => {
     const state = terminalStates.get(terminalId);

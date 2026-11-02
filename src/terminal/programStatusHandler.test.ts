@@ -5,6 +5,7 @@ import {
   STALE_PROGRAM_STATUS_MS,
   answerProgramStatusProbe,
   handleProgramStatusOsc,
+  handleShellIntegrationOsc,
   isProgramStatusStale,
   type ProgramStatusChange,
   type ProgramStatusHost,
@@ -139,5 +140,83 @@ describe('isProgramStatusStale', () => {
     expect(isProgramStatusStale(storeIn('state=idle', 0), T, T)).toBe(false);
     expect(isProgramStatusStale(createProgramStatusStore(), T, T)).toBe(false);
     expect(isProgramStatusStale(undefined, T, T)).toBe(false);
+  });
+});
+
+describe('handleShellIntegrationOsc (OSC 133)', () => {
+  const feed133 = (h: ReturnType<typeof harness>, data: string, now = 1000) =>
+    handleShellIntegrationOsc(h.host, data, {
+      onChange: (c) => {
+        h.changes.push(c);
+        h.alerts.push(decideAgentAlert(c.prev, c.next, false, c.firstReport));
+      },
+    }, now);
+
+  it('should_drop_working_to_idle_on_prompt_start_without_alert', () => {
+    const h = harness(false);
+    h.feed('state=idle');
+    h.feed('state=working');
+    h.feed('id=sub:state=working');
+    const before = h.changes.length;
+    expect(feed133(h, 'A', 5000)).toBe(true);
+    expect(h.host.programStatus?.root).toBeNull();
+    expect(h.host.programStatus?.children.size).toBe(0);
+    expect(h.changes).toHaveLength(before + 1);
+    expect(h.changes.at(-1)).toMatchObject({ prev: 'working', next: 'idle', firstReport: true });
+    expect(h.alerts.at(-1)).toBeNull();
+    expect(h.host.lastPromptAt).toBe(5000);
+  });
+
+  it('should_drop_blocked_but_keep_done_records', () => {
+    const h = harness(false);
+    h.feed('state=idle');
+    h.feed('state=blocked:kind=permission');
+    feed133(h, 'A');
+    expect(h.changes.at(-1)).toMatchObject({ prev: 'blocked', next: 'idle' });
+
+    const d = harness(false);
+    d.feed('state=idle');
+    d.feed('state=working');
+    d.feed('state=done');
+    d.feed('id=a:state=done');
+    const before = d.changes.length;
+    feed133(d, 'A');
+    expect(d.host.programStatus?.root?.state).toBe('done');
+    expect(d.host.programStatus?.children.get('a')?.state).toBe('done');
+    expect(d.changes).toHaveLength(before); // 상태가 그대로면 이벤트도 없다
+  });
+
+  it('should_not_alert_while_replaying_but_still_sync_state', () => {
+    const h = harness(false);
+    h.host.replayingOutput = true;
+    h.feed('state=idle');
+    h.feed('state=working');
+    feed133(h, 'A');
+    h.host.replayingOutput = false;
+    expect(h.alerts.every((a) => a === null)).toBe(true);
+    expect(h.changes.at(-1)).toMatchObject({ prev: 'working', next: 'idle', firstReport: true });
+  });
+
+  it('should_ignore_prompt_start_on_terminals_without_7501_reports', () => {
+    const h = harness(false);
+    feed133(h, 'A', 42);
+    expect(h.changes).toHaveLength(0);
+    expect(h.host.programStatus).toBeUndefined();
+    expect(h.host.lastPromptAt).toBe(42);
+  });
+
+  it('should_record_command_start_and_exit_code_and_ignore_B', () => {
+    const h = harness(false);
+    h.feed('state=working');
+    feed133(h, 'B');
+    feed133(h, 'C', 7);
+    expect(h.host.lastCommandStartAt).toBe(7);
+    feed133(h, 'D;130');
+    expect(h.host.lastCommandExitCode).toBe(130);
+    feed133(h, 'D');
+    expect(h.host.lastCommandExitCode).toBeNull();
+    feed133(h, 'D;abc'); // 잘못된 페이로드는 기록하지 않는다
+    expect(h.host.lastCommandExitCode).toBeNull();
+    expect(h.host.programStatus?.root?.state).toBe('working'); // B/C/D 는 상태를 건드리지 않는다
   });
 });

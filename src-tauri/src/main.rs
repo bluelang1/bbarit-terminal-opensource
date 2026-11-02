@@ -3359,6 +3359,7 @@ async fn detect_github_account(work_dir: String) -> Option<String> {
 // because it spawns git/gh helpers; it never awaits, so State use is unchanged.
 #[tauri::command(async)]
 fn create_shell(
+    app: AppHandle,
     state: State<'_, AppState>,
     terminal_id: String,
     work_dir: String,
@@ -3439,8 +3440,10 @@ fn create_shell(
     }
     cmd.cwd(&shell_work_dir);
 
-    // Remove CLAUDECODE env to allow Claude Code sessions inside Octo Terminal
-    cmd.env_remove("CLAUDECODE");
+    // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
+    // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
+    let claude_hook = claude_hook_file(&app, "session-start.sh");
+    apply_bbarit_terminal_env(&mut cmd, &terminal_id, claude_hook.as_deref());
     // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("COLOR");
@@ -3719,6 +3722,122 @@ fn kill_process_tree(pid: u32) {
         for t in &targets {
             let _ = std::process::Command::new("kill").args(["-KILL", &t.to_string()]).output();
         }
+    }
+}
+
+// ─── Claude session hook env (docs/CLAUDE_SESSION_HOOK.md) ───
+// Claude tabs launch `claude --settings <bundled bbarit-session.json>`; its SessionStart hook
+// runs session-start.sh, which POSTs the session id for BBARIT_TERMINAL_ID to the local bridge.
+// The user's ~/.claude/settings.json and project settings are never written.
+
+/// Markers a parent Claude Code session leaves in the env. Inherited by a tab (the app was
+/// started from inside Claude Code), they make the tab's Claude refuse to save its transcript
+/// ("inherited CLAUDE_CODE_CHILD_SESSION marker"), so a reported id could not be resumed.
+const INHERITED_CLAUDE_MARKERS: [&str; 3] =
+    ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT"];
+
+/// Folder holding the bundled hook files: the app's resources, or the source tree in dev.
+fn claude_hooks_dir(app: &AppHandle) -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(p) = app
+        .path()
+        .resolve("resources/claude-hooks", tauri::path::BaseDirectory::Resource)
+    {
+        candidates.push(p);
+    }
+    #[cfg(debug_assertions)]
+    candidates.push(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/claude-hooks"));
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("session-start.sh").is_file() && dir.join("bbarit-session.json").is_file())
+}
+
+fn claude_hook_file(app: &AppHandle, name: &str) -> Option<String> {
+    claude_hooks_dir(app)
+        .map(|dir| strip_extended_length_prefix(dir.join(name).to_string_lossy().to_string()))
+}
+
+/// Env every tab PTY gets so the hook can say which tab it ran in and where the bridge is.
+fn bbarit_terminal_env(terminal_id: &str, hook_script: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        ("BBARIT_TERMINAL_ID", terminal_id.to_string()),
+        ("BBARIT_BRIDGE_PORT", browser_bridge::BRIDGE_PORT.to_string()),
+    ];
+    if let Some(hook) = hook_script {
+        env.push(("BBARIT_CLAUDE_HOOK", hook.to_string()));
+    }
+    env
+}
+
+/// Shared by create_shell and create_cli_shell: drop inherited Claude markers, add the hook env.
+fn apply_bbarit_terminal_env(cmd: &mut CommandBuilder, terminal_id: &str, hook_script: Option<&str>) {
+    for key in INHERITED_CLAUDE_MARKERS {
+        cmd.env_remove(key);
+    }
+    for (key, value) in bbarit_terminal_env(terminal_id, hook_script) {
+        cmd.env(key, value);
+    }
+}
+
+/// `--settings` file for Claude tabs (the bundled SessionStart hook). None on Windows, where
+/// the hook is not attached (no `sh`), or when the resource is missing.
+#[tauri::command]
+fn claude_hook_settings_path(app: AppHandle) -> Option<String> {
+    if cfg!(target_os = "windows") {
+        return None;
+    }
+    claude_hook_file(&app, "bbarit-session.json")
+}
+
+/// Env vars the frontend may read. Kept to an allowlist so the webview cannot read secrets.
+const READABLE_ENV_VARS: [&str; 1] = ["CLAUDE_CONFIG_DIR"];
+
+#[tauri::command]
+fn read_env_var(name: String) -> Option<String> {
+    if !READABLE_ENV_VARS.contains(&name.as_str()) {
+        return None;
+    }
+    get_env_value(&name).map(|v| v.trim().to_string())
+}
+
+#[cfg(test)]
+mod claude_hook_env_tests {
+    use super::{apply_bbarit_terminal_env, bbarit_terminal_env, read_env_var, INHERITED_CLAUDE_MARKERS};
+    use portable_pty::CommandBuilder;
+
+    #[test]
+    fn tab_env_names_terminal_bridge_and_hook() {
+        let env = bbarit_terminal_env("term-1", Some("/res/claude-hooks/session-start.sh"));
+        assert_eq!(
+            env,
+            vec![
+                ("BBARIT_TERMINAL_ID", "term-1".to_string()),
+                ("BBARIT_BRIDGE_PORT", crate::browser_bridge::BRIDGE_PORT.to_string()),
+                ("BBARIT_CLAUDE_HOOK", "/res/claude-hooks/session-start.sh".to_string()),
+            ]
+        );
+        // A missing resource leaves the hook var out; the bundled settings then no-op.
+        assert!(bbarit_terminal_env("t", None).iter().all(|(k, _)| *k != "BBARIT_CLAUDE_HOOK"));
+    }
+
+    #[test]
+    fn inherited_claude_markers_are_removed() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        for key in INHERITED_CLAUDE_MARKERS {
+            cmd.env(key, "1");
+        }
+        apply_bbarit_terminal_env(&mut cmd, "t", Some("/h.sh"));
+        for key in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT"] {
+            assert!(cmd.get_env(key).is_none(), "{key} should be removed");
+        }
+        assert_eq!(cmd.get_env("BBARIT_TERMINAL_ID").and_then(|v| v.to_str()), Some("t"));
+        assert_eq!(cmd.get_env("BBARIT_CLAUDE_HOOK").and_then(|v| v.to_str()), Some("/h.sh"));
+    }
+
+    #[test]
+    fn read_env_var_only_serves_the_allowlist() {
+        assert_eq!(read_env_var("PATH".into()), None);
+        assert_eq!(read_env_var("ANTHROPIC_API_KEY".into()), None);
     }
 }
 
@@ -4753,6 +4872,7 @@ fn agent_rpc_stop(panel_id: String) {
 // reason as create_shell.
 #[tauri::command(async)]
 fn create_cli_shell(
+    app: AppHandle,
     state: State<'_, AppState>,
     terminal_id: String,
     work_dir: String,
@@ -4890,8 +5010,10 @@ fn create_cli_shell(
     let shell_work_dir = resolve_shell_work_dir(&work_dir);
     cmd.cwd(&shell_work_dir);
 
-    // Remove CLAUDECODE env to allow Claude Code sessions inside Octo Terminal
-    cmd.env_remove("CLAUDECODE");
+    // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
+    // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
+    let claude_hook = claude_hook_file(&app, "session-start.sh");
+    apply_bbarit_terminal_env(&mut cmd, &terminal_id, claude_hook.as_deref());
     // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("COLOR");
@@ -10397,6 +10519,8 @@ fn main() {
             detect_github_account,
             resolve_bundled_agent,
             resolve_browser_cli,
+            claude_hook_settings_path,
+            read_env_var,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,
