@@ -35,6 +35,14 @@ export function isUserLooking(isActiveTab: boolean, doc: Pick<Document, 'hasFocu
   }
 }
 
+/** 상태 점·탭 툴팁 문구. blocked 는 kind 별 문구(BLOCKED_KIND_LABEL)를 우선한다. */
+export const AGENT_STATE_LABEL: Record<AgentTabState, string> = {
+  working: '작업 중',
+  blocked: '입력 대기',
+  done: '완료',
+  idle: '대기',
+};
+
 export const BLOCKED_KIND_LABEL: Record<string, string> = {
   permission: '권한 승인 필요',
   question: '질문에 답해 주세요',

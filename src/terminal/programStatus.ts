@@ -147,10 +147,12 @@ export interface ProgramStatusStore {
   reported: boolean;
   /** 마지막 롤업 상태(턴 계산용). */
   lastState: AgentTabState;
+  /** 마지막 보고를 받은 시각(ms). 오래된 working/blocked 정리에 쓴다. */
+  lastReportAt: number;
 }
 
 export function createProgramStatusStore(): ProgramStatusStore {
-  return { root: null, children: new Map(), turn: 0, reported: false, lastState: 'idle' };
+  return { root: null, children: new Map(), turn: 0, reported: false, lastState: 'idle', lastReportAt: 0 };
 }
 
 const toRecord = (r: ProgramStatusReport): ProgramStatusRecord => {

@@ -15,7 +15,7 @@ describe('decideAgentAlert', () => {
     expect(decideAgentAlert('working', 'idle', true, false)).toBeNull();
   });
 
-  it('should_ignore_repeat_reports_in_same_turn', () => {
+  it('should_ignore_same_state_reports (turn sequence: programStatusHandler.test.ts)', () => {
     expect(decideAgentAlert('blocked', 'blocked', false, false)).toBeNull();
     expect(decideAgentAlert('done', 'done', false, false)).toBeNull();
     expect(decideAgentAlert('working', 'working', false, false)).toBeNull();

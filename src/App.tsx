@@ -169,7 +169,7 @@ import { getLoungeHandle } from './collab/loungeClient';
 import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, totalLoungeUnread, type LoungeUnreadCounts } from './collab/loungeNotifications';
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
-import { AGENT_STATUS_EVENT, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -3546,6 +3546,12 @@ function App() {
   const terminalStatusClass = (terminalId: string): string => {
     const st = agentStateOf(terminalId);
     return `${st === 'working' ? 'running' : 'stopped'} ${st}`;
+  };
+  // Dot/tab tooltip wording follows the display state (blocked names what it waits for).
+  const terminalStatusLabel = (terminalId: string): string => {
+    const st = agentStateOf(terminalId);
+    if (st === 'blocked') return BLOCKED_KIND_LABEL[agentStatus.get(terminalId)?.kind || ''] || '입력 대기';
+    return AGENT_STATE_LABEL[st];
   };
   const projectAgentStateOf = (terminals: { id: string }[]): AgentTabState =>
     aggregateProjectAgentState(terminals.map((tm) => agentStateOf(tm.id)));
@@ -8267,7 +8273,7 @@ Office project scaffold created by BBARIT Terminal.
                   <span
                     key={tm.id}
                     className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
-                    title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
+                    title={`${tm.name}: ${terminalStatusLabel(tm.id)}`}
                   />
                 ))}
               </span>
@@ -16563,7 +16569,7 @@ Office project scaffold created by BBARIT Terminal.
             {project.terminals.length > 0 && (
               <span className={`project-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
                 {project.terminals.slice(0, 6).map(tm => (
-                  <span key={tm.id} className={`project-terminal-dot ${terminalStatusClass(tm.id)}`} title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`} />
+                  <span key={tm.id} className={`project-terminal-dot ${terminalStatusClass(tm.id)}`} title={`${tm.name}: ${terminalStatusLabel(tm.id)}`} />
                 ))}
                 {project.terminals.length > 6 && (
                   <span className="project-terminal-dots-more" title={`${project.terminals.length} terminals`}>
@@ -19944,7 +19950,7 @@ Office project scaffold created by BBARIT Terminal.
                                   <span
                                     key={tm.id}
                                     className={`project-terminal-dot ${terminalStatusClass(tm.id)}`}
-                                    title={`${tm.name}: ${busyTerminals.has(tm.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)}`}
+                                    title={`${tm.name}: ${terminalStatusLabel(tm.id)}`}
                                   />
                                 ))}
                               </span>
@@ -20617,9 +20623,9 @@ Office project scaffold created by BBARIT Terminal.
                       }}
                     >
                       <span className="terminal-tab-label">
-                        <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} title={busyTerminals.has(terminal.id) ? t('app.terminal.running' as any) : t('app.terminal.stopped' as any)} />
+                        <span className={`pty-status-dot ${terminalStatusClass(terminal.id)}`} title={terminalStatusLabel(terminal.id)} />
                         {agentStateOf(terminal.id) === 'blocked' && (
-                          <span className="terminal-tab-agent-glyph" title={blockedAlertText('', '', agentStatus.get(terminal.id)?.kind).body || undefined}>?</span>
+                          <span className="terminal-tab-agent-glyph" title={terminalStatusLabel(terminal.id)}>?</span>
                         )}
                         <CliIcon cliType={terminal.cliType || 'shell'} />
                         <BbaritPersonaBadge profile={terminal.cliType === 'bbarit' ? bbaritPersonaProfile : null} compact />

@@ -163,4 +163,23 @@ tmux 안에서는 tmux 가 지원해야만 보고한다. 백그라운드 세션�
 - **정리**: 터미널 dispose·재생성 때 App 의 항목을 지워(`cleared`) 기존 I/O 기반 표시로 돌린다.
 - **필터·카운트**: 활동 필터(`isTerminalFiltered`)와 mix 화면의 running 개수도 같은 표시 상태를
   쓴다. 7501 이 없는 터미널은 기존 `busyTerminals` 결과와 같다.
+- **재생(replay) 처리**: 재부착·팝아웃 복귀·웹뷰 새로고침 때 저장된 PTY 출력(최대 768 KB)을
+  다시 그리는 동안 `replayingOutput` 을 켠다. 이때 받은 보고는 상태만 반영하고 모두 `firstReport`
+  로 취급해 알림을 내지 않으며, 재생된 `?` 질의에는 응답하지 않는다(살아 있는 Claude 에 응답이
+  다시 들어가는 것을 막는다). 수신 로직은 테스트를 위해 `src/terminal/programStatusHandler.ts`
+  로 뺐다.
+- **새 질의 = 새 세션**: 보고를 받은 적 있는 터미널에 `?` 가 다시 오면 저장소와 `reported` 를
+  초기화한다. 이전 세션의 working → 새 세션 idle 전이가 가짜 done 알림이 되지 않는다.
+- **낡은 working/blocked 정리**: 셸 안의 에이전트만 죽으면 pty-exit 가 없다. 1분마다 확인해
+  루트 상태가 working/blocked 이고 마지막 보고와 PTY 출력(`pty_idle_ms`, 실패 시 프론트 활동
+  시각)이 모두 10분 넘게 없으면 7501 상태를 버리고 `reported` 를 초기화한다(기존 표시·완료
+  토스트로 복귀).
+- **툴팁**: 점·탭 툴팁은 표시 상태에서 만든다(작업 중 / 입력 대기·권한 승인 필요 등 / 완료 / 대기).
+
+### 알려진 한계
+
+- 팝아웃된 터미널은 이벤트를 팝아웃 창에 보내는데 거기에는 듣는 쪽이 없다. 팝아웃 중에는
+  blocked 알림이 사라진다.
+- split/mix 화면에서는 `isActive` 인 창 하나만 "보고 있다" 로 친다. 화면에 보이는 다른 창의
+  done 도 알림이 간다.
 - 실기 확인(macOS + Claude Code)은 하지 않았다. 단위 테스트, `npm run build`, `npm run lint` 만 통과.
