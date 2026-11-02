@@ -106,3 +106,5 @@ jobs:
         # Tauri codegen stays in dev mode and does not require ../dist to exist.
         # whisper-rs/hound are macOS-only (cfg target_os) and are skipped here.
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - name: Test PTY backend (real /bin/sh PTY)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked pty_backend

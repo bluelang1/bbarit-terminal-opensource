@@ -869,6 +869,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
