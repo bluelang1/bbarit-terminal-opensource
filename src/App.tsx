@@ -179,7 +179,7 @@ import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, 
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
-import { UNREPORTED_SETTLE_MS, agentSettledBy, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, runAgentBrief, wrapAgentMessage, type AgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, runAgentBrief, wrapAgentMessage, type AgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -7267,10 +7267,13 @@ Office project scaffold created by BBARIT Terminal.
         if (!projectId) return { ok: false, error: 'no active project' };
         const workDir = (request?.workDir ? String(request.workDir).trim() : '')
           || callerTerm?.lastWorkDir || callerProject?.workDir || undefined;
-        const name = request?.name ? String(request.name).trim() : undefined;
-        const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name || undefined, workDir, {
+        // Claude 자식은 전용 세션 — `--continue` 로 부모 대화를 이어받지 않게 한다.
+        const spec = agentRunTerminalSpec(cliType, request?.name ? String(request.name) : undefined);
+        const name = spec.name;
+        const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name, workDir, {
           projectId,
           activate: !caller,
+          freshClaudeSession: spec.freshClaudeSession,
         });
         if (!terminalId) return { ok: false, error: 'failed to create terminal' };
         // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
@@ -14156,10 +14159,7 @@ Office project scaffold created by BBARIT Terminal.
     const terminal = createTerminal(nameOverride ? termName : `${termName} ${preCount}`, resolvedCliType, shouldAutoAccept, startupMode);
     // A dedicated Claude session: the tab launches `claude --session-id <uuid>` and
     // later `--resume <uuid>`, so it never shares a conversation with other tabs.
-    if (freshClaude) {
-      terminal.claudeSessionId = newClaudeSessionId();
-      terminal.claudeSessionSource = 'app';
-    }
+    Object.assign(terminal, dedicatedClaudeSessionFields(freshClaude, newClaudeSessionId));
     // Optional per-terminal working directory (e.g. a Broker Harness git worktree),
     // so the CLI launches inside that isolated dir instead of the project root.
     if (workDirOverride && workDirOverride.trim()) terminal.lastWorkDir = workDirOverride.trim();

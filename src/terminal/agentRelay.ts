@@ -78,7 +78,64 @@ export function lastNonEmptyLines(text: string, n = 3): string[] {
   return text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => /[\p{L}\p{N}]/u.test(l)).slice(-n);
 }
 
+// TUI 에이전트(Claude Code 등) 화면의 하단은 입력창·상태줄이다. 노트 본문은 그 위의 답을 써야 한다.
+const USER_ECHO = /^\s*(?:❯|>)\s/;
+const PROMPT_MARKER = /^\s*(?:❯|>)\s*$/;
+const ASSISTANT_LINE = /^\s*⏺/;
+const TUI_FOOTER = [
+  /bypass permissions/i,
+  /\? for shortcuts/i,
+  /(?:Fable|Opus|Sonnet|Haiku)\b.*\$/,
+  /✻.*\bdone\b/i,
+  /^\s*[─━—–=_-]{3,}\s*$/,
+  /\d+(?:\.\d+)?\s*%/,
+];
+
+function isTuiFooter(line: string): boolean {
+  return TUI_FOOTER.some((re) => re.test(line));
+}
+
+/**
+ * 노트 본문에 쓸 줄들. 마지막 사용자 입력 에코(`❯ `·`> ` 로 시작) 뒤부터 다음 프롬프트 표시
+ * (`❯`·`>` 만 있는 줄) 전까지를 답으로 보고, 그중 `⏺` 로 시작하는 줄을 먼저 쓴다. 알려진
+ * 하단 줄(권한 모드, 단축키 안내, 모델·비용, `✻ … done`, 가로줄, `%` 상태줄)은 버린다. 아무것도
+ * 남지 않으면 예전 규칙(글자가 있는 마지막 N 줄)으로 돌아간다.
+ */
+export function noteTailLines(text: string, n = 3): string[] {
+  const lines = text.split(/\r?\n/).map((l) => l.trimEnd());
+  let start = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (USER_ECHO.test(lines[i]) && !PROMPT_MARKER.test(lines[i])) { start = i + 1; break; }
+  }
+  if (start >= 0) {
+    let end = lines.length;
+    for (let i = start; i < lines.length; i++) {
+      if (PROMPT_MARKER.test(lines[i])) { end = i; break; }
+    }
+    const answer = lines.slice(start, end).filter((l) => /[\p{L}\p{N}]/u.test(l) && !isTuiFooter(l));
+    const assistant = answer.filter((l) => ASSISTANT_LINE.test(l));
+    const picked = (assistant.length > 0 ? assistant : answer).map((l) => l.trim()).slice(-n);
+    if (picked.length > 0) return picked;
+  }
+  const plain = lastNonEmptyLines(text, Number.MAX_SAFE_INTEGER).filter((l) => !isTuiFooter(l)).slice(-n);
+  return plain.length > 0 ? plain : lastNonEmptyLines(text, n);
+}
+
 export const CTL_REF = 'node "$BBARIT_CTL"';
+
+/**
+ * agent.run 이 만드는 자식 탭. Claude 는 전용 세션(`--session-id <uuid>`)으로 띄운다 — 같은
+ * 프로젝트 폴더에 부모의 대화가 있으면 `--continue` 가 부모 대화를 이어 버린다. 이름은
+ * `--name` 또는 `<cliType> (agent)`.
+ */
+export function agentRunTerminalSpec(cliType: string, name?: string): { name: string; freshClaudeSession: boolean } {
+  return { name: (name || '').trim() || `${cliType} (agent)`, freshClaudeSession: cliType === 'claude' };
+}
+
+/** 전용 Claude 세션 탭의 필드(addTerminal 이 새 터미널에 붙인다). */
+export function dedicatedClaudeSessionFields(fresh: boolean, newId: () => string): { claudeSessionId?: string; claudeSessionSource?: 'app' } {
+  return fresh ? { claudeSessionId: newId(), claudeSessionSource: 'app' } : {};
+}
 
 /**
  * 자식에게 넣는 첫 입력(6 절). 부모가 없으면 프롬프트만. 셸 자식은 여러 줄이 명령으로
@@ -119,11 +176,11 @@ export function formatAgentNote(opts: {
   const from = agentLabel(opts.childId, opts.childName);
   if (opts.state === 'blocked') {
     const kind = opts.kind ? ` kind="${sanitizeAttr(opts.kind)}"` : '';
-    const body = oneLine(opts.msg || lastNonEmptyLines(opts.tail || '', 3).join(' / ') || '(no message)');
+    const body = oneLine(opts.msg || noteTailLines(opts.tail || '', 3).join(' / ') || '(no message)');
     return `<bbarit from="${from}" state="blocked"${kind}>${body} — 답하기: ${CTL_REF} agent send ${opts.childId} "…"</bbarit>`;
   }
   const turn = opts.state === 'done' && typeof opts.turn === 'number' ? ` turn="${opts.turn}"` : '';
-  const body = oneLine(lastNonEmptyLines(opts.tail || '', 3).join(' / ') || '(no output)');
+  const body = oneLine(noteTailLines(opts.tail || '', 3).join(' / ') || '(no output)');
   return `<bbarit from="${from}" state="${opts.state}"${turn}>${body} — 전체: ${CTL_REF} term read 60 --id ${opts.childId}</bbarit>`;
 }
 

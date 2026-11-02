@@ -19,6 +19,9 @@ import {
   UNREPORTED_SETTLE_MS,
   wrapAgentMessage,
   agentSettledBy,
+  agentRunTerminalSpec,
+  dedicatedClaudeSessionFields,
+  noteTailLines,
   neutralizeShell,
   parentAcceptsNotes,
   PARENT_REPORT_MAX_AGE_MS,
@@ -312,5 +315,73 @@ describe('runAgentBrief', () => {
   it('reports a gate refusal', async () => {
     const h = harness({ idleAfterMs: 0, inject: async () => ({ ok: false, reason: 'typing' }) });
     expect(await runAgentBrief(h.deps, { cliType: 'claude', text: 'b' })).toMatchObject({ kind: 'sent', ok: false, reason: 'typing' });
+  });
+});
+
+// Claude Code 2.1.x 화면 끝부분(실기 캡처 모양).
+const CLAUDE_SCREEN = [
+  '╭───────────────────────────────────────────╮',
+  '│ ✻ Welcome to Claude Code!                 │',
+  '╰───────────────────────────────────────────╯',
+  '',
+  '❯ <bbarit from="p1 Claude 1" reach="node \\"$BBARIT_CTL\\" agent send p1 \\"<message>\\"">',
+  '  You were started by another agent (terminal p1 Claude 1).',
+  '  </bbarit>',
+  '  Reply with exactly one word: pong',
+  '',
+  '⏺ pong',
+  '',
+  '✻ Worked for 2s · done',
+  '',
+  '────────────────────────────────────────────────────────────',
+  '❯ ',
+  '────────────────────────────────────────────────────────────',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle)        ? for shortcuts',
+  '  Opus 4.7 · ctx 12% · $0.04',
+].join('\n');
+
+describe('noteTailLines (TUI answer selection)', () => {
+  it('takes the assistant reply after the last user echo, not the footer', () => {
+    expect(noteTailLines(CLAUDE_SCREEN, 3)).toEqual(['⏺ pong']);
+    const note = formatAgentNote({ childId: 'c1', childName: 'claude (agent)', state: 'done', turn: 1, tail: CLAUDE_SCREEN });
+    expect(note).toContain('>⏺ pong — 전체:');
+    expect(note).not.toMatch(/bypass permissions|for shortcuts|Opus/);
+  });
+
+  it('uses the answer lines when there is no ⏺ marker', () => {
+    const screen = ['> run it', 'All 12 tests passed', 'Done in 3s', '>', '? for shortcuts'].join('\n');
+    expect(noteTailLines(screen)).toEqual(['All 12 tests passed', 'Done in 3s']);
+  });
+
+  it('drops footer lines without a user echo and falls back to the plain rule', () => {
+    expect(noteTailLines(['build ok', '─────────', 'bypass permissions on', 'Sonnet 5 · $0.01'].join('\n'))).toEqual(['build ok']);
+    expect(noteTailLines('$ npm test\n12 passing\n$ ')).toEqual(['$ npm test', '12 passing']);
+    expect(noteTailLines('? for shortcuts')).toEqual(['? for shortcuts']);
+  });
+});
+
+describe('agent.run child terminal', () => {
+  it('claude children get a dedicated session id (no --continue into the parent conversation)', () => {
+    const spec = agentRunTerminalSpec('claude');
+    expect(spec).toEqual({ name: 'claude (agent)', freshClaudeSession: true });
+    const fields = dedicatedClaudeSessionFields(spec.freshClaudeSession, () => '0b6c7d8e-1f2a-4b3c-8d4e-5f6a7b8c9d0e');
+    const terminal = { id: 'c1', name: spec.name, cliType: 'claude', ...fields };
+    expect(terminal.claudeSessionId).toBe('0b6c7d8e-1f2a-4b3c-8d4e-5f6a7b8c9d0e');
+    expect(terminal.claudeSessionSource).toBe('app');
+  });
+
+  it('other children keep the shared behaviour and --name wins', () => {
+    expect(agentRunTerminalSpec('codex', ' reviewer ')).toEqual({ name: 'reviewer', freshClaudeSession: false });
+    expect(dedicatedClaudeSessionFields(false, () => 'x')).toEqual({});
+  });
+
+  it('App wires agent.run through the dedicated-session path', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const app = readFileSync(join(process.cwd(), 'src/App.tsx'), 'utf8');
+    const run = app.slice(app.indexOf("case 'agent.run':"), app.indexOf("case 'agent.send':"));
+    expect(run).toContain('agentRunTerminalSpec(cliType');
+    expect(run).toContain('freshClaudeSession: spec.freshClaudeSession');
+    expect(app).toContain('Object.assign(terminal, dedicatedClaudeSessionFields(freshClaude, newClaudeSessionId));');
   });
 });

@@ -4334,7 +4334,8 @@ fn resolve_browser_cli(app: tauri::AppHandle) -> Option<String> {
 
 // Absolute path of bbarit-ctl.mjs, exported to every PTY as `BBARIT_CTL` so an agent in a
 // tab can run `node "$BBARIT_CTL" agent …` (docs/AGENT_RELAY.md). Resolved once at setup:
-// a debug build prefers the repo's scripts/ (live edits), a release build the bundled
+// a debug build prefers the source checkout's scripts/ (CARGO_MANIFEST_DIR, then the
+// exe-derived repo), a release build the bundled
 // resource (`../scripts/bbarit-ctl.mjs` lands under `<resource>/_up_/scripts/`).
 static BBARIT_CTL_PATH: OnceLock<Option<String>> = OnceLock::new();
 
@@ -4358,7 +4359,16 @@ fn init_bbarit_ctl_path(app: &AppHandle) {
             .into_iter()
             .collect();
         let ordered: Vec<std::path::PathBuf> = if cfg!(debug_assertions) {
-            repo.into_iter().chain(resource).collect()
+            // The checkout this binary was compiled from comes first: with CARGO_TARGET_DIR
+            // pointing elsewhere (shared cache, worktrees) the exe-derived repo is wrong.
+            let source = std::path::PathBuf::from(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../scripts/bbarit-ctl.mjs"
+            ));
+            std::iter::once(source)
+                .chain(repo)
+                .chain(resource)
+                .collect()
         } else {
             resource.into_iter().chain(repo).collect()
         };

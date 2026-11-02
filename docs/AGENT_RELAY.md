@@ -140,6 +140,11 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   `lastWorkDir` || 그 프로젝트 폴더로 만들고 포커스를 옮기지 않는다(`addTerminal` 에
   `projectId`·`activate` 옵션 추가, 기존 호출은 그대로). caller 가 없으면 예전처럼 활성
   프로젝트에 만들고 활성화한다.
+- **Claude 자식 = 전용 세션**: 실기에서 자식이 `claude --continue` 로 떠서 같은 폴더의 부모 대화를
+  이어받았다. `agent.run` 은 Claude 자식을 "Claude (새 대화)" 경로(`freshClaudeSession`:
+  `claudeSessionId` + `claudeSessionSource: 'app'`, `--session-id <uuid>` 로 시작)로 만든다
+  (`agentRunTerminalSpec`, `dedicatedClaudeSessionFields`). 탭 이름은 `--name` 또는
+  `<cliType> (agent)`.
 - **준비 판정**(`runAgentBrief`, 의존성 주입으로 테스트): 300 ms 간격, 첫 검사는 첫 sleep 뒤다.
   addTerminal 직후에는 탭이 `projectsRef` 에 아직 없으므로 2 s 동안은 "사라짐" 으로 보지 않는다.
   60 s 시계는 PTY 가 뜬 때부터 잰다(다른 프로젝트에 만든 탭은 그 프로젝트를 볼 때 마운트된다,
@@ -160,7 +165,10 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   에이전트가 떠나 셸만 남았을 수 있어 버린다.
 - **노트 세부**: 브리프 주입 전(`pending`)의 done 은 무시한다(시작 직후 보고). "마지막 3 줄" 은
   글자·숫자가 없는 줄(TUI 입력창 테두리 등)을 건너뛴다. blocked 본문은 7501 `msg`, 없으면
-  마지막 3 줄. 종료 노트는 `state="exited"`. 본문과 이름의 셸 메타문자
+  마지막 3 줄. 종료 노트는 `state="exited"`. 실기에서 done 노트가 Claude 하단 상태줄만 담아서
+  `noteTailLines` 로 고른다: 마지막 사용자 입력 에코(`❯ `·`> `) 뒤부터 다음 프롬프트 표시 전까지,
+  `⏺` 줄 우선, 하단 줄(`bypass permissions`, `? for shortcuts`, 모델·`$` 비용, `✻ … done`,
+  가로줄, `%` 상태줄) 제외. 남는 게 없으면 예전 규칙. 본문과 이름의 셸 메타문자
   `` ` $ ; | & < > \ `` 는 비슷한 모양의 안전한 글자(ˋ ＄ ； ｜ ＆ ‹ › ＼)로 바꾼다(`</bbarit` 위조도
   막힌다). 자식이 같은 턴에 `agent send` 로 부모에게 직접 보고했으면 그 턴의 done 노트는
   보내지 않는다(`lastSendTurn`: 보고가 working 중이면 턴+1, working 을 떠날 때 턴이 오르므로).
@@ -175,7 +183,8 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 - **게이트웨이 비서**: `agent.run`/`agent.send` 는 `SECRETARY_ALLOWED_CMDS` 에 없고, 그대로
   거부되는지 `agent_gateway.rs` 테스트(`secretary_commands_deny_shell_reach`)가 고정한다.
 - **`BBARIT_CTL` 경로**: setup 에서 한 번 계산해 `OnceLock` 에 둔다(`init_bbarit_ctl_path`).
-  debug 빌드는 리포 `scripts/` 를, release 는 번들 리소스(`<resource>/_up_/scripts/`)를 먼저
+  debug 빌드는 컴파일한 체크아웃(`CARGO_MANIFEST_DIR/../scripts`, CARGO_TARGET_DIR 를 다른 곳에
+  두면 exe 기준 경로가 다른 체크아웃을 가리킨다) → exe 기준 리포 `scripts/` 순으로, release 는 번들 리소스(`<resource>/_up_/scripts/`)를 먼저
   찾는다. `cmd.env("BBARIT_CTL", …)` 는 두 빌더 모두 `BBARIT_TERM_SCOPE` 바로 다음 줄이다.
 - **ctl**: `agent run`/`agent wait` 의 `--timeout` 은 초 단위 전체 대기(기본 600)이고 요청마다
   20 s 응답 제한은 그대로다. `agent send` 는 `term write` 처럼 40 s. 폴링마다 다시 연결하므로

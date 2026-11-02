@@ -174,7 +174,9 @@ dev → 9323, tried before the port scan) are read when present; outside a tab p
 `bbarit-agents` (installed to `~/.claude/skills`) teaches the same to Claude Code.
 
 #### `agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]`
-`agent.run`: new background tab (focus stays on the caller) in the caller's project
+`agent.run`: new background tab (focus stays on the caller; named `--name` or
+`<cliType> (agent)`; Claude children start a dedicated session with `--session-id`, never
+`--continue` into the caller's conversation) in the caller's project
 (active project without a caller), cwd = `--workdir` || the caller's cwd || the project
 folder. Once the agent is ready (OSC 7501 `idle` or its welcome screen, max 60 s after
 its shell starts) the prompt is typed through the input gate, prefixed with a
