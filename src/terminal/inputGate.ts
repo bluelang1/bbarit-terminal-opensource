@@ -15,7 +15,7 @@ export const MIN_SUBMIT_DELAY_MS = 200;
 
 export type AutoInputSource =
   | 'ctl' | 'scheduler' | 'telegram' | 'discord' | 'slack'
-  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'other';
+  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'agent' | 'other';
 
 export type PtyWriter = (data: string) => void;
 
