@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { advanceImeAnchor, shouldResyncImeAnchor } from './terminal/imeAnchor';
+import { tmuxAutoStartCommand } from './terminal/tmuxAutoStart';
 import { routeKeyDuringComposition } from './terminal/imeEscape';
 import { applyWheelToScrollPin } from './terminal/scrollPin';
 import { wheelToTicks } from './terminal/wheelTicks';
@@ -3822,7 +3823,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           setTimeout(() => {
             if (!disposed) {
               const sessionName = `octo-${terminalId.slice(-6)}`;
-              writeToPty(`tmux new-session -A -s ${sessionName}\r`);
+              // 토큰 없이 띄워 탭을 닫거나 앱을 꺼도 스코프 스윕이 tmux 서버를 죽이지 않게 한다.
+              writeToPty(`${tmuxAutoStartCommand(sessionName, isWindows)}\r`);
             }
           }, delay);
         }

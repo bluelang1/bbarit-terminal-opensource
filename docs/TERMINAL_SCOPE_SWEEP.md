@@ -61,6 +61,10 @@ herdr-core 의 `sweep.rs` 와 같은 방식으로 푼다. 터미널마다 고유
 
 - macOS/Linux: `sysinfo` 의 `environ()` 은 같은 사용자 프로세스에서 동작한다. 다른
   사용자(sudo 로 띄운 것)는 읽히지 않으며 건너뛴다.
+- macOS 실측(macOS 27.0.1): 커널이 Apple 플랫폼 바이너리(`/bin/sh`, `/bin/zsh`, `/bin/sleep` 등)의
+  환경 변수를 다른 프로세스에 보여 주지 않는다. 그래서 스윕은 node, python(python.org/Homebrew),
+  Homebrew 도구 같은 비플랫폼 바이너리는 잡지만 `/bin/sleep` 같은 시스템 바이너리는 못 잡는다.
+  실제 대상은 개발 서버·워처·브라우저 드라이버라 받아들인다(구현 메모 참고).
 - Windows: `sysinfo` 가 환경을 읽지 못하는 프로세스가 있다. 읽히는 것만 처리하고, 실패는
   조용히 무시한다. 실기 검증은 하지 않았다.
 
@@ -129,12 +133,13 @@ bracketed paste, Enter 분리, 사람 키 보류는 적용된다. 그래야 같�
 - 통합 테스트(`sweep_scope_kills_detached_child_with_token`)는 같은 이유로 `sh -c 'sleep 30'` 대신
   테스트 바이너리 자신(`scope_sweep_sleeper` 테스트, 환경 변수가 있을 때만 30 초 대기)을 희생자로
   띄우고, 다른 토큰을 가진 프로세스는 살아 있는지도 확인한다.
-- **열린 결정 — tmux 자동 시작:** XTerminal 의 `tmuxAutoStart` 는 `tmux new-session -A -s octo-<id>` 로
-  앱 재시작 뒤 다시 붙는 세션을 만든다. tmux 서버(Homebrew 바이너리라 macOS 에서도 environ 이 보인다)는
-  서버를 처음 띄운 탭의 토큰을 물려받으므로, 그 탭을 닫거나 앱을 종료하면 서버와 **모든** tmux 세션이
-  스윕된다. 설계 배경이 tmux 를 대상으로 적었으므로 지금은 그대로 두었다. 세션 유지를 지키려면
-  `tmux` 프로세스를 스윕에서 빼거나 자동 시작 명령을 `env -u BBARIT_TERM_SCOPE tmux ...` 로 바꾸는
-  결정이 필요하다.
+- **tmux 자동 시작(결정됨):** `tmuxAutoStart` 는 앱이 꺼져도 세션이 살아남게 하려고 있으므로 tmux
+  서버가 토큰을 물려받으면 안 된다(물려받으면 서버를 처음 띄운 탭을 닫거나 앱을 끌 때 서버와 **모든**
+  세션이 스윕된다). XTerminal 의 자동 시작 명령을 `src/terminal/tmuxAutoStart.ts` 의
+  `tmuxAutoStartCommand(session)` 로 만들고, unix 에서는 `env -u BBARIT_TERM_SCOPE tmux new-session -A -s <session>`
+  로 띄운다(Windows 는 그대로). 서버가 이미 앞 탭에서 떠 있으면 그 서버에 붙을 뿐이라 따로 할 일이 없다.
+  tmux 세션 안에서 띄운 프로세스도 토큰이 없으므로 탭 스윕 대상이 아니다(세션과 함께 유지된다).
+  사용자가 직접 친 `tmux` 는 여전히 토큰을 물려받는다.
 - 사람의 실기 검증(탭 닫기 후 `lsof -i :18099` 가 비는지, `env -u` 로 띄운 것은 남는지)은 하지 않았다.
 
 ### 버튼 클릭 경로
