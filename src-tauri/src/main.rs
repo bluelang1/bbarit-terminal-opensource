@@ -125,7 +125,9 @@ type FileEntry = common::FileEntry;
 
 struct AppState {
     /// Tab PTYs (docs/PTY_HOLDER_DAEMON.md 3.4). The PTY commands only forward to it.
+    /// Same object as `pty_selection`, which picks in-process vs holder on first use.
     pty: Arc<dyn pty_backend::PtyBackend>,
+    pty_selection: Arc<pty_backend::PtySelection>,
     harness_jobs: Mutex<HashMap<String, HarnessJobRecord>>,
 }
 
@@ -3889,6 +3891,49 @@ mod scope_sweep_tests {
         let status = status.expect("victim still running after sweep");
         assert!(!status.success(), "victim should die by signal: {status:?}");
         assert!(bystander_alive, "a different token must not be swept");
+    }
+}
+
+/// Which backend owns the tab PTYs: `{kind: "in-process" | "holder", socket?, recovered: [...],
+/// fallbackReason?, lost?}`. `recovered` lists terminals that outlived the previous app run.
+/// Async: the first call may start the holder.
+#[tauri::command(async)]
+fn pty_backend_info(state: State<'_, AppState>) -> serde_json::Value {
+    state.pty_selection.info()
+}
+
+/// `terminal.ptyHolder` from ~/.config/octo/config.json ("off" by default, "on").
+fn configured_pty_holder() -> Option<String> {
+    read_octo_config_json().as_ref().and_then(pty_holder_setting)
+}
+
+fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
+    config
+        .get("terminal")
+        .and_then(|t| t.get("ptyHolder"))
+        .and_then(|p| p.as_str())
+        .map(String::from)
+}
+
+#[cfg(test)]
+mod pty_holder_gate_tests {
+    use super::{pty_holder_mode, pty_holder_setting};
+    use serde_json::json;
+
+    #[test]
+    fn holder_mode_needs_the_exact_flag_pair() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(pty_holder_mode(&args(&["octo-ui"])), None);
+        assert_eq!(pty_holder_mode(&args(&["octo-ui", "--mode", "rpc"])), None);
+        assert_eq!(pty_holder_mode(&args(&["octo-ui", "pty-holder", "--mode"])), None);
+    }
+
+    #[test]
+    fn setting_is_read_from_terminal_pty_holder() {
+        assert_eq!(pty_holder_setting(&json!({})), None);
+        assert_eq!(pty_holder_setting(&json!({"terminal": {"fontSize": 13}})), None);
+        assert_eq!(pty_holder_setting(&json!({"terminal": {"ptyHolder": "on"}})).as_deref(), Some("on"));
+        assert_eq!(pty_holder_setting(&json!({"terminal": {"ptyHolder": true}})), None);
     }
 }
 
@@ -9765,6 +9810,15 @@ fn main() {
             }
         })
         .setup(|app| {
+            // Attach to (or start) the PTY holder off the main thread when the user enabled it.
+            // Here, not before the builder: a second instance ended by single-instance must
+            // never HELLO the holder and push the running app off it.
+            {
+                let selection = app.state::<AppState>().pty_selection.clone();
+                std::thread::spawn(move || {
+                    let _ = selection.resolve();
+                });
+            }
             // macOS: Edit 메뉴(표준 액셀러레이터)가 없으면 WKWebView가 Cmd+C/V/X/A를
             // 네이티브 단계에서 버려 keydown이 DOM까지 오지 않는다 — 터미널
             // 복사/붙여넣기가 통째로 죽는 원인. 메뉴의 predefined 항목이
@@ -9891,9 +9945,14 @@ fn main() {
 
             Ok(())
         })
-        .manage(AppState {
-            pty: Arc::new(pty_backend::InProcessBackend::default()),
-            harness_jobs: Mutex::new(HashMap::new()),
+        .manage({
+            let pty_selection =
+                Arc::new(pty_backend::PtySelection::new(configured_pty_holder().as_deref()));
+            AppState {
+                pty: pty_selection.clone(),
+                pty_selection,
+                harness_jobs: Mutex::new(HashMap::new()),
+            }
         })
         .manage(Arc::new(collab::CollabState::new()))
         .manage(Arc::new(collab::TunnelState::new()))
@@ -9991,6 +10050,7 @@ fn main() {
             read_from_pty,
             resize_pty,
             close_pty,
+            pty_backend_info,
             destroy_pty,
             debug_log,
             get_web_terminal_info,
@@ -10171,7 +10231,13 @@ fn main() {
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
                 agent_rpc_stop_all();
-                sweep_all_scopes_on_exit(_app_handle);
+                // Holder backend: GOODBYE kill_all (the holder kills and sweeps its terminals).
+                let handled = _app_handle
+                    .try_state::<AppState>()
+                    .is_some_and(|state| state.pty_selection.on_app_exit());
+                if !handled {
+                    sweep_all_scopes_on_exit(_app_handle);
+                }
             }
         });
 }

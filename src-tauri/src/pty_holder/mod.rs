@@ -16,6 +16,8 @@ pub mod proto;
 pub mod server;
 pub mod spawn;
 
+#[cfg(test)]
+mod integration_tests;
 
 use std::path::{Path, PathBuf};
 

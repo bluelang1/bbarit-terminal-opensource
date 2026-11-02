@@ -70,6 +70,154 @@ pub trait PtyBackend: Send + Sync {
     fn list(&self) -> Vec<TerminalInfo>;
 }
 
+// ─── Backend selection (config `terminal.ptyHolder`) ───
+
+/// The backend chosen once per app run. Resolution is lazy (first PTY spawn, the
+/// `pty_backend_info` command, or the background resolve started in `setup`), so a
+/// second app instance that the single-instance plugin is about to end never attaches
+/// to the holder and pushes the real app off it (newest HELLO wins).
+pub struct PtySelection {
+    want_holder: bool,
+    /// Tests point the holder lookup somewhere else; None = `pty_holder::run_dir()`.
+    #[cfg(unix)]
+    run_dir: Option<std::path::PathBuf>,
+    chosen: std::sync::OnceLock<Chosen>,
+}
+
+struct Chosen {
+    backend: Arc<dyn PtyBackend>,
+    #[cfg(unix)]
+    holder: Option<Arc<crate::pty_holder::client::HolderBackend>>,
+    /// Why the holder was wanted but not used.
+    fallback_reason: Option<String>,
+}
+
+impl PtySelection {
+    /// `setting` is `terminal.ptyHolder`: "on" wants the holder, anything else
+    /// (default "off") keeps the PTYs in this process.
+    pub fn new(setting: Option<&str>) -> Self {
+        PtySelection {
+            want_holder: setting == Some("on"),
+            #[cfg(unix)]
+            run_dir: None,
+            chosen: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Choose now if not yet chosen. Holder failures fall back to in-process.
+    pub fn resolve(&self) -> &Arc<dyn PtyBackend> {
+        &self.chosen.get_or_init(|| self.choose()).backend
+    }
+
+    fn resolved(&self) -> Option<&Arc<dyn PtyBackend>> {
+        self.chosen.get().map(|c| &c.backend)
+    }
+
+    fn choose(&self) -> Chosen {
+        let in_process = |fallback_reason: Option<String>| Chosen {
+            backend: Arc::new(InProcessBackend::default()),
+            #[cfg(unix)]
+            holder: None,
+            fallback_reason,
+        };
+        if !self.want_holder {
+            return in_process(None);
+        }
+        #[cfg(unix)]
+        {
+            use crate::pty_holder::client::HolderBackend;
+            let dir = match &self.run_dir {
+                Some(dir) => Ok(dir.clone()),
+                None => crate::pty_holder::run_dir(),
+            };
+            match dir.and_then(|dir| HolderBackend::attach_or_spawn(&dir)) {
+                Ok(holder) => {
+                    let holder = Arc::new(holder);
+                    safe_eprintln!("[pty] terminals live in the pty holder at {}", holder.socket().display());
+                    Chosen { backend: holder.clone(), holder: Some(holder), fallback_reason: None }
+                }
+                Err(e) => {
+                    safe_eprintln!("[pty] pty holder unavailable, using in-process PTYs: {e}");
+                    in_process(Some(e))
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        in_process(Some("the PTY holder is not available on Windows yet".to_string()))
+    }
+
+    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`.
+    pub fn info(&self) -> serde_json::Value {
+        let chosen = self.chosen.get_or_init(|| self.choose());
+        #[cfg(unix)]
+        if let Some(holder) = &chosen.holder {
+            return serde_json::json!({
+                "kind": "holder",
+                "socket": holder.socket().to_string_lossy(),
+                "recovered": holder.recovered(),
+                "lost": holder.lost_reason(),
+            });
+        }
+        serde_json::json!({
+            "kind": "in-process",
+            "recovered": [],
+            "fallbackReason": chosen.fallback_reason,
+        })
+    }
+
+    /// App exit. True when the backend took care of every terminal itself (the holder
+    /// gets GOODBYE kill_all and kills + sweeps there); false means the caller sweeps.
+    pub fn on_app_exit(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(holder) = self.chosen.get().and_then(|c| c.holder.as_ref()) {
+            // Phase 2a keeps today's quit semantics (terminals end with the app);
+            // "keep running on quit" needs the reattach UI (phase 2b).
+            holder.goodbye("kill_all");
+            return true;
+        }
+        false
+    }
+}
+
+/// Spawning resolves the selection; every other call on an unresolved selection
+/// behaves like an empty in-process backend (no holder is started just to say "not found").
+impl PtyBackend for PtySelection {
+    fn spawn(&self, req: SpawnRequest) -> Result<(), String> {
+        self.resolve().spawn(req)
+    }
+    fn read(&self, id: &str) -> Result<Option<String>, String> {
+        self.resolved().ok_or_else(not_found)?.read(id)
+    }
+    fn write(&self, id: &str, data: &str) -> Result<(), String> {
+        self.resolved().ok_or_else(not_found)?.write(id, data)
+    }
+    fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<(), String> {
+        self.resolved().ok_or_else(not_found)?.resize(id, rows, cols)
+    }
+    fn close(&self, id: &str) -> Result<(), String> {
+        self.resolved().map_or(Ok(()), |b| b.close(id))
+    }
+    fn alive(&self, id: &str) -> bool {
+        self.resolved().is_some_and(|b| b.alive(id))
+    }
+    fn tail(&self, id: &str) -> Result<String, String> {
+        self.resolved().ok_or_else(not_found)?.tail(id)
+    }
+    fn idle_ms(&self, id: &str) -> Result<u64, String> {
+        self.resolved().ok_or_else(not_found)?.idle_ms(id)
+    }
+    fn pid(&self, id: &str) -> Result<Option<u32>, String> {
+        self.resolved().ok_or_else(not_found)?.pid(id)
+    }
+    fn list(&self) -> Vec<TerminalInfo> {
+        self.resolved().map_or_else(Vec::new, |b| b.list())
+    }
+}
+
+fn not_found() -> String {
+    PTY_NOT_FOUND.to_string()
+}
+
 // per-terminal state
 struct PtyInstance {
     writer: Box<dyn Write + Send>,
@@ -845,6 +993,48 @@ mod tests {
         assert_eq!(cmd.get_env("PATH").and_then(|v| v.to_str()), Some("/from/env/file"));
         // The GitHub account is applied last, as before.
         assert_eq!(cmd.get_env("GH_TOKEN").and_then(|v| v.to_str()), Some("gho_test"));
+    }
+
+    // ─── PtySelection ───
+
+    #[test]
+    fn selection_defaults_to_in_process_and_resolves_lazily() {
+        for setting in [None, Some("off"), Some("bogus")] {
+            let sel = PtySelection::new(setting);
+            // Nothing resolved yet: calls behave like an empty backend.
+            assert_eq!(sel.read("x"), Err("PTY not found".to_string()));
+            assert_eq!(sel.close("x"), Ok(()));
+            assert!(sel.list().is_empty() && !sel.alive("x"));
+            assert!(!sel.on_app_exit(), "in-process exit sweep stays with the caller");
+            let info = sel.info();
+            assert_eq!(info["kind"], "in-process");
+            assert_eq!(info["recovered"], serde_json::json!([]));
+            assert!(info["fallbackReason"].is_null(), "{setting:?}: {info}");
+        }
+        let sel = PtySelection::new(None);
+        sel.spawn(SpawnRequest {
+            terminal_id: "s1".into(),
+            cmd: sh("printf sel"),
+            rows: 24,
+            cols: 80,
+            scope_token: TEST_SCOPE.into(),
+        })
+        .unwrap();
+        assert_eq!(sel.list().len(), 1);
+        sel.close("s1").unwrap();
+    }
+
+    #[test]
+    fn holder_failure_falls_back_to_in_process_with_the_reason() {
+        let mut sel = PtySelection::new(Some("on"));
+        // A run dir whose socket path can't fit sun_path: the holder is never started.
+        sel.run_dir = Some(std::env::temp_dir().join("x".repeat(120)));
+        let info = sel.info();
+        assert_eq!(info["kind"], "in-process");
+        let reason = info["fallbackReason"].as_str().unwrap();
+        assert!(reason.contains("max 100"), "{reason}");
+        assert!(sel.read("x").is_err());
+        let _ = std::fs::remove_dir(std::env::temp_dir().join("x".repeat(120)));
     }
 
     // ─── InProcessBackend ───
