@@ -179,6 +179,7 @@ import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, 
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { collectBusyAgentTabs, formatBusyAgentWarning } from './terminal/busyAgentTabs';
 import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, runAgentBrief, wrapAgentMessage, type AgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
@@ -10307,6 +10308,19 @@ Office project scaffold created by BBARIT Terminal.
     setIsUpdating(true);
     try {
       if (updateAvailable.native && pendingNativeUpdateRef.current) {
+        const busy = collectBusyAgentTabs(projects, agentStateOf);
+        if (busy.length > 0) {
+          const ko = locale === 'ko';
+          const { title, message } = formatBusyAgentWarning(busy, ko ? 'ko' : 'en');
+          const { ask } = await import('@tauri-apps/plugin-dialog');
+          const proceed = await ask(`${title}\n\n${message}`, {
+            title: 'BBARIT Terminal',
+            kind: 'warning',
+            okLabel: ko ? '그래도 업데이트' : 'Update anyway',
+            cancelLabel: ko ? '취소' : 'Cancel',
+          });
+          if (!proceed) return;
+        }
         await pendingNativeUpdateRef.current.downloadAndInstall();
         await relaunch();
         return;
