@@ -2216,7 +2216,8 @@ describe('devReviewPair auto-input gate', () => {
         { managed: { branch: 'broker/gate', worktreeDir: '/repo/.octo-tmp/broker-wt-gate', repoDir: '/repo' } },
       );
 
-      await vi.advanceTimersByTimeAsync(12000);
+      // Longer than 20 retries x 6 s: a blocked target has no retry cap while the harness runs.
+      await vi.advanceTimersByTimeAsync(150_000);
       const revWrites = () => writes.filter((w) => w.terminalId === 'rev-term');
       expect(revWrites()).toEqual([]);
       expect(writes.some((w) => w.terminalId === 'dev-term' && String(w.data || '').includes('This terminal is the DEV AGENT'))).toBe(true);
@@ -2228,6 +2229,35 @@ describe('devReviewPair auto-input gate', () => {
       expect(standby).toBeGreaterThanOrEqual(0);
       expect(data[standby + 1]).toBe('\r');
       handle?.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops retrying a blocked relay once the harness is stopped', async () => {
+    vi.useFakeTimers();
+    const writes: Array<Record<string, unknown>> = [];
+    invokeMock.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'write_to_pty') writes.push(args || {});
+      return '';
+    });
+    let revBlocked = true;
+    setInputGateHost({ getAgentState: (id) => (id === 'rev-term' && revBlocked ? 'blocked' : undefined) });
+    try {
+      const handle = await startDevReviewPair(
+        {
+          developer: 'claude', reviewer: 'codex', goal: 'stop while blocked',
+          workDir: '/repo/.octo-tmp/broker-wt-stop', projectName: 'test-project', autoRelay: false,
+        },
+        () => ({ developerId: 'dev-term', reviewerId: 'rev-term' }),
+        () => {},
+        { managed: { branch: 'broker/stop', worktreeDir: '/repo/.octo-tmp/broker-wt-stop', repoDir: '/repo' } },
+      );
+      await vi.advanceTimersByTimeAsync(12000);
+      handle?.stop();
+      revBlocked = false;
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(writes.filter((w) => w.terminalId === 'rev-term')).toEqual([]);
     } finally {
       vi.useRealTimers();
     }

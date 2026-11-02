@@ -27,7 +27,8 @@ npm run ctl -- menu        # full menu
 | `--port <n>` | Target port (installed build: `9223`) |
 | `--json` | Raw JSON instead of human tables |
 | `--window <label>` | Target window label (default `main`) |
-| `--timeout <ms>` | Response timeout (default 20000) |
+| `--timeout <ms>` | Response timeout (default 20000; 40000 for `term write`) |
+| `--force` | `term write`: send even while the agent waits for approval (OSC 7501 `blocked`) |
 
 ---
 
@@ -114,7 +115,11 @@ npm run ctl -- term create bbarit ~/Documents/bbarit/web
 ```
 
 #### `term write <text…>` / `term write-raw <text…>`
-Types into a terminal. `write` appends Enter; `write-raw` does not.
+Types into a terminal. `write` appends Enter; `write-raw` does not (its bytes go out as-is,
+so an embedded `\r` still submits). Writes go through the app's input gate
+(docs/AGENT_INPUT_GATE.md): it waits until you have stopped typing for 3 s (up to 20 s,
+then fails with `user is typing`) and refuses while the agent waits for approval
+(`agent is waiting for input`) unless `--force` is given.
 Target a specific terminal with `--id <terminalId>` (default: active terminal).
 ```bash
 npm run ctl -- term write "git status"

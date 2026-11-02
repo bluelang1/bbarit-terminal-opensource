@@ -11,7 +11,7 @@
 // Roles: developer (agent) · reviewer (agent) · broker (BBARIT) · final approver (user).
 
 import { invoke } from '@tauri-apps/api/core';
-import { queueAutoInput } from '../terminal/inputGate';
+import { lastHumanInputAt, queueAutoInput, type AutoInputResult } from '../terminal/inputGate';
 import { ensureProjectWikiScaffold, getProjectWikiPaths, ensureSharedWikiScaffold, getSharedWikiPaths } from '../notes/wiki';
 import { codeGraphCliSource } from './codeGraphCli';
 import { judge as mechanicalJudge, snapshotSource, cycleTable, CYCLE_LABELS, type SourceBaseline, type CycleState } from './brokerMechanic';
@@ -382,31 +382,52 @@ function submitTerminalInput(id: string): void {
 // Throw input into a terminal by id. The gate sends the text and, after
 // max(200ms, terminalSubmitDelayMs(text)), one separate Enter — Claude Code / Codex treat a
 // large write as a "[Pasted Content]" block and would otherwise absorb a trailing \r.
-// Resolves false when the gate refused (human typing / agent blocked) so the caller retries.
-async function throwToTerminal(id: string, text: string): Promise<boolean> {
+async function throwToTerminal(id: string, text: string, role?: DevReviewRole): Promise<AutoInputResult> {
   const res = await queueAutoInput(id, text, { source: 'devreview', submit: true, fallbackWrite: ptyWriter(id) });
-  if (!res.ok) return false;
-  // Some agent CLIs (Kimi/K2.7 Code especially) absorb a too-early carriage return into the
-  // text instead of submitting it. Follow up with spaced CRs; they go through the gate too,
-  // so none of them lands on a blocked approval dialog. A stray CR at an empty prompt is harmless.
-  for (const d of [1500, 3500, 6000]) {
-    setTimeout(() => submitTerminalInput(id), d);
+  if (!res.ok) return res;
+  // Kimi (K2.7 Code) absorbs a too-early carriage return into the text instead of
+  // submitting it, so follow up with spaced CRs — for Kimi only. Each one is skipped if the
+  // human typed after our Enter (a stray CR would submit their half-typed prompt), and they
+  // go through the gate, so none of them lands on a blocked approval dialog.
+  if (role === 'kimi') {
+    const enterAt = Date.now();
+    for (const d of [1500, 3500, 6000]) {
+      setTimeout(() => {
+        if (lastHumanInputAt(id) > enterAt) return;
+        submitTerminalInput(id);
+      }, d);
+    }
   }
-  return true;
+  return res;
 }
 
 // Refused relays are retried on the relay-loop cadence, in order per terminal, so a message
-// the gate held back (human typing / agent waiting for approval) is delayed, never dropped.
+// the gate held back is delayed, never silently dropped. While the agent is blocked on an
+// approval dialog the relay waits as long as the harness runs; other refusals (human typing,
+// no writer) give up after RELAY_RETRY_LIMIT attempts and call onGiveUp.
 const RELAY_RETRY_MS = 6000;
 const RELAY_RETRY_LIMIT = 20;
+interface RelayWriterOptions {
+  roleOf: (id: string) => DevReviewRole | undefined;
+  isStopped: () => boolean;
+  onGiveUp: (id: string, text: string, reason: string) => void;
+}
 // One ordered chain per terminal, owned by a single harness (createRelayWriter per run).
-function createRelayWriter(): (id: string, text: string) => void {
+function createRelayWriter(opts: RelayWriterOptions): (id: string, text: string) => void {
   const relayChains = new Map<string, Promise<void>>();
   return (id: string, text: string): void => {
     const prev = relayChains.get(id) ?? Promise.resolve();
     const next: Promise<void> = prev.then(async () => {
-      for (let attempt = 0; attempt < RELAY_RETRY_LIMIT; attempt += 1) {
-        if (await throwToTerminal(id, text)) return;
+      let limited = 0;
+      // The first attempt always runs (final "merge complete" relays are sent right before stop).
+      for (let first = true; ; first = false) {
+        if (!first && opts.isStopped()) return;
+        const res = await throwToTerminal(id, text, opts.roleOf(id));
+        if (res.ok || res.reason === 'cancelled') return;
+        if (res.reason !== 'blocked') {
+          limited += 1;
+          if (limited >= RELAY_RETRY_LIMIT) { opts.onGiveUp(id, text, res.reason); return; }
+        }
         await sleep(RELAY_RETRY_MS);
       }
     }).catch(() => {}).finally(() => {
@@ -1021,7 +1042,20 @@ export async function startDevReviewPair(
   // so this is auto-only). PTY-death is detected in the relay loop, where escalateToHuman
   // is in scope; relay() stays a thin never-drop writer so a transient never swallows a
   // real relay.
-  const relay = createRelayWriter();
+  // Late-bound: escalateToHuman lives inside the relay loop below.
+  let relayGiveUp: ((reason: string) => void) | null = null;
+  const relay = createRelayWriter({
+    roleOf: (id) => (id === devId ? config.developer : id === revId ? config.reviewer : undefined),
+    isStopped: () => stopped,
+    onGiveUp: (id, text, reason) => {
+      const who = id === devId ? 'developer' : 'reviewer';
+      emit({ kind: 'error', message: tt(
+        `Broker could not deliver a message to the ${who} terminal (${reason}): ${text.slice(0, 120)}`,
+        `브로커가 ${who === 'developer' ? '개발' : '리뷰'} 터미널에 메시지를 보내지 못했습니다 (${reason}): ${text.slice(0, 120)}`,
+      ) });
+      relayGiveUp?.(`relay to ${who} terminal refused (${reason})`);
+    },
+  });
   // PTY-death tracking: once a broker terminal's CLI is up (has a child process), if that
   // child later disappears the agent CLI exited — the harness cannot continue, so escalate
   // rather than relaying into a dead terminal forever.
@@ -1512,6 +1546,7 @@ export async function startDevReviewPair(
       emit({ kind: 'error', message: tt(`Broker halted (needs human decision): ${reason}. Restart the harness to continue, or stop it.`, `브로커 정지 (사람 결정 필요): ${reason}. 계속하려면 하네스를 재시작하거나 중단하세요.`) });
       stopped = true; // ends the while(!stopped) relay loop
     };
+    relayGiveUp = escalateToHuman;
     setCycle(
       restoredClosedStatus?.cycle || (restoredReviewDecision === 'approved' ? 'approved' : restoredReviewDecision === 'rework' ? 'addressing' : restoredPendingReview ? 'reviewing' : 'developing'),
       restoredClosedStatus?.reason || (restoredReviewDecision === 'approved'

@@ -62,6 +62,8 @@ describe('human input tracking', () => {
     expect(isNonTypingInput('a')).toBe(false);
     expect(isNonTypingInput('\x1b[A')).toBe(false);
     expect(isNonTypingInput('\r')).toBe(false);
+    // Shift+F3 이 CPR 과 같은 바이트라 비입력으로 취급된다(알려진 한계).
+    expect(isNonTypingInput('\x1b[1;2R')).toBe(true);
 
     const t = fakeTerminal();
     writeHumanInput(T, '\x1b[<64;10;5M', t.write);
@@ -127,9 +129,10 @@ describe('queueAutoInput', () => {
 
   it('wraps the body in bracketed paste and strips an inner end marker', async () => {
     const t = fakeTerminal({ bracketed: true });
-    const p = queueAutoInput(T, `line1\nevil${BRACKETED_PASTE_END}rm -rf`, { source: 'telegram', submit: false });
-    await vi.advanceTimersByTimeAsync(100);
+    const p = queueAutoInput(T, `line1\nevil${BRACKETED_PASTE_END}rm -rf`, { source: 'telegram', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(500);
     expect((await p).ok).toBe(true);
+    expect(t.writes.pop()?.data).toBe('\r');
     const out = t.text();
     expect(out.startsWith(BRACKETED_PASTE_START)).toBe(true);
     expect(out.endsWith(BRACKETED_PASTE_END)).toBe(true);
@@ -179,22 +182,106 @@ describe('queueAutoInput', () => {
     expect(t.text()).toBe('yes');
   });
 
-  it('holds human keys during the write, flushes them in order afterwards, and lets Ctrl-C through', async () => {
+  it('holds human keys during the write and flushes them in order afterwards', async () => {
     const t = fakeTerminal();
     const p = queueAutoInput(T, 'auto text', { source: 'ctl' });
     await vi.advanceTimersByTimeAsync(10);
     expect(isWriting(T)).toBe(true);
-    expect(t.writes.map((w) => w.data)).toEqual(['auto text']);
-
     writeHumanInput(T, 'a', t.write);
     writeHumanInput(T, 'b', t.write);
-    writeHumanInput(T, '\x03', t.write);
-    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x03']);
-
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text']);
     await vi.advanceTimersByTimeAsync(6000);
     expect((await p).ok).toBe(true);
     expect(isWriting(T)).toBe(false);
-    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x03', '\r', 'a', 'b']);
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\r', 'a', 'b']);
+  });
+
+  it('Ctrl-C during the write passes at once, drops held keys and cancels the pending Enter', async () => {
+    const t = fakeTerminal();
+    const p = queueAutoInput(T, 'auto text', { source: 'ctl' });
+    await vi.advanceTimersByTimeAsync(10);
+    writeHumanInput(T, '\x03', t.write);
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x03']);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await p).toEqual({ ok: false, reason: 'cancelled' });
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x03']);
+    expect(isWriting(T)).toBe(false);
+  });
+
+  it('Ctrl-C after keys were already held discards them', async () => {
+    const t = fakeTerminal();
+    const p = queueAutoInput(T, 'auto text', { source: 'ctl' });
+    await vi.advanceTimersByTimeAsync(10);
+    writeHumanInput(T, 'a', t.write);
+    writeHumanInput(T, 'b', t.write);
+    writeHumanInput(T, '\x03', t.write);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await p).toEqual({ ok: false, reason: 'cancelled' });
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x03']);
+    // 다음 자동 쓰기는 다시 Enter 를 보낸다(취소 플래그가 남지 않는다).
+    const q = queueAutoInput(T, 'next one', { source: 'ctl', quietMs: 0 });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect((await q).ok).toBe(true);
+    expect(t.writes.map((w) => w.data).slice(-2)).toEqual(['next one', '\r']);
+  });
+
+  it('does not hold mouse or other non-typing sequences while writing', async () => {
+    const t = fakeTerminal();
+    const p = queueAutoInput(T, 'auto text', { source: 'ctl' });
+    await vi.advanceTimersByTimeAsync(10);
+    writeHumanInput(T, '\x1b[<64;10;5M', t.write);
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', '\x1b[<64;10;5M']);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect((await p).ok).toBe(true);
+  });
+
+  it('still flushes held keys when the writer throws', async () => {
+    const t = fakeTerminal();
+    let calls = 0;
+    setInputGateHost({
+      getWriter: () => (data: string) => {
+        calls += 1;
+        if (data === '\r') throw new Error('pty gone');
+        t.write(data);
+      },
+    });
+    const p = queueAutoInput(T, 'auto text', { source: 'ctl' });
+    await vi.advanceTimersByTimeAsync(10);
+    writeHumanInput(T, 'k', t.write);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await p).toEqual({ ok: false, reason: 'disposed' });
+    expect(calls).toBe(2);
+    expect(t.writes.map((w) => w.data)).toEqual(['auto text', 'k']);
+    expect(isWriting(T)).toBe(false);
+  });
+
+  it('writes a gated body over 4096 chars as bracketed chunks', async () => {
+    const t = fakeTerminal({ bracketed: true });
+    const body = 'x'.repeat(4096 + 100);
+    const p = queueAutoInput(T, body, { source: 'telegram' });
+    await vi.advanceTimersByTimeAsync(6000);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.pop()?.data).toBe('\r');
+    expect(t.writes.map((w) => w.data.length)).toEqual([BRACKETED_PASTE_START.length, 4096, 100, BRACKETED_PASTE_END.length]);
+    expect(t.text()).toBe(BRACKETED_PASTE_START + body + BRACKETED_PASTE_END);
+  });
+
+  it('submit:false sends raw bytes without bracketed paste', async () => {
+    const t = fakeTerminal({ bracketed: true });
+    const p = queueAutoInput(T, 'ls -la\r', { source: 'ctl', submit: false });
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['ls -la\r']);
+  });
+
+  it('honours submitDelayMs for plain shells', async () => {
+    const t = fakeTerminal();
+    const p = queueAutoInput(T, 'git status', { source: 'ctl', submitDelayMs: MIN_SUBMIT_DELAY_MS });
+    await vi.advanceTimersByTimeAsync(MIN_SUBMIT_DELAY_MS + 50);
+    expect((await p).ok).toBe(true);
+    const gap = t.writes[1].at - t.writes[0].at;
+    expect(gap).toBeGreaterThanOrEqual(MIN_SUBMIT_DELAY_MS);
+    expect(gap).toBeLessThan(MIN_SUBMIT_DELAY_MS + 50); // not the 1.2 s agent delay
   });
 
   it('waits for a writer and gives up with "no-writer"', async () => {

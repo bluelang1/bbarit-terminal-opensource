@@ -157,7 +157,13 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
   `rollupAgentState` 로 계산, 보고가 없으면 undefined). 상태를 따로 복제하지 않는다.
 - 사람 입력: `sendToPty` 의 마지막 PTY 쓰기와 IME 입력 막대·붙여넣기 이벤트·컨텍스트 메뉴
   경로가 모두 `writeHumanInput()` 를 거친다. 마우스(SGR/X10)·포커스 보고·터미널 질의 응답
-  (CPR, DA, DECRPM, OSC/DCS)은 "치는 중" 으로 기록하지 않는다(보류는 한다).
+  (CPR, DA, DECRPM, OSC/DCS)은 "치는 중" 으로 기록하지도 보류하지도 않는다. 그래서
+  `\x1b[1;2R` 같은 Shift/Ctrl+F3 키도 CPR 과 바이트가 같아 비입력으로 취급된다(알려진 한계).
+  XTerminal 의 마우스·휠 브리지는 `invoke('write_to_pty')` 를 직접 불러 보류를 거치지 않는다.
+- 보류 시간: 자동 쓰기의 본문~Enter 동안이다. Enter 지연이 `terminalSubmitDelayMs` 라 약
+  8.8K 자 텍스트부터 상한 5 초까지 늘어난다(설계의 "1–2 초" 보다 길 수 있다).
+- Ctrl-C: 자동 쓰기 중 사람이 누르면 바로 보내고, 보류한 키를 버리고, 남은 자동 Enter 를
+  취소한다(결과 `cancelled`).
 
 설계와 다른 점:
 
@@ -166,26 +172,33 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
   이 경우 blocked/bracketed 정보는 없다.
 - 키 입력 판정: 제어 문자·이스케이프 시퀀스로만 된 텍스트나 한 글자(`\x03`, `\x1b`, `\r`, `y`
   등)는 bracketed paste 로 감싸지 않고 그대로 보낸다. 감싸면 키가 아니라 글자로 붙여넣어진다.
+  `submit: false`(ctl `write-raw`) 도 바이트 그대로 보낸다 — 안에 든 `\r` 은 예전처럼 제출된다.
 - bracketed 모드에서는 본문 줄바꿈을 사람 붙여넣기와 같이 `\r` 로 바꾼다.
 - blocked 는 대기 전과 조용해진 뒤 두 번 검사한다. 쓰기 직전과 Enter 직전에 writer 를 다시
   찾고, 없으면 `disposed`.
-- Enter 지연은 설계대로 `max(200, terminalSubmitDelayMs(text))` 라 셸에도 최소 1.2 초가 걸린다
-  (예전 ctl 셸 경로는 `text\r` 한 번에 썼다).
+- `AutoInputOptions.submitDelayMs` 추가. 기본은 설계대로 `max(200, terminalSubmitDelayMs(text))`
+  (에이전트 TUI). ctl `terminal.write`, 스케줄러, Telegram/Discord/Slack 은 대상이 일반 셸
+  (`!isInteractiveAgentTerminal(cliType)`)이면 200 ms 를 넘긴다.
 - **Discord·Slack 의 "선행 `\x03`/`\x1b`" 는 코드에 없었다.** 있던 것은 사용자가 `ctrl+c`/`esc`/
   `enter` 를 명시적으로 보낸 키 명령이다. 지우지 않고 Telegram 의 같은 버튼과 함께 게이트로
   보낸다(`submit: false, force: true`; 원격 승인용 Enter 가 blocked 에 막히면 안 되므로).
   일반 명령은 `submit: true, force: false` 이고 예전 35 ms 뒤 `\r` 타이머는 지웠다.
 - Telegram 은 줄마다 80 ms 간격 루프를 지우고 전체 텍스트를 한 번의 붙여넣기로 보낸다.
   거부되면 같은 채팅/채널로 `autoInputRefusalMessage()` 문구를 회신한다.
-- devreview: `throwToTerminal` 이 `Promise<boolean>` 을 돌려준다. 거부되면 하네스별·터미널별
-  순서 큐에서 6 초(릴레이 틱) 뒤 다시 시도한다(최대 20 회). 이 큐 때문에 리뷰 요청이 앞
-  메시지의 Enter 뒤로 밀려 기존 테스트 4 개에 3 초 대기를 더했다. Kimi 용 추가 CR(1.5/3.5/6 초)
-  은 남겼지만 이것들도 게이트를 거치므로 blocked 다이얼로그에는 닿지 않는다.
+- devreview: 거부되면 하네스별·터미널별 순서 큐에서 6 초(릴레이 틱) 뒤 다시 시도한다. 대상이
+  `blocked` 면 하네스가 멈출 때까지(`stop()` 포함) 횟수 제한 없이 기다리고, `typing`/`no-writer`
+  는 20 회에서 포기하며 `emit` + `escalateToHuman` 으로 사람에게 넘긴다(조용히 버리지 않는다).
+  첫 시도는 하네스가 멈춘 직후에도 한 번은 나간다(병합 완료 안내). 이 큐 때문에 리뷰 요청이 앞
+  메시지의 Enter 뒤로 밀려 기존 테스트 4 개에 3 초 대기를 더했다. 추가 CR(1.5/3.5/6 초)은
+  Kimi 에게만 보내고, 릴레이 Enter 뒤에 사람이 입력했으면 건너뛴다.
 - 스케줄러는 동기 반환이라 "실행" 알림은 큐에 넣은 시점에 나간다. 거부되면 실패 알림을 한 번 더 낸다.
 - 에디터 프롬프트는 예전에 `\r` 두 번(500 ms, 800 ms)을 보냈다. 이제 한 번이다.
 - ctl 응답은 게이트 결과를 기다린다. 앞 요청 대기 + 최대 20 초 + 제출 지연이 브리지 UI 커맨드
-  타임아웃(30 초, `agent_gateway.rs`)을 넘을 수 있다. 그때는 ctl 쪽이 타임아웃을 받지만 쓰기는
-  계속 진행된다.
+  타임아웃(30 초, `agent_gateway.rs`)을 넘을 수 있다. `bbarit-ctl term write` 의 응답 타임아웃은
+  그보다 긴 40 초가 기본이다(`--timeout` 으로 바꿀 수 있다). 브리지가 30 초에 먼저 끊으면 ctl 은
+  타임아웃 오류를 받지만 쓰기는 앱에서 계속 진행된다. `--force` 는 `force: true` 로 넘어간다.
+- 칸반 → 콘솔: 예전 `prompt + '\n'` 은 Claude 에서 줄바꿈만 넣고 제출하지 않았다. 이제 게이트가
+  Enter 를 따로 보내 자동 제출된다.
 
 이번에 바꾸지 않은 쓰기(다음 단계에서 `force: true` 로 옮길 후보):
 

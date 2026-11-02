@@ -42,7 +42,13 @@ import { FONTS, STYLES, DARK_STYLES, LIGHT_STYLES, WACKY_STYLES, getEffectiveFon
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { MIN_SUBMIT_DELAY_MS, autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
+
+// Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
+const gateSubmitDelayFor = (cliType?: string): number | undefined => (
+  isInteractiveAgentTerminal(cliType) ? undefined : MIN_SUBMIT_DELAY_MS
+);
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
@@ -4927,7 +4933,8 @@ Office project scaffold created by BBARIT Terminal.
     const write = terminalWritersRef.current[terminalId];
     if (!write) return { ok: false, error: 'no live terminal to run the command in' };
     // 게이트에 맡긴다(사람 입력 대기·blocked 거부). 결과는 비동기라 거부는 콘솔에만 남긴다.
-    void queueAutoInput(terminalId, job.command, { source: 'scheduler', submit: true }).then(async (res) => {
+    const cliType = projectsRef.current.flatMap((p) => p.terminals).find((t) => t.id === terminalId)?.cliType;
+    void queueAutoInput(terminalId, job.command, { source: 'scheduler', submit: true, submitDelayMs: gateSubmitDelayFor(cliType) }).then(async (res) => {
       if (res.ok) return;
       console.warn('[scheduler] not sent:', job.command, res.reason);
       try {
@@ -6976,9 +6983,11 @@ Office project scaffold created by BBARIT Terminal.
         const text = String(request?.text ?? '');
         // 자동 입력 게이트: 사람이 치는 중이면 기다리고, 에이전트가 승인 대기(blocked)면
         // force 없이는 거부한다. Enter 는 게이트가 본문과 따로 보낸다.
+        const targetTerminal = projects.flatMap((p) => p.terminals).find((tt) => tt.id === terminalId);
         const result = await queueAutoInput(terminalId, text, {
           source: 'ctl',
           submit: request?.submit !== false,
+          submitDelayMs: gateSubmitDelayFor(targetTerminal?.cliType),
           force: request?.force === true,
           fallbackWrite: write,
         });
@@ -9026,7 +9035,7 @@ Office project scaffold created by BBARIT Terminal.
           if (lines.length === 0) return;
           const label = `${proj.icon} ${proj.displayName} / ${term.name}`.trim();
           const summary = lines.length === 1 ? lines[0] : `${lines[0]} (+${lines.length - 1} lines)`;
-          void queueAutoInput(term.id, text, { source: 'telegram', submit: true }).then((res) => {
+          void queueAutoInput(term.id, text, { source: 'telegram', submit: true, submitDelayMs: gateSubmitDelayFor(term.cliType) }).then((res) => {
             replyAutoInputResult(res, chatId, label, `✅ ran (${label}): ${summary}`);
           });
         };
@@ -9506,7 +9515,7 @@ Office project scaffold created by BBARIT Terminal.
 
               // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
               const sentCmd = cmd;
-              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'discord', submit: true }).then((res) => {
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'discord', submit: true, submitDelayMs: gateSubmitDelayFor(binding.terminal.cliType) }).then((res) => {
                 if (res.ok) discordSend(`✅ ran (${boundLabel}): ${sentCmd}`, channelId);
                 else discordSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
               });
@@ -9847,7 +9856,7 @@ Office project scaffold created by BBARIT Terminal.
 
               // 자동 입력 게이트: 사람 입력 대기, blocked 면 거부, Enter 는 따로.
               const sentCmd = cmd;
-              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'slack', submit: true }).then((res) => {
+              void queueAutoInput(binding.terminal.id, sentCmd, { source: 'slack', submit: true, submitDelayMs: gateSubmitDelayFor(binding.terminal.cliType) }).then((res) => {
                 if (res.ok) slackSend(`ran (${boundLabel}): ${sentCmd}`, channelId);
                 else slackSend(`⚠️ ${autoInputRefusalMessage(res.reason)} (${boundLabel})`, channelId);
               });

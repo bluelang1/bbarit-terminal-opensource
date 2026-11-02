@@ -35,14 +35,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Argument parsing ─────────────────────────────────────────────────────
 const rawArgs = process.argv.slice(2);
-const flags = { port: 0, json: false, window: 'main', timeout: 20000 };
+const flags = { port: 0, json: false, window: 'main', timeout: 20000, timeoutSet: false, force: false };
 const args = [];
 for (let i = 0; i < rawArgs.length; i++) {
   const a = rawArgs[i];
   if (a === '--port') flags.port = Number(rawArgs[++i]) || 0;
   else if (a === '--json') flags.json = true;
   else if (a === '--window') flags.window = String(rawArgs[++i] || 'main');
-  else if (a === '--timeout') flags.timeout = Number(rawArgs[++i]) || 20000;
+  else if (a === '--timeout') { flags.timeout = Number(rawArgs[++i]) || 20000; flags.timeoutSet = true; }
+  else if (a === '--force') flags.force = true;
   else args.push(a);
 }
 const command = args.shift() || 'menu';
@@ -166,7 +167,8 @@ Usage    npm run ctl -- <command> [args…] [options]      (repo)
 Options  --port <n>     target port (dev app auto-scan 9323–9422 / installed 9223)
          --json         raw JSON output
          --window <lbl> target window label (default: main)
-         --timeout <ms> response timeout (default 20000)
+         --timeout <ms> response timeout (default 20000; 40000 for term write)
+         --force        term write: send even while the agent waits for approval
 
 ■ Status
   status                          active project / view / open files
@@ -325,8 +327,15 @@ async function main() {
         return table(parsed.terminals, ['id', 'name', 'cliType', 'active']);
       }
       if (sub === 'create') return out((await dispatch({ cmd: 'terminal.create', cliType: args[0], workDir: args[1] })).parsed);
-      if (sub === 'write') return out((await dispatch({ cmd: 'terminal.write', terminalId: id, text: args.join(' ') })).parsed);
-      if (sub === 'write-raw') return out((await dispatch({ cmd: 'terminal.write', terminalId: id, text: args.join(' '), submit: false })).parsed);
+      if (sub === 'write' || sub === 'write-raw') {
+        // The app's input gate waits up to 20 s for the user to stop typing, then sends Enter
+        // after the paste settles; the bridge itself allows 30 s. Wait past both by default.
+        if (!flags.timeoutSet) flags.timeout = 40000;
+        const payload = { cmd: 'terminal.write', terminalId: id, text: args.join(' ') };
+        if (sub === 'write-raw') payload.submit = false;
+        if (flags.force) payload.force = true;
+        return out((await dispatch(payload)).parsed);
+      }
       if (sub === 'read') {
         const { parsed } = await dispatch({ cmd: 'terminal.read', terminalId: id, lines: Number(args[0]) || 80 });
         if (flags.json || parsed.ok === false) return out(parsed);

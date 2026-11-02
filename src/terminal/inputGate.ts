@@ -26,6 +26,8 @@ export interface AutoInputOptions {
   force?: boolean;
   quietMs?: number;
   maxWaitMs?: number;
+  /** 본문과 Enter 사이 간격. 기본 max(200, terminalSubmitDelayMs(text)) — 에이전트 TUI 용. 셸은 200. */
+  submitDelayMs?: number;
   source: AutoInputSource;
   /**
    * 등록된 쓰기 함수가 없을 때 쓸 함수(예: 이 창에 마운트되지 않은 팝아웃 터미널에
@@ -36,7 +38,7 @@ export interface AutoInputOptions {
 
 export type AutoInputResult =
   | { ok: true; waitedMs: number }
-  | { ok: false; reason: 'blocked' | 'typing' | 'no-writer' | 'disposed' };
+  | { ok: false; reason: 'blocked' | 'typing' | 'no-writer' | 'disposed' | 'cancelled' };
 
 /** XTerminal 이 등록한다 — 마운트된 터미널의 writer, 7501 상태, bracketed paste 모드. */
 export interface InputGateHost {
@@ -61,6 +63,8 @@ interface GateState {
   lastHumanAt: number;
   chain: Promise<unknown>;
   writing: boolean;
+  /** 자동 쓰기 중 사람이 Ctrl-C 를 눌렀다 — 남은 Enter 를 보내지 않는다. */
+  cancelled: boolean;
   held: HeldInput[];
 }
 
@@ -72,7 +76,7 @@ const gates = new Map<string, GateState>();
 function gateFor(terminalId: string): GateState {
   let g = gates.get(terminalId);
   if (!g) {
-    g = { lastHumanAt: 0, chain: Promise.resolve(), writing: false, held: [] };
+    g = { lastHumanAt: 0, chain: Promise.resolve(), writing: false, cancelled: false, held: [] };
     gates.set(terminalId, g);
   }
   return g;
@@ -134,6 +138,10 @@ export function noteHumanInput(terminalId: string, at: number = clock.now()): vo
   gateFor(terminalId).lastHumanAt = at;
 }
 
+export function lastHumanInputAt(terminalId: string): number {
+  return gates.get(terminalId)?.lastHumanAt || 0;
+}
+
 export function isHumanTyping(terminalId: string, quietMs: number = QUIET_MS, now: number = clock.now()): boolean {
   const last = gates.get(terminalId)?.lastHumanAt || 0;
   return last > 0 && now - last < quietMs;
@@ -160,12 +168,22 @@ export function flushHeld(terminalId: string): void {
 
 /**
  * 사람 키 입력의 단일 출구(XTerminal sendToPty, IME 입력 막대, 붙여넣기). 입력 시각을
- * 기록하고, 자동 쓰기 중이면 보류했다가 끝난 뒤 순서대로 보낸다. Ctrl-C 는 바로 보낸다.
+ * 기록하고, 자동 쓰기 중이면 보류했다가 끝난 뒤 순서대로 보낸다. 마우스·포커스·질의 응답은
+ * 기록도 보류도 하지 않는다. Ctrl-C 는 바로 보내고, 보류한 키를 버리며, 남은 자동 Enter 를
+ * 취소한다(사용자가 멈추려는 것이다).
  */
 export function writeHumanInput(terminalId: string, data: string, write: PtyWriter): void {
   if (!data) return;
-  if (!isNonTypingInput(data)) noteHumanInput(terminalId);
-  if (isWriting(terminalId) && !data.includes('\x03')) {
+  if (isNonTypingInput(data)) { write(data); return; }
+  noteHumanInput(terminalId);
+  const g = gates.get(terminalId);
+  if (g?.writing) {
+    if (data.includes('\x03')) {
+      g.held = [];
+      g.cancelled = true;
+      write(data);
+      return;
+    }
     holdHumanInput(terminalId, data, write);
     return;
   }
@@ -214,10 +232,11 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
   const waitedMs = clock.now() - startedAt;
   const g = gateFor(terminalId);
   g.writing = true;
+  g.cancelled = false;
   try {
-    // 4. 본문
+    // 4. 본문. submit:false(write-raw)는 바이트 그대로 — 안의 \r 은 예전처럼 제출된다.
     if (text) {
-      if (isKeyInput(text)) {
+      if (!submit || isKeyInput(text)) {
         write(text);
       } else {
         const bracketed = !!host?.isBracketedPaste?.(terminalId);
@@ -228,14 +247,16 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
     }
     // 5. Enter 는 따로
     if (submit) {
-      await clock.sleep(Math.max(MIN_SUBMIT_DELAY_MS, terminalSubmitDelayMs(text)));
+      await clock.sleep(opts.submitDelayMs ?? Math.max(MIN_SUBMIT_DELAY_MS, terminalSubmitDelayMs(text)));
+      if (g.cancelled) return { ok: false, reason: 'cancelled' };
       const enter = resolveWriter(terminalId, opts);
       if (!enter) return { ok: false, reason: 'disposed' };
       enter('\r');
     }
   } finally {
-    // 6. 보류한 사람 키를 순서대로
+    // 6. 보류한 사람 키를 순서대로(쓰기 함수가 던져도)
     g.writing = false;
+    g.cancelled = false;
     flushHeld(terminalId);
   }
   return { ok: true, waitedMs };
@@ -244,7 +265,8 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
 /** 터미널마다 직렬로 실행한다. 앞 요청이 끝나야(성공·거부 무관) 다음 요청이 시작된다. */
 export function queueAutoInput(terminalId: string, text: string, opts: AutoInputOptions): Promise<AutoInputResult> {
   const g = gateFor(terminalId);
-  const run = () => runAutoInput(terminalId, text, opts);
+  const run = (): Promise<AutoInputResult> => runAutoInput(terminalId, text, opts)
+    .catch((): AutoInputResult => ({ ok: false, reason: 'disposed' }));
   const result = g.chain.then(run, run);
   g.chain = result.catch(() => undefined);
   return result;
@@ -257,6 +279,7 @@ export function autoInputRefusalMessage(reason: Extract<AutoInputResult, { ok: f
     case 'typing': return '사용자가 입력 중이라 보내지 않았습니다';
     case 'no-writer': return '터미널이 준비되지 않아 보내지 않았습니다';
     case 'disposed': return '터미널이 닫혀 보내지 않았습니다';
+    case 'cancelled': return '사용자가 Ctrl-C 로 멈춰 Enter 를 보내지 않았습니다';
     default: return '보내지 않았습니다';
   }
 }
