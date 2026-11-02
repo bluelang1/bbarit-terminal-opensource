@@ -33,6 +33,7 @@ import {
 import {
   answerProgramStatusProbe,
   handleProgramStatusOsc as handleProgramStatusOscCore,
+  handleShellIntegrationOsc as handleShellIntegrationOscCore,
   isProgramStatusStale,
   type ProgramStatusChange,
 } from './terminal/programStatusHandler';
@@ -290,6 +291,10 @@ interface TerminalState {
   programStatus?: ProgramStatusStore;
   pendingStatusProbe?: boolean;          // writer 등록 전에 온 지원 질의 — 등록되면 답한다
   replayingOutput?: boolean;             // 저장된 PTY 출력 재생 중 — 7501 알림·질의 응답 금지
+  // OSC 133 셸 통합 — docs/SHELL_PROMPT_OSC133.md (기록만, 표시는 범위 밖)
+  lastPromptAt?: number;
+  lastCommandStartAt?: number;
+  lastCommandExitCode?: number | null;
 }
 const terminalStates = new Map<string, TerminalState>();
 
@@ -326,6 +331,18 @@ const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
       else dispatchAgentStatus(terminalId, change.store);
     },
     onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore()),
+  });
+};
+
+/**
+ * registerOscHandler(133) 본체 — 로직은 terminal/programStatusHandler.ts.
+ * A(새 프롬프트)는 7501 working/blocked 를 버리고 상태 이벤트만 보낸다(알림 없음).
+ */
+const handleShellIntegrationOsc = (terminalId: string, data: string): boolean => {
+  const st = terminalStates.get(terminalId);
+  if (!st) return true;
+  return handleShellIntegrationOscCore(st, data, {
+    onChange: (change) => dispatchAgentStatus(terminalId, change.store),
   });
 };
 
@@ -2961,6 +2978,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
       // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
       term.parser.registerOscHandler(7501, (data) => handleProgramStatusOsc(terminalId, data));
+      // OSC 133 셸 통합: 셸 프롬프트로 돌아오면(A) 남은 7501 working/blocked 를 정리한다.
+      term.parser.registerOscHandler(133, (data) => handleShellIntegrationOsc(terminalId, data));
       term.unicode.activeVersion = '11';
 
       termRef.current = term;

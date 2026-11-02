@@ -4,12 +4,14 @@
 import {
   applyProgramStatusReport,
   createProgramStatusStore,
+  dropTransientProgramStatus,
   parseProgramStatus,
   programStatusQueryReply,
   rollupAgentState,
   type AgentTabState,
   type ProgramStatusStore,
 } from './programStatus';
+import { parseOsc133 } from './shellIntegration';
 
 export interface ProgramStatusHost {
   writeToPty: ((data: string) => void) | null;
@@ -18,6 +20,13 @@ export interface ProgramStatusHost {
   pendingStatusProbe?: boolean;
   /** 저장된 PTY 출력을 다시 그리는 중(재부착·팝아웃 복귀·웹뷰 새로고침). */
   replayingOutput?: boolean;
+  // OSC 133 셸 통합 — docs/SHELL_PROMPT_OSC133.md. 기록만 하고 표시는 하지 않는다.
+  /** 마지막 133 A(프롬프트 시작) 시각(ms). */
+  lastPromptAt?: number;
+  /** 마지막 133 C(명령 실행 시작) 시각(ms). */
+  lastCommandStartAt?: number;
+  /** 마지막 133 D 의 종료 코드. D 에 코드가 없으면 null. */
+  lastCommandExitCode?: number | null;
 }
 
 export interface ProgramStatusChange {
@@ -90,4 +99,40 @@ export function isProgramStatusStale(
   const state = rollupAgentState(store);
   if (state !== 'working' && state !== 'blocked') return false;
   return now - store.lastReportAt >= thresholdMs && ptyIdleMs >= thresholdMs;
+}
+
+/**
+ * OSC 133 셸 통합 처리. A(새 프롬프트)는 에이전트가 끝나고 셸로 돌아왔다는 뜻이라 7501 의
+ * working/blocked 레코드를 버린다(done/error/idle 은 남긴다). 상태가 바뀌면 onChange 를
+ * firstReport=true 로 불러 알림 없이 상태만 알린다. 재생 중에도 같다(상태 이벤트를 빼면
+ * 재생된 7501 working 이 App 에 그대로 남는다). C/D 는 기록만, B 는 무시한다.
+ */
+export function handleShellIntegrationOsc(
+  host: ProgramStatusHost,
+  data: string,
+  callbacks: Pick<ProgramStatusCallbacks, 'onChange'>,
+  now: number = Date.now(),
+): boolean {
+  const parsed = parseOsc133(data);
+  if (!parsed) return true;
+  switch (parsed.mark) {
+    case 'A': {
+      host.lastPromptAt = now;
+      const store = host.programStatus;
+      if (!store?.reported) return true;
+      const prev = rollupAgentState(store);
+      dropTransientProgramStatus(store);
+      const next = rollupAgentState(store);
+      if (prev !== next) callbacks.onChange({ prev, next, firstReport: true, store });
+      return true;
+    }
+    case 'C':
+      host.lastCommandStartAt = now;
+      return true;
+    case 'D':
+      host.lastCommandExitCode = parsed.exitCode ?? null;
+      return true;
+    default:
+      return true;
+  }
 }
