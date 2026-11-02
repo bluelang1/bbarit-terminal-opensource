@@ -160,6 +160,7 @@ import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, t
 import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from './projectDragGhost';
 import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } from './projectDropTargets';
 import { isClaudeSessionId, newClaudeSessionId } from './terminal/claudeSessionDir';
+import { applyReportedClaudeSessionToProjects, CLAUDE_SESSION_REPORTED_EVENT, type ClaudeSessionReport } from './terminal/claudeSessionReport';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
@@ -14251,6 +14252,25 @@ Office project scaffold created by BBARIT Terminal.
       if (unlisten) unlisten();
     };
   }, [cleanupHarnessWindowProcesses, isHarnessWindow]);
+  // Claude SessionStart hook → bridge → `claude-session-reported`: remember each Claude
+  // tab's session id so its next launch is `--resume <id>` (docs/CLAUDE_SESSION_HOOK.md).
+  // Main window only: the harness window keeps its own projects snapshot and would
+  // persist a stale copy over the main window's.
+  useEffect(() => {
+    if (isHarnessWindow) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tauriListen<ClaudeSessionReport>(CLAUDE_SESSION_REPORTED_EVENT, (event) => {
+      setProjects((prev) => applyReportedClaudeSessionToProjects(prev, event.payload));
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, [isHarnessWindow]);
   // Main window: tab-close warns about unsaved edits, but window-close used to
   // discard every dirty office/document tab silently. Intercept and ask once.
   useEffect(() => {

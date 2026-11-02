@@ -3,6 +3,7 @@
 //! Routes:
 //!   - GET  /health          — liveness probe
 //!   - POST /api/invoke      — generic command dispatch for MCP clients
+//!   - POST /api/claude-session — Claude Code SessionStart hook report (docs/CLAUDE_SESSION_HOOK.md)
 //!   - GET  /api/commands    — list available commands
 //!   - GET  /web             — embedded xterm.js web terminal UI
 //!   - WS   /ws/terminal/{id} — PTY I/O
@@ -90,6 +91,7 @@ pub async fn start_browser_bridge(
         .route("/api/invoke", post(handle_invoke))
         .route("/api/commands", get(handle_list_commands))
         .route("/editor", post(handle_editor))
+        .route("/api/claude-session", post(handle_claude_session))
         .with_state(bridge_ctx.clone())
         // POST /gateway/ui — the agent's app_control tool drives the app UI. It
         // authenticates with the internal UI token, and lives on the LOCAL port
@@ -398,6 +400,146 @@ mod local_guard_tests {
         h.insert(HOST, HeaderValue::from_static("localhost:19980"));
         h.insert(ORIGIN, HeaderValue::from_static("tauri://localhost"));
         assert!(local_request_allowed(&h, PORT).is_ok());
+    }
+}
+
+// ── Claude session hook ──
+//
+// The bundled SessionStart hook (resources/claude-hooks/session-start.sh) POSTs
+// the tab's Claude session id here; the frontend stores it on the terminal so
+// the next launch is `claude --resume <id>`. Native curl sends no Origin, so it
+// passes `with_local_guard`. State lives in the frontend: this only validates
+// and re-emits. docs/CLAUDE_SESSION_HOOK.md
+
+pub const CLAUDE_SESSION_EVENT: &str = "claude-session-reported";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeSessionReport {
+    pub terminal_id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    pub source: String,
+}
+
+fn is_uuid(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Validate a hook report. Every field is optional at the JSON level so a bad
+/// body is a 400 with a reason rather than axum's generic 422.
+pub fn parse_claude_session_report(
+    body: &serde_json::Value,
+) -> Result<ClaudeSessionReport, &'static str> {
+    let field = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::trim);
+    let terminal_id = field("terminalId").unwrap_or("");
+    if terminal_id.is_empty() {
+        return Err("terminalId is required");
+    }
+    if terminal_id.len() > 128 || terminal_id.chars().any(char::is_control) {
+        return Err("terminalId is invalid");
+    }
+    let session_id = field("sessionId").unwrap_or("");
+    if !is_uuid(session_id) {
+        return Err("sessionId must be a uuid");
+    }
+    let transcript_path = field("transcriptPath").filter(|p| !p.is_empty());
+    if transcript_path.is_some_and(|p| p.len() > 4096 || p.chars().any(char::is_control)) {
+        return Err("transcriptPath is invalid");
+    }
+    let source = field("source").unwrap_or("");
+    if source.len() > 32 || !source.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("source is invalid");
+    }
+    Ok(ClaudeSessionReport {
+        terminal_id: terminal_id.to_string(),
+        session_id: session_id.to_ascii_lowercase(),
+        transcript_path: transcript_path.map(str::to_string),
+        source: source.to_string(),
+    })
+}
+
+async fn handle_claude_session(
+    AxumState(ctx): AxumState<BridgeCtx>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let report = match body.as_ref().map(|Json(v)| parse_claude_session_report(v)) {
+        Ok(Ok(report)) => report,
+        Ok(Err(reason)) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": reason })))
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "body must be JSON" })),
+            )
+        }
+    };
+    if let Err(e) = ctx.app_handle.emit(CLAUDE_SESSION_EVENT, &report) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        );
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod claude_session_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SID: &str = "0f4b2c1e-7d3a-4c5b-9e8f-1a2b3c4d5e6f";
+
+    #[test]
+    fn accepts_hook_report_and_emits_camel_case() {
+        let r = parse_claude_session_report(&json!({
+            "terminalId": "t1", "sessionId": SID,
+            "transcriptPath": "/x/y.jsonl", "source": "startup",
+        }))
+        .unwrap();
+        assert_eq!(r.terminal_id, "t1");
+        assert_eq!(r.session_id, SID);
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({ "terminalId": "t1", "sessionId": SID, "transcriptPath": "/x/y.jsonl", "source": "startup" })
+        );
+        // The hook sends "" for a missing transcript path.
+        let r = parse_claude_session_report(&json!({ "terminalId": "t1", "sessionId": SID, "transcriptPath": "", "source": "" })).unwrap();
+        assert_eq!(r.transcript_path, None);
+    }
+
+    #[test]
+    fn rejects_non_uuid_session_id() {
+        for bad in ["", "abc", "0f4b2c1e-7d3a-4c5b-9e8f-1a2b3c4d5e6", "0f4b2c1e_7d3a-4c5b-9e8f-1a2b3c4d5e6f", "zf4b2c1e-7d3a-4c5b-9e8f-1a2b3c4d5e6f"] {
+            assert_eq!(
+                parse_claude_session_report(&json!({ "terminalId": "t", "sessionId": bad, "source": "startup" })),
+                Err("sessionId must be a uuid"),
+                "{bad:?}"
+            );
+        }
+        assert!(parse_claude_session_report(&json!({ "terminalId": "t", "sessionId": 5 })).is_err());
+    }
+
+    #[test]
+    fn rejects_missing_or_empty_terminal_id() {
+        for body in [json!({ "sessionId": SID }), json!({ "terminalId": "  ", "sessionId": SID }), json!({ "terminalId": null, "sessionId": SID })] {
+            assert_eq!(parse_claude_session_report(&body), Err("terminalId is required"));
+        }
+        assert_eq!(
+            parse_claude_session_report(&json!({ "terminalId": "a\u{7}b", "sessionId": SID })),
+            Err("terminalId is invalid")
+        );
+        assert_eq!(
+            parse_claude_session_report(&json!({ "terminalId": "t", "sessionId": SID, "source": "x y" })),
+            Err("source is invalid")
+        );
     }
 }
 

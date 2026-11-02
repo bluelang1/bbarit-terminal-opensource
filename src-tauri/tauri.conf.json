@@ -50,6 +50,8 @@
     "createUpdaterArtifacts": true,
     "resources": [
       "resources/claude-skills/**/*",
+      "resources/claude-hooks/bbarit-session.json",
+      "resources/claude-hooks/session-start.sh",
       "../agent-browser-cli/bin/bbarit-browser-control.mjs",
       "../bbarit-agent/personas/**/*",
       "../scripts/tauri-dev-screen.mjs"

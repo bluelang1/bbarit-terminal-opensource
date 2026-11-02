@@ -40,7 +40,7 @@ import {
 import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
-import { claudeSessionArgsToFlags, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
+import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
@@ -1212,6 +1212,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // Read at PTY creation only; changing it must not restart a running tab.
   const githubAccountRef = useRef(githubAccount);
   githubAccountRef.current = githubAccount;
+  // Read at launch time only. The SessionStart hook updates the id while Claude runs
+  // (docs/CLAUDE_SESSION_HOOK.md); as an effect dep that would restart the terminal.
+  const claudeSessionIdRef = useRef(claudeSessionId);
+  claudeSessionIdRef.current = claudeSessionId;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Set when the user submits input (Enter); gates the "task completed" toast so it
@@ -3462,14 +3466,23 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // exists: on a fresh project the flag makes Claude exit with
       // "No conversation found to continue".
       let claudeSessionFlags = '';
+      // Bundled SessionStart hook settings (`--settings`): reports this tab's session id
+      // so the next launch resumes it. Local, non-Windows work dirs only.
+      let claudeHookSettings = '';
       if (cliType === 'claude') {
         claudeSessionFlags = claudeSessionArgsToFlags(await resolveClaudeSessionArgs(
-          { workDir, sessionId: claudeSessionId, resumeLastSession },
+          { workDir, sessionId: claudeSessionIdRef.current, resumeLastSession },
           {
             getHomeDir: () => invoke<string>('get_home_dir'),
             readDirectory: (path) => invoke<Array<{ name: string; is_dir: boolean }>>('read_directory', { path }),
+            getClaudeConfigDir: () => invoke<string | null>('read_env_var', { name: 'CLAUDE_CONFIG_DIR' }),
           },
         ));
+        if (!isWindows && isLocalWorkDir(workDir)) {
+          try {
+            claudeHookSettings = (await invoke<string | null>('claude_hook_settings_path')) || '';
+          } catch { /* older host or missing resource: launch without the hook */ }
+        }
       }
 
       const cliCommands: Record<string, string> = {
@@ -3487,6 +3500,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // Inject --mcp-config if set and not already in flags
           if (mcpConfigPath && !hasFlag('--mcp-config') && !normalizedFlags.some(f => f.startsWith('--mcp-config'))) {
             cmd += ` --mcp-config ${shellQuoteArg(mcpConfigPath, argShell)}`;
+          }
+          // Session hook settings, unless the user passes their own --settings
+          if (claudeHookSettings && !hasFlag('--settings') && !normalizedFlags.some(f => f.startsWith('--settings'))) {
+            cmd += ` --settings ${shellQuoteArg(claudeHookSettings, argShell)}`;
           }
           cmd += flagsToString(normalizedFlags);
           return wrapCliCheck(cmd, 'claude', 'npm i -g @anthropic-ai/claude-code');
@@ -3948,7 +3965,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       onDispose?.();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, claudeSessionId, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
+  }, [terminalId, workDir, cliType, autoAccept, startupMode, codexWebSearch, resumeLastSession, extraFlags, deferStart, _isRestored, focusActiveInput, scrollActiveTerminalToBottom]);
 
   const enableDirectInput = useCallback(() => {
     const state = terminalStates.get(terminalId);
