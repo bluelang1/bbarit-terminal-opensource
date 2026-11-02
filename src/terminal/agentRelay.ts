@@ -57,9 +57,9 @@ export function oneLine(text: string, max = 300): string {
   return `${Array.from(flat).slice(0, max - 1).join('')}…`;
 }
 
-/** 마지막 비어 있지 않은 N 줄. */
+/** 마지막 N 줄 — 글자나 숫자가 없는 줄(빈 줄, TUI 입력창 테두리 `╭──╮`·`│ > │`)은 건너뛴다. */
 export function lastNonEmptyLines(text: string, n = 3): string[] {
-  return text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => l.trim()).slice(-n);
+  return text.split(/\r?\n/).map((l) => l.trimEnd()).filter((l) => /[\p{L}\p{N}]/u.test(l)).slice(-n);
 }
 
 export const CTL_REF = 'node "$BBARIT_CTL"';

@@ -77,6 +77,7 @@ describe('helpers', () => {
   });
   it('lastNonEmptyLines', () => {
     expect(lastNonEmptyLines('1\n2\n \n3\n', 2)).toEqual(['2', '3']);
+    expect(lastNonEmptyLines('result: ok\n╭────╮\n│ >  │\n╰────╯\n', 3)).toEqual(['result: ok']);
   });
   it('agentLabel', () => {
     expect(agentLabel('t1')).toBe('t1');

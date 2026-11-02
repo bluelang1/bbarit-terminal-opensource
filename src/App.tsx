@@ -20,7 +20,8 @@ import { FileTreeHeaderMore } from './components/FileTreeHeaderMore';
 import { ClampedMenu } from './components/ClampedMenu';
 import StatusBarStats from './components/StatusBarStats';
 import { type OnMount } from '@monaco-editor/react';
-import { XTerminal, disposeTerminal, releaseTerminalRuntime, getTerminalRecentOutput, isTerminalBusy, getTerminalAgentState, isTerminalAgentUiReady } from './XTerminal';
+import { XTerminal, disposeTerminal, releaseTerminalRuntime, getTerminalRecentOutput, isTerminalBusy } from './XTerminal';
+import { getTerminalAgentState, isTerminalAgentUiReady } from './XTerminal';
 import { useRestoreFocusOnWindowFocus } from './hooks/useRestoreFocusOnWindowFocus';
 import { BROKER_AGENT_ROLES, startDevReviewPair, ROLE_LABEL as BROKER_ROLE_LABEL, normalizeBrokerAgentRole, shouldAcceptBrokerStatusUpdate, type BrokerReviewMode, type DevReviewRole, type BrokerStatusSnapshot, type PairEvent } from './devreview/devReviewPair';
 import { performAgentRestart } from './devreview/restartAgents';
@@ -5737,6 +5738,7 @@ Office project scaffold created by BBARIT Terminal.
     if (agentNoteFlushingRef.current.has(parentId)) return;
     if (!canDeliverToParent(getTerminalAgentState(parentId))) return;
     agentNoteFlushingRef.current.add(parentId);
+    let again = false;
     try {
       const res = await flushNotes(agentNoteQueueRef.current, parentId, async (note) => {
         const parent = findTerminalAnywhere(parentId);
@@ -5754,9 +5756,12 @@ Office project scaffold created by BBARIT Terminal.
       if (res.stoppedBy === 'typing' || res.stoppedBy === 'no-writer' || res.stoppedBy === 'cancelled') {
         window.setTimeout(() => { void flushAgentNotes(parentId); }, 5000);
       }
+      // 보내는 동안 새로 쌓인 노트.
+      again = !res.stoppedBy && agentNoteQueueRef.current.has(parentId);
     } finally {
       agentNoteFlushingRef.current.delete(parentId);
     }
+    if (again) void flushAgentNotes(parentId);
   };
   const deliverAgentNote = async (link: AgentLink, state: AgentNoteState, snap?: AgentStatusSnapshot): Promise<void> => {
     if (!link.parentId) return;

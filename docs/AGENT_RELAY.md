@@ -145,7 +145,8 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   `done` 은 다음 working 까지 남으므로 턴 비교가 필요하다. blocked 인 자식에 답을 보낸 직후의
   같은 턴 blocked 는 아직 처리 전으로 본다. 7501 이 없는 자식(셸 등)은 입력 뒤 5 s 이상 출력이
   없으면 끝으로 본다(긴 무출력 명령은 오판할 수 있다). 링크 없는 `--id` 는 exited/blocked/done.
-- **노트 세부**: 브리프 주입 전(`pending`)의 done 은 무시한다(시작 직후 보고). blocked 본문은
+- **노트 세부**: 브리프 주입 전(`pending`)의 done 은 무시한다(시작 직후 보고). "마지막 3 줄" 은 글자·숫자가
+  없는 줄(TUI 입력창 테두리 등)을 건너뛴다. blocked 본문은
   7501 `msg`, 없으면 마지막 3 줄. 종료 노트는 `state="exited"`. 노트·대기열 전달은 부모가 7501
   을 보고하고 blocked 가 아닐 때만 하고, 게이트가 `typing`/`no-writer`/`cancelled` 로 거부하면
   5 s 뒤 다시, `blocked` 면 부모의 다음 비-blocked 상태 보고 때 다시 보낸다. 본문 안의
