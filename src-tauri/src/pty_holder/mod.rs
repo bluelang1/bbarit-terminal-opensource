@@ -11,6 +11,7 @@
 //!
 //! Unix only. Windows keeps `InProcessBackend` (phase 4).
 
+pub mod client;
 pub mod proto;
 pub mod server;
 pub mod spawn;
