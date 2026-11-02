@@ -40,7 +40,7 @@ import {
 import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { shouldNotifyReady } from './terminal/readyNotify';
-import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs } from './terminal/claudeSessionDir';
+import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
@@ -90,8 +90,10 @@ interface XTerminalProps {
   startupMode?: 'normal' | 'auto-accept' | 'bypass-permissions' | 'auto-edit' | 'full-auto' | 'yolo';
   codexWebSearch?: boolean;
   resumeLastSession?: boolean;
-  /** Dedicated Claude Code session for this tab (uuid); undefined = shared `--continue` tab. */
+  /** Claude Code session for this tab (uuid); undefined = shared `--continue` tab. */
   claudeSessionId?: string;
+  /** 'hook' ids are resumed only when resumeLastSession is on; 'app' (or absent) always. */
+  claudeSessionSource?: ClaudeSessionSource;
   extraFlags?: string[];
   modelId?: string;
   mcpConfigPath?: string;
@@ -1185,7 +1187,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1216,6 +1218,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // (docs/CLAUDE_SESSION_HOOK.md); as an effect dep that would restart the terminal.
   const claudeSessionIdRef = useRef(claudeSessionId);
   claudeSessionIdRef.current = claudeSessionId;
+  const claudeSessionSourceRef = useRef(claudeSessionSource);
+  claudeSessionSourceRef.current = claudeSessionSource;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Set when the user submits input (Enter); gates the "task completed" toast so it
@@ -3471,7 +3475,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       let claudeHookSettings = '';
       if (cliType === 'claude') {
         claudeSessionFlags = claudeSessionArgsToFlags(await resolveClaudeSessionArgs(
-          { workDir, sessionId: claudeSessionIdRef.current, resumeLastSession },
+          { workDir, sessionId: claudeSessionIdRef.current, sessionSource: claudeSessionSourceRef.current, resumeLastSession },
           {
             getHomeDir: () => invoke<string>('get_home_dir'),
             readDirectory: (path) => invoke<Array<{ name: string; is_dir: boolean }>>('read_directory', { path }),

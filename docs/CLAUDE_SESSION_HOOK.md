@@ -132,7 +132,10 @@ settings from a JSON file"). Claude 탭 실행 인자에만 붙는다.
   id 는 탭 생성 때만 정해져서 동작 차이는 없다.
 - **`--settings` 조건**: 로컬 작업 폴더이고 Windows 가 아닐 때만 붙인다(ssh:// 은 원격에서 그
   경로가 없다). 사용자가 `--settings` 를 넣었으면 붙이지 않는다.
-- **알려진 영향**: 훅이 id 를 채운 일반 Claude 탭은 `resumeLastSession` 설정이 꺼져 있어도 다음
-  실행이 `--resume <id>` 다(설계대로 `resolveClaudeSessionArgs` 를 바꾸지 않음). 새 대화를 원하면
-  "Claude 새 대화" 탭을 쓰거나 `/clear` 한다.
+- **id 출처와 `resumeLastSession`** (설계 변경): `TerminalInstance.claudeSessionSource` 에
+  `'app'`("Claude 새 대화"가 만든 id) / `'hook'`(훅이 보고한 id)을 저장한다. `'hook'` id 는
+  `resumeLastSession` 이 켜져 있을 때만 `--resume`/`--session-id` 가 되고, 꺼져 있으면 플래그 없이
+  새 세션으로 띄운다(id 없는 일반 탭과 같다). `'app'` id 는 지금처럼 항상 이어간다. 출처가 없는
+  예전 저장값은 `'app'` 으로 읽는다. "Claude 새 대화" 탭에 `/clear` 로 새 id 가 보고돼도 `'app'` 을
+  유지한다(전용 탭 성격 유지). 탭 이름 번호 계산도 `'app'` 탭만 "새 대화" 로 센다.
 - 실기 확인(macOS 개발 빌드)은 하지 않았다. 단위 테스트와 빌드·린트·감사만 통과.

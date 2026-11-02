@@ -107,6 +107,13 @@ export function newClaudeSessionId(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/**
+ * Where a tab's session id came from: 'app' = "Claude (new session)" created it (always
+ * resumed), 'hook' = the SessionStart hook reported it (resumed only with resumeLastSession).
+ * Ids saved before the hook existed have no source and count as 'app'.
+ */
+export type ClaudeSessionSource = 'app' | 'hook';
+
 export type ClaudeSessionArgs =
   | { kind: 'resume'; sessionId: string }
   | { kind: 'new'; sessionId: string }
@@ -118,13 +125,15 @@ export type ClaudeSessionArgs =
  * - a tab with its own session id resumes that exact conversation when its
  *   transcript exists and otherwise creates it with `--session-id`, so the
  *   tab never shares a conversation with sibling tabs;
- * - a tab without an id keeps the shared "continue the latest" behavior.
+ * - a tab without an id keeps the shared "continue the latest" behavior;
+ * - a hook-reported id follows resumeLastSession: off means a fresh session (no flag).
  */
 export async function resolveClaudeSessionArgs(
-  options: { workDir?: string; sessionId?: string | null; resumeLastSession: boolean },
+  options: { workDir?: string; sessionId?: string | null; sessionSource?: ClaudeSessionSource | null; resumeLastSession: boolean },
   probe: ClaudeContinueProbe,
 ): Promise<ClaudeSessionArgs> {
   const sessionId = isClaudeSessionId(options.sessionId) ? options.sessionId : null;
+  if (sessionId && options.sessionSource === 'hook' && !options.resumeLastSession) return { kind: 'none' };
   if (sessionId) {
     if (!isLocalWorkDir(options.workDir)) return { kind: 'new', sessionId };
     try {

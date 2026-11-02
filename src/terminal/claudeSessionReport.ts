@@ -2,7 +2,7 @@
 // the local bridge (POST /api/claude-session → Tauri event `claude-session-reported`).
 // Storing it on the terminal makes the next launch `claude --resume <id>` instead of
 // the shared `--continue`. docs/CLAUDE_SESSION_HOOK.md
-import { isClaudeSessionId } from './claudeSessionDir';
+import { isClaudeSessionId, type ClaudeSessionSource } from './claudeSessionDir';
 
 export const CLAUDE_SESSION_REPORTED_EVENT = 'claude-session-reported';
 
@@ -14,13 +14,19 @@ export interface ClaudeSessionReport {
   source?: string;
 }
 
-type SessionTerminal = { id: string; cliType?: string; claudeSessionId?: string };
+type SessionTerminal = { id: string; cliType?: string; claudeSessionId?: string; claudeSessionSource?: ClaudeSessionSource };
+
+/** A "Claude (new session)" tab: its id was created by the app, not reported by the hook. */
+export function isDedicatedClaudeTab(t: Pick<SessionTerminal, 'claudeSessionId' | 'claudeSessionSource'>): boolean {
+  return !!t.claudeSessionId && t.claudeSessionSource !== 'hook';
+}
 
 /**
  * Set `claudeSessionId` on the reported Claude terminal. Returns the same array when
  * nothing changes (unknown terminal, not a Claude tab, same id, bad payload) so a
  * React state update can bail out. `source: 'clear'` is handled the same way: the
- * new id replaces the old one.
+ * new id replaces the old one. A plain tab gets `claudeSessionSource: 'hook'`; a
+ * "Claude (new session)" tab keeps 'app' so it stays a dedicated, always-resumed tab.
  */
 export function applyReportedClaudeSession<T extends SessionTerminal>(
   terminals: T[],
@@ -33,7 +39,11 @@ export function applyReportedClaudeSession<T extends SessionTerminal>(
   const target = terminals[index];
   if (target.cliType !== 'claude' || target.claudeSessionId === sessionId) return terminals;
   const next = terminals.slice();
-  next[index] = { ...target, claudeSessionId: sessionId };
+  next[index] = {
+    ...target,
+    claudeSessionId: sessionId,
+    claudeSessionSource: isDedicatedClaudeTab(target) ? 'app' : 'hook',
+  };
   return next;
 }
 
