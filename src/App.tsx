@@ -5484,6 +5484,8 @@ Office project scaffold created by BBARIT Terminal.
     title: string;
     prompt: string;
     duration: string;
+    /** blocked = OSC 7501 입력 대기 알림(완료 말풍선 재사용). 없으면 완료 토스트. */
+    kind?: 'done' | 'blocked';
     leaving?: boolean;
   };
   type CompletedTaskTarget = Pick<TaskToast, 'id' | 'projectId' | 'terminalId' | 'title'>;
@@ -5678,7 +5680,7 @@ Office project scaffold created by BBARIT Terminal.
         }
       }
       const { title, body } = blockedAlertText(projectName, terminalName, d.kind, d.msg);
-      const toast: TaskToast = { id: blockedToastId, projectId, terminalId: tid, title, prompt: body.slice(0, 200), duration: '' };
+      const toast: TaskToast = { id: blockedToastId, projectId, terminalId: tid, title, prompt: body.slice(0, 200), duration: '', kind: 'blocked' };
       setTaskToasts((prev) => [...prev.filter((t) => t.id !== blockedToastId), toast].slice(-4));
       if (taskToastTimersRef.current[blockedToastId]) window.clearTimeout(taskToastTimersRef.current[blockedToastId]);
       taskToastTimersRef.current[blockedToastId] = window.setTimeout(() => dismissTaskToast(blockedToastId), 15000);
@@ -23212,14 +23214,14 @@ Office project scaffold created by BBARIT Terminal.
               key={toast.id}
               className={`task-bubble ${toast.leaving ? 'leaving' : ''}`}
               role="status"
-              title="Go to completed project"
+              title={toast.kind === 'blocked' ? 'Go to waiting agent' : 'Go to completed project'}
               onClick={() => openTaskCompleteTarget(toast)}
             >
               <div className="task-bubble-body">
                 <div className="task-bubble-title">{toast.title}</div>
                 {toast.prompt && <div className="task-bubble-prompt">{toast.prompt}</div>}
                 <div className="task-bubble-meta">
-                  <span className="task-bubble-done">Task complete</span>
+                  <span className="task-bubble-done">{toast.kind === 'blocked' ? '입력 대기' : 'Task complete'}</span>
                   {toast.duration && <span className="task-bubble-duration">⏱ {toast.duration}</span>}
                 </div>
               </div>
