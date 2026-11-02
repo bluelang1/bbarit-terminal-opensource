@@ -12,6 +12,10 @@
  *     download from Settings → Control CLI; auto-falls back to installed 9223)
  *
  * Full docs: docs/BBARIT_CLI.md (also in Settings → Control CLI)
+ *
+ * Inside a BBARIT tab: BBARIT_CTL is this file's path, BBARIT_TERMINAL_ID the tab
+ * (sent as `caller` by `agent …`) and BBARIT_BRIDGE_PORT the app's local bridge port
+ * (19980 installed / 19981 dev), which selects its mcp-bridge port without a scan.
  */
 
 import process from 'node:process';
@@ -35,24 +39,37 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ── Argument parsing ─────────────────────────────────────────────────────
 const rawArgs = process.argv.slice(2);
-const flags = { port: 0, json: false, window: 'main', timeout: 20000, timeoutSet: false, force: false };
+const flags = { port: 0, json: false, window: 'main', timeout: 20000, timeoutSet: false, timeoutRaw: 0, force: false };
 const args = [];
 for (let i = 0; i < rawArgs.length; i++) {
   const a = rawArgs[i];
   if (a === '--port') flags.port = Number(rawArgs[++i]) || 0;
   else if (a === '--json') flags.json = true;
   else if (a === '--window') flags.window = String(rawArgs[++i] || 'main');
-  else if (a === '--timeout') { flags.timeout = Number(rawArgs[++i]) || 20000; flags.timeoutSet = true; }
+  else if (a === '--timeout') { flags.timeoutRaw = Number(rawArgs[++i]) || 0; flags.timeout = flags.timeoutRaw || 20000; flags.timeoutSet = true; }
   else if (a === '--force') flags.force = true;
   else args.push(a);
 }
 const command = args.shift() || 'menu';
 
 // ── WebSocket connection (mcp-bridge) ────────────────────────────────────
+// BBARIT_BRIDGE_PORT (the app's local HTTP bridge, set in every BBARIT tab) → that app's
+// mcp-bridge port: 19980 installed → 9223, 19981 dev → 9323. Unknown values are ignored.
+const BRIDGE_TO_MCP_PORT = { 19980: INSTALLED_PORT, 19981: DEV_BASE_PORT };
+export function mcpPortFromEnv(env = process.env) {
+  return BRIDGE_TO_MCP_PORT[Number(env.BBARIT_BRIDGE_PORT)] || 0;
+}
+
+/** Scan order: the port that answered last time, the env-mapped port, then dev → installed. */
+export function bridgePortCandidates(envPort = 0, lastPort = 0) {
+  const scan = [...Array.from({ length: DEV_PORT_SPAN }, (_, i) => DEV_BASE_PORT + i), INSTALLED_PORT];
+  return [...new Set([lastPort, envPort, ...scan].filter(Boolean))];
+}
+
+let lastBridgePort = 0;
+
 async function connectBridge() {
-  const ports = flags.port
-    ? [flags.port]
-    : [...Array.from({ length: DEV_PORT_SPAN }, (_, i) => DEV_BASE_PORT + i), INSTALLED_PORT];
+  const ports = flags.port ? [flags.port] : bridgePortCandidates(mcpPortFromEnv(), lastBridgePort);
   for (const port of ports) {
     try {
       const ws = await new Promise((resolve, reject) => {
@@ -84,6 +101,7 @@ async function connectBridge() {
           continue;
         }
       }
+      lastBridgePort = port;
       return { ws, port };
     } catch { /* try the next port */ }
   }
@@ -195,6 +213,13 @@ Options  --port <n>     target port (dev app auto-scan 9323–9422 / installed 9
   term close <terminalId>         close a terminal
   (target a specific terminal: add --id <terminalId> to write/read)
 
+■ Agents (one agent delegates to another — details: agent --help)
+  agent run <cliType> <prompt…>   new agent tab + prompt; waits for done/blocked (--bg: don't wait)
+  agent send <terminalId> <text…> type a message into an agent tab
+  agent wait [--id <id> | --children any|all]   wait for child agents
+  agent status [terminalId]       state + last 12 lines (children of this tab by default)
+  agent list                      child agents of this tab
+
 ■ Editor & files
   open <path>                     open a file in the built-in editor (xlsx/pptx/docx too)
   files                           list open editor tabs (path / modified / active)
@@ -274,6 +299,216 @@ function delegateDevScreen(subArgs) {
   process.exitCode = r.status ?? 0;
 }
 
+// ── Agent relay (docs/AGENT_RELAY.md) ────────────────────────────────────
+const AGENT_HELP = `
+bbarit-ctl agent — delegate work to another agent tab and get the result back
+════════════════════════════════════════════════════════════════════════
+Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs node)
+
+  agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>=600]
+      Open a new tab running <cliType> (claude|codex|gemini|…|shell) in the active
+      project and type <prompt> once the agent is ready. The child is told which tab
+      started it and how to report back. Without --bg it waits until the child is done,
+      blocked or exited, then prints its state and last 12 lines.
+      Exit code: 0 done/exited · 2 blocked (child needs an answer) · 3 timed out · 1 error.
+      --bg prints the new terminalId and returns at once.
+  agent send <terminalId> <text…> [--force]
+      Type <text> + Enter into an agent tab, wrapped as <bbarit from="<this tab>">…</bbarit>.
+      Waits while the user is typing; refused while that agent waits for approval or an
+      answer unless --force (use --force to answer a blocked child's question).
+  agent wait [--id <terminalId> | --children any|all] [--timeout <s>=600]
+      Poll every 2 s until one child (any) / every child (all, default) of this tab — or
+      the one --id — is done, blocked or exited. Prints the states (--json for JSON).
+      Exit code: 0 · 2 if a child is blocked · 3 timed out.
+  agent status [terminalId]
+      State (working|blocked|done|idle), kind, exited, settled and the last 12 lines —
+      for <terminalId>, or every child of this tab.
+  agent list
+      Child agents of this tab (same fields, no lines).
+
+Caller  BBARIT_TERMINAL_ID (set in every BBARIT tab) is sent as the caller; outside a tab
+        pass --caller <terminalId>. Children link to their caller's tab.
+
+Notes from children (typed into this tab automatically — only tabs whose agent reports
+OSC 7501 status, e.g. Claude Code; plain shells get none, use agent wait):
+  <bbarit from="<id> <name>" state="done" turn="2">last lines… — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
+  <bbarit from="<id> <name>" state="blocked" kind="question">question… — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>
+  <bbarit from="<id> <name>" state="exited">last lines… — 전체: …</bbarit>
+A blocked child is waiting for permission or an answer: read the question, then
+  node "$BBARIT_CTL" agent send <id> "<answer>" --force
+(or tell the user, for permission prompts they must approve in that tab).
+Notes for a tab that is itself blocked are held and delivered once it continues.
+
+Examples
+  node "$BBARIT_CTL" agent run claude "Review the diff on this branch and list bugs."
+  id=$(node "$BBARIT_CTL" agent run codex "Run the tests and fix failures" --bg)
+  node "$BBARIT_CTL" agent wait --children all --timeout 900
+════════════════════════════════════════════════════════════════════════`;
+
+export const AGENT_POLL_MS = 2000;
+export const AGENT_DEFAULT_WAIT_S = 600;
+
+/** any: at least one settled · all: every one settled. An empty list never satisfies. */
+export function evaluateAgentWait(agents, mode = 'all') {
+  if (!Array.isArray(agents) || agents.length === 0) return false;
+  return mode === 'any' ? agents.some((a) => a && a.settled) : agents.every((a) => a && a.settled);
+}
+
+/**
+ * Poll fetchAgents() every intervalMs until evaluateAgentWait holds or timeoutMs passes.
+ * Up to 3 consecutive fetch failures are retried (the app may be mid-reload).
+ */
+export async function waitForAgents({
+  fetchAgents,
+  mode = 'all',
+  timeoutMs = AGENT_DEFAULT_WAIT_S * 1000,
+  intervalMs = AGENT_POLL_MS,
+  now = Date.now,
+  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+}) {
+  const startedAt = now();
+  let agents = [];
+  let failures = 0;
+  for (;;) {
+    try {
+      agents = await fetchAgents();
+      failures = 0;
+      if (evaluateAgentWait(agents, mode)) return { timedOut: false, agents };
+    } catch (e) {
+      failures += 1;
+      if (failures >= 3) throw e;
+    }
+    if (now() - startedAt >= timeoutMs) return { timedOut: true, agents };
+    await sleep(intervalMs);
+  }
+}
+
+/** 3 timed out · 1 a child could not be started · 2 a settled child is blocked · 0 otherwise. */
+export function agentExitCode({ timedOut, agents }) {
+  if (timedOut) return 3;
+  if ((agents || []).some((a) => a && a.error)) return 1;
+  if ((agents || []).some((a) => a && a.settled && a.state === 'blocked' && !a.exited)) return 2;
+  return 0;
+}
+
+function pickFlagFrom(list, name) {
+  const i = list.indexOf(name);
+  if (i < 0) return undefined;
+  const v = list[i + 1];
+  list.splice(i, 2);
+  return v;
+}
+
+function pickBoolFrom(list, name) {
+  const i = list.indexOf(name);
+  if (i < 0) return false;
+  list.splice(i, 1);
+  return true;
+}
+
+function printAgents(agents, withLines) {
+  if (flags.json) { console.log(JSON.stringify(agents, null, 2)); return; }
+  if (!agents.length) { console.log('(no child agents)'); return; }
+  table(
+    agents.map((a) => ({
+      ...a,
+      state: a.state === 'blocked' && a.kind ? `blocked:${a.kind}` : a.state,
+      exited: a.exited ? 'yes' : '-',
+      settled: a.settled ? 'yes' : '-',
+    })),
+    ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited'],
+  );
+  for (const a of agents) {
+    if (a.error) console.log(`\n✗ ${a.terminalId}: ${a.error}`);
+    if (a.state === 'blocked' && a.msg) console.log(`\n? ${a.terminalId} asks: ${a.msg}`);
+    if (withLines && Array.isArray(a.lastLines) && a.lastLines.length) {
+      console.log(`\n── ${a.terminalId}${a.name ? ` ${a.name}` : ''} (last ${a.lastLines.length} lines)`);
+      console.log(a.lastLines.join('\n'));
+    }
+  }
+}
+
+async function agentCommand(list) {
+  const sub = list.shift();
+  if (!sub || sub === '--help' || sub === '-h' || sub === 'help') { console.log(AGENT_HELP); return; }
+  const caller = pickFlagFrom(list, '--caller') || process.env.BBARIT_TERMINAL_ID || undefined;
+  // `--timeout` means seconds of waiting here; each request keeps the 20 s default.
+  const waitSeconds = flags.timeoutSet ? flags.timeoutRaw : AGENT_DEFAULT_WAIT_S;
+  flags.timeout = 20000;
+  const statusOf = async (payload) => {
+    const { parsed } = await dispatch({ cmd: 'agent.status', ...payload });
+    if (parsed.ok === false) throw new Error(parsed.error || 'agent.status failed');
+    return parsed.agents || [];
+  };
+  const finish = (result, withLines) => {
+    printAgents(result.agents, withLines);
+    if (result.timedOut && !flags.json) console.error(`✗ timed out after ${waitSeconds}s`);
+    process.exitCode = agentExitCode(result);
+  };
+
+  if (sub === 'run') {
+    const bg = pickBoolFrom(list, '--bg');
+    const workDir = pickFlagFrom(list, '--workdir');
+    const name = pickFlagFrom(list, '--name');
+    const cliType = list.shift();
+    const prompt = list.join(' ');
+    if (!cliType || !prompt.trim()) throw new Error('usage: agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]');
+    const { parsed } = await dispatch({ cmd: 'agent.run', cliType, prompt, caller, workDir, name });
+    if (parsed.ok === false) return out(parsed);
+    if (bg) {
+      if (flags.json) return out(parsed);
+      return console.log(parsed.terminalId);
+    }
+    if (!flags.json) console.error(`… started ${parsed.terminalId} (${cliType}); waiting up to ${waitSeconds}s (Ctrl-C stops waiting, the agent keeps running)`);
+    const result = await waitForAgents({
+      fetchAgents: () => statusOf({ terminalId: parsed.terminalId }),
+      mode: 'all',
+      timeoutMs: waitSeconds * 1000,
+    });
+    return finish(result, true);
+  }
+
+  if (sub === 'send') {
+    const terminalId = list.shift();
+    const text = list.join(' ');
+    if (!terminalId || !text.trim()) throw new Error('usage: agent send <terminalId> <text…> [--force]');
+    // The input gate may wait up to 20 s for the user to stop typing (same as term write).
+    flags.timeout = 40000;
+    const payload = { cmd: 'agent.send', terminalId, text, caller };
+    if (flags.force) payload.force = true;
+    return out((await dispatch(payload)).parsed);
+  }
+
+  if (sub === 'wait') {
+    const id = pickFlagFrom(list, '--id');
+    const mode = pickFlagFrom(list, '--children') || 'all';
+    if (mode !== 'any' && mode !== 'all') throw new Error('usage: agent wait [--id <terminalId> | --children any|all] [--timeout <s>]');
+    if (!id) {
+      const first = await statusOf({ caller });
+      if (!first.length) throw new Error(caller ? `no child agents for ${caller}` : 'no child agents (run inside a BBARIT tab or pass --caller <id>)');
+    }
+    const result = await waitForAgents({
+      fetchAgents: () => statusOf(id ? { terminalId: id } : { caller }),
+      mode: id ? 'all' : mode,
+      timeoutMs: waitSeconds * 1000,
+    });
+    return finish(result, false);
+  }
+
+  if (sub === 'status') {
+    const terminalId = list.shift();
+    return printAgents(await statusOf(terminalId ? { terminalId } : { caller }), true);
+  }
+
+  if (sub === 'list') {
+    const { parsed } = await dispatch({ cmd: 'agent.list', caller });
+    if (parsed.ok === false) return out(parsed);
+    return printAgents(parsed.agents || [], false);
+  }
+
+  throw new Error(`unknown agent subcommand: ${sub} (run|send|wait|status|list, agent --help)`);
+}
+
 // ── Command routing ──────────────────────────────────────────────────────
 function pickIdFlag(list) {
   const i = list.indexOf('--id');
@@ -345,6 +580,8 @@ async function main() {
       if (sub === 'close') return out((await dispatch({ cmd: 'terminal.close', terminalId: args[0] })).parsed);
       throw new Error('usage: term list|create|write|write-raw|read|use|close');
     }
+
+    case 'agent': return agentCommand(args);
 
     case 'open': return out((await dispatch({ cmd: 'editor.open', path: args[0] })).parsed);
     case 'files': {
@@ -588,4 +825,9 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`✗ ${e.message}`); process.exitCode = 1; });
+// Run only as a script — tests import the exported helpers without connecting.
+const isMain = (() => {
+  try { return fs.realpathSync(process.argv[1] || '') === fs.realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+})();
+if (isMain) main().catch((e) => { console.error(`✗ ${e.message}`); process.exitCode = 1; });
