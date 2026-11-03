@@ -123,6 +123,22 @@ Build/test gotchas:
 - Button-click terminal sends use `queueButtonInput` (src/terminal/buttonInput.ts):
   force, no quiet wait, but still queued/bracketed. `setsid` does not exist on macOS;
   use `(cmd &)` double-fork when a test needs a process outside the PTY tree.
+- Dev app vs installed app: both binaries are named `octo-ui`; the dev build has no
+  bundle id, so `osascript quit app "octo-ui"`, `tell application id
+  "com.bbarit.terminal.source"`, `pkill/killall octo-ui` hit the user's own app (and
+  the Claude session inside it). Address the dev app only by pid from
+  `pgrep -f 'src-tauri/target/debug/octo-ui$'`; quit it with
+  `npm run ctl -- --port 9323 js "window.__TAURI__.core.invoke('plugin:process|exit')"`
+  (normal quit path, keeps held terminals); System Events keystrokes are blocked by TCC.
+- PTY holder verify: set `terminal.ptyHolder: "on"` and `terminal.keepRunningOnQuit: true`
+  in ~/.config/octo/config.json (debug builds need the explicit true; the file is shared
+  with the installed app, so back it up and restore). Holder socket/log/info live in
+  ~/.config/octo/run/pty-holder.dev.<hash>.{sock,log,json}; `pty_backend_info` (ctl js)
+  reports kind holder|in-process + fallback reason; `app_quit_kill_terminals` stops the
+  holder (log shows `GOODBYE kill_all`). The holder survives app death and the
+  BBARIT_TERM_SCOPE sweep; `dev:screen:start`'s stale sweep skips `--mode pty-holder`.
+- PRs are squash-merged: a branch stacked on a merged branch needs
+  `git rebase --onto main <old-base-sha>` or it carries duplicate commits.
 - Agent relay: tabs can run `node "$BBARIT_CTL" agent run|send|wait|status|list`
   (docs/AGENT_RELAY.md). Children open as background tabs in the caller's project with
   their own Claude session; blocked/done/exit notes are typed into the parent as one
