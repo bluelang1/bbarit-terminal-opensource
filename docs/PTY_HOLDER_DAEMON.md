@@ -347,7 +347,9 @@ trait PtyBackend: Send + Sync {
 `ExitReason`/`exit_goodbye_reason`/`keep_running_on_quit`, `main.rs` 의 커맨드·메뉴·종료 처리. 3절과 다르게 간 점:
 - `pty_list_recovered` 는 첫 WELCOME 의 터미널 + **이 앱이 띄워 아직 쥔 터미널**(웹뷰 새로고침)을 돌려준다.
   닫힌 것은 빼고 `exited`·`pid` 는 현재 값. InProcess 는 `[]` 이고 `isRestored` 는 예전 `!!lastWorkDir` 를 쓴다.
-  프런트는 `pty_backend_info` → (holder 면) `pty_list_recovered` 를 한 번(15 초 상한) 부르고 결과를 레지스트리에 둔다.
+  프런트는 `pty_backend_info` → (holder 면) `pty_list_recovered` 를 부르고 결과를 레지스트리에 둔다. 한 번의 시도는 15 초
+  상한이고, 실패·시간 초과는 in-process 로 보지 않고 백오프(0.5→10 초)로 다시 묻는다. 답이 올 때까지 프로젝트 복원
+  (= `create_shell`)을 하지 않는다.
 - 복구 터미널은 비활성 탭이어도 **마운트 때 바로** 재생·읽기 루프를 시작한다(3.5-1 의 "재생은 활성화 때" 와 다름):
   읽기 루프가 돌지 않으면 홀더 큐가 차서 잘린다.
 - 꺼진 사이 끝난 터미널: tail + modes 재생, 모드 해제, `close_pty`(RELEASE), `octo-pty-exited`, 배너
@@ -369,6 +371,14 @@ trait PtyBackend: Send + Sync {
 - agentLinks: 자식·부모 id, 이름, cliType, `lastNotifiedTurn/State`, `lastSendTurn` 을 프로젝트 JSON(`agentLinks`)에
   저장하고, 로드 뒤 두 탭이 다 있는 링크만 되살린다. 노트를 보낼 때 저장을 한 번 예약한다. ctl `agent wait/run` 은
   브리지가 없거나 `__BBARIT_CTL__` 준비 전이면 3번 실패 규칙 없이 `--timeout` 까지 기다리고 stderr 에 한 줄을 찍는다.
+- **리뷰 반영(2b 수정 커밋)**: `HolderBackend::spawn` 은 살아 있는 id 를 더는 RELEASE 하지 않고 `"PTY alive in holder"` 로
+  거절한다(`create_shell` 의 `replace: true` 만 교체). 프런트는 이 오류를 받으면 붙는다. 끝났거나 잃은 id 는 예전처럼
+  RELEASE 후 새로 띄운다. 목록에서 attach 였는데 마운트 때 죽어 있으면 exited 경로(tail + 배너 + Enter)로 간다. Enter
+  대기 중인 탭은 모듈 수준 `awaitingRestart`(id → 배너)에 남아 재마운트가 배너만 다시 그린다. 재생 경로는
+  `pty_attach_snapshot`(버퍼 복사 + 읽기 큐 비우기를 한 잠금 안에서, 두 백엔드)을 쓰고 `tail()` 의 1회성 드레인은 없앴다.
+  재생 중 7501 이벤트는 `replaying` 으로 표시돼 에이전트 노트를 만들지 않고, 재생 뒤 `octo-pty-replayed` 로 링크의
+  turn 을 맞춘다(저장된 turn 은 복원하지 않음: 실행마다 0 부터). `relaunch()` 실패 시 `pty_cancel_handover`.
+  `find_or_spawn` 은 pid 만이 아니라 소켓 접속으로 홀더를 판정한다. ctl 은 `--port` 명시 때 예전처럼 3번 실패로 끝난다.
 - **안 한 것**: 3.5-7(재부착 때 Claude transcript 재탐지 — `read_directory` 에 mtime 이 없어 "더 최신 jsonl" 판정을
   못 함), 비-macOS 의 "종료하고 모든 터미널 끝내기" UI(커맨드 `app_quit_kill_terminals` 만 있음), 앱 실기 검증.
 
