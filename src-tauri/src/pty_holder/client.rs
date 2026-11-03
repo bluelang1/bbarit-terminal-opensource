@@ -56,6 +56,10 @@ struct Term {
     next_seq: u64,
     alive: bool,
     last_output_at: Instant,
+    /// Seeded from a WELCOME and not yet replayed by the frontend: live output that
+    /// arrives before the first `tail()` lands in both the buffer and the queue, so
+    /// that `tail()` drains the queue to avoid rendering it twice.
+    replay_pending: bool,
 }
 
 impl Term {
@@ -72,7 +76,22 @@ impl Term {
             next_seq: 0,
             alive: true,
             last_output_at: Instant::now(),
+            replay_pending: false,
         }
+    }
+
+    /// The tail copy for `tail()`. The first call after a seed also discards what the
+    /// queue holds: those bytes are in this copy, and `read()` must return only
+    /// output produced after it (otherwise the reattach point renders twice).
+    fn snapshot(&mut self) -> String {
+        if self.replay_pending {
+            self.replay_pending = false;
+            while self.rx.try_recv().is_ok() {}
+            if let Some(q) = self.queue.as_mut() {
+                q.clear_truncated();
+            }
+        }
+        self.buffer.clone()
     }
 
     /// Bytes for the frontend: tail copy + read queue.
@@ -117,6 +136,7 @@ impl Term {
             true
         });
         self.next_seq = seq_end;
+        self.replay_pending = true;
     }
 
     /// The program ended (EXITED): no more output, and its pid is no longer ours.
@@ -873,8 +893,8 @@ impl PtyBackend for HolderBackend {
     }
 
     fn tail(&self, id: &str) -> Result<String, String> {
-        match self.inner.lock_shared().terms.get(id) {
-            Some(term) => Ok(term.buffer.clone()),
+        match self.inner.lock_shared().terms.get_mut(id) {
+            Some(term) => Ok(term.snapshot()),
             None => Err(PTY_NOT_FOUND.to_string()),
         }
     }
@@ -997,6 +1017,36 @@ mod tests {
         assert_eq!(shared.terms["t"].handle, Some(9));
         assert_eq!(shared.by_handle.get(&9).map(String::as_str), Some("t"));
         assert_eq!(shared.recovered.len(), 1, "a reconnect is not a recovery");
+    }
+
+    #[test]
+    fn output_before_the_first_tail_of_a_recovered_terminal_renders_once() {
+        let mut shared = Shared::default();
+        apply_welcome(
+            &mut shared,
+            &welcome(vec![entry("t", 1, false)]),
+            vec![tail(1, 0, b"tick 150\n")],
+        );
+        // The program keeps printing between the WELCOME and the frontend's replay.
+        let term = shared.terms.get_mut("t").unwrap();
+        term.deliver(b"tick 151\n");
+        term.deliver(b"tick 152\n");
+        assert_eq!(term.snapshot(), "tick 150\ntick 151\ntick 152\n");
+        assert_eq!(drain(&shared, "t"), "", "replayed bytes must not be read again");
+
+        let term = shared.terms.get_mut("t").unwrap();
+        term.deliver(b"tick 153\n");
+        // Later tail() calls (ctl term read, startup probe) leave the read queue alone.
+        assert_eq!(term.snapshot(), "tick 150\ntick 151\ntick 152\ntick 153\n");
+        assert_eq!(drain(&shared, "t"), "tick 153\n");
+    }
+
+    #[test]
+    fn a_terminal_this_app_spawned_keeps_its_queue_on_tail() {
+        let mut term = Term::new(1, Some(9), "s".into());
+        term.deliver(b"live");
+        assert_eq!(term.snapshot(), "live");
+        assert_eq!(drain_output(&term.rx), Ok(Some("live".into())));
     }
 
     #[test]

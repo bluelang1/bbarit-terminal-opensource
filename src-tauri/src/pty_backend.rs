@@ -604,6 +604,12 @@ impl OutputQueue {
     pub(crate) fn mark_truncated(&mut self) {
         self.dropped_output = true;
     }
+
+    /// The receiver was emptied on purpose (its bytes were delivered another way).
+    #[cfg(unix)]
+    pub(crate) fn clear_truncated(&mut self) {
+        self.dropped_output = false;
+    }
 }
 
 pub(crate) fn new_output_channel() -> (OutputQueue, Receiver<String>) {
