@@ -165,17 +165,86 @@ impl PtySelection {
         })
     }
 
-    /// App exit. True when the backend took care of every terminal itself (the holder
-    /// gets GOODBYE kill_all and kills + sweeps there); false means the caller sweeps.
-    pub fn on_app_exit(&self) -> bool {
+    /// `pty_list_recovered` payload: terminals to attach to instead of creating (holder
+    /// only; the in-process backend never outlives the app, so it has none).
+    pub fn recovered_list(&self) -> serde_json::Value {
+        let chosen = self.chosen.get_or_init(|| self.choose());
+        #[cfg(unix)]
+        if let Some(holder) = &chosen.holder {
+            return serde_json::to_value(holder.recovered_now()).unwrap_or_else(|_| serde_json::json!([]));
+        }
+        let _ = chosen;
+        serde_json::json!([])
+    }
+
+    /// True once the PTYs live in the holder (resolved and attached).
+    pub fn uses_holder(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.chosen.get().is_some_and(|c| c.holder.is_some())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// App exit with the GOODBYE `reason` from `exit_goodbye_reason`. True when the
+    /// backend took care of every terminal itself (holder: `kill_all` kills + sweeps
+    /// there, `quit`/`handover` keep them running); false means the caller sweeps.
+    pub fn on_app_exit(&self, reason: ExitReason) -> bool {
         #[cfg(unix)]
         if let Some(holder) = self.chosen.get().and_then(|c| c.holder.as_ref()) {
-            // Phase 2a keeps today's quit semantics (terminals end with the app);
-            // "keep running on quit" needs the reattach UI (phase 2b).
-            holder.goodbye("kill_all");
+            holder.goodbye(reason.as_str());
             return true;
         }
+        let _ = reason;
         false
+    }
+}
+
+/// GOODBYE reason on app exit (docs/PTY_HOLDER_DAEMON.md 3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// App only; the holder keeps every terminal.
+    Quit,
+    /// Update relaunch; the next app attaches to the same holder.
+    Handover,
+    /// End every terminal (holder releases, sweeps and exits).
+    KillAll,
+}
+
+impl ExitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExitReason::Quit => "quit",
+            ExitReason::Handover => "handover",
+            ExitReason::KillAll => "kill_all",
+        }
+    }
+}
+
+/// The menu's "quit and end all terminals" wins; an update relaunch hands over;
+/// otherwise `terminal.keepRunningOnQuit` decides.
+pub fn exit_goodbye_reason(keep_running_on_quit: bool, kill_all_requested: bool, handover: bool) -> ExitReason {
+    if kill_all_requested {
+        ExitReason::KillAll
+    } else if handover {
+        ExitReason::Handover
+    } else if keep_running_on_quit {
+        ExitReason::Quit
+    } else {
+        ExitReason::KillAll
+    }
+}
+
+/// `terminal.keepRunningOnQuit`: default true, but a debug build keeps it only when
+/// the setting is explicitly true (dev rebuilds replace the holder binary; decision 9).
+pub fn keep_running_on_quit(setting: Option<bool>, debug_build: bool) -> bool {
+    if debug_build {
+        setting == Some(true)
+    } else {
+        setting.unwrap_or(true)
     }
 }
 
@@ -1005,7 +1074,8 @@ mod tests {
             assert_eq!(sel.read("x"), Err("PTY not found".to_string()));
             assert_eq!(sel.close("x"), Ok(()));
             assert!(sel.list().is_empty() && !sel.alive("x"));
-            assert!(!sel.on_app_exit(), "in-process exit sweep stays with the caller");
+            assert!(!sel.on_app_exit(ExitReason::Quit), "in-process exit sweep stays with the caller");
+            assert_eq!(sel.recovered_list(), serde_json::json!([]));
             let info = sel.info();
             assert_eq!(info["kind"], "in-process");
             assert_eq!(info["recovered"], serde_json::json!([]));
@@ -1022,6 +1092,29 @@ mod tests {
         .unwrap();
         assert_eq!(sel.list().len(), 1);
         sel.close("s1").unwrap();
+    }
+
+    #[test]
+    fn goodbye_reason_selection() {
+        use ExitReason::*;
+        // (keep_running, kill_all requested, handover) → reason
+        assert_eq!(exit_goodbye_reason(true, false, false), Quit);
+        assert_eq!(exit_goodbye_reason(false, false, false), KillAll);
+        assert_eq!(exit_goodbye_reason(true, false, true), Handover);
+        assert_eq!(exit_goodbye_reason(false, false, true), Handover, "updates keep terminals");
+        assert_eq!(exit_goodbye_reason(true, true, false), KillAll, "the menu item wins");
+        assert_eq!(exit_goodbye_reason(true, true, true), KillAll);
+        assert_eq!((Quit.as_str(), Handover.as_str(), KillAll.as_str()), ("quit", "handover", "kill_all"));
+    }
+
+    #[test]
+    fn keep_running_on_quit_defaults_true_but_debug_needs_explicit_true() {
+        assert!(keep_running_on_quit(None, false));
+        assert!(!keep_running_on_quit(Some(false), false));
+        assert!(keep_running_on_quit(Some(true), false));
+        assert!(!keep_running_on_quit(None, true), "dev default is kill_all");
+        assert!(!keep_running_on_quit(Some(false), true));
+        assert!(keep_running_on_quit(Some(true), true));
     }
 
     #[test]

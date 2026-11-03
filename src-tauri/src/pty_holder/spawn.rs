@@ -53,6 +53,7 @@ pub fn discover(run_dir: &Path) -> Vec<(PathBuf, HolderInfo)> {
 pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
     super::ensure_private_dir(run_dir)?;
     prune_old_logs(run_dir);
+    let mut other_version: Option<u32> = None;
     for (info_path, info) in discover(run_dir) {
         let socket = PathBuf::from(&info.socket);
         // Only sockets inside our private run dir are trusted (or cleaned up).
@@ -66,11 +67,20 @@ pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
         }
         // Another version's holder keeps its terminals; DRAIN + a second holder is phase 3.
         if info.version != proto::PROTOCOL_VERSION {
+            other_version.get_or_insert(info.version);
             continue;
         }
         if UnixStream::connect(&socket).is_ok() {
             return Ok(socket);
         }
+    }
+    // Until phase 3 (DRAIN + several holders) a second holder would strand the old one's
+    // terminals unseen: run in-process instead and say why (pty_backend_info.fallbackReason).
+    if let Some(v) = other_version {
+        return Err(format!(
+            "a PTY holder from another app version (protocol {v}, this app {}) is still running; terminals run inside the app until it exits",
+            proto::PROTOCOL_VERSION
+        ));
     }
     spawn_holder(run_dir)
 }

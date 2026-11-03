@@ -312,6 +312,14 @@ impl HolderBackend {
         self.inner.lock_shared().recovered.clone()
     }
 
+    /// Terminals the frontend should attach to instead of creating (`pty_list_recovered`):
+    /// the ones the first WELCOME brought (they outlived the previous app run) plus the ones
+    /// this app started and still holds (a webview reload). Closed terminals are left out;
+    /// `exited` and `pid` reflect the current state.
+    pub fn recovered_now(&self) -> Vec<TerminalEntry> {
+        recovered_now(&self.inner.lock_shared())
+    }
+
     /// The connection is gone and could not be re-established (reason), if so.
     pub fn lost_reason(&self) -> Option<String> {
         self.inner.lock_shared().lost.clone()
@@ -603,6 +611,38 @@ impl Inner {
         self.lock_shared().lost = None;
         Ok(())
     }
+}
+
+fn recovered_now(shared: &Shared) -> Vec<TerminalEntry> {
+    let mut out: Vec<TerminalEntry> = Vec::new();
+    for (id, term) in &shared.terms {
+        let Some(handle) = term.handle else {
+            continue; // the holder lost it: nothing to attach to
+        };
+        let mut entry = match shared.recovered.iter().find(|e| &e.id == id) {
+            Some(e) => e.clone(),
+            None => TerminalEntry {
+                handle,
+                id: id.clone(),
+                cwd: None,
+                pid: None,
+                rows: 0,
+                cols: 0,
+                exited: false,
+                exit_code: None,
+                scope: term.scope.clone(),
+                started_at: 0,
+                dropped_bytes: 0,
+                modes: proto::Modes::default(),
+            },
+        };
+        entry.handle = handle;
+        entry.exited = entry.exited || !term.alive;
+        entry.pid = if term.alive { term.pid } else { None };
+        out.push(entry);
+    }
+    out.sort_by(|a, b| a.started_at.cmp(&b.started_at).then_with(|| a.id.cmp(&b.id)));
+    out
 }
 
 /// Reconcile local terminals with a WELCOME and its TAILs. Returns the handles of
@@ -957,6 +997,36 @@ mod tests {
         assert_eq!(shared.terms["t"].handle, Some(9));
         assert_eq!(shared.by_handle.get(&9).map(String::as_str), Some("t"));
         assert_eq!(shared.recovered.len(), 1, "a reconnect is not a recovery");
+    }
+
+    #[test]
+    fn recovered_now_lists_live_and_exited_terminals_but_not_closed_ones() {
+        let mut shared = Shared::default();
+        let mut gone_while_away = entry("away", 2, true);
+        gone_while_away.exit_code = Some(3);
+        apply_welcome(
+            &mut shared,
+            &welcome(vec![entry("t", 1, false), gone_while_away]),
+            vec![tail(1, 0, b"x"), tail(2, 0, b"bye")],
+        );
+        // Started by this app (no WELCOME entry): still listed, for a webview reload.
+        shared.terms.insert("mine".into(), Term::new(7, Some(99), "s7".into()));
+        let list = recovered_now(&shared);
+        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(ids, vec!["away", "mine", "t"]);
+        let away = list.iter().find(|e| e.id == "away").unwrap();
+        assert!(away.exited);
+        assert_eq!(away.exit_code, Some(3));
+        assert_eq!(away.pid, None, "a reaped pid is never handed out");
+        let mine = list.iter().find(|e| e.id == "mine").unwrap();
+        assert_eq!((mine.handle, mine.pid, mine.exited), (7, Some(99), false));
+
+        // Exits after the WELCOME → exited; lost by the holder → left out.
+        shared.terms.get_mut("t").unwrap().end();
+        shared.terms.get_mut("mine").unwrap().lose();
+        let list = recovered_now(&shared);
+        assert_eq!(list.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["away", "t"]);
+        assert!(list.iter().find(|e| e.id == "t").unwrap().exited);
     }
 
     #[test]

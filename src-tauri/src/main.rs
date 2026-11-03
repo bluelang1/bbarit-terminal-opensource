@@ -3902,6 +3902,52 @@ fn pty_backend_info(state: State<'_, AppState>) -> serde_json::Value {
     state.pty_selection.info()
 }
 
+/// Terminals to attach to instead of creating (holder only; `[]` in-process). The
+/// frontend awaits this before restoring projects (docs/PTY_HOLDER_DAEMON.md 3.5).
+#[tauri::command(async)]
+fn pty_list_recovered(state: State<'_, AppState>) -> serde_json::Value {
+    state.pty_selection.recovered_list()
+}
+
+/// One-shot: the next exit ends every terminal (menu "quit and end all terminals").
+static KILL_TERMINALS_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// One-shot: the next exit is an update relaunch (GOODBYE handover).
+static HANDOVER_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called by handleUpdate right before `relaunch()`.
+#[tauri::command]
+fn pty_prepare_handover() {
+    HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
+}
+
+/// "Quit and end all terminals" (menu / command palette).
+#[tauri::command]
+fn app_quit_kill_terminals(app: AppHandle) {
+    KILL_TERMINALS_ON_EXIT.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
+/// `terminal.keepRunningOnQuit` when it is a boolean.
+fn keep_running_on_quit_setting(config: &serde_json::Value) -> Option<bool> {
+    config
+        .get("terminal")
+        .and_then(|t| t.get("keepRunningOnQuit"))
+        .and_then(|v| v.as_bool())
+}
+
+/// GOODBYE reason for this exit: menu flag > update handover > keepRunningOnQuit
+/// (debug builds keep terminals only when the setting is explicitly true).
+fn exit_reason_now() -> pty_backend::ExitReason {
+    let setting = read_octo_config_json()
+        .as_ref()
+        .and_then(keep_running_on_quit_setting);
+    pty_backend::exit_goodbye_reason(
+        pty_backend::keep_running_on_quit(setting, cfg!(debug_assertions)),
+        KILL_TERMINALS_ON_EXIT.load(Ordering::SeqCst),
+        HANDOVER_ON_EXIT.load(Ordering::SeqCst),
+    )
+}
+
 /// `terminal.ptyHolder` from ~/.config/octo/config.json ("off" by default, "on").
 fn configured_pty_holder() -> Option<String> {
     read_octo_config_json().as_ref().and_then(pty_holder_setting)
@@ -3917,7 +3963,7 @@ fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
 
 #[cfg(all(test, unix))]
 mod pty_holder_gate_tests {
-    use super::{pty_holder_mode, pty_holder_setting};
+    use super::{keep_running_on_quit_setting, pty_holder_mode, pty_holder_setting};
     use serde_json::json;
 
     #[test]
@@ -3930,6 +3976,14 @@ mod pty_holder_gate_tests {
         use std::os::unix::ffi::OsStringExt;
         let odd = vec![std::ffi::OsString::from("octo-ui"), std::ffi::OsString::from_vec(vec![0xff, 0xfe])];
         assert_eq!(pty_holder_mode(&odd), None);
+    }
+
+    #[test]
+    fn keep_running_on_quit_is_read_only_as_a_boolean() {
+        assert_eq!(keep_running_on_quit_setting(&json!({})), None);
+        assert_eq!(keep_running_on_quit_setting(&json!({"terminal": {"keepRunningOnQuit": false}})), Some(false));
+        assert_eq!(keep_running_on_quit_setting(&json!({"terminal": {"keepRunningOnQuit": true}})), Some(true));
+        assert_eq!(keep_running_on_quit_setting(&json!({"terminal": {"keepRunningOnQuit": "yes"}})), None);
     }
 
     #[test]
@@ -9794,8 +9848,15 @@ fn main() {
                         }
 
                         let state = window.app_handle().state::<AppState>();
-                        let pids: Vec<u32> =
-                            state.pty.list().into_iter().filter_map(|t| t.pid).collect();
+                        // Holder terminals outlive the app unless this exit ends them all
+                        // (docs/PTY_HOLDER_DAEMON.md 3.6); in-process PTYs always die here.
+                        let kill_trees = !state.pty_selection.uses_holder()
+                            || exit_reason_now() == pty_backend::ExitReason::KillAll;
+                        let pids: Vec<u32> = if kill_trees {
+                            state.pty.list().into_iter().filter_map(|t| t.pid).collect()
+                        } else {
+                            Vec::new()
+                        };
                         let app_handle = window.app_handle().clone();
                         std::thread::spawn(move || {
                             for pid in pids {
@@ -9831,7 +9892,17 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+                let ko = read_octo_config_json()
+                    .and_then(|c| c.get("language").and_then(|l| l.as_str()).map(|l| l == "ko"))
+                    .unwrap_or(false);
+                let quit_kill = MenuItemBuilder::with_id(
+                    "quit-kill-terminals",
+                    if ko { "종료하고 모든 터미널 끝내기" } else { "Quit and End All Terminals" },
+                )
+                .build(app)?;
                 let app_menu = SubmenuBuilder::new(app, "BBARIT Terminal")
+                    .item(&quit_kill)
+                    .separator()
                     .quit()
                     .build()?;
                 // Select All은 predefined 항목을 쓰면 안 된다: 메뉴가 Cmd+A를 받아
@@ -9858,6 +9929,9 @@ fn main() {
                 app.on_menu_event(|app, event| {
                     if event.id().as_ref() == "edit-select-all" {
                         let _ = app.emit("menu-select-all", ());
+                    } else if event.id().as_ref() == "quit-kill-terminals" {
+                        KILL_TERMINALS_ON_EXIT.store(true, Ordering::SeqCst);
+                        app.exit(0);
                     }
                 });
             }
@@ -10056,6 +10130,9 @@ fn main() {
             resize_pty,
             close_pty,
             pty_backend_info,
+            pty_list_recovered,
+            pty_prepare_handover,
+            app_quit_kill_terminals,
             destroy_pty,
             debug_log,
             get_web_terminal_info,
@@ -10236,10 +10313,11 @@ fn main() {
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
                 agent_rpc_stop_all();
-                // Holder backend: GOODBYE kill_all (the holder kills and sweeps its terminals).
+                // Holder backend: GOODBYE quit/handover keeps the terminals (no sweep);
+                // kill_all makes the holder kill and sweep them. In-process: sweep here.
                 let handled = _app_handle
                     .try_state::<AppState>()
-                    .is_some_and(|state| state.pty_selection.on_app_exit());
+                    .is_some_and(|state| state.pty_selection.on_app_exit(exit_reason_now()));
                 if !handled {
                     sweep_all_scopes_on_exit(_app_handle);
                 }
