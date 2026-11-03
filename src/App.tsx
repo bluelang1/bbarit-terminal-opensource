@@ -10444,7 +10444,13 @@ Office project scaffold created by BBARIT Terminal.
         await pendingNativeUpdateRef.current.downloadAndInstall();
         // PTY holder: GOODBYE handover instead of kill_all, the relaunched app reattaches.
         await invoke('pty_prepare_handover').catch(() => {});
-        await relaunch();
+        try {
+          await relaunch();
+        } catch (e) {
+          // Still running: the next ordinary quit must not hand over (keepRunningOnQuit decides).
+          await invoke('pty_cancel_handover').catch(() => {});
+          throw e;
+        }
         return;
       }
       const url = updateAvailable.assetUrl || updateAvailable.releaseUrl;

@@ -3924,6 +3924,13 @@ fn pty_prepare_handover() {
     HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
 }
 
+/// Called by handleUpdate when `relaunch()` failed: the app keeps running, so the next
+/// ordinary quit must follow `terminal.keepRunningOnQuit` again, not hand over.
+#[tauri::command]
+fn pty_cancel_handover() {
+    HANDOVER_ON_EXIT.store(false, Ordering::SeqCst);
+}
+
 /// "Quit and end all terminals" (menu / command palette).
 #[tauri::command]
 fn app_quit_kill_terminals(app: AppHandle) {
@@ -3969,6 +3976,15 @@ fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
 mod pty_holder_gate_tests {
     use super::{keep_running_on_quit_setting, pty_holder_mode, pty_holder_setting};
     use serde_json::json;
+
+    #[test]
+    fn a_failed_relaunch_cancels_the_handover() {
+        use std::sync::atomic::Ordering;
+        super::pty_prepare_handover();
+        assert!(super::HANDOVER_ON_EXIT.load(Ordering::SeqCst));
+        super::pty_cancel_handover();
+        assert!(!super::HANDOVER_ON_EXIT.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn holder_mode_needs_the_exact_flag_pair() {
@@ -10146,6 +10162,7 @@ fn main() {
             pty_backend_info,
             pty_list_recovered,
             pty_prepare_handover,
+            pty_cancel_handover,
             app_quit_kill_terminals,
             destroy_pty,
             debug_log,
