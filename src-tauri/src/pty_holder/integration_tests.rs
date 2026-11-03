@@ -1,0 +1,885 @@
+//! Holder server + HolderBackend against an in-thread holder on a temp socket
+//! (docs/PTY_HOLDER_DAEMON.md 5).
+
+use super::client::HolderBackend;
+use super::proto::{self, Frame};
+use super::server::{self, Config, Holder, ModeTracker, TailRing, TAIL_BYTES};
+use crate::pty_backend::{PtyBackend, SpawnRequest};
+use portable_pty::CommandBuilder;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+const SLEEPER_PIDFILE_ENV: &str = "BBARIT_HOLDER_TEST_SLEEPER_PIDFILE";
+
+/// Victim for the scope test: when started with the pidfile env it leaves its session
+/// (so neither the process tree nor the process group reaches it), records its pid and
+/// idles. Without the env (normal test runs) it is a no-op.
+#[test]
+fn scope_sleeper() {
+    if let Some(pidfile) = std::env::var_os(SLEEPER_PIDFILE_ENV) {
+        // SAFETY: setsid in a fresh single-purpose process.
+        unsafe {
+            libc::setsid();
+        }
+        std::fs::write(pidfile, std::process::id().to_string()).unwrap();
+        thread::sleep(Duration::from_secs(30));
+    }
+}
+
+struct TestHolder {
+    holder: Arc<Holder>,
+    socket: PathBuf,
+    dir: PathBuf,
+    serving: Option<JoinHandle<()>>,
+}
+
+impl TestHolder {
+    fn start(idle_exit: Duration, allowed_uid: u32) -> Self {
+        // /tmp keeps sun_path short (the macOS per-user temp dir is long).
+        let dir = PathBuf::from(format!("/tmp/bbh-{}", super::new_instance_id()));
+        let socket = dir.join("h.sock");
+        let listener = server::bind(&socket).expect("bind");
+        let holder = Holder::new(Config {
+            idle_exit,
+            allowed_uid,
+            instance: "test".into(),
+        });
+        let serving = {
+            let holder = Arc::clone(&holder);
+            thread::spawn(move || holder.serve(listener).expect("serve"))
+        };
+        TestHolder {
+            holder,
+            socket,
+            dir,
+            serving: Some(serving),
+        }
+    }
+
+    fn default() -> Self {
+        Self::start(Duration::from_secs(60), server::current_uid())
+    }
+
+    /// Wait for serve() to return (idle exit / kill_all).
+    fn wait_stopped(&mut self, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if self.serving.as_ref().is_some_and(|h| h.is_finished()) {
+                let _ = self.serving.take().unwrap().join();
+                return true;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+}
+
+impl Drop for TestHolder {
+    fn drop(&mut self) {
+        // A failed test must not leave `sleep 30` shells behind.
+        if self.serving.as_ref().is_some_and(|h| !h.is_finished()) {
+            self.holder.kill_all_for_test();
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+type Tails = Vec<(u32, proto::TailHeader, Vec<u8>)>;
+
+/// A bare protocol client.
+struct Raw {
+    stream: UnixStream,
+}
+
+impl Raw {
+    fn connect(socket: &Path) -> (Raw, proto::Welcome, Tails) {
+        let mut raw = Raw::hello(socket, &proto::Hello::current());
+        let welcome_frame = raw.next();
+        assert_eq!(welcome_frame.kind, proto::WELCOME);
+        let welcome: proto::Welcome = proto::parse(&welcome_frame).unwrap();
+        let tails = welcome
+            .terminals
+            .iter()
+            .map(|_| {
+                let f = raw.next();
+                assert_eq!(f.kind, proto::TAIL);
+                let (h, bytes) = proto::decode_tail(&f.payload).unwrap();
+                (f.handle, h, bytes.to_vec())
+            })
+            .collect();
+        (raw, welcome, tails)
+    }
+
+    fn hello(socket: &Path, hello: &proto::Hello) -> Raw {
+        let mut stream = UnixStream::connect(socket).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        proto::write_frame(
+            &mut stream,
+            proto::HELLO,
+            0,
+            &serde_json::to_vec(hello).unwrap(),
+        )
+        .unwrap();
+        Raw { stream }
+    }
+
+    fn next(&mut self) -> Frame {
+        proto::read_frame(&mut self.stream).expect("frame")
+    }
+
+    fn send(&mut self, kind: u8, handle: u32, payload: &[u8]) {
+        proto::write_frame(&mut self.stream, kind, handle, payload).unwrap();
+    }
+
+    fn send_json<T: serde::Serialize>(&mut self, kind: u8, handle: u32, v: &T) {
+        self.stream
+            .write_all(&proto::encode_json(kind, handle, v).unwrap())
+            .unwrap();
+    }
+
+    /// Read until OUTPUT for `handle` contains `needle`; returns all output seen.
+    fn output_until(&mut self, handle: u32, needle: &str) -> String {
+        let mut out = String::new();
+        while !out.contains(needle) {
+            let f = self.next();
+            if f.kind == proto::OUTPUT && f.handle == handle {
+                out.push_str(&String::from_utf8_lossy(&f.payload));
+            }
+        }
+        out
+    }
+
+    fn spawn(
+        &mut self,
+        id: &str,
+        script: &str,
+        extra_env: &[(&str, &str)],
+        scope: &str,
+    ) -> (u32, u32) {
+        let mut env: BTreeMap<String, String> = [
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/tmp"),
+            ("BBARIT_TERM_SCOPE", scope),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        for (k, v) in extra_env {
+            env.insert(k.to_string(), v.to_string());
+        }
+        self.send_json(
+            proto::SPAWN,
+            0,
+            &proto::Spawn {
+                id: id.into(),
+                argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+                cwd: Some("/tmp".into()),
+                env,
+                rows: 24,
+                cols: 80,
+                scope: scope.into(),
+            },
+        );
+        loop {
+            let f = self.next();
+            match f.kind {
+                proto::SPAWNED => {
+                    let s: proto::Spawned = proto::parse(&f).unwrap();
+                    assert_eq!(s.id, id);
+                    return (s.handle, s.pid.expect("pid"));
+                }
+                proto::SPAWN_FAILED => panic!("{:?}", proto::parse::<proto::SpawnFailed>(&f)),
+                _ => {}
+            }
+        }
+    }
+}
+
+fn alive(pid: u32) -> bool {
+    super::pid_alive(pid)
+}
+
+fn wait_gone(pid: u32, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < deadline, "{what} ({pid}) survived");
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_file(path: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            if !s.is_empty() {
+                return s;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never appeared",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn spawn_output_reattach_tail_input_release_sweeps_scope() {
+    let th = TestHolder::default();
+    let (mut a, welcome, _) = Raw::connect(&th.socket);
+    assert_eq!(welcome.version, proto::PROTOCOL_VERSION);
+    assert!(welcome.terminals.is_empty());
+
+    let token = crate::new_scope_token();
+    let pidfile = th.dir.join("sleeper.pid");
+    let exe = std::env::current_exe().unwrap();
+    // The sleeper is double-forked and leaves the session: only the scope sweep reaches it.
+    let script = "echo hi; ( \"$TEST_EXE\" --exact pty_holder::integration_tests::scope_sleeper \
+                  --test-threads=1 >/dev/null 2>&1 & ); read line; echo \"got:$line\"; sleep 30";
+    let exe_s = exe.to_string_lossy().into_owned();
+    let pidfile_s = pidfile.to_string_lossy().into_owned();
+    let (handle, sh_pid) = a.spawn(
+        "t1",
+        script,
+        &[
+            ("TEST_EXE", exe_s.as_str()),
+            (SLEEPER_PIDFILE_ENV, pidfile_s.as_str()),
+        ],
+        &token,
+    );
+    a.output_until(handle, "hi");
+    let sleeper: u32 = wait_for_file(&pidfile).trim().parse().unwrap();
+    assert!(alive(sleeper) && alive(sh_pid));
+
+    // The app goes away; the program keeps running.
+    drop(a);
+    thread::sleep(Duration::from_millis(200));
+    assert!(alive(sh_pid), "terminal died with its client");
+
+    // Reattach: WELCOME lists it, TAIL replays it from seq 0.
+    let (mut b, welcome, tails) = Raw::connect(&th.socket);
+    assert_eq!(welcome.terminals.len(), 1);
+    let t = &welcome.terminals[0];
+    assert_eq!(
+        (t.id.as_str(), t.handle, t.pid),
+        ("t1", handle, Some(sh_pid))
+    );
+    assert_eq!(
+        (t.rows, t.cols, t.exited, t.dropped_bytes),
+        (24, 80, false, 0)
+    );
+    assert_eq!(t.scope, token);
+    assert_eq!(t.cwd.as_deref(), Some("/tmp"));
+    assert_eq!(tails.len(), 1);
+    let (tail_handle, header, bytes) = &tails[0];
+    assert_eq!(*tail_handle, handle);
+    assert_eq!(header.seq_start, 0);
+    assert!(String::from_utf8_lossy(bytes).contains("hi"), "{bytes:?}");
+
+    // Input still reaches the program.
+    b.send(proto::INPUT, handle, b"ping\n");
+    b.output_until(handle, "got:ping");
+    b.send_json(
+        proto::RESIZE,
+        handle,
+        &proto::Resize {
+            rows: 30,
+            cols: 100,
+        },
+    );
+
+    // RELEASE: the shell tree and the escaped, scope-carrying sleeper are both gone.
+    b.send(proto::RELEASE, handle, &[]);
+    wait_gone(sh_pid, "shell");
+    wait_gone(sleeper, "scope-carrying double-forked child");
+    drop(b);
+    let (_c, welcome, _) = Raw::connect(&th.socket);
+    assert!(welcome.terminals.is_empty());
+}
+
+#[test]
+fn exit_is_reported_after_the_last_output() {
+    let th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (handle, _) = a.spawn("t-exit", "echo bye; exit 3", &[], "test-scope");
+    let mut out = String::new();
+    let exited = loop {
+        let f = a.next();
+        match f.kind {
+            proto::OUTPUT => out.push_str(&String::from_utf8_lossy(&f.payload)),
+            proto::EXITED => break proto::parse::<proto::Exited>(&f).unwrap(),
+            _ => {}
+        }
+    };
+    assert!(out.contains("bye"), "output after EXITED: {out:?}");
+    assert_eq!(exited.code, Some(3));
+    // Exited terminals stay (with their tail) until RELEASE.
+    drop(a);
+    let (mut b, welcome, tails) = Raw::connect(&th.socket);
+    assert_eq!(welcome.terminals.len(), 1);
+    assert!(welcome.terminals[0].exited);
+    assert_eq!(welcome.terminals[0].exit_code, Some(3));
+    assert!(String::from_utf8_lossy(&tails[0].2).contains("bye"));
+    b.send(proto::RELEASE, handle, &[]);
+}
+
+#[test]
+fn duplicate_ids_and_bad_hello_are_refused() {
+    let th = TestHolder::default();
+    // Wrong protocol version: BYE, no WELCOME.
+    let mut bad = proto::Hello::current();
+    bad.version = 99;
+    let mut r = Raw::hello(&th.socket, &bad);
+    let f = r.next();
+    assert_eq!(f.kind, proto::BYE);
+    assert!(proto::parse::<proto::Bye>(&f)
+        .unwrap()
+        .reason
+        .contains("protocol version 99"));
+
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (handle, _) = a.spawn("dup", "sleep 30", &[], "test-scope");
+    a.send_json(
+        proto::SPAWN,
+        0,
+        &proto::Spawn {
+            id: "dup".into(),
+            argv: vec!["/bin/sh".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            rows: 24,
+            cols: 80,
+            scope: "test-scope".into(),
+        },
+    );
+    let f = loop {
+        let f = a.next();
+        if f.kind == proto::SPAWN_FAILED {
+            break f;
+        }
+    };
+    assert!(proto::parse::<proto::SpawnFailed>(&f)
+        .unwrap()
+        .error
+        .contains("already exists"));
+    a.send(proto::RELEASE, handle, &[]);
+}
+
+#[test]
+fn newest_hello_wins_and_the_old_client_gets_bye() {
+    let th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (_b, _, _) = Raw::connect(&th.socket);
+    let f = a.next();
+    assert_eq!(f.kind, proto::BYE);
+    assert_eq!(proto::parse::<proto::Bye>(&f).unwrap().reason, "replaced");
+}
+
+#[test]
+fn peer_uid_is_checked() {
+    let (x, _y) = UnixStream::pair().unwrap();
+    assert_eq!(server::peer_uid(&x).unwrap(), server::current_uid());
+
+    // A holder that only serves some other uid closes the connection without WELCOME.
+    let th = TestHolder::start(
+        Duration::from_secs(60),
+        server::current_uid().wrapping_add(1),
+    );
+    let mut r = Raw::hello(&th.socket, &proto::Hello::current());
+    let err = proto::read_frame(&mut r.stream).unwrap_err();
+    // macOS reports EOF; Linux AF_UNIX may reset (our HELLO was unread when it closed).
+    assert!(
+        matches!(
+            err.kind(),
+            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn garbage_oversized_and_truncated_frames_never_take_the_holder_down() {
+    let th = TestHolder::default();
+    let read_ends = |mut s: UnixStream| {
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut buf = Vec::new();
+        // The holder closes (or BYEs and closes) instead of hanging or panicking.
+        let _ = std::io::Read::read_to_end(&mut s, &mut buf);
+        buf
+    };
+    // Not a HELLO.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&proto::encode(proto::PING, 0, b"x").unwrap())
+        .unwrap();
+    let reply = read_ends(s);
+    assert_eq!(reply.first(), Some(&proto::BYE));
+    // Random bytes that decode to a huge length.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&[0xff; 64]).unwrap();
+    read_ends(s);
+    // A header promising more than it sends, then EOF.
+    let mut s = UnixStream::connect(&th.socket).unwrap();
+    s.write_all(&[proto::HELLO, 0, 0, 0, 0, 100, 0, 0, 0, b'{'])
+        .unwrap();
+    s.shutdown(std::net::Shutdown::Write).unwrap();
+    read_ends(s);
+    // After a good HELLO: an oversized frame header, then a SPAWN with bad JSON.
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let mut header = vec![proto::INPUT, 1, 0, 0, 0];
+    header.extend_from_slice(&((proto::MAX_PAYLOAD as u32) + 1).to_le_bytes());
+    a.stream.write_all(&header).unwrap();
+    read_ends(a.stream.try_clone().unwrap());
+    let (mut b, _, _) = Raw::connect(&th.socket);
+    b.send(proto::SPAWN, 0, b"{not json");
+    read_ends(b.stream.try_clone().unwrap());
+    // Still serving.
+    let (mut c, welcome, _) = Raw::connect(&th.socket);
+    assert!(welcome.terminals.is_empty());
+    let (handle, _) = c.spawn("after-garbage", "echo alive; sleep 30", &[], "test-scope");
+    c.output_until(handle, "alive");
+    c.send(proto::RELEASE, handle, &[]);
+}
+
+#[test]
+fn tail_ring_keeps_one_mib_and_counts_dropped_bytes() {
+    let mut ring = TailRing::new(TAIL_BYTES);
+    ring.push(&vec![b'a'; TAIL_BYTES - 1]);
+    assert_eq!((ring.seq_start(), ring.dropped()), (0, 0));
+    ring.push(b"bcd");
+    assert_eq!((ring.seq_start(), ring.dropped()), (2, 2));
+    let c = ring.contents();
+    assert_eq!(c.len(), TAIL_BYTES);
+    assert_eq!(&c[c.len() - 3..], b"bcd");
+    // One chunk bigger than the ring.
+    ring.push(&vec![b'z'; TAIL_BYTES + 5]);
+    assert_eq!(ring.dropped(), 2 + TAIL_BYTES as u64 + 5);
+    assert_eq!(ring.contents(), vec![b'z'; TAIL_BYTES]);
+}
+
+#[test]
+fn dropped_bytes_grow_past_one_mib_end_to_end() {
+    let th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let total = TAIL_BYTES + 100_000;
+    let script = format!("head -c {total} /dev/zero | tr '\\0' a; echo; echo DONE; sleep 30");
+    let (handle, _) = a.spawn("big", &script, &[], "test-scope");
+    a.output_until(handle, "DONE");
+    drop(a);
+    let (mut b, welcome, tails) = Raw::connect(&th.socket);
+    let t = &welcome.terminals[0];
+    let (_, header, bytes) = &tails[0];
+    assert!(t.dropped_bytes > 0, "dropped_bytes stayed 0");
+    assert_eq!(header.dropped_bytes, t.dropped_bytes);
+    assert_eq!(header.seq_start, t.dropped_bytes);
+    assert_eq!(bytes.len(), TAIL_BYTES);
+    // seq_start + tail = every byte produced (total 'a's + "\r\nDONE\r\n").
+    assert!(header.seq_start + bytes.len() as u64 >= total as u64);
+    b.send(proto::RELEASE, handle, &[]);
+}
+
+#[test]
+fn modes_are_tracked_across_split_sequences() {
+    let mut m = ModeTracker::default();
+    m.feed(b"\x1b[?10");
+    m.feed(b"49h\x1b[?2004h\x1b[?1000;1006h");
+    assert_eq!(m.snapshot().decset, vec![1000, 1006, 1049, 2004]);
+    m.feed(b"\x1b[?1000l\x1b[?25l\x1b[?1h"); // untracked modes are ignored
+    assert_eq!(m.snapshot().decset, vec![1006, 1049, 2004]);
+    // kitty keyboard: push, set-or, pop
+    m.feed(b"\x1b[>1u");
+    assert_eq!(m.snapshot().kitty_keyboard, 1);
+    m.feed(b"\x1b[=4;2u");
+    assert_eq!(m.snapshot().kitty_keyboard, 5);
+    m.feed(b"\x1b[>3u\x1b[<u");
+    assert_eq!(m.snapshot().kitty_keyboard, 5);
+    m.feed(b"\x1b[?u"); // query, not a change
+    m.feed(b"\x1b[<u");
+    assert_eq!(m.snapshot().kitty_keyboard, 0);
+    // Text and other CSIs don't disturb it; RIS resets.
+    m.feed("plain 텍스트 \x1b[31m red \x1b[0m".as_bytes());
+    assert_eq!(m.snapshot().decset, vec![1006, 1049, 2004]);
+    m.feed(b"\x1bc");
+    assert_eq!(m.snapshot(), proto::Modes::default());
+    // The holder reports modes in WELCOME.
+    let mut m2 = ModeTracker::default();
+    m2.feed(b"\x1b[?47h\x1b[?1047h\x1b[?1002h\x1b[?1003h");
+    assert_eq!(m2.snapshot().decset, vec![47, 1002, 1003, 1047]);
+}
+
+#[test]
+fn welcome_reports_tracked_modes() {
+    let th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (handle, _) = a.spawn(
+        "modes",
+        "printf '\\033[?1049h\\033[?2004h\\033[>1uREADY'; sleep 30",
+        &[],
+        "test-scope",
+    );
+    a.output_until(handle, "READY");
+    drop(a);
+    let (mut b, welcome, _) = Raw::connect(&th.socket);
+    let modes = &welcome.terminals[0].modes;
+    assert_eq!(modes.decset, vec![1049, 2004]);
+    assert_eq!(modes.kitty_keyboard, 1);
+    b.send(proto::RELEASE, handle, &[]);
+}
+
+#[test]
+fn idle_holder_exits_on_its_own() {
+    assert_eq!(server::idle_exit_from(None), Duration::from_secs(60));
+    assert_eq!(
+        server::idle_exit_from(Some("1500")),
+        Duration::from_millis(1500)
+    );
+    assert_eq!(server::idle_exit_from(Some("x")), Duration::from_secs(60));
+
+    let mut th = TestHolder::start(Duration::from_millis(300), server::current_uid());
+    // A connected client keeps it alive past the timeout...
+    let (a, _, _) = Raw::connect(&th.socket);
+    thread::sleep(Duration::from_millis(800));
+    assert!(
+        !th.holder.is_shutting_down(),
+        "exited with a client attached"
+    );
+    // ...and once it leaves, the holder ends by itself.
+    drop(a);
+    assert!(
+        th.wait_stopped(Duration::from_secs(5)),
+        "holder did not exit when idle"
+    );
+}
+
+#[test]
+fn goodbye_kill_all_ends_terminals_and_holder() {
+    let mut th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (_, pid1) = a.spawn("k1", "sleep 30", &[], "test-scope");
+    let (_, pid2) = a.spawn("k2", "sleep 30", &[], "test-scope");
+    a.send_json(
+        proto::GOODBYE,
+        0,
+        &proto::Goodbye {
+            reason: "kill_all".into(),
+        },
+    );
+    wait_gone(pid1, "k1");
+    wait_gone(pid2, "k2");
+    assert!(
+        th.wait_stopped(Duration::from_secs(10)),
+        "holder kept running after kill_all"
+    );
+}
+
+// ─── HolderBackend through the PtyBackend trait ───
+
+fn sh(script: &str) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new("/bin/sh");
+    cmd.arg("-c");
+    cmd.arg(script);
+    cmd
+}
+
+fn spawn_req(id: &str, script: &str) -> SpawnRequest {
+    SpawnRequest {
+        terminal_id: id.into(),
+        cmd: sh(script),
+        rows: 24,
+        cols: 80,
+        scope_token: "test-scope".into(),
+    }
+}
+
+/// Pull until `needle` shows up; returns everything read.
+fn read_until(b: &dyn PtyBackend, id: &str, needle: &str, out: &mut String) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !out.contains(needle) {
+        assert!(Instant::now() < deadline, "no {needle:?}; got {out:?}");
+        match b.read(id) {
+            Ok(Some(chunk)) => out.push_str(&chunk),
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(e) => panic!("read: {e}; got {out:?}"),
+        }
+    }
+}
+
+fn write_retrying(b: &dyn PtyBackend, id: &str, data: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while let Err(e) = b.write(id, data) {
+        assert!(Instant::now() < deadline, "write never succeeded: {e}");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn holder_backend_end_to_end_without_duplicates() {
+    let th = TestHolder::default();
+    let backend = HolderBackend::connect(&th.socket).unwrap();
+    let b: &dyn PtyBackend = &backend;
+    assert!(backend.recovered().is_empty());
+    assert_eq!(b.read("nope"), Err("PTY not found".to_string()));
+
+    // "é" split across two writes exercises the per-terminal UTF-8 reassembly.
+    b.spawn(spawn_req(
+        "h1",
+        "printf 'A1 \\303'; printf '\\251\\n'; read l; printf 'B2:%s\\n' \"$l\"; read l; printf 'C3:%s\\n' \"$l\"; sleep 30",
+    ))
+    .unwrap();
+    assert!(b.alive("h1"));
+    let pid = b.pid("h1").unwrap().expect("pid");
+    assert_eq!(b.list().len(), 1);
+    let mut out = String::new();
+    read_until(b, "h1", "A1 é", &mut out);
+
+    // Connection drops (no BYE): the backend reconnects on its own and must not
+    // hand the already-delivered "A1" over a second time. (Input written into a
+    // connection the holder is closing is lost, so wait for the new one.)
+    assert_eq!(backend.live_connection(), Some(1));
+    th.holder.kick_client();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while backend.live_connection() != Some(2) {
+        assert!(Instant::now() < deadline, "backend never reconnected");
+        thread::sleep(Duration::from_millis(10));
+    }
+    write_retrying(b, "h1", "x\n");
+    read_until(b, "h1", "B2:x", &mut out);
+    b.resize("h1", 40, 120).unwrap();
+
+    // A second app attaches (the first gets BYE): the terminal is "recovered",
+    // its history is in tail(), and read() returns only what comes after.
+    let app2 = HolderBackend::connect(&th.socket).unwrap();
+    let b2: &dyn PtyBackend = &app2;
+    let rec = app2.recovered();
+    assert_eq!(rec.len(), 1);
+    assert_eq!((rec[0].id.as_str(), rec[0].pid), ("h1", Some(pid)));
+    let tail = b2.tail("h1").unwrap();
+    assert!(tail.contains("A1 é") && tail.contains("B2:x"), "{tail:?}");
+    assert_eq!(
+        b2.read("h1"),
+        Ok(None),
+        "recovered terminal re-sent its tail through read()"
+    );
+    b2.write("h1", "y\n").unwrap();
+    let mut out2 = String::new();
+    read_until(b2, "h1", "C3:y", &mut out2);
+    assert!(!out2.contains("A1") && !out2.contains("B2"), "{out2:?}");
+
+    // The first app was pushed off: its terminal reads as disconnected.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while b.alive("h1") {
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(backend.lost_reason().unwrap().contains("replaced"));
+    assert_eq!(out.matches("A1").count(), 1, "{out:?}");
+    assert_eq!(out.matches("B2:x").count(), 1, "{out:?}");
+
+    b2.close("h1").unwrap();
+    assert_eq!(b2.read("h1"), Err("PTY not found".to_string()));
+    wait_gone(pid, "released shell");
+}
+
+#[test]
+fn racing_reconnects_deliver_no_duplicate_bytes() {
+    let th = TestHolder::default();
+    let backend = Arc::new(HolderBackend::connect(&th.socket).unwrap());
+    let b: &dyn PtyBackend = &*backend;
+    b.spawn(spawn_req(
+        "r1",
+        "printf 'M0\\n'; while read l; do printf 'M:%s\\n' \"$l\"; done",
+    ))
+    .unwrap();
+    let mut out = String::new();
+    read_until(b, "r1", "M0", &mut out);
+    for round in 0..5 {
+        let before = backend.live_connection().expect("connected");
+        th.holder.kick_client();
+        // The reader's own reconnect plus several callers (spawn's relink) at once.
+        let racers: Vec<_> = (0..4)
+            .map(|_| {
+                let be = Arc::clone(&backend);
+                thread::spawn(move || be.relink_for_test())
+            })
+            .collect();
+        for r in racers {
+            let _ = r.join();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while backend.live_connection().is_none_or(|g| g <= before) {
+            assert!(Instant::now() < deadline, "never reconnected");
+            thread::sleep(Duration::from_millis(10));
+        }
+        write_retrying(b, "r1", &format!("x{round}\n"));
+        read_until(b, "r1", &format!("M:x{round}"), &mut out);
+    }
+    assert!(
+        backend.lost_reason().is_none(),
+        "{:?}",
+        backend.lost_reason()
+    );
+    assert_eq!(out.matches("M0").count(), 1, "{out:?}");
+    for round in 0..5 {
+        assert_eq!(out.matches(&format!("M:x{round}")).count(), 1, "{out:?}");
+    }
+    b.close("r1").unwrap();
+}
+
+#[test]
+fn holder_backend_reports_exit_like_in_process() {
+    let th = TestHolder::default();
+    let backend = HolderBackend::connect(&th.socket).unwrap();
+    let b: &dyn PtyBackend = &backend;
+    b.spawn(spawn_req("e1", "printf 'done'; exit 0")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut out = String::new();
+    let end = loop {
+        assert!(Instant::now() < deadline, "no disconnect; got {out:?}");
+        match b.read("e1") {
+            Ok(Some(c)) => out.push_str(&c),
+            Ok(None) => thread::sleep(Duration::from_millis(20)),
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(end, "PTY disconnected");
+    assert!(out.contains("done"));
+    assert!(!b.alive("e1"));
+    assert!(b.tail("e1").unwrap().contains("done"));
+    assert!(b.write("e1", "x").is_err());
+    // Reaped: the pid may already be someone else's, so it is no longer reported.
+    assert_eq!(b.pid("e1"), Ok(None));
+    assert!(b.list().iter().all(|t| t.pid.is_none()));
+    // Respawning the same id replaces it (no reattach UI yet).
+    b.spawn(spawn_req("e1", "printf again; sleep 30")).unwrap();
+    let mut again = String::new();
+    read_until(b, "e1", "again", &mut again);
+    b.close("e1").unwrap();
+}
+
+/// Manual check against a real holder process (`octo-ui --mode pty-holder --socket …`):
+/// `BBARIT_HOLDER_LIVE_SOCKET=<sock> BBARIT_HOLDER_LIVE_PHASE=spawn|reattach
+///  cargo test live_holder_client -- --ignored --nocapture`.
+/// `spawn` starts `sh` and then idles until killed; `reattach` lists, replays, types,
+/// releases, and says GOODBYE quit.
+#[test]
+#[ignore]
+fn live_holder_client() {
+    let (Some(socket), Some(phase)) = (
+        std::env::var_os("BBARIT_HOLDER_LIVE_SOCKET"),
+        std::env::var("BBARIT_HOLDER_LIVE_PHASE").ok(),
+    ) else {
+        return;
+    };
+    let backend = HolderBackend::connect(Path::new(&socket)).unwrap();
+    let b: &dyn PtyBackend = &backend;
+    match phase.as_str() {
+        "spawn" => {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.env("PS1", "$ ");
+            b.spawn(SpawnRequest {
+                terminal_id: "live-1".into(),
+                cmd,
+                rows: 24,
+                cols: 80,
+                scope_token: crate::new_scope_token(),
+            })
+            .unwrap();
+            b.write("live-1", "echo hello-from-holder\n").unwrap();
+            let mut out = String::new();
+            read_until(b, "live-1", "hello-from-holder\r\n", &mut out);
+            println!(
+                "LIVE spawned sh pid={} output={out:?}",
+                b.pid("live-1").unwrap().unwrap()
+            );
+            println!("LIVE client pid={} idling until killed", std::process::id());
+            thread::sleep(Duration::from_secs(600));
+        }
+        "reattach" => {
+            for t in backend.recovered() {
+                println!(
+                    "LIVE recovered id={} handle={} pid={:?} exited={} dropped_bytes={} modes={:?}",
+                    t.id, t.handle, t.pid, t.exited, t.dropped_bytes, t.modes
+                );
+            }
+            println!("LIVE tail={:?}", b.tail("live-1").unwrap());
+            println!(
+                "LIVE first read after attach={:?}",
+                b.read("live-1").unwrap()
+            );
+            b.write("live-1", "echo after-reattach\n").unwrap();
+            let mut out = String::new();
+            read_until(b, "live-1", "after-reattach\r\n", &mut out);
+            println!("LIVE output after input={out:?}");
+            let pid = b.pid("live-1").unwrap().unwrap();
+            b.close("live-1").unwrap();
+            wait_gone(pid, "released sh");
+            println!("LIVE released; sh {pid} gone");
+            backend.goodbye("quit");
+        }
+        other => panic!("unknown phase {other}"),
+    }
+}
+
+/// Manual check of the app-side spawn path with the real binary:
+/// `BBARIT_HOLDER_LIVE_EXE=target/debug/octo-ui cargo test live_spawn_detached_holder -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn live_spawn_detached_holder() {
+    let Some(exe) = std::env::var_os("BBARIT_HOLDER_LIVE_EXE") else {
+        return;
+    };
+    let run = PathBuf::from(format!("/tmp/bbh-run-{}", super::new_instance_id()));
+    let socket = super::spawn::spawn_holder_with(Path::new(&exe), &run).unwrap();
+    let found = super::spawn::discover(&run);
+    assert_eq!(found.len(), 1);
+    let info = &found[0].1;
+    println!("LIVE socket={} info={info:?}", socket.display());
+    assert_eq!(
+        super::spawn::find_or_spawn(&run).unwrap(),
+        socket,
+        "second lookup reuses the live holder"
+    );
+    let sid = unsafe { libc::getsid(info.pid as libc::pid_t) };
+    println!(
+        "LIVE holder pid={} sid={sid} (setsid → sid == pid)",
+        info.pid
+    );
+    assert_eq!(sid as u32, info.pid);
+    let mut sys = sysinfo::System::new();
+    let pid = sysinfo::Pid::from_u32(info.pid);
+    sys.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::Some(&[pid]),
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_environ(sysinfo::UpdateKind::Always),
+    );
+    let env = sys.process(pid).unwrap().environ();
+    assert!(!env.is_empty(), "holder environ unreadable");
+    let leaked: Vec<_> = env
+        .iter()
+        .filter(|e| e.to_string_lossy().starts_with("BBARIT_TERM_SCOPE="))
+        .collect();
+    println!(
+        "LIVE holder environ has {} vars, BBARIT_TERM_SCOPE entries: {leaked:?}",
+        env.len()
+    );
+    assert!(leaked.is_empty());
+    let backend = HolderBackend::connect(&socket).unwrap();
+    backend.goodbye("kill_all");
+    wait_gone(info.pid, "holder after kill_all");
+    println!(
+        "LIVE holder exited after GOODBYE kill_all; files left: {:?}",
+        std::fs::read_dir(&run)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_dir_all(&run);
+}

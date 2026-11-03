@@ -300,7 +300,11 @@ describe('App broker integration text', () => {
   });
 
   it('keeps Windows PTY shells configured for UTF-8 broker text', () => {
-    const source = readFileSync(join(process.cwd(), 'src-tauri/src/main.rs'), 'utf8');
+    // The helper lives in main.rs; since the PtyBackend refactor the call site is
+    // pty_backend::build_shell_command, so both files are checked together.
+    const source = ['src-tauri/src/main.rs', 'src-tauri/src/pty_backend.rs']
+      .map((f) => readFileSync(join(process.cwd(), f), 'utf8'))
+      .join('\n');
 
     expect(source).toContain('fn configure_windows_pty_encoding(');
     expect(source).toContain('cmd.env("LANG", "ko_KR.UTF-8");');

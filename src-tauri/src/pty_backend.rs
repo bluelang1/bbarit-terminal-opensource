@@ -25,7 +25,8 @@ const PTY_OUTPUT_QUEUE_CAPACITY: usize = 1024;
 // on bursty long-running output.
 const PTY_READ_MAX_BYTES: usize = 64 * 1024;
 
-const PTY_NOT_FOUND: &str = "PTY not found";
+pub(crate) const PTY_NOT_FOUND: &str = "PTY not found";
+pub(crate) const PTY_DISCONNECTED: &str = "PTY disconnected";
 
 /// A fully built command plus the PTY it should run in.
 pub struct SpawnRequest {
@@ -40,7 +41,7 @@ pub struct SpawnRequest {
 /// One live terminal as seen by app-wide sweeps (exit, window close).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalInfo {
-    // Read by the phase-2 reattach path (WELCOME); unused by phase-1 callers.
+    // Read by the phase-2b reattach path; unused by today's callers.
     #[allow(dead_code)]
     pub id: String,
     pub pid: Option<u32>,
@@ -67,6 +68,154 @@ pub trait PtyBackend: Send + Sync {
     /// Shell pid; Err("PTY not found") for an unknown id, Ok(None) if the OS gave none.
     fn pid(&self, id: &str) -> Result<Option<u32>, String>;
     fn list(&self) -> Vec<TerminalInfo>;
+}
+
+// ─── Backend selection (config `terminal.ptyHolder`) ───
+
+/// The backend chosen once per app run. Resolution is lazy (first PTY spawn, the
+/// `pty_backend_info` command, or the background resolve started in `setup`), so a
+/// second app instance that the single-instance plugin is about to end never attaches
+/// to the holder and pushes the real app off it (newest HELLO wins).
+pub struct PtySelection {
+    want_holder: bool,
+    /// Tests point the holder lookup somewhere else; None = `pty_holder::run_dir()`.
+    #[cfg(unix)]
+    run_dir: Option<std::path::PathBuf>,
+    chosen: std::sync::OnceLock<Chosen>,
+}
+
+struct Chosen {
+    backend: Arc<dyn PtyBackend>,
+    #[cfg(unix)]
+    holder: Option<Arc<crate::pty_holder::client::HolderBackend>>,
+    /// Why the holder was wanted but not used.
+    fallback_reason: Option<String>,
+}
+
+impl PtySelection {
+    /// `setting` is `terminal.ptyHolder`: "on" wants the holder, anything else
+    /// (default "off") keeps the PTYs in this process.
+    pub fn new(setting: Option<&str>) -> Self {
+        PtySelection {
+            want_holder: setting == Some("on"),
+            #[cfg(unix)]
+            run_dir: None,
+            chosen: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Choose now if not yet chosen. Holder failures fall back to in-process.
+    pub fn resolve(&self) -> &Arc<dyn PtyBackend> {
+        &self.chosen.get_or_init(|| self.choose()).backend
+    }
+
+    fn resolved(&self) -> Option<&Arc<dyn PtyBackend>> {
+        self.chosen.get().map(|c| &c.backend)
+    }
+
+    fn choose(&self) -> Chosen {
+        let in_process = |fallback_reason: Option<String>| Chosen {
+            backend: Arc::new(InProcessBackend::default()),
+            #[cfg(unix)]
+            holder: None,
+            fallback_reason,
+        };
+        if !self.want_holder {
+            return in_process(None);
+        }
+        #[cfg(unix)]
+        {
+            use crate::pty_holder::client::HolderBackend;
+            let dir = match &self.run_dir {
+                Some(dir) => Ok(dir.clone()),
+                None => crate::pty_holder::run_dir(),
+            };
+            match dir.and_then(|dir| HolderBackend::attach_or_spawn(&dir)) {
+                Ok(holder) => {
+                    let holder = Arc::new(holder);
+                    safe_eprintln!("[pty] terminals live in the pty holder at {}", holder.socket().display());
+                    Chosen { backend: holder.clone(), holder: Some(holder), fallback_reason: None }
+                }
+                Err(e) => {
+                    safe_eprintln!("[pty] pty holder unavailable, using in-process PTYs: {e}");
+                    in_process(Some(e))
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        in_process(Some("the PTY holder is not available on Windows yet".to_string()))
+    }
+
+    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`.
+    pub fn info(&self) -> serde_json::Value {
+        let chosen = self.chosen.get_or_init(|| self.choose());
+        #[cfg(unix)]
+        if let Some(holder) = &chosen.holder {
+            return serde_json::json!({
+                "kind": "holder",
+                "socket": holder.socket().to_string_lossy(),
+                "recovered": holder.recovered(),
+                "lost": holder.lost_reason(),
+            });
+        }
+        serde_json::json!({
+            "kind": "in-process",
+            "recovered": [],
+            "fallbackReason": chosen.fallback_reason,
+        })
+    }
+
+    /// App exit. True when the backend took care of every terminal itself (the holder
+    /// gets GOODBYE kill_all and kills + sweeps there); false means the caller sweeps.
+    pub fn on_app_exit(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(holder) = self.chosen.get().and_then(|c| c.holder.as_ref()) {
+            // Phase 2a keeps today's quit semantics (terminals end with the app);
+            // "keep running on quit" needs the reattach UI (phase 2b).
+            holder.goodbye("kill_all");
+            return true;
+        }
+        false
+    }
+}
+
+/// Spawning resolves the selection; every other call on an unresolved selection
+/// behaves like an empty in-process backend (no holder is started just to say "not found").
+impl PtyBackend for PtySelection {
+    fn spawn(&self, req: SpawnRequest) -> Result<(), String> {
+        self.resolve().spawn(req)
+    }
+    fn read(&self, id: &str) -> Result<Option<String>, String> {
+        self.resolved().ok_or_else(not_found)?.read(id)
+    }
+    fn write(&self, id: &str, data: &str) -> Result<(), String> {
+        self.resolved().ok_or_else(not_found)?.write(id, data)
+    }
+    fn resize(&self, id: &str, rows: u16, cols: u16) -> Result<(), String> {
+        self.resolved().ok_or_else(not_found)?.resize(id, rows, cols)
+    }
+    fn close(&self, id: &str) -> Result<(), String> {
+        self.resolved().map_or(Ok(()), |b| b.close(id))
+    }
+    fn alive(&self, id: &str) -> bool {
+        self.resolved().is_some_and(|b| b.alive(id))
+    }
+    fn tail(&self, id: &str) -> Result<String, String> {
+        self.resolved().ok_or_else(not_found)?.tail(id)
+    }
+    fn idle_ms(&self, id: &str) -> Result<u64, String> {
+        self.resolved().ok_or_else(not_found)?.idle_ms(id)
+    }
+    fn pid(&self, id: &str) -> Result<Option<u32>, String> {
+        self.resolved().ok_or_else(not_found)?.pid(id)
+    }
+    fn list(&self) -> Vec<TerminalInfo> {
+        self.resolved().map_or_else(Vec::new, |b| b.list())
+    }
+}
+
+fn not_found() -> String {
+    PTY_NOT_FOUND.to_string()
 }
 
 // per-terminal state
@@ -121,14 +270,14 @@ impl PtyBackend for InProcessBackend {
             .map_err(|e| e.to_string())?;
 
         // Thread to read output
-        let (tx, rx) = mpsc::sync_channel::<String>(PTY_OUTPUT_QUEUE_CAPACITY);
+        let (queue, rx) = new_output_channel();
         let alive = Arc::new(AtomicBool::new(true));
         let output_buffer = Arc::new(Mutex::new(String::new()));
         let last_output_at = Arc::new(Mutex::new(std::time::Instant::now()));
 
         spawn_utf8_reader_thread(
             reader,
-            tx,
+            queue,
             Arc::clone(&alive),
             Some(Arc::clone(&output_buffer)),
             Some(Arc::clone(&last_output_at)),
@@ -153,25 +302,7 @@ impl PtyBackend for InProcessBackend {
     fn read(&self, id: &str) -> Result<Option<String>, String> {
         let ptys = self.ptys.lock().unwrap();
         if let Some(instance) = ptys.get(id) {
-            // Non-blocking read from channel; drain as much as possible to reduce invocations/queue backlog.
-            match instance.output_rx.try_recv() {
-                Ok(first) => {
-                    let mut out = String::new();
-                    out.push_str(&first);
-
-                    while out.len() < PTY_READ_MAX_BYTES {
-                        match instance.output_rx.try_recv() {
-                            Ok(next) => out.push_str(&next),
-                            Err(mpsc::TryRecvError::Empty) => break,
-                            Err(mpsc::TryRecvError::Disconnected) => break,
-                        }
-                    }
-
-                    Ok(Some(out))
-                }
-                Err(mpsc::TryRecvError::Empty) => Ok(None),
-                Err(mpsc::TryRecvError::Disconnected) => Err("PTY disconnected".to_string()),
-            }
+            drain_output(&instance.output_rx)
         } else {
             Err(PTY_NOT_FOUND.to_string())
         }
@@ -281,23 +412,169 @@ impl PtyBackend for InProcessBackend {
     }
 }
 
+/// `output_buffer` cap (below 1 MB): long-running terminals don't retain too much
+/// history just for orchestra-side inspection. Shared with the holder client's tail copy.
+pub(crate) const OUTPUT_BUFFER_MAX: usize = 768 * 1024;
+
+/// Append to an output buffer; past `OUTPUT_BUFFER_MAX`, trim the front half (at a
+/// char boundary) so the most recent output (usually the final JSON plan) is kept.
+pub(crate) fn append_output_buffer(buf: &mut String, data: &str) {
+    buf.push_str(data);
+    if buf.len() > OUTPUT_BUFFER_MAX {
+        let trim_at = buf.len() / 2;
+        // Find a safe UTF-8 boundary
+        let safe_trim = buf.ceil_char_boundary(trim_at);
+        let trimmed = buf.split_off(safe_trim);
+        *buf = trimmed;
+    }
+}
+
+/// Turns a byte stream into UTF-8 strings: an incomplete trailing sequence waits for
+/// the next push, invalid bytes are dropped. One per terminal.
+#[derive(Default)]
+pub(crate) struct Utf8Reassembler {
+    pending: Vec<u8>,
+}
+
+impl Utf8Reassembler {
+    /// Feed bytes and emit every decodable piece. Returns false as soon as `emit` does.
+    pub(crate) fn push(&mut self, bytes: &[u8], emit: &mut impl FnMut(String) -> bool) -> bool {
+        let pending = &mut self.pending;
+        pending.extend_from_slice(bytes);
+
+        loop {
+            match std::str::from_utf8(pending) {
+                Ok(s) => {
+                    if !emit(s.to_string()) {
+                        return false;
+                    }
+                    pending.clear();
+                    break;
+                }
+                Err(e) => {
+                    let valid_up_to = e.valid_up_to();
+                    if valid_up_to > 0 {
+                        let valid = &pending[..valid_up_to];
+                        if !emit(String::from_utf8_lossy(valid).to_string()) {
+                            return false;
+                        }
+                    }
+
+                    if let Some(len) = e.error_len() {
+                        // Drop invalid byte(s) and keep trying to decode the rest.
+                        pending.drain(0..(valid_up_to + len));
+                        if pending.is_empty() {
+                            break;
+                        }
+                    } else {
+                        // Incomplete UTF-8 sequence at the end; keep it for the next read.
+                        pending.drain(0..valid_up_to);
+                        break;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Whatever is left at end of stream, decoded lossily.
+    pub(crate) fn finish(&mut self) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let rest = String::from_utf8_lossy(&self.pending).to_string();
+        self.pending.clear();
+        Some(rest)
+    }
+}
+
+/// The per-terminal queue `read()` drains. Never blocks the producer: when the
+/// frontend falls behind, chunks are dropped and a truncation marker is emitted
+/// once there is room again.
+pub(crate) struct OutputQueue {
+    tx: SyncSender<String>,
+    dropped_output: bool,
+}
+
+impl OutputQueue {
+    pub(crate) fn new(tx: SyncSender<String>) -> Self {
+        OutputQueue { tx, dropped_output: false }
+    }
+
+    /// False once the receiving side is gone.
+    pub(crate) fn send(&mut self, data: String) -> bool {
+        if data.is_empty() {
+            return true;
+        }
+        // If we previously dropped output due to a full queue, try to emit a marker once we have space.
+        if self.dropped_output {
+            match self.tx.try_send("\r\n[output truncated]\r\n".to_string()) {
+                Ok(()) => self.dropped_output = false,
+                Err(TrySendError::Disconnected(_)) => return false,
+                Err(TrySendError::Full(_)) => {
+                    // Still full, keep the dropped flag set.
+                }
+            }
+        }
+
+        // Never block the reader thread for a full output queue. If the frontend
+        // falls behind, keep the PTY draining and mark the visible output as truncated.
+        match self.tx.try_send(data) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                self.dropped_output = true;
+                true
+            }
+            Err(TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Output was lost upstream (bytes that fell out of the holder's tail while
+    /// detached): show the same marker before the next chunk.
+    #[cfg(unix)]
+    pub(crate) fn mark_truncated(&mut self) {
+        self.dropped_output = true;
+    }
+}
+
+pub(crate) fn new_output_channel() -> (OutputQueue, Receiver<String>) {
+    let (tx, rx) = mpsc::sync_channel::<String>(PTY_OUTPUT_QUEUE_CAPACITY);
+    (OutputQueue::new(tx), rx)
+}
+
+/// Non-blocking drain of up to `PTY_READ_MAX_BYTES` (the `read_from_pty` contract).
+pub(crate) fn drain_output(rx: &Receiver<String>) -> Result<Option<String>, String> {
+    // Non-blocking read from channel; drain as much as possible to reduce invocations/queue backlog.
+    match rx.try_recv() {
+        Ok(first) => {
+            let mut out = String::new();
+            out.push_str(&first);
+
+            while out.len() < PTY_READ_MAX_BYTES {
+                match rx.try_recv() {
+                    Ok(next) => out.push_str(&next),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+
+            Ok(Some(out))
+        }
+        Err(mpsc::TryRecvError::Empty) => Ok(None),
+        Err(mpsc::TryRecvError::Disconnected) => Err(PTY_DISCONNECTED.to_string()),
+    }
+}
+
 fn spawn_utf8_reader_thread(
     mut reader: Box<dyn Read + Send>,
-    tx: SyncSender<String>,
+    mut queue: OutputQueue,
     alive: Arc<AtomicBool>,
     output_buffer: Option<Arc<Mutex<String>>>,
     last_output_at: Option<Arc<Mutex<std::time::Instant>>>,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
-        let mut dropped_output = false;
-        // Cap buffer below 1 MB to prevent long-running terminals from retaining
-        // too much historical output just for orchestra-side inspection.
-        // When the buffer exceeds this limit, trim the front half so that
-        // the most recent output (which usually contains the final JSON plan)
-        // is always preserved.
-        const OUTPUT_BUFFER_MAX: usize = 768 * 1024;
+        let mut decoder = Utf8Reassembler::default();
 
         let mut try_send = |data: String| {
             if data.is_empty() {
@@ -315,86 +592,27 @@ fn spawn_utf8_reader_thread(
             // Also append to the output buffer if provided.
             if let Some(ref buf_arc) = output_buffer {
                 if let Ok(mut buf) = buf_arc.lock() {
-                    buf.push_str(&data);
-                    // If buffer exceeds limit, trim the front half
-                    if buf.len() > OUTPUT_BUFFER_MAX {
-                        let trim_at = buf.len() / 2;
-                        // Find a safe UTF-8 boundary
-                        let safe_trim = buf.ceil_char_boundary(trim_at);
-                        let trimmed = buf.split_off(safe_trim);
-                        *buf = trimmed;
-                    }
+                    append_output_buffer(&mut buf, &data);
                 }
             }
 
-            // If we previously dropped output due to a full queue, try to emit a marker once we have space.
-            if dropped_output {
-                match tx.try_send("\r\n[output truncated]\r\n".to_string()) {
-                    Ok(()) => dropped_output = false,
-                    Err(TrySendError::Disconnected(_)) => return false,
-                    Err(TrySendError::Full(_)) => {
-                        // Still full, keep the dropped flag set.
-                    }
-                }
-            }
-
-            // Never block the reader thread for a full output queue. If the frontend
-            // falls behind, keep the PTY draining and mark the visible output as truncated.
-            match tx.try_send(data) {
-                Ok(()) => true,
-                Err(TrySendError::Full(_)) => {
-                    dropped_output = true;
-                    true
-                }
-                Err(TrySendError::Disconnected(_)) => false,
-            }
+            queue.send(data)
         };
 
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    pending.extend_from_slice(&buf[..n]);
-
-                    loop {
-                        match std::str::from_utf8(&pending) {
-                            Ok(s) => {
-                                if !try_send(s.to_string()) {
-                                    return;
-                                }
-                                pending.clear();
-                                break;
-                            }
-                            Err(e) => {
-                                let valid_up_to = e.valid_up_to();
-                                if valid_up_to > 0 {
-                                    let valid = &pending[..valid_up_to];
-                                    if !try_send(String::from_utf8_lossy(valid).to_string()) {
-                                        return;
-                                    }
-                                }
-
-                                if let Some(len) = e.error_len() {
-                                    // Drop invalid byte(s) and keep trying to decode the rest.
-                                    pending.drain(0..(valid_up_to + len));
-                                    if pending.is_empty() {
-                                        break;
-                                    }
-                                } else {
-                                    // Incomplete UTF-8 sequence at the end; keep it for the next read.
-                                    pending.drain(0..valid_up_to);
-                                    break;
-                                }
-                            }
-                        }
+                    if !decoder.push(&buf[..n], &mut try_send) {
+                        return;
                     }
                 }
                 Err(_) => break,
             }
         }
 
-        if !pending.is_empty() {
-            let _ = try_send(String::from_utf8_lossy(&pending).to_string());
+        if let Some(rest) = decoder.finish() {
+            let _ = try_send(rest);
         }
 
         // Signal that the PTY process has exited
@@ -775,6 +993,48 @@ mod tests {
         assert_eq!(cmd.get_env("PATH").and_then(|v| v.to_str()), Some("/from/env/file"));
         // The GitHub account is applied last, as before.
         assert_eq!(cmd.get_env("GH_TOKEN").and_then(|v| v.to_str()), Some("gho_test"));
+    }
+
+    // ─── PtySelection ───
+
+    #[test]
+    fn selection_defaults_to_in_process_and_resolves_lazily() {
+        for setting in [None, Some("off"), Some("bogus")] {
+            let sel = PtySelection::new(setting);
+            // Nothing resolved yet: calls behave like an empty backend.
+            assert_eq!(sel.read("x"), Err("PTY not found".to_string()));
+            assert_eq!(sel.close("x"), Ok(()));
+            assert!(sel.list().is_empty() && !sel.alive("x"));
+            assert!(!sel.on_app_exit(), "in-process exit sweep stays with the caller");
+            let info = sel.info();
+            assert_eq!(info["kind"], "in-process");
+            assert_eq!(info["recovered"], serde_json::json!([]));
+            assert!(info["fallbackReason"].is_null(), "{setting:?}: {info}");
+        }
+        let sel = PtySelection::new(None);
+        sel.spawn(SpawnRequest {
+            terminal_id: "s1".into(),
+            cmd: sh("printf sel"),
+            rows: 24,
+            cols: 80,
+            scope_token: TEST_SCOPE.into(),
+        })
+        .unwrap();
+        assert_eq!(sel.list().len(), 1);
+        sel.close("s1").unwrap();
+    }
+
+    #[test]
+    fn holder_failure_falls_back_to_in_process_with_the_reason() {
+        let mut sel = PtySelection::new(Some("on"));
+        // A run dir whose socket path can't fit sun_path: the holder is never started.
+        sel.run_dir = Some(std::env::temp_dir().join("x".repeat(120)));
+        let info = sel.info();
+        assert_eq!(info["kind"], "in-process");
+        let reason = info["fallbackReason"].as_str().unwrap();
+        assert!(reason.contains("max 100"), "{reason}");
+        assert!(sel.read("x").is_err());
+        let _ = std::fs::remove_dir(std::env::temp_dir().join("x".repeat(120)));
     }
 
     // ─── InProcessBackend ───

@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2단계부터 구현 전.** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현 전.** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -252,7 +252,8 @@ trait PtyBackend: Send + Sync {
 |---|---|---|---|
 | **0** ✅ | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
 | **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
-| **2** | 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 재부착(3.5 전체: 순서·exited 처리·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6). 설정 기본 `off` | Rust ~2.3 k 줄, 프런트 ~400 줄. 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·seq 중복 없음 | tail 재생 품질, 모드 추적 누락 |
+| **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~3.9 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
+| **2b** | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
 | **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
@@ -278,6 +279,68 @@ trait PtyBackend: Send + Sync {
   실패하면 예전과 달리 GitHub 계정 조회가 이미 돈 뒤다. `get_pty_cwd` 는 `lsof` 동안 PTY 맵
   잠금을 쥐지 않는다. 잠금이 독(poison)이면 `CloseRequested` 가 패닉 대신 빈 목록으로 진행한다.
 - 손대지 않은 것: `.env` 값이 따옴표 한 글자(`KEY="`)면 `&value[1..0]` 으로 패닉하는 기존 버그.
+
+구현 메모: 2a 완료 — `src-tauri/src/pty_holder/{mod,proto,server,spawn,client}.rs`(+ `integration_tests.rs`),
+`pty_backend.rs` 의 `PtySelection`, `main.rs` 의 모드 게이트·`pty_backend_info`. 3절과 다르게 간 점:
+- **프레임**: 표 그대로에 `BYE`(17, holder→app) 하나를 더했다. 새 HELLO 가 이전 클라이언트를 밀어낼 때
+  `{reason:"replaced"}`, 잘못된 HELLO(버전·클라이언트 이름)에 이유를 싣는다. TAIL 페이로드는
+  `[json_len u32 LE][{seq_start, dropped_bytes}][원시 바이트]`. OUTPUT 에는 seq 를 싣지 않는다: 홀더가
+  WELCOME 과 모든 TAIL 을 상태 잠금 안에서 큐에 넣고 그 뒤에 OUTPUT 이 오므로, 각 바이트는 TAIL 이나
+  OUTPUT 중 정확히 한 번 온다. 클라이언트는 터미널별 `next_seq` 로 재연결 때 겹치는 TAIL 앞부분을 버리고,
+  `seq_start > next_seq` 면 기존 "[output truncated]" 표식을 넣는다.
+- **`modes`** 는 `{decset:[47|1047|1049|1000|1002|1003|1006|2004…], kitty_keyboard:<현재 플래그>}`.
+  출력 바이트를 상태 기계로 훑는다(청크 경계에 걸친 시퀀스 포함, `ESC c` 는 전부 초기화, CSI-u 는
+  `>f u` push·`<n u` pop·`=f;m u` set, `?u` 조회는 무시). alt/main 화면별 kitty 스택은 나누지 않았다.
+- **`dropped_bytes`** 는 "링에서 밀려난 바이트 총수"(= TAIL `seq_start`)다. "앱이 꺼진 동안 생략된 양"은
+  앱이 `seq_start - next_seq` 로 계산한다(2b 에서 배너 문구에 쓴다).
+- **분리 spawn**: setsid 만(launchd/systemd 는 3단계). 같은 exe 를 `--mode pty-holder --socket <run>/<prefix>.<instance>.sock`
+  으로, stdin/stdout `/dev/null`, stderr `<run>/<prefix>.<instance>.log`(0600), cwd `/`, `BBARIT_TERM_SCOPE`·
+  `BBARIT_AGENT_MODE` 제거. 홀더도 시작 때 자기 환경에서 `BBARIT_TERM_SCOPE` 를 지운다. 정보 파일
+  `<prefix>.<instance>.json` `{pid, socket, version, build, instance}` 은 홀더가 쓰고 정상 종료 때 소켓과 함께 지운다.
+  앱은 json 을 글롭해 pid 가 살아 있고 버전이 같은 홀더에 붙고, 죽은 홀더의 json·소켓은 지운다. 버전이 다른
+  홀더는 건너뛴다(DRAIN·다중 홀더는 3단계). 7일 넘은 고아 로그는 정리한다.
+- **경로**: macOS 는 `~/.config/octo/run/` 만(3.2 의 `$TMPDIR` 대안은 쓰지 않음), Linux 는 `$XDG_RUNTIME_DIR/bbarit/`
+  우선. 디렉터리 0700, 소켓 0600, 소켓 경로 100바이트 초과는 거부. `--socket` 으로 받은 경로의 부모가 이미 있으면
+  권한을 바꾸지 않는다(`/tmp` 같은 공용 디렉터리를 0700 으로 만들지 않기 위해).
+- **선택 시점**: 설정은 시작 때 읽지만 홀더 연결은 **지연**한다(`setup` 의 백그라운드 스레드, 첫 `create_shell`,
+  또는 `pty_backend_info` 중 먼저). Tauri 빌더 전에 붙으면 single-instance 가 곧 끝낼 두 번째 실행이 HELLO 로
+  실행 중인 앱을 밀어낸다. 연결 실패는 InProcess 로 폴백하고 이유를 `pty_backend_info().fallbackReason` 에 남긴다
+  (상태바 표시는 2b). `pty_backend_info` 는 `{kind, socket?, recovered:[WELCOME 항목], fallbackReason?, lost?}`.
+- **2a 의 종료 의미**: 앱 종료(`RunEvent::Exit`)는 GOODBYE `kill_all` 이다(홀더가 트리 kill + 스코프 스윕 후 종료).
+  재부착 UI 가 없으므로 오늘과 같은 의미를 유지했다. 터미널이 살아남는 것은 크래시·강제 종료 때뿐이다.
+  "종료해도 유지"(3.6)는 2b. 같은 id 로 `create_shell` 이 다시 오면 기존 터미널을 RELEASE(트리 kill + 스코프
+  스윕)하고 새로 띄운다. InProcess 는 같은 id 를 맵에서 덮어쓸 뿐 이전 프로세스를 kill·스윕하지 않았다(master 가
+  닫히며 SIGHUP 만 감). 홀더 쪽이 더 확실히 정리한다.
+- **스윕**: RELEASE·`kill_all` 때만 한다(자연 종료 때는 하지 않음, InProcess 와 동일). `kill_process_tree`·
+  `sweep_scope(s)` 는 `main.rs` 에 그대로 두고 홀더가 `crate::` 로 부른다(같은 바이너리).
+- **흐름 제어**: pump 는 클라이언트를 기다리지 않는다. 클라이언트별 미전송 백로그가 32 MiB 를 넘으면 그 연결을
+  끊는다. 앱은 재연결해 TAIL 로 따라잡는다(그 사이 1 MiB 를 넘게 놓쳤으면 truncation 표식).
+- **재연결**: BYE 없이 끊기면 같은 소켓에 10 초 동안 100 ms→2 s 백오프로 다시 붙는다. BYE(다른 앱이 가져감)면
+  다시 붙지 않고 모든 터미널을 끊김으로 표시한다. 다음 `create_shell` 이 홀더를 다시 찾거나 띄운다.
+  끊긴 사이 닫은 터미널은 다음 WELCOME 에서 RELEASE 한다. 홀더가 닫는 중인 연결에 쓴 입력은 잃을 수 있다.
+- **수명**: 유휴 종료는 "살아 있는(거두지 않은) 터미널 없음 + 클라이언트 없음" 60 초(`BBARIT_PTY_HOLDER_IDLE_EXIT_MS`
+  로 조정, 테스트용). 끝났지만 RELEASE 안 된 터미널은 클라이언트가 없으면 홀더를 붙잡지 않는다.
+  PING 10 초 / 읽기 타임아웃 30 초, HELLO 는 5 초 안에 와야 한다.
+- **pid 수명**: 홀더는 프로그램이 끝나면 바로 거둔다(wait). 그 뒤 pid 는 OS 가 재사용할 수 있으므로
+  `HolderBackend::pid()`·`list()` 는 EXITED(또는 홀더 상실) 뒤 pid 를 **None** 으로 돌려준다.
+  `CloseRequested` 의 `kill_process_tree`, `pty_terminal_has_child`, `get_pty_cwd` 같은 pid 사용처는 None 을
+  "프로세스 없음" 으로 다뤄야 한다. 홀더도 거둔 터미널에는 SIGNAL·트리 kill·`killer.kill()` 을 하지 않는다.
+- **리뷰 반영(2a 수정 커밋)**: run 디렉터리는 lstat 로 확인해 심볼릭 링크·다른 소유자·0700 이 아닌 경우 거부한다
+  (예전처럼 chmod 하고 넘어가지 않음). json 의 소켓이 run 디렉터리 밖이면 무시한다. 접속만 하고 HELLO 전인
+  연결도 "클라이언트 있음" 으로 쳐서 유휴 종료가 앱의 탐침과 HELLO 사이에 끼지 않는다. 밀린 클라이언트는
+  소켓을 직접 shutdown 한다. 핸들은 u32 가 한 바퀴 돌아도 쓰는 중인 값을 건너뛴다. 밀려난 클라이언트의
+  프레임은 HELLO 교체와 같은 잠금 아래에서 버린다. 앱 쪽은 연결·채택을 한 뮤텍스로 직렬화하고 현재 세대가
+  아닌 연결의 프레임을 버린다. 쓰기는 연결별 writer 스레드(쓰기 타임아웃 5 초)로 보내 메인 스레드 커맨드가
+  소켓에 막히지 않는다. `release_later` 는 WELCOME 마다 비우고 같은 id 로 spawn 하면 지운다. 기다리는 쪽이
+  없는 SPAWNED 는 RELEASE 하고, 응답을 잃은 SPAWN 은 다음 WELCOME 으로 해결한다. 모드 게이트는 `args_os`
+  를 쓴다. CI(ubuntu)에 `cargo test … pty_holder` 단계를 더했다.
+- **공용 헬퍼**: `pty_backend.rs` 의 UTF-8 이어붙이기·큐(드롭 + "[output truncated]")·64 KiB 드레인·출력 버퍼
+  상한을 `Utf8Reassembler`/`OutputQueue`/`drain_output`/`append_output_buffer` 로 뽑아 두 백엔드가 같이 쓴다
+  (InProcess 동작 동일). Windows 는 `pty_holder` 모듈을 컴파일하지 않고, 게이트는 오류를 찍고 2 로 끝난다.
+- 실기(macOS, 디버그 바이너리): `octo-ui --mode pty-holder --socket /tmp/x.sock` → 클라이언트가 `sh` 생성 →
+  클라이언트 `kill -9` → `sh` 가 홀더의 자식으로 생존 → 새 클라이언트가 WELCOME·TAIL 수신, 입력·출력 정상 →
+  RELEASE 로 `sh` 소멸 → 유휴 종료로 소켓·json 정리. 앱 쪽 `spawn_holder` 로 띄운 홀더는 `getsid == pid` 이고
+  환경에 `BBARIT_TERM_SCOPE` 가 없다. 앱 자체(Tauri)로 설정을 켠 실기는 2b 와 함께 한다.
 
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.

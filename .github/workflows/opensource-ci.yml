@@ -108,3 +108,5 @@ jobs:
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
       - name: Test PTY backend (real /bin/sh PTY)
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked pty_backend
+      - name: Test PTY holder (in-thread holder, unix socket, SO_PEERCRED)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked pty_holder
