@@ -27,6 +27,9 @@ const PTY_READ_MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) const PTY_NOT_FOUND: &str = "PTY not found";
 pub(crate) const PTY_DISCONNECTED: &str = "PTY disconnected";
+/// `create_shell` for an id whose program is still running in the PTY holder (the
+/// frontend missed the recovery list): it must attach to it, not replace it.
+pub(crate) const PTY_ALIVE_IN_HOLDER: &str = "PTY alive in holder";
 
 /// A fully built command plus the PTY it should run in.
 pub struct SpawnRequest {
@@ -36,6 +39,9 @@ pub struct SpawnRequest {
     pub cols: u16,
     /// `BBARIT_TERM_SCOPE` value already planted in `cmd`; swept on close.
     pub scope_token: String,
+    /// The caller means to end a still-running terminal under this id. Without it the
+    /// holder backend refuses a live id (`PTY_ALIVE_IN_HOLDER`); in-process ignores it.
+    pub replace: bool,
 }
 
 /// One live terminal as seen by app-wide sweeps (exit, window close).
@@ -315,7 +321,7 @@ pub struct InProcessBackend {
 
 impl PtyBackend for InProcessBackend {
     fn spawn(&self, req: SpawnRequest) -> Result<(), String> {
-        let SpawnRequest { terminal_id, cmd, rows, cols, scope_token } = req;
+        let SpawnRequest { terminal_id, cmd, rows, cols, scope_token, .. } = req;
         let pty_system = native_pty_system();
 
         let pty_pair = pty_system
@@ -1094,6 +1100,7 @@ mod tests {
             rows: 24,
             cols: 80,
             scope_token: TEST_SCOPE.into(),
+            replace: false,
         })
         .unwrap();
         assert_eq!(sel.list().len(), 1);
@@ -1156,6 +1163,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 scope_token: TEST_SCOPE.into(),
+                replace: false,
             })
             .unwrap();
     }

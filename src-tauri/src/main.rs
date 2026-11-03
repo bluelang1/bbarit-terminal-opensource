@@ -3226,8 +3226,11 @@ fn create_shell(
     cols: u16,
     shell_type: Option<String>,
     github_account: Option<String>,
+    replace: Option<bool>,
 ) -> Result<(), String> {
     // github_account (JS `githubAccount`) pins the per-tab gh identity on macOS/Linux.
+    // replace (JS `replace`): end a still-running holder terminal under this id; without it
+    // that is refused with "PTY alive in holder" and the frontend attaches instead.
     #[cfg(target_os = "windows")]
     let _ = &github_account;
 
@@ -3299,6 +3302,7 @@ fn create_shell(
         rows,
         cols,
         scope_token,
+        replace: replace.unwrap_or(false),
     })
 }
 

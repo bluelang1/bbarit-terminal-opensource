@@ -16,7 +16,7 @@
 use super::proto::{self, Frame, TerminalEntry};
 use crate::pty_backend::{
     append_output_buffer, drain_output, new_output_channel, OutputQueue, PtyBackend, SpawnRequest,
-    TerminalInfo, Utf8Reassembler, PTY_DISCONNECTED, PTY_NOT_FOUND,
+    TerminalInfo, Utf8Reassembler, PTY_ALIVE_IN_HOLDER, PTY_DISCONNECTED, PTY_NOT_FOUND,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
@@ -764,6 +764,24 @@ fn apply_welcome(
     release
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnConflict {
+    /// Unknown id: just spawn.
+    None,
+    /// Still running in the holder and no replace intent: refuse.
+    Alive,
+    /// Known but ended / lost, or replace was asked for: release it first.
+    Release,
+}
+
+fn spawn_conflict(shared: &Shared, id: &str, replace: bool) -> SpawnConflict {
+    match shared.terms.get(id) {
+        None => SpawnConflict::None,
+        Some(t) if t.alive && t.handle.is_some() && !replace => SpawnConflict::Alive,
+        Some(_) => SpawnConflict::Release,
+    }
+}
+
 fn pinger(inner: Weak<Inner>) {
     loop {
         thread::sleep(PING_INTERVAL);
@@ -785,10 +803,18 @@ impl PtyBackend for HolderBackend {
             rows,
             cols,
             scope_token,
+            replace,
         } = req;
-        // Same id again (no reattach UI yet): replace it, like the in-process map does.
-        if self.inner.lock_shared().terms.contains_key(&terminal_id) {
-            self.close(&terminal_id)?;
+        // A running terminal is never replaced by accident (the frontend missed the
+        // recovery list): it must attach. An ended one, or an explicit replace, is released.
+        let known = {
+            let shared = self.inner.lock_shared();
+            spawn_conflict(&shared, &terminal_id, replace)
+        };
+        match known {
+            SpawnConflict::None => {}
+            SpawnConflict::Alive => return Err(PTY_ALIVE_IN_HOLDER.to_string()),
+            SpawnConflict::Release => self.close(&terminal_id)?,
         }
         self.inner.relink()?;
         let spawn = proto::Spawn {
@@ -1077,6 +1103,23 @@ mod tests {
         let list = recovered_now(&shared);
         assert_eq!(list.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), vec!["away", "t"]);
         assert!(list.iter().find(|e| e.id == "t").unwrap().exited);
+    }
+
+    #[test]
+    fn a_live_id_is_only_replaced_on_purpose() {
+        let mut shared = Shared::default();
+        apply_welcome(
+            &mut shared,
+            &welcome(vec![entry("live", 1, false), entry("ended", 2, true)]),
+            vec![tail(1, 0, b""), tail(2, 0, b"")],
+        );
+        assert_eq!(spawn_conflict(&shared, "live", false), SpawnConflict::Alive);
+        assert_eq!(spawn_conflict(&shared, "live", true), SpawnConflict::Release);
+        assert_eq!(spawn_conflict(&shared, "ended", false), SpawnConflict::Release);
+        assert_eq!(spawn_conflict(&shared, "new", false), SpawnConflict::None);
+        // Lost with the holder: nothing to attach to, a new spawn may take the id.
+        shared.terms.get_mut("live").unwrap().lose();
+        assert_eq!(spawn_conflict(&shared, "live", false), SpawnConflict::Release);
     }
 
     #[test]
