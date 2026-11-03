@@ -8,6 +8,7 @@ import {
   mcpPortFromEnv,
   waitForAgents,
   isAppUnreachable,
+  unreachableWaitPolicy,
   BRIDGE_UNREACHABLE,
 } from '../scripts/bbarit-ctl.mjs';
 
@@ -72,6 +73,23 @@ test('waitForAgents keeps waiting while the app is unreachable, bounded by the t
   assert.equal(never.timedOut, true);
   assert.equal(isAppUnreachable(new Error('__BBARIT_CTL__ not ready (app too old or still loading)')), true);
   assert.equal(isAppUnreachable(new Error('agent.status failed')), false);
+});
+
+test('an explicit --port fails fast instead of waiting for the app', async () => {
+  const closed = () => Object.assign(new Error('Cannot connect to port 9999'), { code: BRIDGE_UNREACHABLE });
+  assert.equal(unreachableWaitPolicy(0), isAppUnreachable);
+  assert.equal(unreachableWaitPolicy(9999)(closed()), false);
+  let calls = 0;
+  await assert.rejects(
+    waitForAgents({
+      fetchAgents: async () => { calls++; throw closed(); },
+      timeoutMs: 600000,
+      isUnreachable: unreachableWaitPolicy(9999),
+      ...fakeClock(),
+    }),
+    /Cannot connect to port 9999/,
+  );
+  assert.equal(calls, 3, 'three strikes, as before the holder change');
 });
 
 test('agentExitCode', () => {

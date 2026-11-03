@@ -39,6 +39,14 @@ export function isAppUnreachable(e) {
   if (e && e.code === BRIDGE_UNREACHABLE) return true;
   return /__BBARIT_CTL__ not ready/.test(String(e && e.message || e));
 }
+
+/**
+ * Which errors agent wait/run wait out. An explicit --port names one app on purpose: a wrong
+ * or closed port fails fast (3 strikes) instead of waiting for the whole --timeout.
+ */
+export function unreachableWaitPolicy(explicitPort) {
+  return explicitPort ? () => false : isAppUnreachable;
+}
 const DEV_PORT_SPAN = 100;
 const INSTALLED_PORT = 9223;
 
@@ -465,6 +473,7 @@ async function agentCommand(list) {
     if (parsed.ok === false) throw new Error(parsed.error || 'agent.status failed');
     return parsed.agents || [];
   };
+  const waitsOut = unreachableWaitPolicy(flags.port);
   const warnUnreachable = () => { console.error('… app not reachable, waiting… (terminals keep running; Ctrl-C stops waiting)'); };
   const finish = (result, withLines) => {
     printAgents(result.agents, withLines);
@@ -490,6 +499,7 @@ async function agentCommand(list) {
       fetchAgents: () => statusOf({ terminalId: parsed.terminalId }),
       mode: 'all',
       timeoutMs: waitSeconds * 1000,
+      isUnreachable: waitsOut,
       onUnreachable: warnUnreachable,
     });
     return finish(result, true);
@@ -512,13 +522,14 @@ async function agentCommand(list) {
     if (mode !== 'any' && mode !== 'all') throw new Error('usage: agent wait [--id <terminalId> | --children any|all] [--timeout <s>]');
     if (!id) {
       // App closed: skip the empty check and wait for it (links are restored on restart).
-      const first = await statusOf({ caller }).catch((e) => { if (isAppUnreachable(e)) return null; throw e; });
+      const first = await statusOf({ caller }).catch((e) => { if (waitsOut(e)) return null; throw e; });
       if (first && !first.length) throw new Error(caller ? `no child agents for ${caller}` : 'no child agents (run inside a BBARIT tab or pass --caller <id>)');
     }
     const result = await waitForAgents({
       fetchAgents: () => statusOf(id ? { terminalId: id } : { caller }),
       mode: id ? 'all' : mode,
       timeoutMs: waitSeconds * 1000,
+      isUnreachable: waitsOut,
       onUnreachable: warnUnreachable,
     });
     return finish(result, false);
