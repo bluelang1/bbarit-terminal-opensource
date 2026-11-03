@@ -144,6 +144,26 @@ describe('decideAgentNote', () => {
     expect(decideAgentNote(link, { state: 'blocked', turn: 2 }).note).toBe('blocked');
   });
 
+  it('ignores reports parsed from replayed output and resyncs to the post-replay turn', async () => {
+    const { resyncLinkAfterReplay } = await import('./agentRelay');
+    // Restored link (turn reset), then a tail replay re-counts done at turns 1..3.
+    let link = baseLink({ lastNotifiedTurn: -1 });
+    for (const turn of [1, 2, 3]) {
+      const r = decideAgentNote(link, { state: 'done', turn, replaying: true });
+      expect(r.note).toBeNull();
+      link = r.link;
+    }
+    link = resyncLinkAfterReplay({ ...link, lastSendTurn: 7 }, 3, 'done');
+    expect(link).toMatchObject({ lastNotifiedTurn: 3, lastNotifiedState: 'done', lastSendTurn: undefined, lastState: 'done' });
+    // The same done reported live again is not news; the next turn is.
+    expect(decideAgentNote(link, { state: 'done', turn: 3 }).note).toBeNull();
+    expect(decideAgentNote(link, { state: 'done', turn: 4 }).note).toBe('done');
+    // A replay that ended working leaves no note state: the first live blocked is sent.
+    const working = resyncLinkAfterReplay(baseLink(), 2, 'working');
+    expect(working.lastNotifiedState).toBeUndefined();
+    expect(decideAgentNote(working, { state: 'blocked', turn: 2 }).note).toBe('blocked');
+  });
+
   it('exit notes once', () => {
     const first = decideExitNote(baseLink());
     expect(first.note).toBe('exited');
@@ -398,8 +418,9 @@ describe('agentLinks persistence', () => {
     const saved = JSON.parse(JSON.stringify(serializeAgentLinks(links)));
     expect(saved.map((l: { childId: string }) => l.childId)).toEqual(['c1', 'c2', 'c3']);
     const restored = restoreAgentLinks(saved, new Set(['p', 'c1', 'c3']), 99);
+    // Turn numbers belong to the previous app run (the counter restarts at 0): not restored.
     expect(restored).toEqual([
-      { childId: 'c1', parentId: 'p', name: 'rev', cliType: 'claude', createdAt: 5, lastNotifiedTurn: 3, lastNotifiedState: 'done', lastSendTurn: undefined },
+      { childId: 'c1', parentId: 'p', name: 'rev', cliType: 'claude', createdAt: 5, lastNotifiedTurn: -1 },
     ]);
     expect(restoreAgentLinks('junk', new Set())).toEqual([]);
   });

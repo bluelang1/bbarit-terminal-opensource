@@ -40,6 +40,8 @@ export interface AgentStatusSnapshot {
   cleared?: boolean;
   /** 보고를 받은 시각(ms). 부모가 "최근에" 7501 을 보고했는지 판단한다. */
   at?: number;
+  /** 재생(복구·재부착) 중 파싱된 과거 보고. 노트를 만들지 않는다. */
+  replaying?: boolean;
 }
 
 /** 노트·브리프의 `from` 에 쓰는 짧은 표시 이름. */
@@ -190,7 +192,9 @@ export function formatAgentNote(opts: {
  * 반환: 보낼 상태(없으면 null)와 갱신된 링크.
  */
 export function decideAgentNote(link: AgentLink, s: AgentStatusSnapshot): { note: AgentNoteState | null; link: AgentLink } {
-  if (s.cleared) return { note: null, link };
+  // 재생된 보고는 과거 것이다(앱이 뜰 때마다 turn 은 0 부터 다시 센다). 재생 뒤
+  // resyncLinkAfterReplay 가 링크를 재생 후 turn 에 맞춘다.
+  if (s.cleared || s.replaying) return { note: null, link };
   const next: AgentLink = { ...link, lastState: s.state };
   if (s.state !== 'blocked' && s.state !== 'done') return { note: null, link: next };
   if (s.state === 'done' && link.pending) return { note: null, link: next };
@@ -200,6 +204,20 @@ export function decideAgentNote(link: AgentLink, s: AgentStatusSnapshot): { note
   }
   if (link.lastNotifiedTurn === s.turn && link.lastNotifiedState === s.state) return { note: null, link: next };
   return { note: s.state, link: { ...next, lastNotifiedTurn: s.turn, lastNotifiedState: s.state } };
+}
+
+/**
+ * 저장된 출력을 재생한 뒤: 링크의 턴 기록을 재생 후 turn/상태로 맞춘다. 이 turn 은 이번 앱
+ * 실행의 카운터라 이전 실행에서 저장한 lastNotifiedTurn·lastSendTurn 과 비교할 수 없다.
+ */
+export function resyncLinkAfterReplay(link: AgentLink, turn: number, state?: AgentTabState): AgentLink {
+  return {
+    ...link,
+    lastNotifiedTurn: turn,
+    lastNotifiedState: state === 'blocked' || state === 'done' ? state : undefined,
+    lastSendTurn: undefined,
+    lastState: state ?? link.lastState,
+  };
 }
 
 /** PTY 종료 → 노트는 한 번만. */
@@ -424,23 +442,25 @@ export function serializeAgentLinks(links: Iterable<AgentLink>): PersistedAgentL
   return out;
 }
 
-/** Saved links whose child and parent tabs still exist (others are pruned). */
+/**
+ * Saved links whose child and parent tabs still exist (others are pruned). Turn numbers are
+ * not restored: the OSC 7501 turn counter restarts at 0 every app run, so a saved
+ * lastNotifiedTurn/lastSendTurn would drop (equal number) or repeat notes. A replay resyncs
+ * them (resyncLinkAfterReplay).
+ */
 export function restoreAgentLinks(raw: unknown, aliveIds: ReadonlySet<string>, now = Date.now()): AgentLink[] {
   if (!Array.isArray(raw)) return [];
   const out: AgentLink[] = [];
   for (const r of raw) {
     if (!r || typeof r.childId !== 'string' || typeof r.parentId !== 'string') continue;
     if (!aliveIds.has(r.childId) || !aliveIds.has(r.parentId)) continue;
-    const state = r.lastNotifiedState === 'blocked' || r.lastNotifiedState === 'done' || r.lastNotifiedState === 'exited' ? r.lastNotifiedState : undefined;
     out.push({
       childId: r.childId,
       parentId: r.parentId,
       name: typeof r.name === 'string' ? r.name : undefined,
       cliType: typeof r.cliType === 'string' ? r.cliType : undefined,
       createdAt: Number.isFinite(r.createdAt) ? r.createdAt : now,
-      lastNotifiedTurn: Number.isFinite(r.lastNotifiedTurn) ? r.lastNotifiedTurn : 0,
-      lastNotifiedState: state,
-      lastSendTurn: Number.isFinite(r.lastSendTurn) ? r.lastSendTurn : undefined,
+      lastNotifiedTurn: -1,
     });
   }
   return out;

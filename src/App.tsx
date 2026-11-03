@@ -21,7 +21,7 @@ import { ClampedMenu } from './components/ClampedMenu';
 import StatusBarStats from './components/StatusBarStats';
 import { type OnMount } from '@monaco-editor/react';
 import { XTerminal, disposeTerminal, releaseTerminalRuntime, getTerminalRecentOutput, isTerminalBusy } from './XTerminal';
-import { getTerminalAgentState, isTerminalAgentUiReady, isTerminalPtyStarted, PTY_EXITED_EVENT } from './XTerminal';
+import { getTerminalAgentState, isTerminalAgentUiReady, isTerminalPtyStarted, PTY_EXITED_EVENT, PTY_REPLAYED_EVENT } from './XTerminal';
 import { useRestoreFocusOnWindowFocus } from './hooks/useRestoreFocusOnWindowFocus';
 import { BROKER_AGENT_ROLES, startDevReviewPair, ROLE_LABEL as BROKER_ROLE_LABEL, normalizeBrokerAgentRole, shouldAcceptBrokerStatusUpdate, type BrokerReviewMode, type DevReviewRole, type BrokerStatusSnapshot, type PairEvent } from './devreview/devReviewPair';
 import { performAgentRestart } from './devreview/restartAgents';
@@ -181,7 +181,7 @@ import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning } from './terminal/busyAgentTabs';
-import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -5819,6 +5819,8 @@ Office project scaffold created by BBARIT Terminal.
     }, 350);
   };
   const agentRelayStatusRef = useRef<Map<string, AgentStatusSnapshot>>(new Map());
+  /** Turn/state after a tab's output replay (links restored later are resynced to it). */
+  const agentReplayedTurnRef = useRef<Map<string, { turn: number; state?: AgentTabState }>>(new Map());
   const agentNoteFlushingRef = useRef<Set<string>>(new Set());
   const findTerminalAnywhere = (terminalId: string): TerminalInstance | undefined => {
     for (const p of projectsRef.current) {
@@ -5889,7 +5891,7 @@ Office project scaffold created by BBARIT Terminal.
       const d = (ev as CustomEvent).detail as AgentStatusEventDetail | undefined;
       if (!d?.terminalId) return;
       const tid = d.terminalId;
-      const snap: AgentStatusSnapshot = { state: d.state, kind: d.kind, msg: d.msg, turn: d.turn, cleared: d.cleared, at: Date.now() };
+      const snap: AgentStatusSnapshot = { state: d.state, kind: d.kind, msg: d.msg, turn: d.turn, cleared: d.cleared, at: Date.now(), replaying: d.replaying };
       if (d.cleared) agentRelayStatusRef.current.delete(tid);
       else agentRelayStatusRef.current.set(tid, snap);
       const link = agentLinksRef.current.get(tid);
@@ -5912,9 +5914,20 @@ Office project scaffold created by BBARIT Terminal.
       if (note) void deliverAgentNote(next, note);
     };
     window.addEventListener(PTY_EXITED_EVENT, onPtyExited as EventListener);
+    // Replayed output re-counted old turns (ignored above): line the link up with the result.
+    const onPtyReplayed = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as { terminalId?: string; turn?: number; state?: AgentTabState } | undefined;
+      if (!d?.terminalId) return;
+      const turn = Number(d.turn) || 0;
+      agentReplayedTurnRef.current.set(d.terminalId, { turn, state: d.state });
+      const link = agentLinksRef.current.get(d.terminalId);
+      if (link) agentLinksRef.current.set(d.terminalId, resyncLinkAfterReplay(link, turn, d.state));
+    };
+    window.addEventListener(PTY_REPLAYED_EVENT, onPtyReplayed as EventListener);
     return () => {
       window.removeEventListener(AGENT_STATUS_EVENT, onRelayStatus as EventListener);
       window.removeEventListener(PTY_EXITED_EVENT, onPtyExited as EventListener);
+      window.removeEventListener(PTY_REPLAYED_EVENT, onPtyReplayed as EventListener);
     };
   }, []);
   // 탭이 닫히면: 부모가 사라진 링크와 대기열은 버린다(자식 탭은 그대로 둔다). 닫힌 자식의 링크도 버린다.
@@ -5923,7 +5936,9 @@ Office project scaffold created by BBARIT Terminal.
     if (projectsLoadedRef.current && restoredAgentLinksRef.current !== undefined) {
       // Links saved with the projects (pruned to tabs that still exist).
       for (const l of restoreAgentLinks(restoredAgentLinksRef.current, alive)) {
-        if (!agentLinksRef.current.has(l.childId)) agentLinksRef.current.set(l.childId, l);
+        if (agentLinksRef.current.has(l.childId)) continue;
+        const replayed = agentReplayedTurnRef.current.get(l.childId);
+        agentLinksRef.current.set(l.childId, replayed ? resyncLinkAfterReplay(l, replayed.turn, replayed.state) : l);
       }
       restoredAgentLinksRef.current = undefined;
     }
@@ -5935,6 +5950,9 @@ Office project scaffold created by BBARIT Terminal.
     }
     for (const tid of [...agentRelayStatusRef.current.keys()]) {
       if (!alive.has(tid)) agentRelayStatusRef.current.delete(tid);
+    }
+    for (const tid of [...agentReplayedTurnRef.current.keys()]) {
+      if (!alive.has(tid)) agentReplayedTurnRef.current.delete(tid);
     }
   }, [projects]);
   /** agent.run: 자식 에이전트가 준비되면(7501 idle 또는 화면 휴리스틱) 첫 메시지를 게이트로 넣는다. */
