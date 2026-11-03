@@ -67,6 +67,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.terminal.tmuxAutoStart.desc': '打开新的Shell标签时自动启动tmux会话',
   'settings.terminal.confirmOnClose': '关闭确认',
   'settings.terminal.confirmOnClose.desc': '关闭有运行进程的终端时显示确认消息',
+  'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
+  'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
   'settings.terminal.autoSaveFiles': '自动保存文件',
   'settings.terminal.showProjectName': '显示项目名称',
   'settings.terminal.shellType': 'Shell 类型',

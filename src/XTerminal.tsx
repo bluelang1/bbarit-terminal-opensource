@@ -39,6 +39,7 @@ import {
 } from './terminal/programStatusHandler';
 import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
+import { decsetPrefix, decsetReset, exitedBannerText, markRecoveredHandled, omittedBytesLine, recoveredPtyFor, recoveredStartPlan } from './terminal/ptyRecovery';
 import { shouldNotifyReady } from './terminal/readyNotify';
 import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
@@ -294,6 +295,7 @@ interface TerminalState {
   programStatus?: ProgramStatusStore;
   pendingStatusProbe?: boolean;          // writer 등록 전에 온 지원 질의 — 등록되면 답한다
   replayingOutput?: boolean;             // 저장된 PTY 출력 재생 중 — 7501 알림·질의 응답 금지
+  restartOnEnter?: () => void;           // 앱이 꺼진 동안 끝난 홀더 터미널: Enter 로 새 셸(그 전 입력은 버림)
   // OSC 133 셸 통합 — docs/SHELL_PROMPT_OSC133.md (기록만, 표시는 범위 밖)
   lastPromptAt?: number;
   lastCommandStartAt?: number;
@@ -3222,6 +3224,11 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     // Write data to PTY (works regardless of disposed state)
     const writeToPty = (data: string) => {
+      const exitedState = terminalStates.get(terminalId);
+      if (exitedState?.restartOnEnter) {
+        if (/[\r\n]/.test(data)) exitedState.restartOnEnter();
+        return;
+      }
       _terminalLastActivity.set(terminalId, Date.now());
       feedTerminalInput(terminalId, data);
       // Always works as long as PTY exists
@@ -3688,11 +3695,47 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try {
         await ensurePtyListeners();
 
+        // PTY holder reattach (docs/PTY_HOLDER_DAEMON.md 3.5): a terminal that outlived the
+        // previous app run is attached, never re-created, and gets no startup command.
+        const recoveredEntry = recoveredPtyFor(terminalId);
+        const recoveredPlan = recoveredStartPlan(recoveredEntry, ptyAlreadyExists);
+        if (recoveredPlan === 'exited' && recoveredEntry) {
+          // Ended while the app was closed: replay its tail, say so, release it. A new shell
+          // starts only when the user presses Enter.
+          markRecoveredHandled(terminalId);
+          const buffered = await invoke<string>('read_pty_output_buffer', { terminalId }).catch(() => '');
+          const replayState = terminalStates.get(terminalId);
+          if (replayState) replayState.replayingOutput = true;
+          try {
+            await processTerminalOutput(terminalId, omittedBytesLine(recoveredEntry.dropped_bytes) + decsetPrefix(recoveredEntry.modes) + (buffered || '') + decsetReset(recoveredEntry.modes));
+            await waitForXtermParsed(terminalStates.get(terminalId)?.term);
+          } finally {
+            const after = terminalStates.get(terminalId);
+            if (after) after.replayingOutput = false;
+          }
+          await invoke('close_pty', { terminalId }).catch(() => {});
+          notifyPtyExited(terminalId);
+          if (disposed) return;
+          const banner = exitedBannerText(recoveredEntry) || '';
+          term.write(`\r\n\x1b[7m ${banner} \x1b[0m \x1b[2m${t('terminal.recoveredExitedHint' as Parameters<typeof t>[0], 'Enter 를 누르면 같은 폴더에서 다시 시작합니다')}\x1b[0m\r\n`);
+          const exitedState = terminalStates.get(terminalId);
+          if (exitedState) {
+            exitedState.restartOnEnter = () => {
+              exitedState.restartOnEnter = undefined;
+              exitedState._ptyExitDispatched = false;
+              if (!disposed) void initialize();
+            };
+          }
+          isReadyRef.current = true;
+          return;
+        }
+        const recoveredAttach = recoveredPlan === 'attach';
+
         const restoredProbe = await probeRestoredPty({
           invokeFn: invoke,
           terminalId,
           cliType,
-          isRestored: _isRestored,
+          isRestored: _isRestored || recoveredAttach,
           ptyAlreadyExists,
         });
         if (restoredProbe.ptyAlreadyExists && !ptyAlreadyExists) {
@@ -3701,6 +3744,15 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (restoredState) {
             restoredState.ptyCreated = true;
             if (restoredProbe.markCliAutoStarted) restoredState.autoStartedCliType = cliType;
+            if (recoveredAttach) {
+              // Running already: never (re)type the start command, not even the repair path.
+              restoredState.autoStartedCliType = cliType;
+              restoredState.startupRepairAttemptedCliType = cliType;
+            }
+          }
+          if (recoveredAttach && recoveredEntry && !disposed) {
+            // Modes the 1 MiB tail may have lost (alt screen, mouse, bracketed paste), then the tail.
+            restoredProbe.bufferedOutput = omittedBytesLine(recoveredEntry.dropped_bytes) + decsetPrefix(recoveredEntry.modes) + restoredProbe.bufferedOutput;
           }
           if (restoredProbe.bufferedOutput && !disposed) {
             // 재생되는 OSC 7501 보고는 과거 것이다: 상태는 반영하되 알림·질의 응답은 하지 않는다.
@@ -3713,6 +3765,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               const after = terminalStates.get(terminalId);
               if (after) after.replayingOutput = false;
             }
+          }
+          if (recoveredAttach && !disposed) {
+            // Same size may send no SIGWINCH: nudge cols-1 → cols so TUIs redraw (herdr's nudge).
+            const cols = term.cols || 80;
+            const rows = term.rows || 24;
+            await invoke('resize_pty', { terminalId, rows, cols: Math.max(2, cols - 1) }).catch(() => {});
+            window.setTimeout(() => { void invoke('resize_pty', { terminalId, rows: term.rows || rows, cols: term.cols || cols }).catch(() => {}); }, 80);
+            window.dispatchEvent(new CustomEvent('octo-pty-recovered', { detail: { terminalId, state: getTerminalAgentState(terminalId) } }));
           }
         }
 
@@ -3798,6 +3858,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           && looksLikePlainShellPrompt(stateBeforeStartup.recentOutputText);
         const shouldRunStartupCommand =
           !!startupCommand &&
+          !recoveredAttach &&
           (!ptyAlreadyExists ||
             (cliType !== 'shell' && stateBeforeStartup?.autoStartedCliType !== cliType) ||
             existingRawShell);
@@ -3857,7 +3918,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         // PROCESS (reliable — not prose regex) and re-inject only when the CLI genuinely
         // never started. If a CLI is running, pty_terminal_has_child is true so this is a
         // no-op — it can NEVER spam an already-running agent (the old repair-loop bug).
-        if (cliType !== 'shell' && startupCommand) {
+        if (cliType !== 'shell' && startupCommand && !recoveredAttach) {
           const scheduleStartRetry = (attempt: number) => {
             if (attempt > 3) return;
             setTimeout(() => {

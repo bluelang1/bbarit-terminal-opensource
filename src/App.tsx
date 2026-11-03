@@ -142,6 +142,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
+import { isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -180,7 +181,7 @@ import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning } from './terminal/busyAgentTabs';
-import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, runAgentBrief, wrapAgentMessage, type AgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
@@ -1820,7 +1821,37 @@ function upsertRecentProject(list: RecentProjectEntry[], next: Omit<RecentProjec
   return [entry, ...filtered].slice(0, 20);
 }
 
-function saveProjects(projects: Project[], activeId: string | null) {
+/** Holder terminals without a saved tab → a "복구됨" tab in the project with the same folder,
+ *  else one "복구된 터미널" project. Layouts get the new ids. Never kills anything. */
+function placeRecoveredTerminals(projects: Project[], recovered: readonly RecoveredPty[]): Project[] {
+  const before = new Map(projects.map((p) => [p.id, p.terminals.length]));
+  const { projects: placed } = placeUnknownRecovered<TerminalInstance, Project>(projects, recovered, {
+    terminal: (e) => ({ ...createTerminal('복구됨'), id: e.id, lastWorkDir: e.cwd || undefined }),
+    project: (entries, terminals) => ({
+      id: `recovered-${Date.now()}`,
+      workDir: entries.find((e) => e.cwd)?.cwd || '/',
+      name: '복구된 터미널',
+      displayName: '복구된 터미널',
+      icon: projectNumberIcon(projects.length + 1),
+      category: 'coding',
+      styleIndex: 0,
+      fontIndex: 0,
+      terminals,
+      activeTerminalId: terminals[0].id,
+    }),
+  });
+  if (placed === projects) return projects;
+  return placed.map((p) => {
+    if (before.get(p.id) === p.terminals.length) return p;
+    const ids = p.terminals.map((t) => t.id);
+    const tiling = p.terminalTiling
+      ? { ...p.terminalTiling, rightIds: [...p.terminalTiling.rightIds, ...ids.filter((id) => !p.terminalTiling!.leftIds.includes(id) && !p.terminalTiling!.rightIds.includes(id))] }
+      : undefined;
+    return { ...p, terminalLayout: normalizeTerminalLayout(p.terminalLayout, ids, p.activeTerminalId), terminalTiling: tiling };
+  });
+}
+
+function saveProjects(projects: Project[], activeId: string | null, agentLinks?: PersistedAgentLink[]) {
   const data = {
     version: 2,
     projects: projects.map(p => ({
@@ -1862,11 +1893,13 @@ function saveProjects(projects: Project[], activeId: string | null) {
       activeTerminalId: p.activeTerminalId,
     })),
     activeProjectId: activeId,
+    // Agent relay links survive app restarts (terminals do, with the PTY holder).
+    agentLinks: agentLinks && agentLinks.length > 0 ? agentLinks : undefined,
   };
   void kvSet(STORAGE_KEY, JSON.stringify(data));
 }
 
-async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: string | null }> {
+async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: string | null; agentLinks?: unknown }> {
   try {
     const data = await kvGet(STORAGE_KEY);
     console.log('[loadProjects] kvGet result:', data ? `${data.length} chars` : 'NULL');
@@ -1960,7 +1993,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
         terminalTiling: tiling,
       };
     });
-    return { projects, activeProjectId: parsed.activeProjectId || (projects[0]?.id || null) };
+    return { projects, activeProjectId: parsed.activeProjectId || (projects[0]?.id || null), agentLinks: parsed.agentLinks };
   } catch {
     return { projects: [], activeProjectId: null };
   }
@@ -2146,6 +2179,8 @@ function App() {
 
   // Guard: do not save projects until initial load completes (prevents HMR wiping data)
   const projectsLoadedRef = useRef(false);
+  // Saved agent relay links, applied once the restored projects are in place.
+  const restoredAgentLinksRef = useRef<unknown>(undefined);
 
   const markTerminalStarted = useCallback((terminalId: string) => {
     setStartupDeferredTerminalIds((prev) => {
@@ -2174,6 +2209,10 @@ function App() {
     projectsToOpen: Project[],
     preferredActiveId: string | null,
   ) => {
+    // Holder terminals that outlived the previous run (docs/PTY_HOLDER_DAEMON.md 3.5): known
+    // before any XTerminal mounts. Unsaved ones join the project with the same folder.
+    const recovery = await loadPtyRecovery(invoke);
+    projectsToOpen = placeRecoveredTerminals(projectsToOpen, recovery.recovered);
     let resolvedActiveProjectId = preferredActiveId;
     let startupSshError: string | null = null;
     let restoredActiveProject = projectsToOpen.find((p) => p.id === resolvedActiveProjectId) || null;
@@ -2249,7 +2288,8 @@ function App() {
 
     setProjects(projectsToOpen);
     setActiveProjectId(resolvedActiveProjectId);
-    setStartupDeferredTerminalIds(startupDeferredIds);
+    // Recovered terminals are already running: nothing to defer, only the screen to replay.
+    setStartupDeferredTerminalIds(withoutRecovered(startupDeferredIds, recovery.recovered));
     projectsRef.current = projectsToOpen;
     if (projectsToOpen.length === 0) setShowNewProjectModal(true);
     setProjectDocsExpanded(new Set(projectsToOpen.map(p => p.id)));
@@ -2289,7 +2329,10 @@ function App() {
     let cancelled = false;
 
     const restoreProjects = async () => {
+      // Before applyRestoredProjects: recovered ids decide deferStart / create_shell.
+      await loadPtyRecovery(invoke);
       const loaded = await loadProjects();
+      restoredAgentLinksRef.current = loaded.agentLinks;
       console.log('[LoadProjects] Loaded', loaded.projects.length, 'projects, activeProjectId=', loaded.activeProjectId);
       if (cancelled) return;
       if (loaded.projects.length === 0) {
@@ -5539,6 +5582,50 @@ Office project scaffold created by BBARIT Terminal.
   // 프로젝트 폴더가 외부에서 삭제/이동된 경우: 활성화 시 감지해 경고 토스트 (프로젝트당 1회).
   // PTY는 resolve_shell_work_dir이 홈으로 fallback하므로 유령 폴더를 재생성하지 않는다.
   const missingWorkDirWarnedRef = useRef<Set<string>>(new Set());
+  // PTY holder reattach notices (docs/PTY_HOLDER_DAEMON.md 3.5-3.6): first recovery ever,
+  // why the holder is not used, and one summary of recovered agents waiting for input.
+  const ptyNoticeShownRef = useRef(false);
+  useEffect(() => {
+    const pushToast = (id: string, title: string, prompt: string, ms: number, terminalId = '', kind?: 'blocked') => {
+      setTaskToasts((prev) => [...prev.filter((t) => t.id !== id), { id, terminalId, title, prompt, duration: '', kind }].slice(-4));
+      taskToastTimersRef.current[id] = window.setTimeout(() => dismissTaskToast(id), ms);
+    };
+    if (!ptyNoticeShownRef.current) {
+      ptyNoticeShownRef.current = true;
+      void loadPtyRecovery(invoke).then(async (rec) => {
+        const ko = locale === 'ko';
+        if (rec.fallbackReason) {
+          pushToast('pty-holder-fallback', ko ? '터미널이 앱 안에서 실행 중' : 'Terminals run inside the app', rec.fallbackReason, 15000);
+        }
+        const live = rec.recovered.filter((e) => !e.exited).length;
+        if (live > 0 && !(await kvGet('octo-pty-holder-recovered-notice').catch(() => null))) {
+          void kvSet('octo-pty-holder-recovered-notice', '1');
+          pushToast('pty-holder-recovered',
+            ko ? `이전 세션의 터미널 ${live}개를 복구했습니다` : `Recovered ${live} terminal(s) from the previous session`,
+            ko ? '앱을 종료해도 터미널은 계속 돕니다. 메뉴의 "종료하고 모든 터미널 끝내기"로 전부 끝낼 수 있습니다.' : 'Quitting keeps terminals running. Use "Quit and End All Terminals" to end them.',
+            15000);
+        }
+      });
+    }
+    const blocked = new Set<string>();
+    let timer: number | null = null;
+    let done = false;
+    const onRecovered = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as { terminalId?: string; state?: string } | undefined;
+      if (done || !d?.terminalId) return;
+      if (d.state === 'blocked') blocked.add(d.terminalId);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        done = true;
+        if (blocked.size === 0) return;
+        const ko = locale === 'ko';
+        pushToast('pty-holder-blocked', ko ? `대기 중인 에이전트 ${blocked.size}개` : `${blocked.size} agent(s) waiting for input`,
+          ko ? '앱이 꺼진 동안 입력을 기다리게 된 탭이 있습니다.' : 'Some tabs started waiting while the app was closed.', 15000, [...blocked][0], 'blocked');
+      }, 2000);
+    };
+    window.addEventListener('octo-pty-recovered', onRecovered as EventListener);
+    return () => { window.removeEventListener('octo-pty-recovered', onRecovered as EventListener); if (timer) window.clearTimeout(timer); };
+  }, []);
   useEffect(() => {
     const proj = activeProject;
     const workDir = proj?.workDir?.trim();
@@ -5723,6 +5810,14 @@ Office project scaffold created by BBARIT Terminal.
   // 처음 등록한 리스너가 그대로 써도 된다.
   const agentLinksRef = useRef<Map<string, AgentLink>>(new Map());
   const agentNoteQueueRef = useRef<PendingNotes>(new Map());
+  /** Persist lastNotifiedTurn changes (projects are saved with the links). */
+  const scheduleAgentLinksSave = () => {
+    if (!projectsLoadedRef.current || projectsRef.current.length === 0) return;
+    if (projectSaveTimerRef.current) clearTimeout(projectSaveTimerRef.current);
+    projectSaveTimerRef.current = setTimeout(() => {
+      saveProjects(projectsRef.current, activeProjectIdLatestRef.current, serializeAgentLinks(agentLinksRef.current.values()));
+    }, 350);
+  };
   const agentRelayStatusRef = useRef<Map<string, AgentStatusSnapshot>>(new Map());
   const agentNoteFlushingRef = useRef<Set<string>>(new Set());
   const findTerminalAnywhere = (terminalId: string): TerminalInstance | undefined => {
@@ -5801,7 +5896,7 @@ Office project scaffold created by BBARIT Terminal.
       if (link) {
         const { note, link: next } = decideAgentNote(link, snap);
         agentLinksRef.current.set(tid, next);
-        if (note) void deliverAgentNote(next, note, snap);
+        if (note) { void deliverAgentNote(next, note, snap); scheduleAgentLinksSave(); }
       }
       // 이 터미널이 부모라면 blocked 를 벗어날 때 쌓인 노트를 보낸다.
       if (!d.cleared && d.state !== 'blocked' && agentNoteQueueRef.current.has(tid)) void flushAgentNotes(tid);
@@ -5825,6 +5920,13 @@ Office project scaffold created by BBARIT Terminal.
   // 탭이 닫히면: 부모가 사라진 링크와 대기열은 버린다(자식 탭은 그대로 둔다). 닫힌 자식의 링크도 버린다.
   useEffect(() => {
     const alive = new Set(projects.flatMap((p) => p.terminals.map((tt) => tt.id)));
+    if (projectsLoadedRef.current && restoredAgentLinksRef.current !== undefined) {
+      // Links saved with the projects (pruned to tabs that still exist).
+      for (const l of restoreAgentLinks(restoredAgentLinksRef.current, alive)) {
+        if (!agentLinksRef.current.has(l.childId)) agentLinksRef.current.set(l.childId, l);
+      }
+      restoredAgentLinksRef.current = undefined;
+    }
     for (const [childId, link] of agentLinksRef.current) {
       if (!alive.has(childId) || (link.parentId && !alive.has(link.parentId))) agentLinksRef.current.delete(childId);
     }
@@ -9192,7 +9294,7 @@ Office project scaffold created by BBARIT Terminal.
     if (projectSaveTimerRef.current) clearTimeout(projectSaveTimerRef.current);
     projectSaveTimerRef.current = setTimeout(() => {
       console.log('[SaveGuard] Saving', projects.length, 'projects, activeProjectId=', activeProjectId);
-      saveProjects(projects, activeProjectId);
+      saveProjects(projects, activeProjectId, serializeAgentLinks(agentLinksRef.current.values()));
     }, 350);
     return () => {
       if (projectSaveTimerRef.current) clearTimeout(projectSaveTimerRef.current);
@@ -10322,6 +10424,8 @@ Office project scaffold created by BBARIT Terminal.
           if (!proceed) return;
         }
         await pendingNativeUpdateRef.current.downloadAndInstall();
+        // PTY holder: GOODBYE handover instead of kill_all, the relaunched app reattaches.
+        await invoke('pty_prepare_handover').catch(() => {});
         await relaunch();
         return;
       }
@@ -21142,7 +21246,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            projectWorkDir={activeProject.workDir}
 			                            githubAccount={activeProject.githubAccount}
                             isActive={terminal.id === activeProject.activeTerminalId}
-                            isRestored={!!terminal.lastWorkDir}
+                            isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
                             deferStart={shouldDeferStartupTerminal(terminal.id, terminal.id === activeProject.activeTerminalId)}
                             style={projectStyle}
 			                            fontFamily={projectFont.value}
@@ -21535,7 +21639,7 @@ Office project scaffold created by BBARIT Terminal.
                             projectWorkDir={proj.workDir}
                             githubAccount={proj.githubAccount}
                             isActive={isActiveTerminal}
-                            isRestored={!!terminal.lastWorkDir}
+                            isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
                             deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
                             style={projectStyle}
                             fontFamily={projectFont.value}
@@ -21841,7 +21945,7 @@ Office project scaffold created by BBARIT Terminal.
                                     projectWorkDir={proj.workDir}
                                     githubAccount={proj.githubAccount}
                                     isActive={isActiveTerminal}
-                                    isRestored={!!terminal.lastWorkDir}
+                                    isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
                                     deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
                                     style={projectStyle}
                                     fontFamily={projectFont.value}
@@ -22127,7 +22231,7 @@ Office project scaffold created by BBARIT Terminal.
 			                              projectWorkDir={activeProject.workDir}
 			                              githubAccount={activeProject.githubAccount}
 			                              isActive={isActiveTerminal}
-			                              isRestored={!!terminal.lastWorkDir}
+			                              isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
 			                              deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
 			                              style={projectStyle}
 			                              fontFamily={projectFont.value}
@@ -22470,7 +22574,7 @@ Office project scaffold created by BBARIT Terminal.
 		                                  projectWorkDir={activeProject.workDir}
 		                                  githubAccount={activeProject.githubAccount}
 		                                  isActive={isActiveTerminal}
-		                                  isRestored={!!terminal.lastWorkDir}
+		                                  isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
 		                                  deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
 		                                  style={projectStyle}
 		                                  fontFamily={projectFont.value}
@@ -22784,7 +22888,7 @@ Office project scaffold created by BBARIT Terminal.
                           projectWorkDir={activeProject.workDir}
                           githubAccount={activeProject.githubAccount}
                           isActive={isActiveTerminal}
-                          isRestored={!!terminal.lastWorkDir}
+                          isRestored={isRestoredTerminal(terminal.id, terminal.lastWorkDir)}
                           deferStart={shouldDeferStartupTerminal(terminal.id, isActiveTerminal)}
                           style={projectStyle}
                           fontFamily={projectFont.value}

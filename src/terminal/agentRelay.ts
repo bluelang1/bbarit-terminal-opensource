@@ -393,3 +393,55 @@ export async function runAgentBrief(
     ? { kind: 'sent', ok: true, readyBy, sentTurn, sentWhileBlocked }
     : { kind: 'sent', ok: false, reason: res.reason, readyBy, sentTurn, sentWhileBlocked };
 }
+
+// ── 재시작 뒤에도 이어지게(docs/PTY_HOLDER_DAEMON.md 3.5-6): 링크를 프로젝트와 함께 저장 ──
+export interface PersistedAgentLink {
+  childId: string;
+  parentId: string;
+  name?: string;
+  cliType?: string;
+  createdAt?: number;
+  lastNotifiedTurn: number;
+  lastNotifiedState?: AgentNoteState;
+  lastSendTurn?: number;
+}
+
+export function serializeAgentLinks(links: Iterable<AgentLink>): PersistedAgentLink[] {
+  const out: PersistedAgentLink[] = [];
+  for (const l of links) {
+    if (!l?.childId || !l.parentId || l.exited) continue;
+    out.push({
+      childId: l.childId,
+      parentId: l.parentId,
+      name: l.name || undefined,
+      cliType: l.cliType || undefined,
+      createdAt: l.createdAt,
+      lastNotifiedTurn: Number(l.lastNotifiedTurn) || 0,
+      lastNotifiedState: l.lastNotifiedState,
+      lastSendTurn: l.lastSendTurn,
+    });
+  }
+  return out;
+}
+
+/** Saved links whose child and parent tabs still exist (others are pruned). */
+export function restoreAgentLinks(raw: unknown, aliveIds: ReadonlySet<string>, now = Date.now()): AgentLink[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AgentLink[] = [];
+  for (const r of raw) {
+    if (!r || typeof r.childId !== 'string' || typeof r.parentId !== 'string') continue;
+    if (!aliveIds.has(r.childId) || !aliveIds.has(r.parentId)) continue;
+    const state = r.lastNotifiedState === 'blocked' || r.lastNotifiedState === 'done' || r.lastNotifiedState === 'exited' ? r.lastNotifiedState : undefined;
+    out.push({
+      childId: r.childId,
+      parentId: r.parentId,
+      name: typeof r.name === 'string' ? r.name : undefined,
+      cliType: typeof r.cliType === 'string' ? r.cliType : undefined,
+      createdAt: Number.isFinite(r.createdAt) ? r.createdAt : now,
+      lastNotifiedTurn: Number.isFinite(r.lastNotifiedTurn) ? r.lastNotifiedTurn : 0,
+      lastNotifiedState: state,
+      lastSendTurn: Number.isFinite(r.lastSendTurn) ? r.lastSendTurn : undefined,
+    });
+  }
+  return out;
+}

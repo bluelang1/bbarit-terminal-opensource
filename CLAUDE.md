@@ -96,6 +96,11 @@ Build/test gotchas:
   ~/.config/octo/github-accounts.json `owners` > owner==gh login (local only); org
   detection (`gh api user/orgs`) runs in the background and caches hits to that file.
   gh accounts come from ~/.config/gh/hosts.yml; never return or log tokens.
+- PTY holder reattach: XTerminal asks src/terminal/ptyRecovery.ts (loaded from
+  pty_list_recovered before applyRestoredProjects); recovered ids skip deferStart,
+  create_shell and every startup-command injection. Holder isRestored = in that list.
+- Quit with the holder: GOODBYE from exit_goodbye_reason (menu kill_all > update
+  handover > terminal.keepRunningOnQuit, true by default, debug builds only if explicit).
 - Project edit reuses the new-project modal (editingProjectId); save logic lives in
   src/projectEdit.ts. Category is forced to `coding` on load/save.
 - Agent status comes from OSC 7501 (Claude Code >= 2.1.295 probes `ESC]7501;?`;

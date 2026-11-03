@@ -385,3 +385,22 @@ describe('agent.run child terminal', () => {
     expect(app).toContain('Object.assign(terminal, dedicatedClaudeSessionFields(freshClaude, newClaudeSessionId));');
   });
 });
+
+describe('agentLinks persistence', () => {
+  it('round-trips and prunes links whose tabs are gone', async () => {
+    const { serializeAgentLinks, restoreAgentLinks } = await import('./agentRelay');
+    const links = [
+      { childId: 'c1', parentId: 'p', name: 'rev', cliType: 'claude', createdAt: 5, lastNotifiedTurn: 3, lastNotifiedState: 'done' as const, pending: true },
+      { childId: 'c2', parentId: 'p', createdAt: 6, lastNotifiedTurn: 0 },
+      { childId: 'c3', parentId: 'gone', createdAt: 7, lastNotifiedTurn: 1 },
+      { childId: 'c4', parentId: 'p', createdAt: 8, lastNotifiedTurn: 0, exited: true },
+    ];
+    const saved = JSON.parse(JSON.stringify(serializeAgentLinks(links)));
+    expect(saved.map((l: { childId: string }) => l.childId)).toEqual(['c1', 'c2', 'c3']);
+    const restored = restoreAgentLinks(saved, new Set(['p', 'c1', 'c3']), 99);
+    expect(restored).toEqual([
+      { childId: 'c1', parentId: 'p', name: 'rev', cliType: 'claude', createdAt: 5, lastNotifiedTurn: 3, lastNotifiedState: 'done', lastSendTurn: undefined },
+    ]);
+    expect(restoreAgentLinks('junk', new Set())).toEqual([]);
+  });
+});

@@ -67,6 +67,8 @@ export const it: Record<TranslationKey, string> = {
   'settings.terminal.tmuxAutoStart.desc': 'Avvia automaticamente una sessione tmux all\'apertura di una nuova scheda shell',
   'settings.terminal.confirmOnClose': 'Conferma chiusura',
   'settings.terminal.confirmOnClose.desc': 'Mostra conferma alla chiusura di un terminale con processi in esecuzione',
+  'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
+  'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
   'settings.terminal.autoSaveFiles': 'Salvataggio automatico file',
   'settings.terminal.showProjectName': 'Mostra nome progetto',
   'settings.terminal.shellType': 'Tipo di shell',

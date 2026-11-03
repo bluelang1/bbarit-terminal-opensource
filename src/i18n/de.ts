@@ -67,6 +67,8 @@ export const de: Record<TranslationKey, string> = {
   'settings.terminal.tmuxAutoStart.desc': 'Automatisch eine tmux-Sitzung beim Öffnen eines neuen Shell-Tabs starten',
   'settings.terminal.confirmOnClose': 'Schließen bestätigen',
   'settings.terminal.confirmOnClose.desc': 'Bestätigung anzeigen beim Schließen eines Terminals mit laufenden Prozessen',
+  'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
+  'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
   'settings.terminal.autoSaveFiles': 'Dateien automatisch speichern',
   'settings.terminal.showProjectName': 'Projektname anzeigen',
   'settings.terminal.shellType': 'Shell-Typ',

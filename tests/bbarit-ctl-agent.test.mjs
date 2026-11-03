@@ -7,6 +7,8 @@ import {
   evaluateAgentWait,
   mcpPortFromEnv,
   waitForAgents,
+  isAppUnreachable,
+  BRIDGE_UNREACHABLE,
 } from '../scripts/bbarit-ctl.mjs';
 
 const done = { terminalId: 'a', state: 'done', settled: true };
@@ -53,6 +55,23 @@ test('waitForAgents retries transient failures, then gives up', async () => {
   assert.equal((await waitForAgents({ fetchAgents: flaky, timeoutMs: 60000, ...clock })).timedOut, false);
   const broken = async () => { throw new Error('gone'); };
   await assert.rejects(waitForAgents({ fetchAgents: broken, timeoutMs: 60000, ...fakeClock() }), /gone/);
+});
+
+test('waitForAgents keeps waiting while the app is unreachable, bounded by the timeout', async () => {
+  const clock = fakeClock();
+  const closed = () => Object.assign(new Error('Cannot reach BBARIT Terminal'), { code: BRIDGE_UNREACHABLE });
+  let calls = 0;
+  let warned = 0;
+  // App closed for 10 polls (20 s, far past 3 strikes), then back with the child done.
+  const fetchAgents = async () => { calls++; if (calls <= 10) throw closed(); return [done]; };
+  const res = await waitForAgents({ fetchAgents, timeoutMs: 60000, onUnreachable: () => { warned++; }, ...clock });
+  assert.equal(res.timedOut, false);
+  assert.equal(calls, 11);
+  assert.equal(warned, 1, 'one "app not reachable" line');
+  const never = await waitForAgents({ fetchAgents: async () => { throw closed(); }, timeoutMs: 6000, ...fakeClock() });
+  assert.equal(never.timedOut, true);
+  assert.equal(isAppUnreachable(new Error('__BBARIT_CTL__ not ready (app too old or still loading)')), true);
+  assert.equal(isAppUnreachable(new Error('agent.status failed')), false);
 });
 
 test('agentExitCode', () => {

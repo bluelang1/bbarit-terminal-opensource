@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현 전.** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현(실기 확인 전).** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -253,7 +253,7 @@ trait PtyBackend: Send + Sync {
 | **0** ✅ | `handleUpdate` 에 "작업 중 탭 N개" 확인 대화상자. 7501 상태로 바로 만든다 | PR 1개, 작음 | 없음. 홀더와 독립 |
 | **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
 | **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~3.9 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
-| **2b** | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
+| **2b** ✅ | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
 | **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
@@ -341,6 +341,36 @@ trait PtyBackend: Send + Sync {
   클라이언트 `kill -9` → `sh` 가 홀더의 자식으로 생존 → 새 클라이언트가 WELCOME·TAIL 수신, 입력·출력 정상 →
   RELEASE 로 `sh` 소멸 → 유휴 종료로 소켓·json 정리. 앱 쪽 `spawn_holder` 로 띄운 홀더는 `getsid == pid` 이고
   환경에 `BBARIT_TERM_SCOPE` 가 없다. 앱 자체(Tauri)로 설정을 켠 실기는 2b 와 함께 한다.
+
+구현 메모: 2b — `src/terminal/ptyRecovery.ts`(레지스트리 + 순수 함수), `XTerminal.tsx` 초기화, `App.tsx`
+`applyRestoredProjects`·저장, `agentRelay.ts` 의 링크 직렬화, `bbarit-ctl.mjs` 재시도, `pty_backend.rs` 의
+`ExitReason`/`exit_goodbye_reason`/`keep_running_on_quit`, `main.rs` 의 커맨드·메뉴·종료 처리. 3절과 다르게 간 점:
+- `pty_list_recovered` 는 첫 WELCOME 의 터미널 + **이 앱이 띄워 아직 쥔 터미널**(웹뷰 새로고침)을 돌려준다.
+  닫힌 것은 빼고 `exited`·`pid` 는 현재 값. InProcess 는 `[]` 이고 `isRestored` 는 예전 `!!lastWorkDir` 를 쓴다.
+  프런트는 `pty_backend_info` → (holder 면) `pty_list_recovered` 를 한 번(15 초 상한) 부르고 결과를 레지스트리에 둔다.
+- 복구 터미널은 비활성 탭이어도 **마운트 때 바로** 재생·읽기 루프를 시작한다(3.5-1 의 "재생은 활성화 때" 와 다름):
+  읽기 루프가 돌지 않으면 홀더 큐가 차서 잘린다.
+- 꺼진 사이 끝난 터미널: tail + modes 재생, 모드 해제, `close_pty`(RELEASE), `octo-pty-exited`, 배너
+  "종료됨 (code N)". 기존 "재시작" 경로가 프런트에 없어서 **Enter 를 누르면** 같은 탭에서 `initialize()` 를 다시
+  돌린다(그 전 입력은 버림).
+- `modes` 재생은 alt-screen 을 먼저, kitty 플래그는 `CSI > f u`. 생략 줄은 TAIL 의 `dropped_bytes`(링에서 밀린 총량)를
+  쓴다. 새 앱의 xterm 에는 그만큼이 없으므로 "꺼진 동안" 양과 같지 않아도 화면에 없는 양은 맞다.
+- 저장 안 된 홀더 터미널(팝아웃·pm2 로그·하네스 셸 포함)은 같은 폴더 프로젝트에 "복구됨" 탭, 없으면
+  "복구된 터미널" 프로젝트(다음 저장부터 일반 프로젝트). 자동으로 죽이지 않는다.
+- blocked 요약 토스트는 XTerminal 이 재생 뒤 보내는 `octo-pty-recovered` 를 2 초 모아 한 번. "처음 복구" 토스트는 KV
+  `octo-pty-holder-recovered-notice` 로 한 번만. `fallbackReason` 은 토스트로 보인다(상태바 대신).
+- 종료: `exit_goodbye_reason(keep, kill_all_flag, handover_flag)` — 메뉴/`app_quit_kill_terminals` > 업데이트
+  (`pty_prepare_handover` 뒤 `relaunch()`) > `terminal.keepRunningOnQuit`(릴리스 기본 true, **디버그 빌드는 명시적 true
+  일 때만**, 결정 9). 홀더 quit/handover 는 앱 스윕과 비-macOS `CloseRequested` 트리 kill 을 건너뛴다. 메뉴 항목은
+  macOS 앱 메뉴에만 있다(ko/en 은 시작 때 `language`). 스키마 키는 선택적(미설정 = 빌드별 기본)이라 설정 저장이
+  dev 기본값을 true 로 굳히지 않는다.
+- 버전 불일치: 다른 프로토콜 버전의 홀더가 살아 있으면 두 번째 홀더를 띄우지 않고 InProcess 로 폴백하며 이유를
+  `fallbackReason` 에 남긴다(3단계 DRAIN 전까지 이전 터미널을 보이지 않게 버려 두지 않기 위해).
+- agentLinks: 자식·부모 id, 이름, cliType, `lastNotifiedTurn/State`, `lastSendTurn` 을 프로젝트 JSON(`agentLinks`)에
+  저장하고, 로드 뒤 두 탭이 다 있는 링크만 되살린다. 노트를 보낼 때 저장을 한 번 예약한다. ctl `agent wait/run` 은
+  브리지가 없거나 `__BBARIT_CTL__` 준비 전이면 3번 실패 규칙 없이 `--timeout` 까지 기다리고 stderr 에 한 줄을 찍는다.
+- **안 한 것**: 3.5-7(재부착 때 Claude transcript 재탐지 — `read_directory` 에 mtime 이 없어 "더 최신 jsonl" 판정을
+  못 함), 비-macOS 의 "종료하고 모든 터미널 끝내기" UI(커맨드 `app_quit_kill_terminals` 만 있음), 앱 실기 검증.
 
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.
