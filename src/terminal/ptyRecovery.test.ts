@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery, isRestoredTerminal, loadPtyRecovery,
-  markRecoveredHandled, omittedBytesLine, placeUnknownRecovered, recoveredPtyFor, recoveredStartPlan,
-  setPtyRecovery, withoutRecovered, type RecoveredPty,
+  awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
+  isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
+  omittedBytesLine, placeUnknownRecovered, planAfterProbe, recoveredPtyFor, recoveredStartPlan,
+  resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
 } from './ptyRecovery';
 
 const entry = (id: string, extra: Partial<RecoveredPty> = {}): RecoveredPty => ({
@@ -51,6 +52,71 @@ describe('recovered-id gating', () => {
     expect(a).toBe(b);
     expect(calls).toEqual(['pty_backend_info', 'pty_list_recovered']);
     expect(getPtyRecovery().recovered.map((e) => e.id)).toEqual(['r1']);
+  });
+
+  it('loadPtyRecovery retries errors and timeouts instead of concluding in-process', async () => {
+    resetPtyRecoveryForTests();
+    let n = 0;
+    const waits: number[] = [];
+    const retries: number[] = [];
+    const invokeFn = async <T,>(cmd: string): Promise<T> => {
+      if (cmd === 'pty_backend_info') {
+        n += 1;
+        if (n === 1) throw new Error('ipc down');
+        if (n === 2) return new Promise<T>(() => {}); // never answers: the attempt times out
+        return { kind: 'holder' } as T;
+      }
+      return [entry('kept')] as T;
+    };
+    const rec = await loadPtyRecovery(invokeFn, {
+      timeoutMs: 5,
+      backoffMs: [1, 2],
+      sleep: async (ms) => { waits.push(ms); },
+      onRetry: (attempt) => { retries.push(attempt); },
+    });
+    expect(rec.kind).toBe('holder');
+    expect(rec.recovered.map((e) => e.id)).toEqual(['kept']);
+    expect(retries).toEqual([1, 2]);
+    expect(waits).toEqual([1, 2]);
+    expect(getPtyRecovery().kind).toBe('holder');
+  });
+
+  it('loadPtyRecovery does not resolve while the backend keeps failing', async () => {
+    resetPtyRecoveryForTests();
+    let attempts = 0;
+    let settled = false;
+    const invokeFn = async <T,>(): Promise<T> => { attempts += 1; throw new Error('down'); };
+    void loadPtyRecovery(invokeFn, { timeoutMs: 5, backoffMs: [0], sleep: () => new Promise((r) => { setTimeout(r, 0); }) })
+      .then(() => { settled = true; });
+    await new Promise((r) => { setTimeout(r, 30); });
+    expect(attempts).toBeGreaterThan(2);
+    expect(settled).toBe(false);
+    expect(getPtyRecovery().kind).toBe('in-process'); // untouched default, never "loaded"
+    resetPtyRecoveryForTests();
+  });
+
+  it('an attach whose terminal is gone after the probe becomes exited', () => {
+    expect(planAfterProbe('attach', true)).toBe('attach');
+    expect(planAfterProbe('attach', false)).toBe('exited');
+    expect(planAfterProbe('create', false)).toBe('create');
+    expect(planAfterProbe('exited', true)).toBe('exited');
+  });
+
+  it('recognizes the holder guard error from create_shell', () => {
+    expect(isAliveInHolderError('PTY alive in holder')).toBe(true);
+    expect(isAliveInHolderError(new Error('PTY alive in holder'))).toBe(true);
+    expect(isAliveInHolderError('PTY not found')).toBe(false);
+    expect(isAliveInHolderError(undefined)).toBe(false);
+  });
+
+  it('an exited tab waiting for Enter keeps its banner across remounts until cleared', () => {
+    resetPtyRecoveryForTests();
+    expect(awaitingRestartBanner('t1')).toBeUndefined();
+    markAwaitingRestart('t1', 'BANNER');
+    expect(awaitingRestartBanner('t1')).toBe('BANNER');
+    expect(awaitingRestartBanner('t1')).toBe('BANNER'); // a second remount still sees it
+    clearAwaitingRestart('t1');
+    expect(awaitingRestartBanner('t1')).toBeUndefined();
   });
 });
 

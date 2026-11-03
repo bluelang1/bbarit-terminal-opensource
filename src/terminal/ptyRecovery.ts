@@ -67,11 +67,33 @@ export function isRestoredTerminal(id: string, lastWorkDir?: string | null, reco
   return !!lastWorkDir;
 }
 
-/** Ask the backend once (memoized). Failures and timeouts count as in-process with nothing recovered. */
-export function loadPtyRecovery(invokeFn: InvokeLike, timeoutMs = 15000): Promise<PtyRecovery> {
+export interface LoadPtyRecoveryOptions {
+  /** Upper bound for one attempt (the first `pty_backend_info` may start the holder). */
+  timeoutMs?: number;
+  /** Waits between failed attempts; the last one repeats. */
+  backoffMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+  onRetry?: (attempt: number, error: unknown) => void;
+}
+
+const DEFAULT_BACKOFF_MS = [500, 1000, 2000, 5000, 10000] as const;
+
+/**
+ * Ask the backend once (memoized). A failed or timed-out attempt is retried with backoff
+ * and never read as "in-process, nothing recovered": that would make every saved tab call
+ * create_shell over a terminal still running in the holder. Callers that await this
+ * (App.tsx, before restoring projects) therefore create no shells until it answers.
+ */
+export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptions = {}): Promise<PtyRecovery> {
   if (loading) return loading;
-  loading = (async () => {
-    const timeout = new Promise<null>((resolve) => { setTimeout(() => resolve(null), timeoutMs); });
+  const timeoutMs = opts.timeoutMs ?? 15000;
+  const backoff = opts.backoffMs && opts.backoffMs.length > 0 ? opts.backoffMs : DEFAULT_BACKOFF_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }));
+  const attempt = async (): Promise<PtyRecovery> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`pty recovery list timed out after ${timeoutMs} ms`)), timeoutMs);
+    });
     const work = (async () => {
       const info = await invokeFn<{ kind?: string; fallbackReason?: string | null }>('pty_backend_info');
       const recovered = info?.kind === 'holder' ? await invokeFn<RecoveredPty[]>('pty_list_recovered') : [];
@@ -80,12 +102,55 @@ export function loadPtyRecovery(invokeFn: InvokeLike, timeoutMs = 15000): Promis
         recovered: Array.isArray(recovered) ? recovered.filter((e) => e && typeof e.id === 'string') : [],
         fallbackReason: info?.fallbackReason ?? null,
       };
-    })().catch(() => null);
-    const result = (await Promise.race([work, timeout])) || { kind: 'in-process' as PtyBackendKind, recovered: [] };
-    setPtyRecovery(result);
-    return result;
+    })();
+    try {
+      return await Promise.race([work, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+  loading = (async () => {
+    for (let n = 0; ; n++) {
+      try {
+        const result = await attempt();
+        setPtyRecovery(result);
+        return result;
+      } catch (err) {
+        opts.onRetry?.(n + 1, err);
+        await sleep(backoff[Math.min(n, backoff.length - 1)]);
+      }
+    }
   })();
   return loading;
+}
+
+/** Tests only: forget the memoized load and every per-run mark. */
+export function resetPtyRecoveryForTests(): void {
+  loading = null;
+  setPtyRecovery({ kind: 'in-process', recovered: [] });
+  awaitingRestart.clear();
+}
+
+/** `create_shell` refused because the id still runs in the holder: attach to it instead. */
+export function isAliveInHolderError(err: unknown): boolean {
+  return String((err as { message?: string })?.message ?? err).includes('PTY alive in holder');
+}
+
+// ── exited terminals waiting for Enter (survives remounts of the same tab) ──
+const awaitingRestart = new Map<string, string>();
+
+/** The tab shows an exited recovered terminal; `banner` is redrawn by a remount. */
+export function markAwaitingRestart(id: string, banner: string): void {
+  awaitingRestart.set(id, banner);
+}
+
+/** Banner to redraw when this id is still waiting for Enter, else undefined. */
+export function awaitingRestartBanner(id: string): string | undefined {
+  return awaitingRestart.get(id);
+}
+
+export function clearAwaitingRestart(id: string): void {
+  awaitingRestart.delete(id);
 }
 
 // ── pure helpers ──
@@ -96,6 +161,15 @@ export type RecoveredStartPlan = 'attach' | 'exited' | 'create';
 export function recoveredStartPlan(entry: RecoveredPty | undefined, ptyAlreadyExists: boolean): RecoveredStartPlan {
   if (ptyAlreadyExists || !entry) return 'create';
   return entry.exited ? 'exited' : 'attach';
+}
+
+/**
+ * After the liveness probe: an 'attach' whose terminal is no longer alive (it ended between
+ * the list and this mount, or the holder lost it) is shown as exited (tail + banner +
+ * Enter restarts), never silently replaced by a fresh shell.
+ */
+export function planAfterProbe(plan: RecoveredStartPlan, alive: boolean): RecoveredStartPlan {
+  return plan === 'attach' && !alive ? 'exited' : plan;
 }
 
 /** Recovered terminals are already running: never defer them on startup. */
