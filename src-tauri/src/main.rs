@@ -406,7 +406,7 @@ fn configure_windows_pty_encoding(
             cmd.arg("-NoLogo");
             cmd.arg("-NoExit");
             cmd.arg("-Command");
-            cmd.arg("[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null");
+            cmd.arg("[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[System.Text.UTF8Encoding]::new($false); chcp 65001 > $null;");
         }
     }
 }
