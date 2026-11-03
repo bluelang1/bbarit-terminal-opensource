@@ -68,8 +68,12 @@ pub trait PtyBackend: Send + Sync {
     fn close(&self, id: &str) -> Result<(), String>;
     /// True while the reader thread is still running.
     fn alive(&self, id: &str) -> bool;
-    /// Accumulated output (front-trimmed), for replay / inspection.
+    /// Accumulated output (front-trimmed), for inspection. Leaves the read queue alone.
     fn tail(&self, id: &str) -> Result<String, String>;
+    /// The reattach/replay copy: the accumulated output, with the read queue drained under
+    /// the same lock, so `read()` afterwards returns only output produced after this copy
+    /// (nothing renders twice). Only the frontend's replay path calls it.
+    fn attach_snapshot(&self, id: &str) -> Result<String, String>;
     fn idle_ms(&self, id: &str) -> Result<u64, String>;
     /// Shell pid; Err("PTY not found") for an unknown id, Ok(None) if the OS gave none.
     fn pid(&self, id: &str) -> Result<Option<u32>, String>;
@@ -278,6 +282,9 @@ impl PtyBackend for PtySelection {
     fn tail(&self, id: &str) -> Result<String, String> {
         self.resolved().ok_or_else(not_found)?.tail(id)
     }
+    fn attach_snapshot(&self, id: &str) -> Result<String, String> {
+        self.resolved().ok_or_else(not_found)?.attach_snapshot(id)
+    }
     fn idle_ms(&self, id: &str) -> Result<u64, String> {
         self.resolved().ok_or_else(not_found)?.idle_ms(id)
     }
@@ -452,6 +459,18 @@ impl PtyBackend for InProcessBackend {
             }
             None => Err(PTY_NOT_FOUND.to_string()),
         }
+    }
+
+    fn attach_snapshot(&self, id: &str) -> Result<String, String> {
+        let ptys = self.ptys.lock().unwrap();
+        let Some(instance) = ptys.get(id) else {
+            return Err(PTY_NOT_FOUND.to_string());
+        };
+        // The reader appends and queues under this lock, so every chunk is either in the
+        // copy (and drained here) or arrives through read() afterwards.
+        let buf = instance.output_buffer.lock().unwrap();
+        while instance.output_rx.try_recv().is_ok() {}
+        Ok(buf.clone())
     }
 
     fn idle_ms(&self, id: &str) -> Result<u64, String> {
@@ -670,10 +689,12 @@ fn spawn_utf8_reader_thread(
                 }
             }
 
-            // Also append to the output buffer if provided.
+            // Also append to the output buffer if provided. Queue under the same lock so
+            // attach_snapshot never sees a chunk in the buffer that is still on its way.
             if let Some(ref buf_arc) = output_buffer {
                 if let Ok(mut buf) = buf_arc.lock() {
                     append_output_buffer(&mut buf, &data);
+                    return queue.send(data);
                 }
             }
 
@@ -1209,6 +1230,36 @@ mod tests {
         assert_eq!(list[0].scope_token, TEST_SCOPE);
         b.close("t1").unwrap();
         assert!(b.list().is_empty());
+    }
+
+    #[test]
+    fn attach_snapshot_takes_the_buffer_and_drains_the_queue() {
+        let b = InProcessBackend::default();
+        spawn(&b, "t3", "printf 'one\\n'; read l; printf 'two:%s\\n' \"$l\"; sleep 30");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !b.tail("t3").unwrap().contains("one") {
+            assert!(Instant::now() < deadline, "no output");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // tail() is a read-only copy: the queue still holds "one".
+        assert!(b.tail("t3").unwrap().contains("one"));
+        // A webview reload replays the snapshot; read() must not hand "one" over again.
+        let snap = b.attach_snapshot("t3").unwrap();
+        assert!(snap.contains("one"), "{snap:?}");
+        assert_eq!(b.read("t3"), Ok(None));
+        b.write("t3", "x\n").unwrap();
+        let mut out = String::new();
+        while !out.contains("two:x") {
+            assert!(Instant::now() < deadline, "no echo; got {out:?}");
+            if let Ok(Some(chunk)) = b.read("t3") {
+                out.push_str(&chunk);
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(!out.contains("one"), "{out:?}");
+        assert_eq!(b.attach_snapshot("nope"), Err("PTY not found".to_string()));
+        b.close("t3").unwrap();
     }
 
     #[test]

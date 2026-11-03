@@ -30,7 +30,8 @@ export async function probeRestoredPty({
     return { ptyAlreadyExists: false, bufferedOutput: '', markCliAutoStarted: false };
   }
 
-  const bufferedOutput = await invokeFn<string>('read_pty_output_buffer', { terminalId }).catch(() => '');
+  // Replay copy: the backend drains the read queue in the same step, so nothing renders twice.
+  const bufferedOutput = await invokeFn<string>('pty_attach_snapshot', { terminalId }).catch(() => '');
   const hasAgentUi = cliType !== 'shell' && looksLikeAgentUiReady(cliType as AgentCliKind, bufferedOutput || '');
   return {
     ptyAlreadyExists: true,

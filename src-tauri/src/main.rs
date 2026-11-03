@@ -7659,6 +7659,15 @@ fn read_pty_output_buffer(
     state.pty.tail(&terminal_id)
 }
 
+/// The reattach/replay copy of a PTY's output: like `read_pty_output_buffer`, but the
+/// read queue is drained in the same step, so the next `read_from_pty` returns only
+/// output produced after it. Only the frontend's replay path (restored / recovered tabs)
+/// may call it; inspection (`term read`, agent notes) keeps `read_pty_output_buffer`.
+#[tauri::command]
+fn pty_attach_snapshot(state: State<'_, AppState>, terminal_id: String) -> Result<String, String> {
+    state.pty.attach_snapshot(&terminal_id)
+}
+
 #[tauri::command]
 fn git_worktree_add(
     repo_dir: String,
@@ -10129,6 +10138,7 @@ fn main() {
             git_clone,
             check_pty_alive,
             read_pty_output_buffer,
+            pty_attach_snapshot,
             write_to_pty,
             read_from_pty,
             resize_pty,

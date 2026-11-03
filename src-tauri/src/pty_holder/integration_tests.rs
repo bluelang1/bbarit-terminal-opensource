@@ -661,7 +661,7 @@ fn holder_backend_end_to_end_without_duplicates() {
     let rec = app2.recovered();
     assert_eq!(rec.len(), 1);
     assert_eq!((rec[0].id.as_str(), rec[0].pid), ("h1", Some(pid)));
-    let tail = b2.tail("h1").unwrap();
+    let tail = b2.attach_snapshot("h1").unwrap();
     assert!(tail.contains("A1 é") && tail.contains("B2:x"), "{tail:?}");
     assert_eq!(
         b2.read("h1"),
