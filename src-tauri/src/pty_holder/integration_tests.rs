@@ -1244,6 +1244,62 @@ fn set_with_an_older_holder(old: &TestHolder, old_v: u32, new: &TestHolder, new_
 }
 
 #[test]
+fn an_older_holder_lost_mid_session_leaves_the_primary_working() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    assert!(b.alive("old1"));
+
+    // Another client takes the old holder over (newest HELLO wins): the set loses old1.
+    let (_thief, _, _) = Raw::connect(&old.socket);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while b.alive("old1") {
+        assert!(Instant::now() < deadline, "old1 still alive after the old holder dropped us");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(b.write("old1", "x").is_err(), "no input into a lost terminal");
+    assert!(set.recovered_now().iter().all(|e| e.id != "old1"), "nothing to attach to");
+    let info = set.holders_info();
+    assert_eq!(info.len(), 1, "a lost older holder with no terminals is not listed: {info:?}");
+    assert_eq!(info[0]["primary"], true);
+
+    // The primary is untouched, and the lost id is started again there (no PTY_ALIVE refusal).
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    b.spawn(spawn_req("old1", "printf 'AGAIN\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "old1", "AGAIN", &mut out);
+    assert_eq!(set.older_index_of("old1"), None);
+    assert_eq!(new.holder.terminal_count(), 2);
+    b.close("new1").unwrap();
+    b.close("old1").unwrap();
+}
+
+#[test]
+fn kill_all_through_the_set_ends_every_holder() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let mut new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    let (old_pid, new_pid) = (b.pid("old1").unwrap().unwrap(), b.pid("new1").unwrap().unwrap());
+
+    set.goodbye("kill_all");
+    wait_gone(old_pid, "old1 after kill_all");
+    wait_gone(new_pid, "new1 after kill_all");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "old holder kept running");
+    assert!(new.wait_stopped(Duration::from_secs(10)), "new holder kept running");
+}
+
+#[test]
 fn kill_all_after_the_handover_goodbye_reconnects_and_ends_every_holder() {
     // Update relaunch: GOODBYE handover goes out at once; "quit and end all terminals" can
     // still come before the app exits, when no connection is left.
