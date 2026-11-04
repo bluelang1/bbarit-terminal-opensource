@@ -3948,6 +3948,7 @@ fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
     RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
     state.pty_selection.on_app_exit(exit_reason_now());
     let env = app.env();
+    let watchdog_app = app.clone();
     std::thread::spawn(move || {
         std::thread::sleep(RELAUNCH_WATCHDOG);
         if !claim_restart(&RESTARTING) {
@@ -3955,6 +3956,13 @@ fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
         }
         safe_eprintln!("[update] restart request not handled within {RELAUNCH_WATCHDOG:?}; relaunching directly");
         agent_rpc_stop_all();
+        // RunEvent::Exit never ran: in-process PTYs still need the exit sweep.
+        let in_process = watchdog_app
+            .try_state::<AppState>()
+            .is_some_and(|state| !state.pty_selection.uses_holder());
+        if in_process {
+            sweep_all_scopes_on_exit(&watchdog_app);
+        }
         tauri::process::restart(&env);
     });
     app.request_restart();
