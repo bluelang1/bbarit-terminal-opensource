@@ -156,17 +156,26 @@ impl PtySelection {
         in_process(Some("the PTY holder is not available on Windows yet".to_string()))
     }
 
-    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`.
+    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`, plus
+    /// for the holder how it was started: `spawnMethod` ("launchd" | "systemd" | "setsid"),
+    /// `label` (launchd) / `unit` (systemd), `spawnFallbackReason` (why not launchd/systemd).
     pub fn info(&self) -> serde_json::Value {
         let chosen = self.chosen.get_or_init(|| self.choose());
         #[cfg(unix)]
         if let Some(holder) = &chosen.holder {
-            return serde_json::json!({
+            let socket = holder.socket();
+            let mut info = serde_json::json!({
                 "kind": "holder",
-                "socket": holder.socket().to_string_lossy(),
+                "socket": socket.to_string_lossy(),
                 "recovered": holder.recovered(),
                 "lost": holder.lost_reason(),
             });
+            if let (Some(obj), serde_json::Value::Object(spawn)) =
+                (info.as_object_mut(), crate::pty_holder::spawn::describe(&socket))
+            {
+                obj.extend(spawn);
+            }
+            return info;
         }
         serde_json::json!({
             "kind": "in-process",

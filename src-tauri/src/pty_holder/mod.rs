@@ -6,7 +6,7 @@
 //!
 //! - `proto`: frame format and JSON payloads (version 1).
 //! - `server`: the holder itself (spawn, pump, reap, tail ring, mode tracking).
-//! - `spawn`: how the app starts a detached holder (setsid; launchd/systemd is phase 3).
+//! - `spawn`: how the app starts a detached holder (launchd / systemd-run / setsid).
 //! - `client`: `HolderBackend`, the app side.
 //!
 //! Unix only. Windows keeps `InProcessBackend` (phase 4).

@@ -1,9 +1,14 @@
 //! Finding or starting a holder (docs/PTY_HOLDER_DAEMON.md 3.1).
 //!
-//! Phase 2a only has the `setsid` fallback: the holder is this same exe run as
-//! `--mode pty-holder --socket <path>` in its own session, with stdin/stdout on
-//! /dev/null and stderr on `<run>/<prefix>.<instance>.log`. launchd/systemd
-//! registration (so the holder leaves the app's coalition/cgroup) is phase 3.
+//! The holder is this same exe run as `--mode pty-holder --socket <path>` with stdin/stdout
+//! on /dev/null and stderr on `<run>/<prefix>.<instance>.log`. It is started, in order:
+//! - macOS: as a one-shot launchd job (`launchctl bootstrap gui/<uid>`), so it gets its own
+//!   coalition and is its own TCC responsible process instead of staying in the app's;
+//! - Linux: as a transient `systemd-run --user` service (its own cgroup);
+//! - otherwise, or when that fails: in its own session (`setsid`), the phase 2a path.
+//!
+//! The reason for a fallback is kept for `pty_backend_info` (`spawnFallbackReason`).
+//! `BBARIT_PTY_HOLDER_SPAWN=setsid` skips launchd/systemd (debugging).
 
 use super::proto::{self, HolderInfo};
 use std::os::unix::fs::OpenOptionsExt;
@@ -11,9 +16,61 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Never below 2 s: the first run of a freshly built/updated exe takes ~1.7 s (signature check).
 const SOCKET_WAIT: Duration = Duration::from_secs(5);
+/// launchctl / systemd-run normally answer in milliseconds.
+const TOOL_TIMEOUT: Duration = Duration::from_secs(5);
+/// `setsid` forces the phase 2a spawn (skips launchd/systemd).
+pub const SPAWN_ENV: &str = "BBARIT_PTY_HOLDER_SPAWN";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnMethod {
+    Launchd,
+    Systemd,
+    Setsid,
+}
+
+impl SpawnMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SpawnMethod::Launchd => "launchd",
+            SpawnMethod::Systemd => "systemd",
+            SpawnMethod::Setsid => "setsid",
+        }
+    }
+}
+
+/// Why the holder at this socket was started with setsid instead of launchd/systemd.
+static SPAWN_FALLBACK: Mutex<Option<(PathBuf, String)>> = Mutex::new(None);
+
+/// How the holder at `socket` was started, for `pty_backend_info`:
+/// `{spawnMethod, label?, unit?, spawnFallbackReason?}` (from its info file; null fields for
+/// holders of 2a/2b, which did not record it).
+pub fn describe(socket: &Path) -> serde_json::Value {
+    let info = std::fs::read(super::info_path_for(socket))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<HolderInfo>(&b).ok());
+    let fallback = SPAWN_FALLBACK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .filter(|(s, _)| s == socket)
+        .map(|(_, why)| why.clone());
+    let mut v = serde_json::json!({
+        "spawnMethod": info.as_ref().and_then(|i| i.spawn_method.clone()),
+        "spawnFallbackReason": fallback,
+    });
+    if let Some(label) = info.as_ref().and_then(|i| i.label.clone()) {
+        v["label"] = label.into();
+    }
+    if let Some(unit) = info.as_ref().and_then(|i| i.unit.clone()) {
+        v["unit"] = unit.into();
+    }
+    v
+}
 
 /// `<prefix>.<instance>.json` → parsed info, for our prefix only (dev never matches
 /// release files and vice versa: the instance part must not contain a dot).
@@ -165,7 +222,8 @@ pub fn spawn_holder(run_dir: &Path) -> Result<PathBuf, String> {
 
 pub fn spawn_holder_with(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> {
     super::ensure_private_dir(run_dir)?;
-    let base = format!("{}.{}", super::file_prefix(), super::new_instance_id());
+    let instance = super::new_instance_id();
+    let base = format!("{}.{instance}", super::file_prefix());
     let socket = run_dir.join(format!("{base}.sock"));
     super::check_socket_path(&socket)?;
     let log_path = run_dir.join(format!("{base}.log"));
@@ -175,9 +233,55 @@ pub fn spawn_holder_with(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> 
         .mode(0o600)
         .open(&log_path)
         .map_err(|e| format!("open {}: {e}", log_path.display()))?;
+    let forced_setsid = std::env::var(SPAWN_ENV).is_ok_and(|v| v.trim() == "setsid");
+    #[allow(unused_mut)]
+    let mut fallback: Option<String> = forced_setsid.then(|| format!("{SPAWN_ENV}=setsid"));
+    #[cfg(target_os = "macos")]
+    if !forced_setsid {
+        drop(log); // launchd opens the log itself (StandardErrorPath)
+        match launchd::spawn(exe, run_dir, &instance, &socket, &log_path) {
+            Ok(label) => {
+                return wait_for_socket(&socket, &log_path).inspect_err(|_| {
+                    // Started but never listened: do not leave a late holder behind.
+                    launchd::bootout(&label);
+                });
+            }
+            Err(e) => {
+                safe_eprintln!("[pty-holder] launchd spawn failed, using setsid: {e}");
+                fallback = Some(format!("launchd: {e}"));
+            }
+        }
+        let log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| format!("open {}: {e}", log_path.display()))?;
+        return spawn_setsid(exe, &socket, log, &log_path, fallback);
+    }
+    #[cfg(target_os = "linux")]
+    if !forced_setsid {
+        match systemd::spawn(exe, &instance, &socket, &log_path) {
+            Ok(_unit) => return wait_for_socket(&socket, &log_path),
+            Err(e) => {
+                safe_eprintln!("[pty-holder] systemd-run failed, using setsid: {e}");
+                fallback = Some(format!("systemd: {e}"));
+            }
+        }
+    }
+    spawn_setsid(exe, &socket, log, &log_path, fallback)
+}
+
+/// The phase 2a spawn: same exe in its own session, reaped by a thread of this app.
+fn spawn_setsid(
+    exe: &Path,
+    socket: &Path,
+    log: std::fs::File,
+    log_path: &Path,
+    fallback: Option<String>,
+) -> Result<PathBuf, String> {
     let mut cmd = Command::new(exe);
     cmd.args(["--mode", "pty-holder", "--socket"])
-        .arg(&socket)
+        .arg(socket)
+        .args(["--spawn-method", SpawnMethod::Setsid.as_str()])
         // Never carry a tab's scope token (a sweep of that tab would kill every terminal),
         // and never fall into the embedded agent's mode gate.
         .env_remove(crate::SCOPE_ENV)
@@ -200,12 +304,19 @@ pub fn spawn_holder_with(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> 
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    // The socket accepts as soon as it is bound; the info file is written right after.
-    let info_path = super::info_path_for(&socket);
+    if let Some(why) = fallback {
+        *SPAWN_FALLBACK.lock().unwrap_or_else(|p| p.into_inner()) = Some((socket.to_path_buf(), why));
+    }
+    wait_for_socket(socket, log_path)
+}
+
+/// The socket accepts as soon as it is bound; the info file is written right after.
+fn wait_for_socket(socket: &Path, log_path: &Path) -> Result<PathBuf, String> {
+    let info_path = super::info_path_for(socket);
     let deadline = Instant::now() + SOCKET_WAIT;
     while Instant::now() < deadline {
-        if info_path.exists() && UnixStream::connect(&socket).is_ok() {
-            return Ok(socket);
+        if info_path.exists() && UnixStream::connect(socket).is_ok() {
+            return Ok(socket.to_path_buf());
         }
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -215,6 +326,325 @@ pub fn spawn_holder_with(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> 
         SOCKET_WAIT,
         log_path.display()
     ))
+}
+
+/// Exit status and output of a helper tool, killed after `TOOL_TIMEOUT`.
+#[allow(dead_code)] // only launchd/systemd use it
+fn run_tool(cmd: &mut Command) -> Result<(std::process::ExitStatus, String, String), String> {
+    use std::io::Read;
+    let name = cmd.get_program().to_string_lossy().into_owned();
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{name}: {e}"))?;
+    let read = |pipe: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        })
+    };
+    let out = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let err = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let deadline = Instant::now() + TOOL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{name} did not answer within {TOOL_TIMEOUT:?}"));
+            }
+            Err(e) => return Err(format!("{name}: {e}")),
+        }
+    };
+    Ok((status, out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+}
+
+/// Environment for a holder started by launchd/systemd: only what the holder itself
+/// reads. Terminals get their full environment from each SPAWN.
+#[allow(dead_code)] // only launchd/systemd use it
+fn holder_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
+    }
+    env.push(("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string()));
+    if let Ok(v) = std::env::var(super::server::IDLE_EXIT_ENV) {
+        env.push((super::server::IDLE_EXIT_ENV.to_string(), v));
+    }
+    env
+}
+
+/// One-shot launchd jobs (docs 3.1, 3단계 스파이크 E4).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) mod launchd {
+    use super::{run_tool, SpawnMethod};
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::process::Command;
+
+    /// `com.bbarit.terminal.<prefix>.`: dev and release jobs never touch each other.
+    pub fn label_prefix() -> String {
+        format!("com.bbarit.terminal.{}.", super::super::file_prefix())
+    }
+
+    pub fn label_for(instance: &str) -> String {
+        format!("{}{instance}", label_prefix())
+    }
+
+    fn domain() -> String {
+        // SAFETY: getuid never fails.
+        format!("gui/{}", unsafe { libc::getuid() })
+    }
+
+    /// Our jobs in `launchctl list` output: `(pid, label)`, pid None for the `-` rows of
+    /// finished jobs. Other labels (and our prefix with a dotted instance, i.e. the dev
+    /// jobs seen from a release build) are ignored.
+    pub fn our_jobs(list: &str, prefix: &str) -> Vec<(Option<u32>, String)> {
+        list.lines()
+            .filter_map(|line| {
+                let mut cols = line.split_whitespace();
+                let (pid, _status, label) = (cols.next()?, cols.next()?, cols.next()?);
+                let instance = label.strip_prefix(prefix)?;
+                if instance.is_empty() || instance.contains('.') || cols.next().is_some() {
+                    return None;
+                }
+                let pid = match pid {
+                    "-" => None,
+                    n => Some(n.parse::<u32>().ok()?),
+                };
+                Some((pid, label.to_string()))
+            })
+            .collect()
+    }
+
+    /// Labels to boot out (finished jobs only: booting out a live holder SIGHUPs every
+    /// terminal in it) and the plist files in the run dir whose job is not running.
+    pub fn plan_cleanup(
+        jobs: &[(Option<u32>, String)],
+        plists: &[(String, std::path::PathBuf)],
+    ) -> (Vec<String>, Vec<std::path::PathBuf>) {
+        let stale: Vec<String> = jobs.iter().filter(|j| j.0.is_none()).map(|j| j.1.clone()).collect();
+        let live: HashSet<&str> = jobs.iter().filter(|j| j.0.is_some()).map(|j| j.1.as_str()).collect();
+        let remove = plists
+            .iter()
+            .filter(|(label, _)| !live.contains(label.as_str()))
+            .map(|(_, path)| path.clone())
+            .collect();
+        (stale, remove)
+    }
+
+    /// `(label, path)` of our `<prefix>.<instance>.plist` files.
+    fn plists_in(run_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
+        let prefix = format!("{}.", super::super::file_prefix());
+        let Ok(entries) = std::fs::read_dir(run_dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name();
+                let instance = name.to_str()?.strip_prefix(&prefix)?.strip_suffix(".plist")?.to_string();
+                (!instance.is_empty() && !instance.contains('.')).then(|| (label_for(&instance), e.path()))
+            })
+            .collect()
+    }
+
+    /// Boot out our finished jobs (they stay listed as `- 0 <label>` forever otherwise)
+    /// and remove plists of jobs that are not running.
+    pub fn cleanup_stale(run_dir: &Path) {
+        let list = match run_tool(Command::new("launchctl").arg("list")) {
+            Ok((st, out, _)) if st.success() => out,
+            Ok((st, _, err)) => {
+                safe_eprintln!("[pty-holder] launchctl list: {st} {}", err.trim());
+                return;
+            }
+            Err(e) => {
+                safe_eprintln!("[pty-holder] launchctl list: {e}");
+                return;
+            }
+        };
+        let jobs = our_jobs(&list, &label_prefix());
+        let (stale, remove) = plan_cleanup(&jobs, &plists_in(run_dir));
+        for label in stale {
+            bootout(&label);
+        }
+        for path in remove {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    pub fn bootout(label: &str) {
+        let target = format!("{}/{label}", domain());
+        match run_tool(Command::new("launchctl").args(["bootout", &target])) {
+            Ok((st, _, _)) if st.success() => {}
+            Ok((st, _, err)) => safe_eprintln!("[pty-holder] launchctl bootout {target}: {st} {}", err.trim()),
+            Err(e) => safe_eprintln!("[pty-holder] launchctl bootout {target}: {e}"),
+        }
+    }
+
+    fn xml_escape(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    }
+
+    /// The job plist: one-shot (RunAtLoad, no KeepAlive), its own process group left alone
+    /// at exit (AbandonProcessGroup: the terminals are in their own sessions anyway),
+    /// not throttled (Interactive).
+    pub fn plist(label: &str, argv: &[String], log: &str, env: &[(String, String)]) -> String {
+        let s = |v: &str| format!("<string>{}</string>", xml_escape(v));
+        let args: String = argv.iter().map(|a| format!("\n\t\t{}", s(a))).collect();
+        let env: String = env
+            .iter()
+            .map(|(k, v)| format!("\n\t\t<key>{}</key>{}", xml_escape(k), s(v)))
+            .collect();
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>{label}
+	<key>ProgramArguments</key>
+	<array>{args}
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><false/>
+	<key>AbandonProcessGroup</key><true/>
+	<key>ProcessType</key><string>Interactive</string>
+	<key>WorkingDirectory</key><string>/</string>
+	<key>StandardInPath</key><string>/dev/null</string>
+	<key>StandardOutPath</key><string>/dev/null</string>
+	<key>StandardErrorPath</key>{log}
+	<key>EnvironmentVariables</key>
+	<dict>{env}
+	</dict>
+</dict>
+</plist>
+"#,
+            label = s(label),
+            log = s(log),
+        )
+    }
+
+    /// Write the plist (0600) and `launchctl bootstrap` it. Returns the label.
+    pub fn spawn(exe: &Path, run_dir: &Path, instance: &str, socket: &Path, log: &Path) -> Result<String, String> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let utf8 = |p: &Path| {
+            p.to_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{} is not UTF-8", p.display()))
+        };
+        cleanup_stale(run_dir);
+        let label = label_for(instance);
+        let argv = vec![
+            utf8(exe)?,
+            "--mode".into(),
+            "pty-holder".into(),
+            "--socket".into(),
+            utf8(socket)?,
+            "--spawn-method".into(),
+            SpawnMethod::Launchd.as_str().into(),
+            "--job".into(),
+            label.clone(),
+        ];
+        let body = plist(&label, &argv, &utf8(log)?, &super::holder_env());
+        let path = run_dir.join(format!("{}.{instance}.plist", super::super::file_prefix()));
+        let mut f = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        f.write_all(body.as_bytes())
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        drop(f);
+        let result = run_tool(Command::new("launchctl").arg("bootstrap").arg(domain()).arg(&path));
+        match result {
+            Ok((st, _, _)) if st.success() => Ok(label),
+            other => {
+                let _ = std::fs::remove_file(&path);
+                Err(match other {
+                    Ok((st, out, err)) => format!(
+                        "launchctl bootstrap {label}: {st}: {}",
+                        format!("{} {}", out.trim(), err.trim()).trim()
+                    ),
+                    Err(e) => e,
+                })
+            }
+        }
+    }
+}
+
+/// Transient `systemd-run --user` services (docs 3.1).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod systemd {
+    use super::{run_tool, SpawnMethod};
+    use std::ffi::OsString;
+    use std::path::Path;
+    use std::process::Command;
+
+    /// `bbarit-pty-holder-<instance>` (dev: `bbarit-pty-holder-dev-<instance>`).
+    pub fn unit_for(instance: &str) -> String {
+        format!("bbarit-{}-{instance}", super::super::file_prefix().replace('.', "-"))
+    }
+
+    /// `systemd-run` arguments: a transient user service that is collected when it ends
+    /// and whose stop only signals the holder itself (KillMode=process).
+    pub fn argv(exe: &Path, socket: &Path, log: &Path, unit: &str, env: &[(String, String)]) -> Vec<OsString> {
+        let mut a: Vec<OsString> = [
+            "--user",
+            "--collect",
+            "--quiet",
+            "--service-type=exec",
+            "-p",
+            "KillMode=process",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        a.push("-p".into());
+        let mut stderr = OsString::from("StandardError=append:");
+        stderr.push(log);
+        a.push(stderr);
+        a.push("--unit".into());
+        a.push(unit.into());
+        for (k, v) in env {
+            // HOME/PATH come from the user manager; only pass our own knobs.
+            if k != "HOME" && k != "PATH" {
+                a.push("-E".into());
+                a.push(format!("{k}={v}").into());
+            }
+        }
+        a.push("--".into());
+        a.push(exe.into());
+        for s in ["--mode", "pty-holder", "--socket"] {
+            a.push(s.into());
+        }
+        a.push(socket.into());
+        a.push("--spawn-method".into());
+        a.push(SpawnMethod::Systemd.as_str().into());
+        a.push("--job".into());
+        a.push(unit.into());
+        a
+    }
+
+    pub fn spawn(exe: &Path, instance: &str, socket: &Path, log: &Path) -> Result<String, String> {
+        let unit = unit_for(instance);
+        let args = argv(exe, socket, log, &unit, &super::holder_env());
+        match run_tool(Command::new("systemd-run").args(&args))? {
+            (st, _, _) if st.success() => Ok(unit),
+            (st, out, err) => Err(format!(
+                "systemd-run {unit}: {st}: {}",
+                format!("{} {}", out.trim(), err.trim()).trim()
+            )),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +675,174 @@ mod tests {
         assert_eq!(classify(true, proto::PROTOCOL_VERSION + 1, probe), Candidate::Stale);
         let missing = UnixStream::connect(dir.join("none.sock")).map(|_| ());
         assert_eq!(classify(true, proto::PROTOCOL_VERSION, missing), Candidate::Stale);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn launchctl_list_rows_are_split_into_live_and_finished_jobs() {
+        let prefix = "com.bbarit.terminal.pty-holder.";
+        let list = "PID\tStatus\tLabel\n\
+                    -\t0\tcom.bbarit.terminal.pty-holder.0a1b2c3d\n\
+                    4242\t0\tcom.bbarit.terminal.pty-holder.deadbeef\n\
+                    -\t-15\tcom.bbarit.terminal.pty-holder.cafe0001\n\
+                    -\t0\tcom.bbarit.terminal.pty-holder.dev.12345678\n\
+                    777\t0\tcom.apple.Finder\n\
+                    -\t0\tcom.bbarit.terminal.pty-holderX.1\n\
+                    -\t0\tcom.bbarit.terminal.pty-holder.\n\
+                    garbage\n";
+        let jobs = launchd::our_jobs(list, prefix);
+        assert_eq!(
+            jobs,
+            vec![
+                (None, "com.bbarit.terminal.pty-holder.0a1b2c3d".to_string()),
+                (Some(4242), "com.bbarit.terminal.pty-holder.deadbeef".to_string()),
+                (None, "com.bbarit.terminal.pty-holder.cafe0001".to_string()),
+            ]
+        );
+        // The dev build sees only its own jobs.
+        let dev = launchd::our_jobs(list, "com.bbarit.terminal.pty-holder.dev.");
+        assert_eq!(dev, vec![(None, "com.bbarit.terminal.pty-holder.dev.12345678".to_string())]);
+
+        let p = |l: &str| PathBuf::from(format!("/r/{l}.plist"));
+        let plists = vec![
+            ("com.bbarit.terminal.pty-holder.0a1b2c3d".to_string(), p("a")), // finished
+            ("com.bbarit.terminal.pty-holder.deadbeef".to_string(), p("b")), // live: keep
+            ("com.bbarit.terminal.pty-holder.99999999".to_string(), p("c")), // not listed
+        ];
+        let (bootout, remove) = launchd::plan_cleanup(&jobs, &plists);
+        assert_eq!(
+            bootout,
+            vec![
+                "com.bbarit.terminal.pty-holder.0a1b2c3d".to_string(),
+                "com.bbarit.terminal.pty-holder.cafe0001".to_string()
+            ],
+            "only `-` rows; never the live 4242"
+        );
+        assert_eq!(remove, vec![p("a"), p("c")]);
+    }
+
+    #[test]
+    fn launchd_plist_is_a_one_shot_interactive_job() {
+        assert_eq!(launchd::label_for("abcd1234"), "com.bbarit.terminal.pty-holder.dev.abcd1234");
+        let argv: Vec<String> = ["/A&B/octo-ui", "--mode", "pty-holder", "--socket", "/r/x.sock"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let env = vec![("HOME".to_string(), "/Users/me".to_string()), ("PATH".to_string(), "/usr/bin:/bin".to_string())];
+        let body = launchd::plist("com.bbarit.terminal.pty-holder.x", &argv, "/r/x.log", &env);
+        for needle in [
+            "<key>Label</key><string>com.bbarit.terminal.pty-holder.x</string>",
+            "<string>/A&amp;B/octo-ui</string>",
+            "<key>RunAtLoad</key><true/>",
+            "<key>KeepAlive</key><false/>",
+            "<key>AbandonProcessGroup</key><true/>",
+            "<key>ProcessType</key><string>Interactive</string>",
+            "<key>WorkingDirectory</key><string>/</string>",
+            "<key>StandardErrorPath</key><string>/r/x.log</string>",
+            "<key>HOME</key><string>/Users/me</string>",
+        ] {
+            assert!(body.contains(needle), "{needle}\n{body}");
+        }
+        assert!(!body.contains("BBARIT_TERM_SCOPE") && !body.contains("BBARIT_AGENT_MODE"));
+        // plutil validates the XML where it exists (macOS).
+        if Path::new("/usr/bin/plutil").exists() {
+            let dir = std::env::temp_dir().join(format!("bbarit-pl-{}", super::super::new_instance_id()));
+            super::super::ensure_private_dir(&dir).unwrap();
+            let f = dir.join("j.plist");
+            std::fs::write(&f, &body).unwrap();
+            let out = Command::new("/usr/bin/plutil").arg("-lint").arg(&f).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stdout));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn holder_env_carries_only_what_the_holder_reads() {
+        let env = holder_env();
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.iter().all(|k| ["HOME", "PATH", super::super::server::IDLE_EXIT_ENV].contains(k)), "{keys:?}");
+        assert!(keys.contains(&"PATH"));
+    }
+
+    #[test]
+    fn systemd_run_argv() {
+        assert_eq!(systemd::unit_for("abcd1234"), "bbarit-pty-holder-dev-abcd1234");
+        let env = vec![
+            ("HOME".to_string(), "/home/me".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("BBARIT_PTY_HOLDER_IDLE_EXIT_MS".to_string(), "500".to_string()),
+        ];
+        let argv = systemd::argv(
+            Path::new("/opt/bbarit/octo-ui"),
+            Path::new("/run/user/1000/bbarit/pty-holder.abcd1234.sock"),
+            Path::new("/run/user/1000/bbarit/pty-holder.abcd1234.log"),
+            "bbarit-pty-holder-abcd1234",
+            &env,
+        );
+        let argv: Vec<String> = argv.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(
+            argv,
+            [
+                "--user",
+                "--collect",
+                "--quiet",
+                "--service-type=exec",
+                "-p",
+                "KillMode=process",
+                "-p",
+                "StandardError=append:/run/user/1000/bbarit/pty-holder.abcd1234.log",
+                "--unit",
+                "bbarit-pty-holder-abcd1234",
+                "-E",
+                "BBARIT_PTY_HOLDER_IDLE_EXIT_MS=500",
+                "--",
+                "/opt/bbarit/octo-ui",
+                "--mode",
+                "pty-holder",
+                "--socket",
+                "/run/user/1000/bbarit/pty-holder.abcd1234.sock",
+                "--spawn-method",
+                "systemd",
+                "--job",
+                "bbarit-pty-holder-abcd1234",
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_reads_the_info_file_and_the_fallback_reason() {
+        let dir = std::env::temp_dir().join(format!("bbarit-ds-{}", super::super::new_instance_id()));
+        super::super::ensure_private_dir(&dir).unwrap();
+        let socket = dir.join("pty-holder.dev.d1.sock");
+        let write = |info: &HolderInfo| {
+            std::fs::write(super::super::info_path_for(&socket), serde_json::to_vec(info).unwrap()).unwrap()
+        };
+        let mut info = HolderInfo {
+            pid: 1,
+            socket: socket.to_string_lossy().into_owned(),
+            version: proto::PROTOCOL_VERSION,
+            build: "x".into(),
+            instance: "d1".into(),
+            spawn_method: Some("launchd".into()),
+            label: Some("com.bbarit.terminal.pty-holder.dev.d1".into()),
+            unit: None,
+        };
+        write(&info);
+        let v = describe(&socket);
+        assert_eq!(v["spawnMethod"], "launchd");
+        assert_eq!(v["label"], "com.bbarit.terminal.pty-holder.dev.d1");
+        assert!(v["spawnFallbackReason"].is_null() && v.get("unit").is_none(), "{v}");
+
+        info.spawn_method = Some("setsid".into());
+        info.label = None;
+        write(&info);
+        *SPAWN_FALLBACK.lock().unwrap() = Some((socket.clone(), "launchd: bootstrap failed".into()));
+        let v = describe(&socket);
+        assert_eq!(v["spawnMethod"], "setsid");
+        assert_eq!(v["spawnFallbackReason"], "launchd: bootstrap failed");
+        assert!(describe(&dir.join("other.sock"))["spawnFallbackReason"].is_null());
+        assert!(describe(&dir.join("other.sock"))["spawnMethod"].is_null());
+        *SPAWN_FALLBACK.lock().unwrap() = None;
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

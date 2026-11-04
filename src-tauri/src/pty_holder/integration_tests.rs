@@ -875,7 +875,18 @@ fn live_holder_client() {
     }
 }
 
-/// Manual check of the app-side spawn path with the real binary:
+/// `launchctl list` row for `label`: None = not listed, Some(None) = listed with pid `-`.
+fn launchctl_pid(label: &str) -> Option<Option<u32>> {
+    let out = std::process::Command::new("launchctl").arg("list").output().unwrap();
+    let list = String::from_utf8_lossy(&out.stdout);
+    super::spawn::launchd::our_jobs(&list, &super::spawn::launchd::label_prefix())
+        .into_iter()
+        .find(|(_, l)| l == label)
+        .map(|(pid, _)| pid)
+}
+
+/// Manual check of the app-side spawn path with the real binary (macOS: as a launchd job;
+/// `BBARIT_PTY_HOLDER_SPAWN=setsid` for the setsid path):
 /// `BBARIT_HOLDER_LIVE_EXE=target/debug/octo-ui cargo test live_spawn_detached_holder -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -895,11 +906,22 @@ fn live_spawn_detached_holder() {
         "second lookup reuses the live holder"
     );
     let sid = unsafe { libc::getsid(info.pid as libc::pid_t) };
+    let pgid = unsafe { libc::getpgid(info.pid as libc::pid_t) };
     println!(
-        "LIVE holder pid={} sid={sid} (setsid → sid == pid)",
-        info.pid
+        "LIVE holder pid={} sid={sid} pgid={pgid} spawnMethod={:?} label={:?} unit={:?}",
+        info.pid, info.spawn_method, info.label, info.unit
     );
-    assert_eq!(sid as u32, info.pid);
+    if info.spawn_method.as_deref() == Some("setsid") {
+        assert_eq!(sid as u32, info.pid, "setsid → sid == pid");
+    }
+    let launchd_label = if cfg!(target_os = "macos") && std::env::var_os(super::spawn::SPAWN_ENV).is_none() {
+        assert_eq!(info.spawn_method.as_deref(), Some("launchd"), "{:?}", super::spawn::describe(&socket));
+        let label = info.label.clone().expect("launchd label");
+        assert_eq!(launchctl_pid(&label), Some(Some(info.pid)), "live job listed with the holder pid");
+        Some(label)
+    } else {
+        None
+    };
     let mut sys = sysinfo::System::new();
     let pid = sysinfo::Pid::from_u32(info.pid);
     sys.refresh_processes_specifics(
@@ -921,6 +943,20 @@ fn live_spawn_detached_holder() {
     let backend = HolderBackend::connect(&socket).unwrap();
     backend.goodbye("kill_all");
     wait_gone(info.pid, "holder after kill_all");
+    if let Some(label) = &launchd_label {
+        // A finished one-shot job stays listed as `- 0 <label>` until the next spawn's cleanup.
+        assert_eq!(launchctl_pid(label), Some(None), "finished job listed with pid -");
+        println!("LIVE after kill_all: {label} listed with pid -");
+        super::spawn::launchd::cleanup_stale(&run);
+        assert_eq!(launchctl_pid(label), None, "stale job booted out");
+        let plists: Vec<_> = std::fs::read_dir(&run)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".plist"))
+            .collect();
+        assert!(plists.is_empty(), "plist of a finished job removed: {plists:?}");
+        println!("LIVE cleanup booted out {label} and removed its plist");
+    }
     println!(
         "LIVE holder exited after GOODBYE kill_all; files left: {:?}",
         std::fs::read_dir(&run)
