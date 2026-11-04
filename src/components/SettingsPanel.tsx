@@ -23,7 +23,8 @@ import {
 import { useConfig, getConfigSnapshot } from '../config/ConfigContext';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '../i18n/en';
-import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit } from '../config/schema';
+import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit, effectivePtyHolder } from '../config/schema';
+import { describePtyBackend, getPtyRecovery } from '../terminal/ptyRecovery';
 import type { AgentConfig, TerminalConfig, EditorConfig, NoteTemplate, SttConfig } from '../config/schema';
 import { getModelsForCliType } from '../config/modelPresets';
 import { kvGet, kvSet, kvDelete } from '../hooks/useKV';
@@ -343,7 +344,7 @@ export function SettingsPanel({
   onProjectReorder,
 }: SettingsPanelProps) {
   const { config, updateConfig } = useConfig();
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
 
   // Skip config writes on initial mount to prevent unnecessary re-renders that steal terminal focus.
 
@@ -2162,6 +2163,18 @@ export function SettingsPanel({
                   />
                   <span className="setting-description">
                     {t('settings.terminal.confirmOnClose.desc')}
+                  </span>
+                </div>
+                <div className="setting-item">
+                  <label>{t('settings.terminal.ptyHolder')}</label>
+                  <input
+                    type="checkbox"
+                    checked={effectivePtyHolder(terminalSettings.ptyHolder, import.meta.env.DEV)}
+                    onChange={(e) => updateTerminalSetting('ptyHolder', e.target.checked ? 'on' : 'off')}
+                  />
+                  <span className="setting-description">
+                    {t('settings.terminal.ptyHolder.desc')}{' '}
+                    {t('settings.terminal.ptyHolder.now')}: {describePtyBackend(getPtyRecovery(), locale === 'ko')}
                   </span>
                 </div>
                 <div className="setting-item">

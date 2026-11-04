@@ -29,6 +29,21 @@ export interface PtyRecovery {
   kind: PtyBackendKind;
   recovered: RecoveredPty[];
   fallbackReason?: string | null;
+  /** Holder only: how the primary holder was started ("launchd" | "systemd" | "setsid"). */
+  spawnMethod?: string | null;
+  /** Holder only: why launchd/systemd was not used for it. */
+  spawnFallbackReason?: string | null;
+}
+
+/** One-line status of the PTY backend for settings / notices. */
+export function describePtyBackend(rec: Pick<PtyRecovery, 'kind' | 'fallbackReason' | 'spawnMethod' | 'spawnFallbackReason'>, ko: boolean): string {
+  if (rec.kind !== 'holder') {
+    const base = ko ? '앱 안 (in-process)' : 'inside the app (in-process)';
+    return rec.fallbackReason ? `${base}: ${rec.fallbackReason}` : base;
+  }
+  const how = rec.spawnMethod ? ` · ${rec.spawnMethod}` : '';
+  const why = rec.spawnFallbackReason ? ` (${rec.spawnFallbackReason})` : '';
+  return `${ko ? 'PTY 홀더' : 'PTY holder'}${how}${why}`;
 }
 
 type InvokeLike = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -95,12 +110,14 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
       timer = setTimeout(() => reject(new Error(`pty recovery list timed out after ${timeoutMs} ms`)), timeoutMs);
     });
     const work = (async () => {
-      const info = await invokeFn<{ kind?: string; fallbackReason?: string | null }>('pty_backend_info');
+      const info = await invokeFn<{ kind?: string; fallbackReason?: string | null; spawnMethod?: string | null; spawnFallbackReason?: string | null }>('pty_backend_info');
       const recovered = info?.kind === 'holder' ? await invokeFn<RecoveredPty[]>('pty_list_recovered') : [];
       return {
         kind: (info?.kind === 'holder' ? 'holder' : 'in-process') as PtyBackendKind,
         recovered: Array.isArray(recovered) ? recovered.filter((e) => e && typeof e.id === 'string') : [],
         fallbackReason: info?.fallbackReason ?? null,
+        spawnMethod: info?.spawnMethod ?? null,
+        spawnFallbackReason: info?.spawnFallbackReason ?? null,
       };
     })();
     try {

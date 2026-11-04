@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
-  isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
+  describePtyBackend, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
   omittedBytesLine, placeUnknownRecovered, planAfterProbe, recoveredPtyFor, recoveredStartPlan,
   resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
 } from './ptyRecovery';
@@ -39,6 +39,15 @@ describe('recovered-id gating', () => {
     markRecoveredHandled('x');
     expect(recoveredPtyFor('x')).toBeUndefined();
     expect(isRestoredTerminal('x', '')).toBe(true); // stays stable (effect dep)
+  });
+
+  it('describePtyBackend shows kind, spawn method and fallback reasons', () => {
+    expect(describePtyBackend({ kind: 'holder', spawnMethod: 'launchd' }, false)).toBe('PTY holder · launchd');
+    expect(describePtyBackend({ kind: 'holder', spawnMethod: 'setsid', spawnFallbackReason: 'launchd: x' }, true))
+      .toBe('PTY 홀더 · setsid (launchd: x)');
+    expect(describePtyBackend({ kind: 'in-process', fallbackReason: 'newer holder' }, false))
+      .toBe('inside the app (in-process): newer holder');
+    expect(describePtyBackend({ kind: 'in-process' }, true)).toBe('앱 안 (in-process)');
   });
 
   it('loadPtyRecovery asks the list only for the holder and memoizes', async () => {

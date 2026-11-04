@@ -43,11 +43,22 @@ export interface TerminalConfig {
    * (docs/PTY_HOLDER_DAEMON.md 3.6, decision 9). Read by the Rust host at exit.
    */
   keepRunningOnQuit?: boolean;
+  /**
+   * Terminals live in the PTY holder process so they survive quitting and updates
+   * (docs/PTY_HOLDER_DAEMON.md). Unset = "on" in release builds, "off" in dev builds
+   * (same rule as keepRunningOnQuit). Read by the Rust host at startup.
+   */
+  ptyHolder?: 'on' | 'off';
 }
 
 /** Effective `terminal.keepRunningOnQuit` (dev builds need an explicit true). */
 export function effectiveKeepRunningOnQuit(value: boolean | undefined, devBuild: boolean): boolean {
   return devBuild ? value === true : value !== false;
+}
+
+/** Effective `terminal.ptyHolder` (dev builds need an explicit "on"); mirrors `pty_holder_wanted`. */
+export function effectivePtyHolder(value: string | undefined, devBuild: boolean): boolean {
+  return devBuild ? value === 'on' : value !== 'off';
 }
 
 export interface AgentConfig {

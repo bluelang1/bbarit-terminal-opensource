@@ -103,11 +103,11 @@ struct Chosen {
 }
 
 impl PtySelection {
-    /// `setting` is `terminal.ptyHolder`: "on" wants the holder, anything else
-    /// (default "off") keeps the PTYs in this process.
+    /// `setting` is `terminal.ptyHolder` ("on" | "off"); unset follows the build's default
+    /// (`pty_holder_wanted`).
     pub fn new(setting: Option<&str>) -> Self {
         PtySelection {
-            want_holder: setting == Some("on"),
+            want_holder: pty_holder_wanted(setting, cfg!(debug_assertions)),
             #[cfg(unix)]
             run_dir: None,
             chosen: std::sync::OnceLock::new(),
@@ -257,6 +257,17 @@ pub fn exit_goodbye_reason(keep_running_on_quit: bool, kill_all_requested: bool,
         ExitReason::Quit
     } else {
         ExitReason::KillAll
+    }
+}
+
+/// `terminal.ptyHolder` (phase 3: on by default). Release builds use the holder unless the
+/// setting is "off"; debug builds only when it is "on" (like `keepRunningOnQuit`, decision 9:
+/// dev rebuilds replace the holder binary).
+pub fn pty_holder_wanted(setting: Option<&str>, debug_build: bool) -> bool {
+    if debug_build {
+        setting == Some("on")
+    } else {
+        setting != Some("off")
     }
 }
 
@@ -1151,6 +1162,17 @@ mod tests {
         assert_eq!(exit_goodbye_reason(true, true, false), KillAll, "the menu item wins");
         assert_eq!(exit_goodbye_reason(true, true, true), KillAll);
         assert_eq!((Quit.as_str(), Handover.as_str(), KillAll.as_str()), ("quit", "handover", "kill_all"));
+    }
+
+    #[test]
+    fn pty_holder_is_on_by_default_in_release_but_debug_needs_explicit_on() {
+        assert!(pty_holder_wanted(None, false));
+        assert!(pty_holder_wanted(Some("on"), false));
+        assert!(pty_holder_wanted(Some("bogus"), false), "only \"off\" opts out");
+        assert!(!pty_holder_wanted(Some("off"), false));
+        assert!(!pty_holder_wanted(None, true), "dev default stays in-process");
+        assert!(!pty_holder_wanted(Some("off"), true));
+        assert!(pty_holder_wanted(Some("on"), true));
     }
 
     #[test]

@@ -83,6 +83,11 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
 - 홀더가 죽으면 그 안의 터미널은 죽는다(홀더가 부모다). 앱은 다음 연결에서 사라진 터미널을
   `holder_lost` 로 표시하고 "같은 폴더에서 다시 시작" 을 제안한다(기존 재시작 경로).
 - 재부팅 뒤도 같다. 저장된 프로젝트의 터미널은 지금처럼 다시 만든다.
+- **설정(3b)**: `terminal.ptyHolder` 는 릴리스 빌드에서 **기본 `on`** 이다(미설정 = on, `"off"` 만 끈다). 디버그 빌드는
+  `keepRunningOnQuit` 와 같은 규칙으로 명시적 `"on"` 일 때만 쓴다(`pty_backend::pty_holder_wanted`, TS `effectivePtyHolder`).
+  설정 화면의 "PTY 홀더 사용" 체크박스가 `"on"/"off"` 를 쓰고, 설명 줄에 지금 백엔드(종류 · spawnMethod · 폴백 이유)를
+  보인다. 릴리스 빌드에서 홀더에 처음 붙으면 한 번만 안내 토스트("앱을 닫아도 터미널은 계속 실행됩니다 …")를 띄운다
+  (KV `octo-pty-holder-intro-notice`). launchd/systemd 대신 setsid 로 띄웠으면 그 이유를 토스트로 보인다.
 
 구현 메모: 3a(Rust) — `pty_holder/spawn.rs`(`spawn_holder_with`, `launchd`·`systemd` 하위 모듈, `describe`),
 `server.rs`(SIGTERM/SIGINT), `proto.rs`(`HolderInfo` 필드), `pty_backend.rs`(`info()`). 위 계획과 다르게 간 점:
@@ -305,7 +310,7 @@ trait PtyBackend: Send + Sync {
 | **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
 | **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~3.9 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
 | **2b** ✅ | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
-| **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | 스파이크 완료(아래 "3단계 스파이크 결과"): setsid 홀더는 앱 coalition·responsible 에 남지만 앱 종료·재실행 뒤 생존·재부착됨, 새 inode 교체(cargo·mv·codesign)는 안전·제자리 덮어쓰기는 기동 중 프로세스 SIGKILL, launchd 기동 +20 ms·RSS 동일, 홀더 기동 59 ms/23 MB, TCC 주체는 홀더를 띄운 앱. **남은 미검증**: 설치 번들 교체 + `relaunch()` 뒤 생존, launchd 홀더의 TCC 항목 이름, 페이지 축출 뒤 제자리 덮어쓰기 영향 |
+| **3** ✅(3a·3b) | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | 스파이크 완료(아래 "3단계 스파이크 결과"): setsid 홀더는 앱 coalition·responsible 에 남지만 앱 종료·재실행 뒤 생존·재부착됨, 새 inode 교체(cargo·mv·codesign)는 안전·제자리 덮어쓰기는 기동 중 프로세스 SIGKILL, launchd 기동 +20 ms·RSS 동일, 홀더 기동 59 ms/23 MB, TCC 주체는 홀더를 띄운 앱. **남은 미검증**: 설치 번들 교체 + `relaunch()` 뒤 생존, launchd 홀더의 TCC 항목 이름, 페이지 축출 뒤 제자리 덮어쓰기 영향 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
 구현 메모: 0단계 완료 — `src/terminal/busyAgentTabs.ts`(순수 함수, 셸 탭 제외) + `src/App.tsx` `handleUpdate` 의 `ask()` 확인(네이티브 업데이트 경로만).
@@ -588,6 +593,7 @@ TCC 항목 이름)를 PR 체크리스트에 넣는다.
    없음(Activity Monitor 에 보임). 2차에 작은 메뉴바 아이콘 검토.
 3. **단계 0 을 이번 릴리스 다음(1.1.61)에 바로 넣을지.** 제안: 예, 작고 독립적이다.
 4. **설정 기본값 전환 시점**: 3단계에서 `on`. 그 전까지는 설정에서 켠 사용자만.
+   → 결정·반영(3b): 릴리스 빌드 기본 `on`(`"off"` 로 끔). 디버그 빌드는 명시적 `"on"` 일 때만(결정 9 와 같은 이유).
 5. **웹 터미널(`web_terminal.rs`)** 도 홀더로 보낼지. 제안: 범위 밖, 별도 과제.
 6. **꺼진 사이 끝난 터미널 표시**: tail + "종료됨" 배너 후 사용자가 닫거나 재시작(제안) vs
    자동으로 같은 폴더에 새 셸.

@@ -142,7 +142,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -5595,7 +5595,18 @@ Office project scaffold created by BBARIT Terminal.
       void loadPtyRecovery(invoke).then(async (rec) => {
         const ko = locale === 'ko';
         if (rec.fallbackReason) {
-          pushToast('pty-holder-fallback', ko ? '터미널이 앱 안에서 실행 중' : 'Terminals run inside the app', rec.fallbackReason, 15000);
+          pushToast('pty-holder-fallback', ko ? '터미널이 앱 안에서 실행 중' : 'Terminals run inside the app', describePtyBackend(rec, ko), 15000);
+        } else if (rec.kind === 'holder' && rec.spawnFallbackReason) {
+          pushToast('pty-holder-spawn-fallback', ko ? 'PTY 홀더를 대체 방식으로 시작함' : 'PTY holder started another way', describePtyBackend(rec, ko), 15000);
+        }
+        // First holder attach of this install (release builds; dev keeps the holder opt-in).
+        if (rec.kind === 'holder' && !import.meta.env.DEV && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
+          void kvSet('octo-pty-holder-intro-notice', '1');
+          pushToast('pty-holder-intro',
+            ko ? '터미널이 앱과 따로 실행됩니다' : 'Terminals now run apart from the app',
+            ko ? "앱을 닫아도 터미널은 계속 실행됩니다. 메뉴의 '종료하고 모든 터미널 끝내기'로 모두 종료할 수 있습니다"
+              : "Terminals keep running after you close the app. Use 'Quit and End All Terminals' in the menu to end them all.",
+            20000);
         }
         const live = rec.recovered.filter((e) => !e.exited).length;
         if (live > 0 && !(await kvGet('octo-pty-holder-recovered-notice').catch(() => null))) {

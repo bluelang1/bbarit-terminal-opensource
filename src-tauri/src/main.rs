@@ -3984,7 +3984,8 @@ fn exit_reason_now() -> pty_backend::ExitReason {
     )
 }
 
-/// `terminal.ptyHolder` from ~/.config/octo/config.json ("off" by default, "on").
+/// `terminal.ptyHolder` from ~/.config/octo/config.json ("on" | "off"; unset = on in
+/// release builds, off in debug builds: `pty_backend::pty_holder_wanted`).
 fn configured_pty_holder() -> Option<String> {
     read_octo_config_json().as_ref().and_then(pty_holder_setting)
 }
