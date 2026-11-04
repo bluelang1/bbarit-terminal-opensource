@@ -31,6 +31,26 @@ fn scope_sleeper() {
     }
 }
 
+const RUN_HOLDER_SOCKET_ENV: &str = "BBARIT_HOLDER_TEST_RUN_SOCKET";
+
+/// A real holder process for the signal test: when started with the socket env this test
+/// binary becomes `--mode pty-holder --socket <env>` and exits. Otherwise a no-op.
+#[test]
+fn holder_process_main() {
+    if let Some(socket) = std::env::var_os(RUN_HOLDER_SOCKET_ENV) {
+        let args: Vec<std::ffi::OsString> = vec![
+            "holder".into(),
+            "--mode".into(),
+            "pty-holder".into(),
+            "--socket".into(),
+            socket,
+            "--spawn-method".into(),
+            "manual".into(),
+        ];
+        std::process::exit(server::main_from_args(&args));
+    }
+}
+
 struct TestHolder {
     holder: Arc<Holder>,
     socket: PathBuf,
@@ -910,4 +930,65 @@ fn live_spawn_detached_holder() {
             .collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&run);
+}
+
+/// SIGTERM (launchd bootout / systemd stop) removes the socket and info file and logs
+/// "exiting: SIGTERM". It does not kill_all: terminals are not killed by the holder; they
+/// end by the kernel's SIGHUP when the PTY master closes with the holder.
+#[test]
+fn sigterm_removes_socket_and_info_and_leaves_terminals_to_the_hangup() {
+    let dir = PathBuf::from(format!("/tmp/bbh-sig-{}", super::new_instance_id()));
+    super::ensure_private_dir(&dir).unwrap();
+    let socket = dir.join("pty-holder.dev.sigtest1.sock");
+    let info_path = super::info_path_for(&socket);
+    let log_path = dir.join("holder.log");
+    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "pty_holder::integration_tests::holder_process_main",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(RUN_HOLDER_SOCKET_ENV, &socket)
+        .env_remove(crate::SCOPE_ENV)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log_path).unwrap())
+        .spawn()
+        .unwrap();
+    let info: proto::HolderInfo = serde_json::from_str(&wait_for_file(&info_path)).unwrap();
+    assert_eq!(info.pid, holder.id());
+    assert_eq!(info.spawn_method.as_deref(), Some("manual"));
+    assert_eq!(info.instance, "sigtest1");
+
+    let backend = HolderBackend::connect(&socket).unwrap();
+    // The shell records SIGHUP, so its death is the PTY hangup, not a holder kill.
+    let hup_file = dir.join("hup");
+    let script = format!("trap 'echo hup > {}; exit 0' HUP; echo ready; while :; do sleep 0.1; done", hup_file.display());
+    backend.spawn(spawn_req("sig-1", &script)).unwrap();
+    let mut out = String::new();
+    read_until(&backend, "sig-1", "ready", &mut out);
+    let sh_pid = backend.pid("sig-1").unwrap().unwrap();
+    assert!(alive(sh_pid));
+
+    // SAFETY: signalling our own child.
+    unsafe {
+        libc::kill(holder.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(st) = holder.try_wait().unwrap() {
+            break st;
+        }
+        assert!(Instant::now() < deadline, "holder ignored SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "holder exit status {status:?}");
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("[pty-holder] exiting: SIGTERM"), "{log}");
+    assert!(!socket.exists(), "socket left behind");
+    assert!(!info_path.exists(), "info file left behind");
+    wait_gone(sh_pid, "shell after the holder's PTY closed");
+    assert_eq!(wait_for_file(&hup_file).trim(), "hup", "shell ended by SIGHUP");
+    drop(backend);
+    let _ = std::fs::remove_dir_all(&dir);
 }

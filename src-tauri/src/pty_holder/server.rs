@@ -16,7 +16,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
@@ -73,7 +73,13 @@ pub fn main_from_args(args: &[std::ffi::OsString]) -> i32 {
         safe_eprintln!("pty-holder: --socket <path> is required");
         return 2;
     };
-    match run(&socket) {
+    let spawned = SpawnedBy {
+        method: arg_value(args, "--spawn-method")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "manual".to_string()),
+        job: arg_value(args, "--job").map(|v| v.to_string_lossy().into_owned()),
+    };
+    match run(&socket, &spawned) {
         Ok(()) => 0,
         Err(e) => {
             safe_eprintln!("pty-holder: {e}");
@@ -89,27 +95,97 @@ fn arg_value(args: &[std::ffi::OsString], name: &str) -> Option<std::path::PathB
         .map(std::path::PathBuf::from)
 }
 
+/// How the app started this holder (`--spawn-method`, `--job`), recorded in the info file
+/// so a later app knows which launchd label / systemd unit to stop.
+#[derive(Debug, Clone)]
+pub struct SpawnedBy {
+    /// "launchd" | "systemd" | "setsid" | "manual" (started by hand / tests).
+    pub method: String,
+    /// launchd label or systemd unit.
+    pub job: Option<String>,
+}
+
 /// Bind `socket`, write the info file next to it, serve until the holder decides to
 /// exit, then remove both files.
-pub fn run(socket: &Path) -> Result<(), String> {
+pub fn run(socket: &Path, spawned: &SpawnedBy) -> Result<(), String> {
     // The holder must not carry a tab's scope token: a sweep of that tab would kill it
     // (dev: an app started from inside a BBARIT tab). Single-threaded here.
     std::env::remove_var(crate::SCOPE_ENV);
+    // Before the socket exists, so a TERM can never leave the files behind.
+    install_stop_handlers()?;
     let instance = instance_from_socket(socket).unwrap_or_else(super::new_instance_id);
     let listener = bind(socket)?;
     let info_path = super::info_path_for(socket);
-    write_info(&info_path, socket, &instance)?;
+    write_info(&info_path, socket, &instance, spawned)?;
     safe_eprintln!(
-        "[pty-holder] pid {} listening on {}",
+        "[pty-holder] pid {} listening on {} (spawned by {}{})",
         std::process::id(),
-        socket.display()
+        socket.display(),
+        spawned.method,
+        spawned.job.as_deref().map(|j| format!(" as {j}")).unwrap_or_default()
     );
     let holder = Holder::new(Config::new(instance));
+    {
+        let holder = Arc::clone(&holder);
+        thread::spawn(move || watch_stop_signal(&holder));
+    }
     let result = holder.serve(listener).map_err(|e| e.to_string());
     let _ = std::fs::remove_file(socket);
     let _ = std::fs::remove_file(&info_path);
-    safe_eprintln!("[pty-holder] exiting");
+    match holder.shutdown_reason() {
+        Some(why) => safe_eprintln!("[pty-holder] exiting: {why}"),
+        None => safe_eprintln!("[pty-holder] exiting"),
+    }
     result
+}
+
+/// SIGTERM/SIGINT that asked the holder to stop (0 = none yet).
+static STOP_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn on_stop_signal(sig: libc::c_int) {
+    // Async-signal-safe: one atomic store; the watcher thread does the rest.
+    STOP_SIGNAL.store(sig, Ordering::SeqCst);
+}
+
+/// SIGTERM (launchd bootout, systemd stop, `kill`) and SIGINT stop the holder cleanly:
+/// it stops accepting and removes its socket and info file. It does not kill or sweep
+/// its terminals (that is GOODBYE kill_all); they get SIGHUP from the kernel when the
+/// holder's PTY masters close at exit, exactly as on any other holder death.
+fn install_stop_handlers() -> Result<(), String> {
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: a zeroed sigaction with a plain handler and an empty mask is valid;
+        // the handler only stores to an atomic.
+        let rc = unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = libc::SA_RESTART;
+            libc::sigaction(sig, &sa, std::ptr::null_mut())
+        };
+        if rc != 0 {
+            return Err(format!("sigaction({sig}): {}", io::Error::last_os_error()));
+        }
+    }
+    Ok(())
+}
+
+fn signal_name(sig: i32) -> String {
+    match sig {
+        libc::SIGTERM => "SIGTERM".to_string(),
+        libc::SIGINT => "SIGINT".to_string(),
+        other => format!("signal {other}"),
+    }
+}
+
+fn watch_stop_signal(holder: &Holder) {
+    while !holder.is_shutting_down() {
+        let sig = STOP_SIGNAL.load(Ordering::SeqCst);
+        if sig != 0 {
+            holder.begin_shutdown(&signal_name(sig));
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// `<run>/<prefix>.<instance>.sock` → `<instance>`.
@@ -144,7 +220,12 @@ pub fn bind(path: &Path) -> Result<UnixListener, String> {
     Ok(listener)
 }
 
-fn write_info(info_path: &Path, socket: &Path, instance: &str) -> Result<(), String> {
+fn write_info(
+    info_path: &Path,
+    socket: &Path,
+    instance: &str,
+    spawned: &SpawnedBy,
+) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     let info = proto::HolderInfo {
         pid: std::process::id(),
@@ -152,6 +233,9 @@ fn write_info(info_path: &Path, socket: &Path, instance: &str) -> Result<(), Str
         version: proto::PROTOCOL_VERSION,
         build: env!("CARGO_PKG_VERSION").to_string(),
         instance: instance.to_string(),
+        spawn_method: Some(spawned.method.clone()),
+        label: spawned.job.clone().filter(|_| spawned.method == "launchd"),
+        unit: spawned.job.clone().filter(|_| spawned.method == "systemd"),
     };
     let json = serde_json::to_vec_pretty(&info).map_err(|e| e.to_string())?;
     let mut f = std::fs::OpenOptions::new()
@@ -459,6 +543,8 @@ pub struct Holder {
     changed: Condvar,
     cfg: Config,
     shutdown: AtomicBool,
+    /// Why the holder is shutting down (logged as "exiting: <why>").
+    shutdown_reason: Mutex<Option<String>>,
     sweeps: AtomicUsize,
 }
 
@@ -478,6 +564,7 @@ impl Holder {
             changed: Condvar::new(),
             cfg,
             shutdown: AtomicBool::new(false),
+            shutdown_reason: Mutex::new(None),
             sweeps: AtomicUsize::new(0),
         })
     }
@@ -492,8 +579,13 @@ impl Holder {
 
     fn begin_shutdown(&self, why: &str) {
         if !self.shutdown.swap(true, Ordering::SeqCst) {
+            *self.shutdown_reason.lock().unwrap_or_else(|p| p.into_inner()) = Some(why.to_string());
             safe_eprintln!("[pty-holder] shutting down: {why}");
         }
+    }
+
+    pub fn shutdown_reason(&self) -> Option<String> {
+        self.shutdown_reason.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Accept connections until shutdown. Blocks the calling thread.

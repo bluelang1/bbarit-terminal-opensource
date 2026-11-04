@@ -269,6 +269,15 @@ pub struct HolderInfo {
     pub version: u32,
     pub build: String,
     pub instance: String,
+    /// "launchd" | "systemd" | "setsid" | "manual". Missing in files of 2a/2b holders.
+    #[serde(rename = "spawnMethod", default, skip_serializing_if = "Option::is_none")]
+    pub spawn_method: Option<String>,
+    /// launchd job label (spawnMethod "launchd").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// systemd unit (spawnMethod "systemd").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
 }
 
 #[cfg(test)]
@@ -410,5 +419,28 @@ mod tests {
             assert!(t.get(key).is_some(), "{key}");
         }
         assert_eq!(t["modes"]["decset"], serde_json::json!([1049, 2004]));
+    }
+
+    #[test]
+    fn holder_info_spawn_fields_are_optional_and_camel_case() {
+        // A 2a/2b holder's file has no spawn fields.
+        let old = br#"{"pid":1,"socket":"/r/x.sock","version":1,"build":"1.0","instance":"ab"}"#;
+        let info: HolderInfo = serde_json::from_slice(old).unwrap();
+        assert_eq!((info.spawn_method, info.label, info.unit), (None, None, None));
+        let info = HolderInfo {
+            pid: 2,
+            socket: "/r/y.sock".into(),
+            version: 1,
+            build: "1.0".into(),
+            instance: "cd".into(),
+            spawn_method: Some("launchd".into()),
+            label: Some("com.bbarit.terminal.pty-holder.cd".into()),
+            unit: None,
+        };
+        let v = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["spawnMethod"], "launchd");
+        assert_eq!(v["label"], "com.bbarit.terminal.pty-holder.cd");
+        assert!(v.get("unit").is_none() && v.get("spawn_method").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<HolderInfo>(v).unwrap(), info);
     }
 }
