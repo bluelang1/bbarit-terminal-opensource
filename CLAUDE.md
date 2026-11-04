@@ -130,13 +130,20 @@ Build/test gotchas:
   `pgrep -f 'src-tauri/target/debug/octo-ui$'`; quit it with
   `npm run ctl -- --port 9323 js "window.__TAURI__.core.invoke('plugin:process|exit')"`
   (normal quit path, keeps held terminals); System Events keystrokes are blocked by TCC.
-- PTY holder verify: set `terminal.ptyHolder: "on"` and `terminal.keepRunningOnQuit: true`
-  in ~/.config/octo/config.json (debug builds need the explicit true; the file is shared
-  with the installed app, so back it up and restore). Holder socket/log/info live in
-  ~/.config/octo/run/pty-holder.dev.<hash>.{sock,log,json}; `pty_backend_info` (ctl js)
-  reports kind holder|in-process + fallback reason; `app_quit_kill_terminals` stops the
-  holder (log shows `GOODBYE kill_all`). The holder survives app death and the
-  BBARIT_TERM_SCOPE sweep; `dev:screen:start`'s stale sweep skips `--mode pty-holder`.
+- PTY holder: release builds default `terminal.ptyHolder` on and `keepRunningOnQuit` true
+  (only `"off"`/false disable); debug builds need explicit `"on"`/true in
+  ~/.config/octo/config.json (shared with the installed app: back up and restore).
+  macOS spawns it as a one-shot launchd job `com.bbarit.terminal.pty-holder[.dev].<id>`
+  (Linux systemd-run, setsid fallback; `BBARIT_PTY_HOLDER_SPAWN=setsid` forces it);
+  finished jobs stay listed as `- 0 <label>` and are booted out later, never a live pid.
+  Socket/log/info: ~/.config/octo/run/pty-holder[.dev].<id>.{sock,log,json}.
+  `pty_backend_info` (ctl js) reports kind, spawnMethod, fallback reason and `holders[]`;
+  `app_quit_kill_terminals` stops everything (`GOODBYE kill_all`); `app_relaunch_for_update`
+  sends GOODBYE handover then restarts (8 s watchdog respawn). A holder with another
+  protocol version is attached + DRAINed and a new one spawned; debug builds can force
+  this with `BBARIT_PTY_HOLDER_PROTO_VERSION=<n>`. Holder exe must be replaced by a new
+  inode (cargo/mv/codesign are; in-place `cp` gets SIGKILL). The holder survives app
+  death and the BBARIT_TERM_SCOPE sweep; `dev:screen:start`'s sweep skips `--mode pty-holder`.
 - PRs are squash-merged: a branch stacked on a merged branch needs
   `git rebase --onto main <old-base-sha>` or it carries duplicate commits.
 - Agent relay: tabs can run `node "$BBARIT_CTL" agent run|send|wait|status|list`

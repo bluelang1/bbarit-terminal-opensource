@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현(실기 확인 전).** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현(실기 확인 전). 3a(launchd/systemd-run 분리 spawn, 홀더 SIGTERM 정리, Rust) 구현.** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -83,6 +83,62 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
 - 홀더가 죽으면 그 안의 터미널은 죽는다(홀더가 부모다). 앱은 다음 연결에서 사라진 터미널을
   `holder_lost` 로 표시하고 "같은 폴더에서 다시 시작" 을 제안한다(기존 재시작 경로).
 - 재부팅 뒤도 같다. 저장된 프로젝트의 터미널은 지금처럼 다시 만든다.
+- **설정(3b)**: `terminal.ptyHolder` 는 릴리스 빌드에서 **기본 `on`** 이다(미설정 = on, `"off"` 만 끈다). 디버그 빌드는
+  `keepRunningOnQuit` 와 같은 규칙으로 명시적 `"on"` 일 때만 쓴다(`pty_backend::pty_holder_wanted`, TS `effectivePtyHolder`).
+  설정 화면의 "PTY 홀더 사용" 체크박스가 `"on"/"off"` 를 쓰고, 설명 줄에 지금 백엔드(종류 · spawnMethod · 폴백 이유)를
+  보인다. 릴리스 빌드에서 홀더에 처음 붙으면 한 번만 안내 토스트("앱을 닫아도 터미널은 계속 실행됩니다 …")를 띄운다
+  (KV `octo-pty-holder-intro-notice`). launchd/systemd 대신 setsid 로 띄웠으면 그 이유를 토스트로 보인다.
+
+구현 메모: 3a(Rust) — `pty_holder/spawn.rs`(`spawn_holder_with`, `launchd`·`systemd` 하위 모듈, `describe`),
+`server.rs`(SIGTERM/SIGINT), `proto.rs`(`HolderInfo` 필드), `pty_backend.rs`(`info()`). 위 계획과 다르게 간 점:
+- **macOS launchd**: plist 는 `<run>/<prefix>.<instance>.plist`(0600), 레이블은 `com.bbarit.terminal.<prefix>.<instance>`
+  (릴리스 `com.bbarit.terminal.pty-holder.<8hex>`, 개발 `….pty-holder.dev.<8hex>`. instance 는 spawn 마다 새 난수라
+  레이블도 spawn 마다 고유하다). `ProgramArguments` = exe + `--mode pty-holder --socket <path> --spawn-method launchd
+  --job <label>`. 뒤 두 쌍은 홀더가 정보 파일에 `spawnMethod`/`label` 을 쓰게 하려고 더했다. 그 밖의 키는 `RunAtLoad`,
+  `KeepAlive=false`, `AbandonProcessGroup`, `ProcessType=Interactive`, `WorkingDirectory=/`, stdin/stdout `/dev/null`,
+  `StandardErrorPath`=기존 홀더 로그다. env 는 `HOME`, `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, 그리고 앱에 있을 때만
+  `BBARIT_PTY_HOLDER_IDLE_EXIT_MS` 를 넣는다. rlimit 은 넘기지 않는다(launchd 기본값).
+  launchd 홀더는 `getsid == 1`(launchd 세션)이고 `pgid == pid` 다. setsid 홀더처럼 세션 리더는 아니다. 터미널은 각자
+  세션을 만들므로 동작은 같다.
+- **낡은 잡 정리**: 우리 접두사이면서 instance 에 점이 없는 레이블만 다룬다. 그래서 릴리스는 개발 잡을 건드리지 않고,
+  개발도 릴리스 잡을 건드리지 않는다. (3b 수정) 레이블은 uid 마다 한 이름공간인데 plist 는 run 디렉터리마다 따로라,
+  동시에 띄우는 다른 spawner(다른 worktree 의 dev 앱, live 테스트)의 막 bootstrap 한 잡(PID 아직 `-`)이나 쓰는 중인
+  plist 를 지울 수 있었다. 그래서 정리는 **소켓이 열린 뒤 백그라운드 스레드**에서 하고(시작 경로에서 launchctl 대기 제거),
+  `launchctl list` 를 `STALE_MIN_AGE`(= `SOCKET_WAIT` + 5 초 = 10 초) 간격으로 두 번 읽는다. 두 번 다 `-` 이고, 우리 plist 가
+  있으면 그 mtime 이 10 초보다 오래된 레이블만 `bootout gui/<uid>/<label>` 한다. plist 는 10 초보다 오래됐고 잡이 돌고 있지
+  않을 때만 지운다(`plan_cleanup`, `plists_in`).
+  bootstrap 이 성공했는데 소켓이 `SOCKET_WAIT`(5 초, 그대로) 안에 열리지 않으면 그 레이블을 bootout 한다(늦게 뜬 홀더가
+  남지 않게). (3b) 그 뒤 새 경로로 setsid 를 한 번 시도하고 이유(`launchd: job started but …`)를
+  `spawnFallbackReason` 에 남긴다. Linux 도 같다: systemd-run 은 성공했는데 소켓이 안 열리면 `systemctl --user stop <unit>`
+  (최선 노력) 후 setsid (`start_service`).
+- **폴백**: launchd(macOS)·systemd-run(Linux)이 실패하면 2a 의 setsid 로 띄운다. 실패 원인은 도구 없음, 0 이 아닌 종료,
+  5 초 타임아웃, UTF-8 이 아닌 경로, gui 도메인 없음(ssh 세션) 등이다. 이유는 `pty_backend_info.spawnFallbackReason` 에
+  남는다(이 앱이 띄운 그 소켓일 때만). `BBARIT_PTY_HOLDER_SPAWN=setsid` 로 setsid 를 강제할 수 있다(디버깅·비교용).
+- **Linux**: `systemd-run --user --collect --quiet --service-type=exec -p KillMode=process -p StandardError=append:<log>
+  --unit bbarit-<prefix의 .을 -로>-<instance> [-E BBARIT_PTY_HOLDER_IDLE_EXIT_MS=…] -- <exe> … --spawn-method systemd --job <unit>`.
+  `StandardError=append:` 는 systemd 240 이상이 필요하다. 그보다 오래된 systemd 에서는 실패해 setsid 로 간다.
+  이 Mac 에서는 argv 테스트만 했고, 실제 systemd 실행과 Linux 빌드(`cfg(target_os="linux")` 분기)는 CI(ubuntu)가 처음 확인한다.
+- **정보 파일·`pty_backend_info`**: `HolderInfo` 에 선택 필드 `spawnMethod`("launchd"|"systemd"|"setsid"|"manual"),
+  `label`, `unit` 을 더했다. 2a/2b 파일도 그대로 읽힌다. `pty_backend_info`(holder)에는 `spawnMethod`, `label`/`unit`,
+  `spawnFallbackReason` 이 붙는다. 프로토콜 버전은 그대로 1 이다.
+- **홀더 SIGTERM/SIGINT**: `sigaction` 핸들러는 원자 변수 하나만 쓰고, 감시 스레드가 일반 종료 경로를 시작한다.
+  새 접속을 받지 않고, `.sock`/`.json` 을 지운 뒤 `[pty-holder] exiting: SIGTERM` 을 남긴다. 터미널을 kill 하거나
+  스윕하지 않는다(그것은 GOODBYE `kill_all` 의 일이다). 다만 홀더가 끝나면 PTY master 가 닫히므로 커널이 세션 리더에
+  SIGHUP 을 보내고, 보통의 셸은 끝난다. 3.1 의 "홀더가 죽으면 터미널도 죽는다" 와 같은 결과다. 차이는 파일이 깨끗이
+  지워진다는 점이다. 새 크레이트는 더하지 않았다(`libc` 만 씀). `kill_all` 뒤 launchd 잡은 `-  0  <label>` 로 남고,
+  다음 spawn 의 정리에서 내려간다.
+- **테스트**: `spawn::tests::{launchctl_list_rows_are_split_into_live_and_finished_jobs, launchd_plist_is_a_one_shot_interactive_job
+  (plutil -lint), holder_env_carries_only_what_the_holder_reads, systemd_run_argv, describe_reads_the_info_file_and_the_fallback_reason}`,
+  `proto::tests::holder_info_spawn_fields_are_optional_and_camel_case`,
+  `integration_tests::sigterm_removes_socket_and_info_and_leaves_terminals_to_the_hangup`(테스트 바이너리를 실제 홀더 프로세스로
+  띄우고 TERM 을 보낸다. 셸의 HUP 트랩으로 SIGHUP 종료를 확인한다). 수동(ignored) `live_spawn_detached_holder` 는 macOS 에서
+  launchd 경로를 확인한다. `launchctl list` 의 live pid → `kill_all` 뒤 `-` → `cleanup_stale` 로 사라지고 plist 도 지워지는지
+  본다. `BBARIT_PTY_HOLDER_SPAWN=setsid` 로는 setsid 경로를 확인한다.
+- **실기(dev 앱, 2026-11-04)**: `pty_backend_info` = `kind:"holder"`, `spawnMethod:"launchd"`,
+  `label:"com.bbarit.terminal.pty-holder.dev.<id>"`. `launchctl list` 에 live pid 로 보였다. 셸 탭에서 1 초 tick 루프를 돌리며
+  앱을 `kill -TERM` 해도 홀더와 루프는 살아 있었고, 다시 띄운 앱이 같은 소켓에 붙어(`recovered` 2) tick 이 끊기지 않았다.
+  `app_quit_kill_terminals` 뒤에는 홀더 로그가 `exiting: GOODBYE kill_all` 이었고 레이블은 `-  0` 으로 남았다. 다음 시작에서
+  그 레이블은 bootout 되고 plist 도 지워졌다. 폴백은 실기에서 일어나지 않았다(강제 env 로만 확인).
 
 ### 3.2 소켓과 신뢰 경계
 
@@ -254,7 +310,7 @@ trait PtyBackend: Send + Sync {
 | **1** ✅ | 리팩터링만: `PtyBackend` 트레이트 + `InProcessBackend`, `build_shell_command` 분리(의존성 주입), `create_cli_shell` 삭제 또는 빌더 공유, 커맨드 함수는 백엔드에 위임. 동작 변화 0 | Rust ~600 줄, 테스트: argv·cwd·env 키 스냅샷 | 숨은 env 차이(상속 + remove 의미) |
 | **2a** ✅ | Rust 반쪽: 홀더 모드(`--mode pty-holder`), 프로토콜(seq·modes·dropped_bytes 포함), `HolderBackend`, `setsid` 분리 spawn, 설정 `terminal.ptyHolder`(기본 `off`) + 실패 시 InProcess 폴백, `pty_backend_info` 커맨드. 프런트 변경 없음 | Rust ~3.9 k 줄(테스트 포함). 통합 테스트: 홀더를 스레드로 띄워 `sh` 생성·입출력·tail·RELEASE·스코프 스윕·seq 중복 없음 | 모드 추적 누락 |
 | **2b** ✅ | 프런트: 재부착(3.5 전체: 순서·exited 처리·modes 재생·nudge), `agentLinks` 영속 + ctl 재시도, 종료 의미(3.6: quit 시 터미널 유지, `kill_all` 메뉴) | 프런트 ~400 줄 + Rust 소량 | tail 재생 품질 |
-| **3** | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | **실기 스파이크 선행**: 번들 교체 뒤 실행 중인 홀더 생존 여부, dev 재빌드로 실행 파일이 덮어써질 때 코드서명 SIGKILL 여부, TCC 프롬프트 귀속, dylib 정적 초기화 비용. 모두 미검증 |
+| **3** ✅(3a·3b) | launchd/systemd 등록(고유 레이블·stale 정리·Interactive), 업데이트 handover + DRAIN + 다중 홀더, 복구 탭 UI, 기본 `on` | Rust ~800 줄 | 스파이크 완료(아래 "3단계 스파이크 결과"): setsid 홀더는 앱 coalition·responsible 에 남지만 앱 종료·재실행 뒤 생존·재부착됨, 새 inode 교체(cargo·mv·codesign)는 안전·제자리 덮어쓰기는 기동 중 프로세스 SIGKILL, launchd 기동 +20 ms·RSS 동일, 홀더 기동 59 ms/23 MB, TCC 주체는 홀더를 띄운 앱. **남은 미검증**: 설치 번들 교체 + `relaunch()` 뒤 생존, launchd 홀더의 TCC 항목 이름, 페이지 축출 뒤 제자리 덮어쓰기 영향 |
 | **4** | Windows 홀더 | 별도 설계 | ConPTY 소유권 이전 |
 
 구현 메모: 0단계 완료 — `src/terminal/busyAgentTabs.ts`(순수 함수, 셸 탭 제외) + `src/App.tsx` `handleUpdate` 의 `ask()` 확인(네이티브 업데이트 경로만).
@@ -382,6 +438,129 @@ trait PtyBackend: Send + Sync {
 - **안 한 것**: 3.5-7(재부착 때 Claude transcript 재탐지 — `read_directory` 에 mtime 이 없어 "더 최신 jsonl" 판정을
   못 함), 비-macOS 의 "종료하고 모든 터미널 끝내기" UI(커맨드 `app_quit_kill_terminals` 만 있음), 앱 실기 검증.
 
+### 3단계 스파이크 결과 (2026-11-04, macOS 27.0.1 (26A434), Apple Silicon arm64)
+
+실험 대상은 `c312c0e` 의 디버그 바이너리(265 MB, ad-hoc·linker-signed)와 그 복사본이다. 측정 로그는 스파이크 세션의
+스크래치 디렉터리(`E1.log`…`E6.log`)에 있고 리포에는 넣지 않았다. `launchctl procinfo` 는 root 가 필요해 쓰지 못했다.
+coalition·responsible pid 는 대상 프로세스에 `kill -ABRT` 를 보내 생긴 크래시 리포트(`.ips` 의 `coalitionID`/
+`coalitionName`/`responsiblePid`)와 `launchctl print gui/<uid>/<label>` 의 `resource coalition` 으로 읽었다.
+
+**E1. 오늘의 `setsid` 홀더가 속한 coalition**
+- 방법: dev 앱(`target/debug/octo-ui`)을 ① 설치본 탭 안의 셸에서 `tauri dev` 로, ② LaunchServices 실행을 흉내 낸
+  일회성 launchd 잡(`spike.bbarit.devapp-…`)으로 띄우고, 앱이 `setsid` 로 띄운 홀더를 앱 종료 뒤 ABRT 로 확인했다.
+- 결과: ② 에서 홀더(pid 5738, `getsid == pgid == 5738`, 앱 종료 뒤 ppid 1)는 **앱 잡의 coalition 그대로**였다
+  (`coalitionID 58458`, `coalitionName spike.bbarit.devapp-…` = 앱 잡의 resource coalition, `responsiblePid 5726` = 이미 끝난
+  앱 pid). 앱이 정상 종료된 뒤에도 그 coalition 은 `state = active` 로 남았고, 다시 띄운 앱도 같은 coalition(58458)에 들어갔다.
+  ① 에서는 dev 앱과 홀더 모두 설치본의 coalition(`36490 com.bbarit.terminal.source`)에 있었다. 셸에서 띄운 프로세스는
+  setsid·재부모화와 상관없이 그 앱의 coalition 을 물려받는다.
+- 결과(생존): 두 경우 모두 앱 정상 종료(`plugin:process|exit`, `keepRunningOnQuit=true`) 뒤 홀더와 탭 셸은 살아 있었고,
+  launchd 가 앱 잡을 끝낼 때 coalition 의 남은 프로세스를 정리하지는 않았다.
+- 설계 결론: "setsid 만으로는 앱 coalition 에 남는다"는 사실로 확인됐다. 다만 이번 측정에서 그것 때문에 홀더가 죽지는
+  않았다. 그러니 launchd 의 이유는 "생존"이 아니라 **귀속**이다. 앱 coalition 에 남은 홀더는 그 앱의 에너지·메모리·
+  jetsam 집계에 묶이고, TCC 와 크래시 리포트도 끝난 앱 pid 를 responsible 로 가리킨다(E6). 3단계 launchd 잡은 그대로 진행한다.
+  번들 교체가 coalition 을 거두는지는 E2 에서 보지 못했다(미검증).
+
+**E2. 업데이트식 재시작**
+- 방법: 홀더 on 인 launchd dev 앱의 셸 탭에서 `for i in $(seq 1 600); do echo tick $i; sleep 1; done` 를 돌리고
+  ⓐ 정상 종료 → `launchctl kickstart` ⓑ `pty_prepare_handover` + `plugin:process|restart` ⓒ `kill -TERM` → kickstart.
+- 결과: ⓐ·ⓒ 둘 다 새 앱이 `pty_backend_info` `kind:"holder"` 로 같은 소켓에 붙었다. `recovered` 3개(셸 2 + Claude 1)였고
+  루프는 끊김 없이 이어졌다(tick 54 @18:43:17 → tick 89 @18:43:53 → tick 181 @18:45:25). ⓑ 는 `restart` 호출이 `null` 을
+  돌려주고 앱이 그대로 떠 있었다. 그 뒤 같은 앱에서 `plugin:process|exit` 도 효과가 없어 `kill -TERM` 으로 끝냈다.
+  launchd 잡 안의 dev 앱에서 Tauri `relaunch()` 경로는 재현하지 못했고, 원인은 조사하지 않았다.
+- 설계 결론: 프로세스 수준의 "앱 교체 뒤 홀더 생존 + 재부착"은 확인됐다. 실제 `.app` 번들 교체(업데이터)와
+  `relaunch()` 는 **미검증**이다. 설치 빌드로 다시 확인해야 한다.
+
+**E3. 실행 중인 홀더의 실행 파일을 바꿀 때**
+- 방법: 디버그 바이너리 복사본을 홀더로 띄우고(`--mode pty-holder`, setsid) 파이썬 클라이언트로 `sh` 를 SPAWN 했다.
+  그다음 실행 파일을 (a) 새 파일 + `mv`, (b) 제자리 `cp`, (c) `codesign -s - -f` 로 바꿨다. 결과는 inode·생존·새 SPAWN 으로 확인했다.
+- (a) `mv`: inode 32784308 → 32784487. 5 초 뒤 홀더 생존, 새 SPAWN 성공, 기존 자식 생존. **안전.**
+- (b) 제자리 `cp`(inode 32784487 유지): **기동 중인**(exec 후 약 1 초, 아직 소켓 전) 홀더는 덮어쓰는 순간 SIGKILL 됐다
+  (`SIGKILL (Code Signature Invalid)`, namespace CODESIGNING, "Invalid Page", 크래시 리포트 `holder-exe-…-173441.ips`).
+  완전히 기동한 홀더는 코드 바이트가 다른 파일(`__text` 를 난수로 바꾼 같은 크기 사본)로 덮어써도 2 분 넘게 살았다.
+  새 SPAWN·잘못된 HELLO·SIGNAL·RELEASE·RESIZE·GOODBYE kill_all 도 정상이었다. 같은 파일을 덮어쓴 뒤 `mmap` 한 `cmp` 는
+  같은 사유로 두 번 SIGKILL 됐다. 페이지가 메모리에서 밀려난 뒤 다시 읽힐 때 실행 중인 홀더도 죽는지는 확인하지 못했다(`purge` 는 root 필요).
+- (c) `codesign -f`: 새 파일로 바꿔 쓴다(inode 32785374 → 32785590). 홀더 생존, 새 SPAWN 성공. **안전.**
+- cargo: `tauri dev` 재빌드 전후로 `target/debug/octo-ui` inode 가 32174038 → 32805762 로 바뀌었다(deps 산출물과
+  하드링크도 아님). 새 파일을 쓰므로 (a) 와 같다. 재빌드 동안 dev 홀더(구 바이너리)는 영향이 없었다.
+- 설계 결론: 홀더 exe 는 **반드시 새 inode 로 교체**되어야 한다. cargo·codesign·`mv`·번들 통째 교체는 안전하다.
+  제자리 쓰기(`cp` 덮어쓰기, `dd conv=notrunc`, 일부 설치 도구)는 그 파일에서 기동 중이거나 새로 매핑하는 프로세스를
+  죽이고, 실행 중인 홀더도 잠재적으로 위험하다. 업데이터 경로가 제자리 쓰기를 하지 않는지 3단계에서 확인한다
+  (Tauri 업데이터는 `.app` 을 통째로 옮기는 방식이라 예상상 안전하지만 미검증).
+
+**E4. 일회성 launchd 잡(3.1 계획)**
+- 방법: 스크래치 plist(`RunAtLoad`, `KeepAlive=false`, `AbandonProcessGroup`, `ProcessType=Interactive`, env 는 HOME·PATH)를
+  `launchctl bootstrap gui/501` 로 올렸다. 시간·coalition·환경·레이블 수명·bootout 동작을 측정했다.
+- 시간: bootstrap 호출 5 ms, bootstrap → 소켓 생성 중앙값 **79.5 ms**(5회: 100/70/80/77/80). 같은 바이너리의 setsid 기동은
+  59 ms(E5)라 약 20 ms 차이다. 새 파일 첫 실행은 두 방식 모두 1.7 s 였다(서명 검증·페이지 인). RSS 는 23.4 MB 로 setsid 와 같다.
+- coalition: 잡마다 자기 resource/jetsam coalition 이 생긴다(`name = <label>`). 홀더 ABRT 리포트는 `coalitionName = <label>`,
+  `responsiblePid = 없음`(자기 자신)이었다. jetsam priority 40, `spawn type = interactive (4)`, 메모리 한도 없음.
+- 환경: launchd 가 `PATH`(plist 값)·`HOME`·`XPC_SERVICE_NAME=<label>`·`OSLogRateLimit=64`·`SSH_AUTH_SOCK` 만 준다.
+  홀더가 띄운 자식의 env 는 SPAWN 이 준 것 + `SHELL`/`PWD`/`SHLVL` 뿐이었다. 2a 구조(SPAWN 이 전체 env 를 실어 보냄)로 충분하다.
+- 레이블 수명: 유휴 종료 뒤에도 `launchctl list` 에 `-  0  <label>` 로 남는다. **같은 레이블 재-bootstrap 은 실패**한다
+  (`Bootstrap failed: 5: Input/output error`). `launchctl kickstart gui/501/<label>` 은 남은 잡을 다시 띄운다.
+  PID 칸이 `-` 인 잡의 `bootout` 은 rc 0 으로 깨끗이 내려간다.
+- 살아 있는 잡 bootout: 홀더가 즉시 끝났다(로그에 "exiting" 없음, SIGTERM 핸들러 없음). 그 아래 셸 2개도 사라졌고,
+  HUP 트랩을 건 셸은 `got-HUP` 을 남겼다.
+- 설계 결론: 3.1 의 세부(고유 레이블, `-` 인 잡만 bootout, 살아 있는 잡 bootout = 모든 터미널 HUP)는 실측과 맞다.
+  추가할 것: ① 홀더에 SIGTERM 핸들러(소켓·json 정리; 지금은 TERM 으로 죽으면 `.sock`/`.json` 이 남는다. 다음 `find_or_spawn` 이
+  지우긴 한다) ② 고정 레이블 + `kickstart` 도 선택지지만, 버전별 다중 홀더(DRAIN)를 생각하면 고유 레이블이 단순하다.
+
+**E5. 홀더 기동 비용(dylib 정적 초기화)**
+- 방법: 스크래치 사본을 `--mode pty-holder` 로 5번 띄워 exec → 로그의 "listening" 줄까지 시간을 쟀고, 1 초 뒤 RSS 를 쟀다.
+- 결과: 1회차 1707 ms(새로 복사한 파일의 첫 실행), 2~5회차 56/60/57/59 ms, **중앙값 59 ms**. 유휴 RSS **23.3 MB**.
+  바이너리 265 MB(디버그), 링크된 dylib·프레임워크 24개(AppKit·WebKit·CloudKit·CoreData 등 GUI 프레임워크 포함).
+- 설계 결론: 매번 드는 비용(약 60 ms·23 MB)은 문제없다. 업데이트·재빌드 직후 첫 기동은 서명 검증 때문에 약 1.7 s 가 걸린다.
+  `SOCKET_WAIT` 5 s 는 여유가 있지만 2 s 아래로 줄이지 않는다. 별도 경량 바이너리는 필요 없다.
+
+**E6. TCC 프롬프트 귀속(최선 노력)**
+- 방법: launchd dev 앱(pid 5726)이 setsid 로 띄운 홀더 아래 셸 탭에서 `ls ~/Desktop`·`ls ~/Documents` 를 실행했다.
+  ctl 스크린숏을 찍고 `log stream` 으로 `com.apple.TCC` 를 봤다.
+- 결과: tccd 가 `AUTHREQ_PROMPTING service=kTCCServiceSystemPolicyDesktopFolder` 를 남겼다. 이때 responsible 은
+  `identifier=octo_ui-…, pid=5726, responsible_path=…/target/debug/octo-ui` 로, 셸·홀더가 아니라 **홀더를 띄운 앱**이었다.
+  약 1.9 s 뒤 `authValue=2`(허용)가 기록됐고 Documents 도 허용됐다. 두 `ls` 모두 rc 0 이었다.
+  프롬프트 창은 웹뷰 스크린숏에 잡히지 않고, 누가 눌렀는지도 확인할 수 없어 대화상자 문구는 관찰하지 못했다.
+- 설계 결론: setsid 홀더의 TCC 주체는 "홀더를 띄운 앱 프로세스"다. 앱이 끝난 뒤 홀더 셸이 새로 묻는 경우는 확인하지
+  못했다(responsible pid 가 죽은 pid 를 가리킴). launchd 홀더는 responsible 이 자기 자신이라, 프롬프트와 권한 항목이 **홀더 exe
+  (설치본에서는 번들 안의 같은 exe)** 기준이 된다. 설치 빌드에서 이 항목이 "BBARIT Terminal Source" 로 보이는지,
+  앱에 준 권한을 그대로 쓰는지는 **미검증**이다(설치본에서 다시 확인).
+
+**3단계에 반영할 것 요약**: launchd 잡은 coalition·responsible 분리를 위해 유지한다(생존 자체는 setsid 로도 이번엔
+문제없었음). 홀더 SIGTERM 정리를 더한다. 실행 파일 교체는 새 inode 만 허용한다. 설치 빌드 실기(번들 교체 + `relaunch()`,
+TCC 항목 이름)를 PR 체크리스트에 넣는다.
+
+구현 메모: 3b — `pty_holder/multi.rs`(`HolderSet`), `proto.rs`(`protocol_version`, `ACK`), `spawn.rs`(`scan`/`Found`,
+`pick_or_spawn`), `client.rs`(연결별 `version`, `drain`), `server.rs`(DRAIN ACK, drained 규칙). 3.6 과 다르게·자세히 간 점:
+- **다중 홀더**: 앱은 시작 때 run 디렉터리의 정보 파일을 모두 본다(`spawn::scan`). 우리 프로토콜 버전의 홀더가 있으면
+  그것이 primary, 없으면 새로 띄운다. **더 오래된** 버전(`MIN_ATTACH_VERSION`(1) ≤ v < 우리)의 살아 있는 홀더에는 **그
+  버전으로** HELLO 해 붙고(지금까지 모든 버전은 프레임·페이로드가 같다) DRAIN 을 보낸다. 그 홀더의 터미널은 복구 목록에
+  들어가 attach·write·resize·close 가 되지만 SPAWN 은 절대 보내지 않는다. `HolderSet` 이 터미널 id → 홀더 맵으로 호출을
+  나눈다(맵에 없으면 primary). 이전 홀더에서 아직 도는 id 로 `create_shell` 이 오면 `"PTY alive in holder"`(프런트는 붙음),
+  끝난 id 면 거기서 RELEASE 하고 primary 에 띄운다. 이전 홀더의 마지막 터미널을 닫으면 앱은 그 홀더에 GOODBYE quit 를
+  보낸다(곧 drained 로 끝나므로 재접속하지 않게). 버전이 같으면 `HolderSet` 은 primary 하나뿐이고 모든 호출이 그대로 간다.
+  **더 새로운** 버전(다운그레이드)만 있고 우리 버전이 없으면 예전처럼 in-process 로 폴백하고 이유를 남긴다.
+- **DRAIN**: 홀더는 ACK 프레임(18, `{of:"DRAIN", terminals:n}`)으로 답한다. 3b 이전 홀더는 ACK 를 안 보내므로 앱은 기다리지
+  않는다(`drainAcked` 로만 보인다). 여러 번 받아도 같다. **종료 조건을 "모든 터미널이 끝남"에서 "모든 터미널이 RELEASE 됨"으로
+  바꿨다**: 꺼진 사이 끝난 터미널만 남은 이전 홀더가 DRAIN 받자마자 끝나면 새 앱이 tail·"종료됨" 배너를 못 보이고 새 셸을
+  띄우기 때문이다. 아무도 RELEASE 하지 않는 끝난 터미널은 평소의 유휴 종료(클라이언트 없음 60 초)로 정리된다.
+- **`pty_backend_info.holders`**: `[{socket, version, primary, draining, drainAcked, terminals, connected, spawnMethod, label?,
+  unit?, spawnFallbackReason}]`. primary 가 먼저이고, 이전 홀더는 연결돼 있거나 터미널이 남아 있을 때만 나온다.
+  `kind`/`socket`/`spawnMethod` 등 최상위 필드는 primary 를 가리킨다.
+- **버전 흉내(디버그 빌드만)**: `BBARIT_PTY_HOLDER_PROTO_VERSION=<n>` 이면 앱과 그 앱이 띄우는 홀더가 버전 n 을 말한다
+  (launchd/systemd 홀더 env 에도 넘김). 두 번째 빌드 없이 다중 홀더 경로를 실기로 확인하려는 것이다. 릴리스 빌드는 무시한다.
+- **업데이트 재시작(스파이크 E2ⓑ 의 원인)**: 권한 문제가 아니다(`capabilities/default.json` 의 `process:default` 에
+  `allow-exit`·`allow-restart` 가 들어 있다). `plugin:process|restart`/`exit` 는 `request_restart`/`exit` 가 이벤트 루프에
+  `RequestExit` 를 **올려 두기만** 하고 unit 을 돌려주므로 `invoke` 는 곧바로 `null` 이다. 실제 종료(RunEvent::Exit → GOODBYE →
+  재실행)는 루프가 그 메시지를 처리할 때 일어나는데, 백그라운드 dev 앱에서 3 초·13 초로 들쭉날쭉했다(첫 시도는 13 초 뒤에야
+  새 pid). 스파이크는 그 전에 "안 됨"으로 봤을 가능성이 크다. 그래서 `app_relaunch_for_update`(async 커맨드)를 더했다:
+  handover 표시 → **곧바로** 홀더에 GOODBYE handover → `request_restart()` → 8 초(`RELAUNCH_WATCHDOG`) 안에 안 끝나면 그
+  스레드에서 `tauri::process::restart`(새 프로세스 + exit). `handleUpdate` 는 이 커맨드를 쓰고, 없으면 예전 `relaunch()` 경로.
+  실기: 이 커맨드로 1 초 안에 새 pid, 같은 홀더(로그 `client attached` 만 늘어남), tick 루프 끊김 없음.
+- **재시작 한 번만**: 워치독과 RunEvent::Exit(Tauri 재시작)은 `RESTARTING` 을 `swap(true)` 해 먼저 잡은 쪽만 재실행한다(`exit_restart_action`). 워치독이 먼저면 Exit 는 Tauri 재시작으로 돌아가지 않고 기다리며, 그 사이 "종료하고 모든 터미널 끝내기"는 재실행 없이 끝낸다.
+- **Windows**: `pty_holder_wanted(.., unix)` 는 unix 가 아니면 항상 false 라 `fallbackReason` 이 없고(폴백 토스트 없음), 설정 체크박스는 꺼짐·비활성(macOS/Linux 전용).
+- **테스트**: `integration_tests::{an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours,
+  a_draining_holder_keeps_exited_terminals_until_they_are_released}`(스레드 홀더 둘: v1 은 draining·ACK·attach·입력·끝난 id 재사용,
+  새 터미널은 v2, 마지막 RELEASE 뒤 v1 종료), `proto::tests::{version_override_is_debug_only_and_sane, ack_round_trip}`.
+
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.
 
@@ -416,6 +595,7 @@ trait PtyBackend: Send + Sync {
    없음(Activity Monitor 에 보임). 2차에 작은 메뉴바 아이콘 검토.
 3. **단계 0 을 이번 릴리스 다음(1.1.61)에 바로 넣을지.** 제안: 예, 작고 독립적이다.
 4. **설정 기본값 전환 시점**: 3단계에서 `on`. 그 전까지는 설정에서 켠 사용자만.
+   → 결정·반영(3b): 릴리스 빌드 기본 `on`(`"off"` 로 끔). 디버그 빌드는 명시적 `"on"` 일 때만(결정 9 와 같은 이유).
 5. **웹 터미널(`web_terminal.rs`)** 도 홀더로 보낼지. 제안: 범위 밖, 별도 과제.
 6. **꺼진 사이 끝난 터미널 표시**: tail + "종료됨" 배너 후 사용자가 닫거나 재시작(제안) vs
    자동으로 같은 폴더에 새 셸.

@@ -2,6 +2,7 @@
 //! (docs/PTY_HOLDER_DAEMON.md 5).
 
 use super::client::HolderBackend;
+use super::multi::HolderSet;
 use super::proto::{self, Frame};
 use super::server::{self, Config, Holder, ModeTracker, TailRing, TAIL_BYTES};
 use crate::pty_backend::{PtyBackend, SpawnRequest};
@@ -31,6 +32,26 @@ fn scope_sleeper() {
     }
 }
 
+const RUN_HOLDER_SOCKET_ENV: &str = "BBARIT_HOLDER_TEST_RUN_SOCKET";
+
+/// A real holder process for the signal test: when started with the socket env this test
+/// binary becomes `--mode pty-holder --socket <env>` and exits. Otherwise a no-op.
+#[test]
+fn holder_process_main() {
+    if let Some(socket) = std::env::var_os(RUN_HOLDER_SOCKET_ENV) {
+        let args: Vec<std::ffi::OsString> = vec![
+            "holder".into(),
+            "--mode".into(),
+            "pty-holder".into(),
+            "--socket".into(),
+            socket,
+            "--spawn-method".into(),
+            "manual".into(),
+        ];
+        std::process::exit(server::main_from_args(&args));
+    }
+}
+
 struct TestHolder {
     holder: Arc<Holder>,
     socket: PathBuf,
@@ -40,6 +61,10 @@ struct TestHolder {
 
 impl TestHolder {
     fn start(idle_exit: Duration, allowed_uid: u32) -> Self {
+        Self::start_version(idle_exit, allowed_uid, proto::PROTOCOL_VERSION)
+    }
+
+    fn start_version(idle_exit: Duration, allowed_uid: u32, version: u32) -> Self {
         // /tmp keeps sun_path short (the macOS per-user temp dir is long).
         let dir = PathBuf::from(format!("/tmp/bbh-{}", super::new_instance_id()));
         let socket = dir.join("h.sock");
@@ -47,7 +72,8 @@ impl TestHolder {
         let holder = Holder::new(Config {
             idle_exit,
             allowed_uid,
-            instance: "test".into(),
+            instance: format!("test-v{version}"),
+            version,
         });
         let serving = {
             let holder = Arc::clone(&holder);
@@ -204,6 +230,19 @@ impl Raw {
 
 fn alive(pid: u32) -> bool {
     super::pid_alive(pid)
+}
+
+/// Alive and not a zombie (a killed child stays a zombie until its reap thread runs).
+fn running(pid: u32) -> bool {
+    if !alive(pid) {
+        return false;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
 }
 
 fn wait_gone(pid: u32, what: &str) {
@@ -855,7 +894,18 @@ fn live_holder_client() {
     }
 }
 
-/// Manual check of the app-side spawn path with the real binary:
+/// `launchctl list` row for `label`: None = not listed, Some(None) = listed with pid `-`.
+fn launchctl_pid(label: &str) -> Option<Option<u32>> {
+    let out = std::process::Command::new("launchctl").arg("list").output().unwrap();
+    let list = String::from_utf8_lossy(&out.stdout);
+    super::spawn::launchd::our_jobs(&list, &super::spawn::launchd::label_prefix())
+        .into_iter()
+        .find(|(_, l)| l == label)
+        .map(|(pid, _)| pid)
+}
+
+/// Manual check of the app-side spawn path with the real binary (macOS: as a launchd job;
+/// `BBARIT_PTY_HOLDER_SPAWN=setsid` for the setsid path):
 /// `BBARIT_HOLDER_LIVE_EXE=target/debug/octo-ui cargo test live_spawn_detached_holder -- --ignored --nocapture`.
 #[test]
 #[ignore]
@@ -875,11 +925,22 @@ fn live_spawn_detached_holder() {
         "second lookup reuses the live holder"
     );
     let sid = unsafe { libc::getsid(info.pid as libc::pid_t) };
+    let pgid = unsafe { libc::getpgid(info.pid as libc::pid_t) };
     println!(
-        "LIVE holder pid={} sid={sid} (setsid → sid == pid)",
-        info.pid
+        "LIVE holder pid={} sid={sid} pgid={pgid} spawnMethod={:?} label={:?} unit={:?}",
+        info.pid, info.spawn_method, info.label, info.unit
     );
-    assert_eq!(sid as u32, info.pid);
+    if info.spawn_method.as_deref() == Some("setsid") {
+        assert_eq!(sid as u32, info.pid, "setsid → sid == pid");
+    }
+    let launchd_label = if cfg!(target_os = "macos") && std::env::var_os(super::spawn::SPAWN_ENV).is_none() {
+        assert_eq!(info.spawn_method.as_deref(), Some("launchd"), "{:?}", super::spawn::describe(&socket));
+        let label = info.label.clone().expect("launchd label");
+        assert_eq!(launchctl_pid(&label), Some(Some(info.pid)), "live job listed with the holder pid");
+        Some(label)
+    } else {
+        None
+    };
     let mut sys = sysinfo::System::new();
     let pid = sysinfo::Pid::from_u32(info.pid);
     sys.refresh_processes_specifics(
@@ -901,6 +962,21 @@ fn live_spawn_detached_holder() {
     let backend = HolderBackend::connect(&socket).unwrap();
     backend.goodbye("kill_all");
     wait_gone(info.pid, "holder after kill_all");
+    if let Some(label) = &launchd_label {
+        // A finished one-shot job stays listed as `- 0 <label>` until the next spawn's cleanup.
+        assert_eq!(launchctl_pid(label), Some(None), "finished job listed with pid -");
+        println!("LIVE after kill_all: {label} listed with pid -");
+        // Zero age limit: the plist is seconds old (the app's own cleanup waits STALE_MIN_AGE).
+        super::spawn::launchd::cleanup_stale_with(&run, Duration::ZERO);
+        assert_eq!(launchctl_pid(label), None, "stale job booted out");
+        let plists: Vec<_> = std::fs::read_dir(&run)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".plist"))
+            .collect();
+        assert!(plists.is_empty(), "plist of a finished job removed: {plists:?}");
+        println!("LIVE cleanup booted out {label} and removed its plist");
+    }
     println!(
         "LIVE holder exited after GOODBYE kill_all; files left: {:?}",
         std::fs::read_dir(&run)
@@ -910,4 +986,342 @@ fn live_spawn_detached_holder() {
             .collect::<Vec<_>>()
     );
     let _ = std::fs::remove_dir_all(&run);
+}
+
+/// SIGTERM (launchd bootout / systemd stop) removes the socket and info file and logs
+/// "exiting: SIGTERM". It does not kill_all: terminals are not killed by the holder; they
+/// end by the kernel's SIGHUP when the PTY master closes with the holder.
+#[test]
+fn sigterm_removes_socket_and_info_and_leaves_terminals_to_the_hangup() {
+    let dir = PathBuf::from(format!("/tmp/bbh-sig-{}", super::new_instance_id()));
+    super::ensure_private_dir(&dir).unwrap();
+    let socket = dir.join("pty-holder.dev.sigtest1.sock");
+    let info_path = super::info_path_for(&socket);
+    let log_path = dir.join("holder.log");
+    let mut holder = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "pty_holder::integration_tests::holder_process_main",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env(RUN_HOLDER_SOCKET_ENV, &socket)
+        .env_remove(crate::SCOPE_ENV)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&log_path).unwrap())
+        .spawn()
+        .unwrap();
+    let info: proto::HolderInfo = serde_json::from_str(&wait_for_file(&info_path)).unwrap();
+    assert_eq!(info.pid, holder.id());
+    assert_eq!(info.spawn_method.as_deref(), Some("manual"));
+    assert_eq!(info.instance, "sigtest1");
+
+    let backend = HolderBackend::connect(&socket).unwrap();
+    // The shell records SIGHUP, so its death is the PTY hangup, not a holder kill.
+    let hup_file = dir.join("hup");
+    let script = format!("trap 'echo hup > {}; exit 0' HUP; echo ready; while :; do sleep 0.1; done", hup_file.display());
+    backend.spawn(spawn_req("sig-1", &script)).unwrap();
+    let mut out = String::new();
+    read_until(&backend, "sig-1", "ready", &mut out);
+    let sh_pid = backend.pid("sig-1").unwrap().unwrap();
+    assert!(alive(sh_pid));
+
+    // SAFETY: signalling our own child.
+    unsafe {
+        libc::kill(holder.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(st) = holder.try_wait().unwrap() {
+            break st;
+        }
+        assert!(Instant::now() < deadline, "holder ignored SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "holder exit status {status:?}");
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert!(log.contains("[pty-holder] exiting: SIGTERM"), "{log}");
+    assert!(!socket.exists(), "socket left behind");
+    assert!(!info_path.exists(), "info file left behind");
+    wait_gone(sh_pid, "shell after the holder's PTY closed");
+    assert_eq!(wait_for_file(&hup_file).trim(), "hup", "shell ended by SIGHUP");
+    drop(backend);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sigterm_during_goodbye_kill_all_waits_for_the_kill() {
+    // macOS logout: the app's GOODBYE kill_all and launchd's SIGTERM overlap. The holder
+    // must not end (and leave HUP/TERM-ignoring children behind) while kill_all still runs.
+    let mut th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (handle, pid) = a.spawn(
+        "stubborn",
+        "trap '' HUP TERM; printf ready; while :; do sleep 1; done",
+        &[],
+        "test-scope-kill-all",
+    );
+    a.output_until(handle, "ready");
+    a.send_json(
+        proto::GOODBYE,
+        0,
+        &proto::Goodbye {
+            reason: "kill_all".into(),
+        },
+    );
+    // kill_all has taken the terminals (its TERM → 300 ms → KILL is still ahead)...
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while th.holder.terminal_count() > 0 {
+        assert!(Instant::now() < deadline, "kill_all never started");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(th.holder.sweeps_running() > 0 || !running(pid), "kill_all is not counted");
+    // ...when the SIGTERM arrives.
+    th.holder.stop_for_test("SIGTERM");
+    assert!(th.wait_stopped(Duration::from_secs(15)), "holder never stopped");
+    // serve() returning is the process exit: by then the stubborn shell must be gone.
+    assert!(!running(pid), "a TERM/HUP-ignoring terminal outlived the holder");
+    assert_eq!(th.holder.sweeps_running(), 0);
+}
+
+// ─── Update across a protocol change: older holder drained, new one primary (3.6) ───
+
+#[test]
+fn an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+
+    // The previous app (old protocol) left a running terminal and an exited one behind.
+    {
+        let prev = HolderBackend::connect_version(&old.socket, old_v).unwrap();
+        let p: &dyn PtyBackend = &prev;
+        p.spawn(spawn_req(
+            "old1",
+            "printf 'OLD-READY\\n'; while read l; do printf 'OLD:%s\\n' \"$l\"; done",
+        ))
+        .unwrap();
+        let mut out = String::new();
+        read_until(p, "old1", "OLD-READY", &mut out);
+        p.spawn(spawn_req("old2", "printf 'bye'; exit 3")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p.alive("old2") {
+            assert!(Instant::now() < deadline, "old2 never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        prev.goodbye("handover");
+    }
+
+    // The updated app: our protocol is new_v; the old holder is attached in old_v.
+    let primary = HolderBackend::connect_version(&new.socket, new_v).unwrap();
+    let set = HolderSet::with_older(primary, vec![(old.socket.clone(), old_v)]);
+    let b: &dyn PtyBackend = &set;
+
+    // Draining (and the holder says so), but still there for its terminals.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(old.holder.is_draining() && set.holders_info()[1]["drainAcked"] == true) {
+        assert!(Instant::now() < deadline, "DRAIN never reached the old holder");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!new.holder.is_draining());
+    let ids: Vec<String> = set.recovered_now().into_iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec!["old1".to_string(), "old2".to_string()]);
+    let info = set.holders_info();
+    assert_eq!(info.len(), 2, "{info:?}");
+    assert_eq!((info[0]["version"].as_u64(), info[0]["primary"].as_bool()), (Some(new_v as u64), Some(true)));
+    assert_eq!(info[0]["draining"], false);
+    assert_eq!((info[1]["version"].as_u64(), info[1]["draining"].as_bool()), (Some(old_v as u64), Some(true)));
+    assert_eq!(info[1]["terminals"], 2);
+
+    // Attach to the old terminal: replay, type, read.
+    assert!(set.attach_snapshot("old1").unwrap().contains("OLD-READY"));
+    assert!(set.tail("old2").unwrap().contains("bye"));
+    b.write("old1", "ping\n").unwrap();
+    let mut out = String::new();
+    read_until(b, "old1", "OLD:ping", &mut out);
+    b.resize("old1", 30, 100).unwrap();
+    // A create_shell for the running id must attach, not start a second program.
+    assert_eq!(b.spawn(spawn_req("old1", "true")), Err(crate::pty_backend::PTY_ALIVE_IN_HOLDER.to_string()));
+
+    // New terminals go to the new holder only.
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    assert_eq!(new.holder.terminal_count(), 1);
+    assert_eq!(old.holder.terminal_count(), 2);
+    assert_eq!(set.older_index_of("new1"), None);
+    // The exited old terminal is released after its banner; reusing its id spawns on ours.
+    b.spawn(spawn_req("old2", "printf 'AGAIN\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "old2", "AGAIN", &mut out);
+    assert_eq!(set.older_index_of("old2"), None);
+    assert_eq!(new.holder.terminal_count(), 2);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while old.holder.terminal_count() != 1 {
+        assert!(Instant::now() < deadline, "old2 was not released in the old holder");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!old.holder.is_shutting_down(), "a draining holder with a live terminal stays");
+    assert_eq!(b.list().len(), 3);
+
+    // Closing the last old terminal ends the old holder; the set reports one holder.
+    let old_pid = b.pid("old1").unwrap().expect("pid");
+    b.close("old1").unwrap();
+    wait_gone(old_pid, "old1 after release");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "drained holder kept running");
+    let info = set.holders_info();
+    assert_eq!(info.len(), 1, "{info:?}");
+    assert_eq!(info[0]["primary"], true);
+    assert_eq!(b.read("old1"), Err(crate::pty_backend::PTY_NOT_FOUND.to_string()));
+    b.close("new1").unwrap();
+    b.close("old2").unwrap();
+}
+
+#[test]
+fn a_draining_holder_keeps_exited_terminals_until_they_are_released() {
+    let mut th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (h, _) = a.spawn("ex", "printf done; exit 0", &[], "test-scope-drain");
+    loop {
+        if a.next().kind == proto::EXITED {
+            break;
+        }
+    }
+    a.send(proto::DRAIN, 0, &[]);
+    let ack = loop {
+        let f = a.next();
+        if f.kind == proto::ACK {
+            break proto::parse::<proto::Ack>(&f).unwrap();
+        }
+    };
+    assert_eq!(ack, proto::Ack { of: "DRAIN".into(), terminals: 1 });
+    // Exited but not released: the app still has to replay its tail. Still serving.
+    thread::sleep(Duration::from_millis(300));
+    assert!(!th.holder.is_shutting_down(), "drained before the exited terminal was released");
+    // A SPAWN is refused while draining.
+    a.send_json(
+        proto::SPAWN,
+        0,
+        &proto::Spawn {
+            id: "late".into(),
+            argv: vec!["/bin/sh".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            rows: 24,
+            cols: 80,
+            scope: "s".into(),
+        },
+    );
+    let refused = loop {
+        let f = a.next();
+        if f.kind == proto::SPAWN_FAILED {
+            break proto::parse::<proto::SpawnFailed>(&f).unwrap();
+        }
+    };
+    assert!(refused.error.contains("draining"), "{refused:?}");
+    // DRAIN again is harmless; the RELEASE of the last terminal ends it.
+    a.send(proto::DRAIN, 0, &[]);
+    a.send(proto::RELEASE, h, &[]);
+    assert!(th.wait_stopped(Duration::from_secs(10)), "holder did not exit when drained");
+}
+
+/// The previous app (protocol `old_v`) left `old1` running in `old`; the updated app's set
+/// has `new` as primary and `old` attached in `old_v`.
+fn set_with_an_older_holder(old: &TestHolder, old_v: u32, new: &TestHolder, new_v: u32) -> HolderSet {
+    {
+        let prev = HolderBackend::connect_version(&old.socket, old_v).unwrap();
+        let p: &dyn PtyBackend = &prev;
+        p.spawn(spawn_req("old1", "printf 'OLD-READY\\n'; sleep 30")).unwrap();
+        let mut out = String::new();
+        read_until(p, "old1", "OLD-READY", &mut out);
+        prev.goodbye("handover");
+    }
+    let primary = HolderBackend::connect_version(&new.socket, new_v).unwrap();
+    let set = HolderSet::with_older(primary, vec![(old.socket.clone(), old_v)]);
+    assert_eq!(set.older_index_of("old1"), Some(0));
+    set
+}
+
+#[test]
+fn an_older_holder_lost_mid_session_leaves_the_primary_working() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    assert!(b.alive("old1"));
+
+    // Another client takes the old holder over (newest HELLO wins): the set loses old1.
+    let (_thief, _, _) = Raw::connect(&old.socket);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while b.alive("old1") {
+        assert!(Instant::now() < deadline, "old1 still alive after the old holder dropped us");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(b.write("old1", "x").is_err(), "no input into a lost terminal");
+    assert!(set.recovered_now().iter().all(|e| e.id != "old1"), "nothing to attach to");
+    let info = set.holders_info();
+    assert_eq!(info.len(), 1, "a lost older holder with no terminals is not listed: {info:?}");
+    assert_eq!(info[0]["primary"], true);
+
+    // The primary is untouched, and the lost id is started again there (no PTY_ALIVE refusal).
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    b.spawn(spawn_req("old1", "printf 'AGAIN\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "old1", "AGAIN", &mut out);
+    assert_eq!(set.older_index_of("old1"), None);
+    assert_eq!(new.holder.terminal_count(), 2);
+    b.close("new1").unwrap();
+    b.close("old1").unwrap();
+}
+
+#[test]
+fn kill_all_through_the_set_ends_every_holder() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let mut new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    let (old_pid, new_pid) = (b.pid("old1").unwrap().unwrap(), b.pid("new1").unwrap().unwrap());
+
+    set.goodbye("kill_all");
+    wait_gone(old_pid, "old1 after kill_all");
+    wait_gone(new_pid, "new1 after kill_all");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "old holder kept running");
+    assert!(new.wait_stopped(Duration::from_secs(10)), "new holder kept running");
+}
+
+#[test]
+fn kill_all_after_the_handover_goodbye_reconnects_and_ends_every_holder() {
+    // Update relaunch: GOODBYE handover goes out at once; "quit and end all terminals" can
+    // still come before the app exits, when no connection is left.
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let mut new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    let (old_pid, new_pid) = (b.pid("old1").unwrap().unwrap(), b.pid("new1").unwrap().unwrap());
+
+    set.goodbye("handover");
+    thread::sleep(Duration::from_millis(300));
+    assert!(running(old_pid) && running(new_pid), "handover keeps the terminals");
+    assert!(!old.holder.is_shutting_down() && !new.holder.is_shutting_down());
+
+    set.goodbye("kill_all");
+    wait_gone(old_pid, "old1 after kill_all");
+    wait_gone(new_pid, "new1 after kill_all");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "old holder kept running");
+    assert!(new.wait_stopped(Duration::from_secs(10)), "new holder kept running");
 }

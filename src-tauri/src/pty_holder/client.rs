@@ -19,7 +19,7 @@ use crate::pty_backend::{
     TerminalInfo, Utf8Reassembler, PTY_ALIVE_IN_HOLDER, PTY_DISCONNECTED, PTY_NOT_FOUND,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -167,6 +167,10 @@ struct Shared {
     lost: Option<String>,
     /// Closed while no connection was up: RELEASE them if the next WELCOME lists them.
     release_later: HashSet<String>,
+    /// DRAIN sent (an older holder kept only for its terminals).
+    draining: bool,
+    /// The holder confirmed the DRAIN (ACK; holders before 3b never send it).
+    drain_acked: bool,
 }
 
 enum Out {
@@ -183,6 +187,8 @@ struct Link {
 
 struct Inner {
     socket: Mutex<PathBuf>,
+    /// Protocol version spoken on this connection (HELLO, and the WELCOME must match).
+    version: u32,
     /// Where to discover/spawn a new holder after losing ours (None: fixed socket, tests).
     run_dir: Option<PathBuf>,
     shared: Mutex<Shared>,
@@ -205,7 +211,7 @@ struct Session {
     tails: Vec<(u32, proto::TailHeader, Vec<u8>)>,
 }
 
-fn connect_session(socket: &Path) -> Result<Session, String> {
+fn connect_session(socket: &Path, version: u32) -> Result<Session, String> {
     super::check_socket_path(socket)?;
     let mut stream =
         UnixStream::connect(socket).map_err(|e| format!("connect {}: {e}", socket.display()))?;
@@ -215,8 +221,8 @@ fn connect_session(socket: &Path) -> Result<Session, String> {
     stream
         .set_write_timeout(Some(WRITE_TIMEOUT))
         .map_err(|e| e.to_string())?;
-    let hello =
-        proto::encode_json(proto::HELLO, 0, &proto::Hello::current()).map_err(|e| e.to_string())?;
+    let hello = proto::encode_json(proto::HELLO, 0, &proto::Hello::with_version(version))
+        .map_err(|e| e.to_string())?;
     stream
         .write_all(&hello)
         .map_err(|e| format!("HELLO: {e}"))?;
@@ -229,11 +235,10 @@ fn connect_session(socket: &Path) -> Result<Session, String> {
         return Err(format!("expected WELCOME, got frame kind {}", first.kind));
     }
     let welcome: proto::Welcome = proto::parse(&first).map_err(|e| e.to_string())?;
-    if welcome.version != proto::PROTOCOL_VERSION {
+    if welcome.version != version {
         return Err(format!(
-            "holder speaks protocol {} (app {})",
-            welcome.version,
-            proto::PROTOCOL_VERSION
+            "holder speaks protocol {} (app {version})",
+            welcome.version
         ));
     }
     let mut tails = Vec::with_capacity(welcome.terminals.len());
@@ -283,19 +288,26 @@ impl HolderBackend {
     /// Attach to the holder listening on `socket` (no discovery, no respawn).
     #[cfg(test)]
     pub fn connect(socket: &Path) -> Result<Self, String> {
-        Self::start(socket.to_path_buf(), None)
+        Self::connect_version(socket, proto::protocol_version())
     }
 
-    /// Attach to a live holder of our protocol version in `run_dir`, or start one.
-    pub fn attach_or_spawn(run_dir: &Path) -> Result<Self, String> {
-        let socket = super::spawn::find_or_spawn(run_dir)?;
-        Self::start(socket, Some(run_dir.to_path_buf()))
+    /// Attach to the holder at `socket` speaking protocol `version` (no discovery, no
+    /// respawn): an older holder recovered for its terminals (`HolderSet`).
+    pub fn connect_version(socket: &Path, version: u32) -> Result<Self, String> {
+        Self::start(socket.to_path_buf(), None, version)
     }
 
-    fn start(socket: PathBuf, run_dir: Option<PathBuf>) -> Result<Self, String> {
-        let session = connect_session(&socket)?;
+    /// The primary holder: `socket` of our protocol `version`; after losing it, find or
+    /// start another one in `run_dir`.
+    pub fn attach_primary(socket: PathBuf, run_dir: &Path, version: u32) -> Result<Self, String> {
+        Self::start(socket, Some(run_dir.to_path_buf()), version)
+    }
+
+    fn start(socket: PathBuf, run_dir: Option<PathBuf>, version: u32) -> Result<Self, String> {
+        let session = connect_session(&socket, version)?;
         let inner = Arc::new(Inner {
             socket: Mutex::new(socket),
+            version,
             run_dir,
             shared: Mutex::new(Shared::default()),
             replied: Condvar::new(),
@@ -336,8 +348,41 @@ impl HolderBackend {
         self.inner.lock_shared().lost.clone()
     }
 
+    /// Protocol version spoken with this holder.
+    pub fn version(&self) -> u32 {
+        self.inner.version
+    }
+
+    /// A connection to the holder is up right now.
+    pub fn is_connected(&self) -> bool {
+        self.inner.is_linked()
+    }
+
+    /// DRAIN: the holder refuses new SPAWNs and exits once its last terminal is released.
+    /// Idempotent. The holder ACKs (`drain_acked`), but holders before 3b do not.
+    pub fn drain(&self) -> Result<(), String> {
+        let frame = proto::encode(proto::DRAIN, 0, &[]).map_err(|e| e.to_string())?;
+        self.inner.send(frame)?;
+        self.inner.lock_shared().draining = true;
+        Ok(())
+    }
+
+    /// DRAIN sent, and whether the holder acknowledged it.
+    pub fn drain_state(&self) -> (bool, bool) {
+        let shared = self.inner.lock_shared();
+        (shared.draining, shared.drain_acked)
+    }
+
+    /// Ids of the terminals this backend knows (live, exited, or lost).
+    pub fn terminal_ids(&self) -> Vec<String> {
+        self.inner.lock_shared().terms.keys().cloned().collect()
+    }
+
     /// GOODBYE {reason} ("quit" | "handover" | "kill_all") and disconnect. Waits briefly
     /// for the frame to leave (the app is usually about to exit).
+    ///
+    /// `kill_all` with no connection (an update handover already said GOODBYE, or the link
+    /// dropped) reconnects once just to send it: the user asked to end every terminal.
     pub fn goodbye(&self, reason: &str) {
         self.inner.closing.store(true, Ordering::SeqCst);
         if let Ok(f) = proto::encode_json(
@@ -347,7 +392,10 @@ impl HolderBackend {
                 reason: reason.to_string(),
             },
         ) {
-            let _ = self.inner.send(f);
+            if self.inner.send(f.clone()).is_err() && reason == "kill_all" {
+                self.goodbye_on_new_connection(&f);
+                return;
+            }
         }
         let link = self.inner.take_link();
         if let Some(link) = link {
@@ -356,6 +404,26 @@ impl HolderBackend {
                 let _ = flushed.recv_timeout(GOODBYE_FLUSH);
             }
             let _ = link.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// HELLO, send `frame` (a GOODBYE), and wait briefly for the holder to hang up.
+    fn goodbye_on_new_connection(&self, frame: &[u8]) {
+        let socket = self.socket();
+        match connect_session(&socket, self.inner.version) {
+            Ok(mut session) => {
+                let _ = session.stream.write_all(frame);
+                let _ = session.stream.flush();
+                // The holder closes after handling GOODBYE; wait for that, briefly.
+                let _ = session.stream.set_read_timeout(Some(GOODBYE_FLUSH));
+                let deadline = Instant::now() + GOODBYE_FLUSH * 3;
+                let mut sink = [0u8; 4096];
+                while Instant::now() < deadline
+                    && matches!(session.stream.read(&mut sink), Ok(n) if n > 0)
+                {}
+                let _ = session.stream.shutdown(std::net::Shutdown::Both);
+            }
+            Err(e) => safe_eprintln!("[pty-holder] GOODBYE after reconnect to {}: {e}", socket.display()),
         }
     }
 
@@ -513,7 +581,7 @@ impl Inner {
                 if self.is_linked() {
                     return; // someone else (spawn's relink) already reconnected
                 }
-                if let Ok(session) = connect_session(&socket) {
+                if let Ok(session) = connect_session(&socket, self.version) {
                     if self.adopt(session).is_ok() {
                         safe_eprintln!("[pty-holder] reconnected to {}", socket.display());
                         return;
@@ -580,6 +648,11 @@ impl Inner {
                     term.end();
                 }
             }
+            proto::ACK => {
+                if proto::parse::<proto::Ack>(&frame).is_ok_and(|a| a.of == "DRAIN") {
+                    shared.drain_acked = true;
+                }
+            }
             _ => {} // PONG, and nothing else is expected mid-stream
         }
     }
@@ -609,14 +682,14 @@ impl Inner {
             return Ok(());
         }
         let socket = match &self.run_dir {
-            Some(dir) => super::spawn::find_or_spawn(dir)?,
+            Some(dir) => super::spawn::find_or_spawn_version(dir, self.version)?,
             None => self
                 .socket
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone(),
         };
-        let session = connect_session(&socket)?;
+        let session = connect_session(&socket, self.version)?;
         *self.socket.lock().unwrap_or_else(|p| p.into_inner()) = socket;
         self.adopt(session)?;
         self.lock_shared().lost = None;

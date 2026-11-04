@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
-  isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
-  omittedBytesLine, placeUnknownRecovered, planAfterProbe, recoveredPtyFor, recoveredStartPlan,
+  describePtyBackend, holderIntroWanted, hostDebugBuild, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
+  omittedBytesLine, placeUnknownRecovered, planAfterProbe, ptyHolderDefaultOn, recoveredPtyFor, recoveredStartPlan,
   resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
 } from './ptyRecovery';
 
@@ -39,6 +39,15 @@ describe('recovered-id gating', () => {
     markRecoveredHandled('x');
     expect(recoveredPtyFor('x')).toBeUndefined();
     expect(isRestoredTerminal('x', '')).toBe(true); // stays stable (effect dep)
+  });
+
+  it('describePtyBackend shows kind, spawn method and fallback reasons', () => {
+    expect(describePtyBackend({ kind: 'holder', spawnMethod: 'launchd' }, false)).toBe('PTY holder · launchd');
+    expect(describePtyBackend({ kind: 'holder', spawnMethod: 'setsid', spawnFallbackReason: 'launchd: x' }, true))
+      .toBe('PTY 홀더 · setsid (launchd: x)');
+    expect(describePtyBackend({ kind: 'in-process', fallbackReason: 'newer holder' }, false))
+      .toBe('inside the app (in-process): newer holder');
+    expect(describePtyBackend({ kind: 'in-process' }, true)).toBe('앱 안 (in-process)');
   });
 
   it('loadPtyRecovery asks the list only for the holder and memoizes', async () => {
@@ -166,5 +175,39 @@ describe('unknown holder terminals', () => {
   it('returns the same array when every terminal is known', () => {
     const projects: P[] = [{ id: 'p1', workDir: '/w', terminals: [{ id: 'a', name: 'a' }] }];
     expect(placeUnknownRecovered(projects, [entry('a')], make).projects).toBe(projects);
+  });
+});
+
+describe('holder intro notice', () => {
+  it('shows only for the holder in release builds when quitting keeps terminals', () => {
+    const holder = { kind: 'holder' as const };
+    expect(holderIntroWanted(holder, false, true)).toBe(true);
+    expect(holderIntroWanted(holder, false, false)).toBe(false);
+    expect(holderIntroWanted(holder, true, true)).toBe(false);
+    expect(holderIntroWanted({ kind: 'in-process' }, false, true)).toBe(false);
+  });
+});
+
+describe('host build defaults (pty_backend_info.defaultOn / debugBuild)', () => {
+  it('prefers what the host reports over the Vite flag', () => {
+    // `tauri build --debug`: Rust debug_assertions on, Vite DEV off.
+    expect(hostDebugBuild({ debugBuild: true }, false)).toBe(true);
+    expect(hostDebugBuild({}, false)).toBe(false);
+    expect(hostDebugBuild({}, true)).toBe(true);
+    expect(ptyHolderDefaultOn({ defaultOn: false, debugBuild: true }, false)).toBe(false);
+    expect(ptyHolderDefaultOn({ defaultOn: false }, false)).toBe(false); // e.g. Windows release
+    expect(ptyHolderDefaultOn({ debugBuild: true }, false)).toBe(false);
+    expect(ptyHolderDefaultOn({}, false)).toBe(true);
+  });
+
+  it('loadPtyRecovery keeps defaultOn/debugBuild from pty_backend_info', async () => {
+    resetPtyRecoveryForTests();
+    const invokeFn = (async (cmd: string) => (cmd === 'pty_backend_info'
+      ? { kind: 'in-process', defaultOn: false, debugBuild: true }
+      : [])) as <T>(command: string) => Promise<T>;
+    const rec = await loadPtyRecovery(invokeFn);
+    expect(rec.defaultOn).toBe(false);
+    expect(rec.debugBuild).toBe(true);
+    resetPtyRecoveryForTests();
   });
 });

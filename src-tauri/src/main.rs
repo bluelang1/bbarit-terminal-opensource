@@ -3306,7 +3306,10 @@ fn create_shell(
     })
 }
 
-// Write data to PTY
+// Write data to PTY. Stays a main-thread command on purpose: async commands run as
+// separate tokio tasks, so two fire-and-forget writes (XTerminal onData, paste then Enter)
+// could land out of order. It never waits for the backend choice (`OnceLock::get`) and the
+// holder write only queues a frame, so it does not block.
 #[tauri::command]
 fn write_to_pty(
     state: State<'_, AppState>,
@@ -3325,7 +3328,8 @@ fn read_from_pty(
     state.pty.read(&terminal_id)
 }
 
-// Resize PTY
+// Resize PTY. Main thread like write_to_pty: the last resize must win, which concurrent
+// async tasks would not guarantee. Non-blocking for the same reasons.
 #[tauri::command]
 fn resize_pty(
     state: State<'_, AppState>,
@@ -3899,7 +3903,8 @@ mod scope_sweep_tests {
 }
 
 /// Which backend owns the tab PTYs: `{kind: "in-process" | "holder", socket?, recovered: [...],
-/// fallbackReason?, lost?}`. `recovered` lists terminals that outlived the previous app run.
+/// fallbackReason?, lost?, spawnMethod?, label?, unit?, spawnFallbackReason?, holders?}`. `recovered` lists terminals that outlived the previous app run;
+/// `holders` lists every holder in use (primary first, then older-protocol ones being drained).
 /// Async: the first call may start the holder.
 #[tauri::command(async)]
 fn pty_backend_info(state: State<'_, AppState>) -> serde_json::Value {
@@ -3931,6 +3936,83 @@ fn pty_cancel_handover() {
     HANDOVER_ON_EXIT.store(false, Ordering::SeqCst);
 }
 
+/// How long `app_relaunch_for_update` lets Tauri's own restart run before doing it itself.
+const RELAUNCH_WATCHDOG: Duration = Duration::from_secs(8);
+
+/// Update relaunch (docs/PTY_HOLDER_DAEMON.md 3.6). `plugin:process|restart` only posts an
+/// exit request to the event loop and returns null at once; the exit (RunEvent::Exit with
+/// the GOODBYE, then the respawn) happens whenever the loop next runs, measured 3–13 s in a
+/// background dev app and not at all within the spike's window. So: mark the handover, say
+/// GOODBYE handover to the holder(s) right now (the terminals are safe whatever happens
+/// next), ask Tauri to restart, and if this process is still here after
+/// `RELAUNCH_WATCHDOG`, respawn and exit directly.
+#[tauri::command(async)]
+fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
+    HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
+    RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
+    state.pty_selection.on_app_exit(exit_reason_now());
+    let env = app.env();
+    let watchdog_app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(RELAUNCH_WATCHDOG);
+        if !claim_restart(&RESTARTING) {
+            return; // RunEvent::Exit got there first; Tauri's restart (or a quit) is under way.
+        }
+        safe_eprintln!("[update] restart request not handled within {RELAUNCH_WATCHDOG:?}; relaunching directly");
+        agent_rpc_stop_all();
+        // RunEvent::Exit never ran: in-process PTYs still need the exit sweep.
+        let in_process = watchdog_app
+            .try_state::<AppState>()
+            .is_some_and(|state| !state.pty_selection.uses_holder());
+        if in_process {
+            sweep_all_scopes_on_exit(&watchdog_app);
+        }
+        tauri::process::restart(&env);
+    });
+    app.request_restart();
+}
+
+/// `app_relaunch_for_update` asked Tauri to restart (its RunEvent::Exit respawns the app).
+static RELAUNCH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Someone (the watchdog or RunEvent::Exit) has taken the update relaunch: there must be
+/// exactly one, or two apps start and the later HELLO takes the other's terminals.
+static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True for the first caller only.
+fn claim_restart(restarting: &std::sync::atomic::AtomicBool) -> bool {
+    !restarting.swap(true, Ordering::SeqCst)
+}
+
+/// What RunEvent::Exit does about an update relaunch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitRestart {
+    /// Not a relaunch: an ordinary exit.
+    Ordinary,
+    /// We claimed it: let Tauri's own restart run after the handler.
+    Tauri,
+    /// The watchdog claimed it first and is respawning: do not let Tauri spawn a second app.
+    WaitForWatchdog,
+    /// "Quit and end all terminals" came during the relaunch window: claim it (stops the
+    /// watchdog) and exit without relaunching.
+    Quit,
+}
+
+fn exit_restart_action(
+    relaunch_requested: bool,
+    kill_all_requested: bool,
+    restarting: &std::sync::atomic::AtomicBool,
+) -> ExitRestart {
+    if !relaunch_requested {
+        ExitRestart::Ordinary
+    } else if !claim_restart(restarting) {
+        ExitRestart::WaitForWatchdog
+    } else if kill_all_requested {
+        ExitRestart::Quit
+    } else {
+        ExitRestart::Tauri
+    }
+}
+
 /// "Quit and end all terminals" (menu / command palette).
 #[tauri::command]
 fn app_quit_kill_terminals(app: AppHandle) {
@@ -3959,7 +4041,8 @@ fn exit_reason_now() -> pty_backend::ExitReason {
     )
 }
 
-/// `terminal.ptyHolder` from ~/.config/octo/config.json ("off" by default, "on").
+/// `terminal.ptyHolder` from ~/.config/octo/config.json ("on" | "off"; unset = on in
+/// release builds, off in debug builds: `pty_backend::pty_holder_wanted`).
 fn configured_pty_holder() -> Option<String> {
     read_octo_config_json().as_ref().and_then(pty_holder_setting)
 }
@@ -3976,6 +4059,46 @@ fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
 mod pty_holder_gate_tests {
     use super::{keep_running_on_quit_setting, pty_holder_mode, pty_holder_setting};
     use serde_json::json;
+
+    #[test]
+    fn an_update_relaunch_hands_over_unless_the_menu_asked_to_end_all() {
+        use crate::pty_backend::{exit_goodbye_reason, ExitReason};
+        // app_relaunch_for_update sets the handover flag before it says GOODBYE.
+        assert_eq!(exit_goodbye_reason(false, false, true), ExitReason::Handover);
+        assert_eq!(exit_goodbye_reason(true, false, true), ExitReason::Handover);
+        assert_eq!(exit_goodbye_reason(true, true, true), ExitReason::KillAll);
+        assert_eq!(super::RELAUNCH_WATCHDOG, std::time::Duration::from_secs(8));
+    }
+
+    #[test]
+    fn only_one_update_relaunch_ever_runs() {
+        use super::{claim_restart, exit_restart_action, ExitRestart};
+        use std::sync::atomic::AtomicBool;
+        let flag = AtomicBool::new(false);
+        assert!(claim_restart(&flag), "first caller restarts");
+        assert!(!claim_restart(&flag), "second caller backs off");
+
+        // (relaunch requested, kill_all requested) with nobody restarting yet.
+        let fresh = || AtomicBool::new(false);
+        assert_eq!(exit_restart_action(false, false, &fresh()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(false, true, &fresh()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(true, false, &fresh()), ExitRestart::Tauri);
+        assert_eq!(exit_restart_action(true, true, &fresh()), ExitRestart::Quit);
+        // An ordinary exit never claims (a later relaunch could still run).
+        let idle = fresh();
+        exit_restart_action(false, false, &idle);
+        assert!(claim_restart(&idle));
+
+        // Exit first: it claims, so the watchdog (claim_restart) backs off.
+        let exit_first = fresh();
+        assert_eq!(exit_restart_action(true, false, &exit_first), ExitRestart::Tauri);
+        assert!(!claim_restart(&exit_first));
+        // Watchdog first: Exit must not let Tauri spawn a second app.
+        let watchdog_first = fresh();
+        assert!(claim_restart(&watchdog_first));
+        assert_eq!(exit_restart_action(true, false, &watchdog_first), ExitRestart::WaitForWatchdog);
+        assert_eq!(exit_restart_action(true, true, &watchdog_first), ExitRestart::WaitForWatchdog);
+    }
 
     #[test]
     fn a_failed_relaunch_cancels_the_handover() {
@@ -7659,8 +7782,9 @@ fn pty_idle_ms(state: State<'_, AppState>, terminal_id: String) -> Result<u64, S
     state.pty.idle_ms(&terminal_id)
 }
 
-// Check if a PTY process is still alive (reader thread running)
-#[tauri::command]
+// Check if a PTY process is still alive (reader thread running). Read-only and awaited by
+// every caller, so it runs off the main thread.
+#[tauri::command(async)]
 fn check_pty_alive(state: State<'_, AppState>, terminal_id: String) -> bool {
     state.pty.alive(&terminal_id)
 }
@@ -10163,6 +10287,7 @@ fn main() {
             pty_list_recovered,
             pty_prepare_handover,
             pty_cancel_handover,
+            app_relaunch_for_update,
             app_quit_kill_terminals,
             destroy_pty,
             debug_log,
@@ -10343,6 +10468,12 @@ fn main() {
             // which never goes through CloseRequested (prevent_close) above. Reap
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
+                // Decide the update relaunch first, so a watchdog firing meanwhile backs off.
+                let restart = exit_restart_action(
+                    RELAUNCH_REQUESTED.load(Ordering::SeqCst),
+                    KILL_TERMINALS_ON_EXIT.load(Ordering::SeqCst),
+                    &RESTARTING,
+                );
                 agent_rpc_stop_all();
                 // Holder backend: GOODBYE quit/handover keeps the terminals (no sweep);
                 // kill_all makes the holder kill and sweep them. In-process: sweep here.
@@ -10351,6 +10482,19 @@ fn main() {
                     .is_some_and(|state| state.pty_selection.on_app_exit(exit_reason_now()));
                 if !handled {
                     sweep_all_scopes_on_exit(_app_handle);
+                }
+                match restart {
+                    ExitRestart::Ordinary | ExitRestart::Tauri => {}
+                    ExitRestart::WaitForWatchdog => {
+                        // The watchdog's process::restart exits this process; never return
+                        // into Tauri's restart. Bounded in case the watchdog died.
+                        std::thread::sleep(Duration::from_secs(10));
+                        std::process::exit(0);
+                    }
+                    ExitRestart::Quit => {
+                        _app_handle.cleanup_before_exit();
+                        std::process::exit(0);
+                    }
                 }
             }
         });

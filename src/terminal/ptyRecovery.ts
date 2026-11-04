@@ -29,6 +29,43 @@ export interface PtyRecovery {
   kind: PtyBackendKind;
   recovered: RecoveredPty[];
   fallbackReason?: string | null;
+  /** Holder only: how the primary holder was started ("launchd" | "systemd" | "setsid"). */
+  spawnMethod?: string | null;
+  /** Holder only: why launchd/systemd was not used for it. */
+  spawnFallbackReason?: string | null;
+  /** Host: the holder is used when `terminal.ptyHolder` is unset (build + OS). */
+  defaultOn?: boolean;
+  /** Host is a debug build (`debug_assertions`; can differ from `import.meta.env.DEV`). */
+  debugBuild?: boolean;
+}
+
+/** One-line status of the PTY backend for settings / notices. */
+export function describePtyBackend(rec: Pick<PtyRecovery, 'kind' | 'fallbackReason' | 'spawnMethod' | 'spawnFallbackReason'>, ko: boolean): string {
+  if (rec.kind !== 'holder') {
+    const base = ko ? '앱 안 (in-process)' : 'inside the app (in-process)';
+    return rec.fallbackReason ? `${base}: ${rec.fallbackReason}` : base;
+  }
+  const how = rec.spawnMethod ? ` · ${rec.spawnMethod}` : '';
+  const why = rec.spawnFallbackReason ? ` (${rec.spawnFallbackReason})` : '';
+  return `${ko ? 'PTY 홀더' : 'PTY holder'}${how}${why}`;
+}
+
+/** Host debug build when known, else the frontend's own build flag. */
+export function hostDebugBuild(rec: Pick<PtyRecovery, 'debugBuild'>, viteDev: boolean): boolean {
+  return rec.debugBuild ?? viteDev;
+}
+
+/** Holder default for an unset `terminal.ptyHolder`: the host's answer, else release = on. */
+export function ptyHolderDefaultOn(rec: Pick<PtyRecovery, 'defaultOn' | 'debugBuild'>, viteDev: boolean): boolean {
+  return rec.defaultOn ?? !hostDebugBuild(rec, viteDev);
+}
+
+/**
+ * The one-time "terminals now run apart from the app" notice: holder in use, release build
+ * (dev keeps the holder opt-in), and quitting really keeps terminals (keepRunningOnQuit).
+ */
+export function holderIntroWanted(rec: Pick<PtyRecovery, 'kind'>, devBuild: boolean, keepRunningOnQuit: boolean): boolean {
+  return rec.kind === 'holder' && !devBuild && keepRunningOnQuit;
 }
 
 type InvokeLike = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -95,12 +132,16 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
       timer = setTimeout(() => reject(new Error(`pty recovery list timed out after ${timeoutMs} ms`)), timeoutMs);
     });
     const work = (async () => {
-      const info = await invokeFn<{ kind?: string; fallbackReason?: string | null }>('pty_backend_info');
+      const info = await invokeFn<{ kind?: string; fallbackReason?: string | null; spawnMethod?: string | null; spawnFallbackReason?: string | null; defaultOn?: boolean; debugBuild?: boolean }>('pty_backend_info');
       const recovered = info?.kind === 'holder' ? await invokeFn<RecoveredPty[]>('pty_list_recovered') : [];
       return {
         kind: (info?.kind === 'holder' ? 'holder' : 'in-process') as PtyBackendKind,
         recovered: Array.isArray(recovered) ? recovered.filter((e) => e && typeof e.id === 'string') : [],
         fallbackReason: info?.fallbackReason ?? null,
+        spawnMethod: info?.spawnMethod ?? null,
+        spawnFallbackReason: info?.spawnFallbackReason ?? null,
+        ...(typeof info?.defaultOn === 'boolean' ? { defaultOn: info.defaultOn } : {}),
+        ...(typeof info?.debugBuild === 'boolean' ? { debugBuild: info.debugBuild } : {}),
       };
     })();
     try {

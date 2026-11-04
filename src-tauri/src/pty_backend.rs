@@ -97,17 +97,17 @@ pub struct PtySelection {
 struct Chosen {
     backend: Arc<dyn PtyBackend>,
     #[cfg(unix)]
-    holder: Option<Arc<crate::pty_holder::client::HolderBackend>>,
+    holder: Option<Arc<crate::pty_holder::multi::HolderSet>>,
     /// Why the holder was wanted but not used.
     fallback_reason: Option<String>,
 }
 
 impl PtySelection {
-    /// `setting` is `terminal.ptyHolder`: "on" wants the holder, anything else
-    /// (default "off") keeps the PTYs in this process.
+    /// `setting` is `terminal.ptyHolder` ("on" | "off"); unset follows the build's default
+    /// (`pty_holder_wanted`).
     pub fn new(setting: Option<&str>) -> Self {
         PtySelection {
-            want_holder: setting == Some("on"),
+            want_holder: pty_holder_wanted(setting, cfg!(debug_assertions), cfg!(unix)),
             #[cfg(unix)]
             run_dir: None,
             chosen: std::sync::OnceLock::new(),
@@ -135,12 +135,12 @@ impl PtySelection {
         }
         #[cfg(unix)]
         {
-            use crate::pty_holder::client::HolderBackend;
+            use crate::pty_holder::multi::HolderSet;
             let dir = match &self.run_dir {
                 Some(dir) => Ok(dir.clone()),
                 None => crate::pty_holder::run_dir(),
             };
-            match dir.and_then(|dir| HolderBackend::attach_or_spawn(&dir)) {
+            match dir.and_then(|dir| HolderSet::attach_or_spawn(&dir)) {
                 Ok(holder) => {
                     let holder = Arc::new(holder);
                     safe_eprintln!("[pty] terminals live in the pty holder at {}", holder.socket().display());
@@ -152,21 +152,48 @@ impl PtySelection {
                 }
             }
         }
+        // Unreachable: `pty_holder_wanted` is false off unix, so no fallback is reported.
         #[cfg(not(unix))]
-        in_process(Some("the PTY holder is not available on Windows yet".to_string()))
+        in_process(None)
     }
 
-    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`.
+    /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`, plus
+    /// for the holder how it was started: `spawnMethod` ("launchd" | "systemd" | "setsid"),
+    /// `label` (launchd) / `unit` (systemd), `spawnFallbackReason` (why not launchd/systemd),
+    /// and `holders` (every holder in use: the primary first, then older-protocol ones being
+    /// drained). `socket`/`spawnMethod`/… describe the primary. Always: `defaultOn` (the
+    /// holder is used when `terminal.ptyHolder` is unset, for this build and OS) and
+    /// `debugBuild`, so settings show the host's defaults instead of guessing from Vite.
     pub fn info(&self) -> serde_json::Value {
+        let mut info = self.backend_info();
+        if let Some(obj) = info.as_object_mut() {
+            obj.insert(
+                "defaultOn".into(),
+                pty_holder_wanted(None, cfg!(debug_assertions), cfg!(unix)).into(),
+            );
+            obj.insert("debugBuild".into(), cfg!(debug_assertions).into());
+        }
+        info
+    }
+
+    fn backend_info(&self) -> serde_json::Value {
         let chosen = self.chosen.get_or_init(|| self.choose());
         #[cfg(unix)]
         if let Some(holder) = &chosen.holder {
-            return serde_json::json!({
+            let socket = holder.socket();
+            let mut info = serde_json::json!({
                 "kind": "holder",
-                "socket": holder.socket().to_string_lossy(),
+                "socket": socket.to_string_lossy(),
                 "recovered": holder.recovered(),
                 "lost": holder.lost_reason(),
+                "holders": holder.holders_info(),
             });
+            if let (Some(obj), serde_json::Value::Object(spawn)) =
+                (info.as_object_mut(), crate::pty_holder::spawn::describe(&socket))
+            {
+                obj.extend(spawn);
+            }
+            return info;
         }
         serde_json::json!({
             "kind": "in-process",
@@ -245,6 +272,20 @@ pub fn exit_goodbye_reason(keep_running_on_quit: bool, kill_all_requested: bool,
         ExitReason::Quit
     } else {
         ExitReason::KillAll
+    }
+}
+
+/// `terminal.ptyHolder` (phase 3: on by default). Release builds use the holder unless the
+/// setting is "off"; debug builds only when it is "on" (like `keepRunningOnQuit`, decision 9:
+/// dev rebuilds replace the holder binary). Never off unix (`unix` = `cfg!(unix)`): there is
+/// no holder on Windows, so that is not a fallback and nothing is reported.
+pub fn pty_holder_wanted(setting: Option<&str>, debug_build: bool, unix: bool) -> bool {
+    if !unix {
+        false
+    } else if debug_build {
+        setting == Some("on")
+    } else {
+        setting != Some("off")
     }
 }
 
@@ -1113,6 +1154,9 @@ mod tests {
             assert_eq!(info["kind"], "in-process");
             assert_eq!(info["recovered"], serde_json::json!([]));
             assert!(info["fallbackReason"].is_null(), "{setting:?}: {info}");
+            // Test builds are debug builds: the holder is opt-in there.
+            assert_eq!(info["defaultOn"], false, "{info}");
+            assert_eq!(info["debugBuild"], true, "{info}");
         }
         let sel = PtySelection::new(None);
         sel.spawn(SpawnRequest {
@@ -1139,6 +1183,27 @@ mod tests {
         assert_eq!(exit_goodbye_reason(true, true, false), KillAll, "the menu item wins");
         assert_eq!(exit_goodbye_reason(true, true, true), KillAll);
         assert_eq!((Quit.as_str(), Handover.as_str(), KillAll.as_str()), ("quit", "handover", "kill_all"));
+    }
+
+    #[test]
+    fn pty_holder_is_on_by_default_in_release_but_debug_needs_explicit_on() {
+        assert!(pty_holder_wanted(None, false, true));
+        assert!(pty_holder_wanted(Some("on"), false, true));
+        assert!(pty_holder_wanted(Some("bogus"), false, true), "only \"off\" opts out");
+        assert!(!pty_holder_wanted(Some("off"), false, true));
+        assert!(!pty_holder_wanted(None, true, true), "dev default stays in-process");
+        assert!(!pty_holder_wanted(Some("off"), true, true));
+        assert!(pty_holder_wanted(Some("on"), true, true));
+    }
+
+    #[test]
+    fn pty_holder_is_never_wanted_off_unix() {
+        // (setting, debug build): Windows has no holder whatever the setting says.
+        for setting in [None, Some("on"), Some("off"), Some("bogus")] {
+            for debug in [false, true] {
+                assert!(!pty_holder_wanted(setting, debug, false), "{setting:?} debug={debug}");
+            }
+        }
     }
 
     #[test]
