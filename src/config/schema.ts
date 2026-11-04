@@ -56,8 +56,12 @@ export function effectiveKeepRunningOnQuit(value: boolean | undefined, devBuild:
   return devBuild ? value === true : value !== false;
 }
 
-/** Effective `terminal.ptyHolder` (dev builds need an explicit "on"); mirrors `pty_holder_wanted`. */
-export function effectivePtyHolder(value: string | undefined, devBuild: boolean): boolean {
+/**
+ * Effective `terminal.ptyHolder` (dev builds need an explicit "on"); mirrors `pty_holder_wanted`.
+ * Always off on Windows: there is no holder there.
+ */
+export function effectivePtyHolder(value: string | undefined, devBuild: boolean, windows = false): boolean {
+  if (windows) return false;
   return devBuild ? value === 'on' : value !== 'off';
 }
 

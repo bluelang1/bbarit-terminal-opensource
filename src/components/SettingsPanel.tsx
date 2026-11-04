@@ -2169,10 +2169,12 @@ export function SettingsPanel({
                   <label>{t('settings.terminal.ptyHolder')}</label>
                   <input
                     type="checkbox"
-                    checked={effectivePtyHolder(terminalSettings.ptyHolder, import.meta.env.DEV)}
+                    checked={effectivePtyHolder(terminalSettings.ptyHolder, import.meta.env.DEV, IS_WINDOWS)}
+                    disabled={IS_WINDOWS}
                     onChange={(e) => updateTerminalSetting('ptyHolder', e.target.checked ? 'on' : 'off')}
                   />
                   <span className="setting-description">
+                    {IS_WINDOWS && <>{locale === 'ko' ? 'macOS/Linux 전용입니다.' : 'macOS/Linux only.'}{' '}</>}
                     {t('settings.terminal.ptyHolder.desc')}{' '}
                     {t('settings.terminal.ptyHolder.now')}: {describePtyBackend(getPtyRecovery(), locale === 'ko')}
                   </span>

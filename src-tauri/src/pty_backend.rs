@@ -107,7 +107,7 @@ impl PtySelection {
     /// (`pty_holder_wanted`).
     pub fn new(setting: Option<&str>) -> Self {
         PtySelection {
-            want_holder: pty_holder_wanted(setting, cfg!(debug_assertions)),
+            want_holder: pty_holder_wanted(setting, cfg!(debug_assertions), cfg!(unix)),
             #[cfg(unix)]
             run_dir: None,
             chosen: std::sync::OnceLock::new(),
@@ -152,8 +152,9 @@ impl PtySelection {
                 }
             }
         }
+        // Unreachable: `pty_holder_wanted` is false off unix, so no fallback is reported.
         #[cfg(not(unix))]
-        in_process(Some("the PTY holder is not available on Windows yet".to_string()))
+        in_process(None)
     }
 
     /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`, plus
@@ -262,9 +263,12 @@ pub fn exit_goodbye_reason(keep_running_on_quit: bool, kill_all_requested: bool,
 
 /// `terminal.ptyHolder` (phase 3: on by default). Release builds use the holder unless the
 /// setting is "off"; debug builds only when it is "on" (like `keepRunningOnQuit`, decision 9:
-/// dev rebuilds replace the holder binary).
-pub fn pty_holder_wanted(setting: Option<&str>, debug_build: bool) -> bool {
-    if debug_build {
+/// dev rebuilds replace the holder binary). Never off unix (`unix` = `cfg!(unix)`): there is
+/// no holder on Windows, so that is not a fallback and nothing is reported.
+pub fn pty_holder_wanted(setting: Option<&str>, debug_build: bool, unix: bool) -> bool {
+    if !unix {
+        false
+    } else if debug_build {
         setting == Some("on")
     } else {
         setting != Some("off")
@@ -1166,13 +1170,23 @@ mod tests {
 
     #[test]
     fn pty_holder_is_on_by_default_in_release_but_debug_needs_explicit_on() {
-        assert!(pty_holder_wanted(None, false));
-        assert!(pty_holder_wanted(Some("on"), false));
-        assert!(pty_holder_wanted(Some("bogus"), false), "only \"off\" opts out");
-        assert!(!pty_holder_wanted(Some("off"), false));
-        assert!(!pty_holder_wanted(None, true), "dev default stays in-process");
-        assert!(!pty_holder_wanted(Some("off"), true));
-        assert!(pty_holder_wanted(Some("on"), true));
+        assert!(pty_holder_wanted(None, false, true));
+        assert!(pty_holder_wanted(Some("on"), false, true));
+        assert!(pty_holder_wanted(Some("bogus"), false, true), "only \"off\" opts out");
+        assert!(!pty_holder_wanted(Some("off"), false, true));
+        assert!(!pty_holder_wanted(None, true, true), "dev default stays in-process");
+        assert!(!pty_holder_wanted(Some("off"), true, true));
+        assert!(pty_holder_wanted(Some("on"), true, true));
+    }
+
+    #[test]
+    fn pty_holder_is_never_wanted_off_unix() {
+        // (setting, debug build): Windows has no holder whatever the setting says.
+        for setting in [None, Some("on"), Some("off"), Some("bogus")] {
+            for debug in [false, true] {
+                assert!(!pty_holder_wanted(setting, debug, false), "{setting:?} debug={debug}");
+            }
+        }
     }
 
     #[test]
