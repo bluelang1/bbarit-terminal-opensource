@@ -361,6 +361,8 @@ export const en = {
   'settings.terminal.tmuxAutoStart.desc': 'Automatically start tmux session when opening a new shell tab',
   'settings.terminal.confirmOnClose': 'Confirm on close',
   'settings.terminal.confirmOnClose.desc': 'Show confirmation when closing a terminal with running processes',
+  'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
+  'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
   'terminal.closeConfirmTitle': 'Close terminal?',
   'terminal.closeConfirmMessage': 'A process is still running in this terminal.',
   // PptxEditor presets

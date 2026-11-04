@@ -5,7 +5,7 @@ describe('probeRestoredPty', () => {
   it('reattaches a live restored PTY and reads its buffered output', async () => {
     const invokeMock = vi.fn(async (command: string) => {
       if (command === 'check_pty_alive') return true;
-      if (command === 'read_pty_output_buffer') return 'OpenAI Codex (v0.141.0)\nmodel: gpt-5.5 high\ndirectory: C:/repo';
+      if (command === 'pty_attach_snapshot') return 'OpenAI Codex (v0.141.0)\nmodel: gpt-5.5 high\ndirectory: C:/repo';
       throw new Error(`unexpected command ${command}`);
     });
     const invokeFn = invokeMock as unknown as <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
@@ -22,13 +22,13 @@ describe('probeRestoredPty', () => {
       markCliAutoStarted: true,
     });
     expect(invokeMock).toHaveBeenNthCalledWith(1, 'check_pty_alive', { terminalId: 'term-1' });
-    expect(invokeMock).toHaveBeenNthCalledWith(2, 'read_pty_output_buffer', { terminalId: 'term-1' });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, 'pty_attach_snapshot', { terminalId: 'term-1' });
   });
 
   it('does not mark a live restored raw shell as an already-started agent', async () => {
     const invokeMock = vi.fn(async (command: string) => {
       if (command === 'check_pty_alive') return true;
-      if (command === 'read_pty_output_buffer') return 'PS C:\\Users\\test-user\\Documents\\projects\\gudae> ';
+      if (command === 'pty_attach_snapshot') return 'PS C:\\Users\\test-user\\Documents\\projects\\gudae> ';
       throw new Error(`unexpected command ${command}`);
     });
     const invokeFn = invokeMock as unknown as <T>(command: string, args?: Record<string, unknown>) => Promise<T>;

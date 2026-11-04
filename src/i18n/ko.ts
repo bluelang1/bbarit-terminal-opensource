@@ -363,6 +363,8 @@ export const ko: Record<TranslationKey, string> = {
   'settings.terminal.tmuxAutoStart.desc': '새 셸 탭을 열 때 자동으로 tmux 세션을 시작합니다',
   'settings.terminal.confirmOnClose': '닫기 확인',
   'settings.terminal.confirmOnClose.desc': '실행 중인 프로세스가 있는 터미널을 닫을 때 확인 메시지를 표시합니다',
+  'settings.terminal.keepRunningOnQuit': '종료해도 터미널 유지',
+  'settings.terminal.keepRunningOnQuit.desc': 'PTY 홀더가 켜져 있으면 앱을 종료해도 터미널과 에이전트가 계속 돌고, 다시 열면 이어 붙습니다. 메뉴의 "종료하고 모든 터미널 끝내기"는 항상 전부 끝냅니다.',
   'terminal.closeConfirmTitle': '터미널을 닫으시겠습니까?',
   'terminal.closeConfirmMessage': '이 터미널에서 프로세스가 아직 실행 중입니다.',
   // PptxEditor presets

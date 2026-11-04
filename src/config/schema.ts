@@ -37,6 +37,17 @@ export interface TerminalConfig {
   jisYenToBackslash: boolean;
   /** Floating terminal: starting working directory for new tabs ('' = home). */
   floatingTermStartDir: string;
+  /**
+   * PTY holder on: quitting the app keeps terminals running (GOODBYE quit) instead of
+   * ending them (kill_all). Unset = default true in release builds, false in dev builds
+   * (docs/PTY_HOLDER_DAEMON.md 3.6, decision 9). Read by the Rust host at exit.
+   */
+  keepRunningOnQuit?: boolean;
+}
+
+/** Effective `terminal.keepRunningOnQuit` (dev builds need an explicit true). */
+export function effectiveKeepRunningOnQuit(value: boolean | undefined, devBuild: boolean): boolean {
+  return devBuild ? value === true : value !== false;
 }
 
 export interface AgentConfig {

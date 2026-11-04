@@ -32,6 +32,21 @@ const DEFAULT_APP_IDS = ['com.bbarit.terminal.source', 'com.octo.terminal'];
 const ACCEPTED_APP_IDS = process.env.BBARIT_BRIDGE_APP_ID ? [process.env.BBARIT_BRIDGE_APP_ID] : DEFAULT_APP_IDS;
 
 const DEV_BASE_PORT = 9323;
+export const BRIDGE_UNREACHABLE = 'BRIDGE_UNREACHABLE';
+
+/** The app is closed or still loading: agent wait/run keep polling (bounded by --timeout). */
+export function isAppUnreachable(e) {
+  if (e && e.code === BRIDGE_UNREACHABLE) return true;
+  return /__BBARIT_CTL__ not ready/.test(String(e && e.message || e));
+}
+
+/**
+ * Which errors agent wait/run wait out. An explicit --port names one app on purpose: a wrong
+ * or closed port fails fast (3 strikes) instead of waiting for the whole --timeout.
+ */
+export function unreachableWaitPolicy(explicitPort) {
+  return explicitPort ? () => false : isAppUnreachable;
+}
 const DEV_PORT_SPAN = 100;
 const INSTALLED_PORT = 9223;
 
@@ -105,11 +120,13 @@ async function connectBridge() {
       return { ws, port };
     } catch { /* try the next port */ }
   }
-  throw new Error(
+  const err = new Error(
     flags.port
       ? `Cannot connect to port ${flags.port}. Is the app running?`
       : `Cannot reach BBARIT Terminal (dev ports 9323–9422, installed ${INSTALLED_PORT}). Is the app running?`,
   );
+  err.code = BRIDGE_UNREACHABLE;
+  throw err;
 }
 
 function wsCommand(ws, cmd, payload = {}) {
@@ -361,7 +378,9 @@ export function evaluateAgentWait(agents, mode = 'all') {
 
 /**
  * Poll fetchAgents() every intervalMs until evaluateAgentWait holds or timeoutMs passes.
- * Up to 3 consecutive fetch failures are retried (the app may be mid-reload).
+ * Up to 3 consecutive fetch failures are retried (the app may be mid-reload). While the
+ * app is unreachable (closed — its terminals live on in the PTY holder — or loading) it
+ * keeps polling until the timeout and calls onUnreachable once.
  */
 export async function waitForAgents({
   fetchAgents,
@@ -370,18 +389,25 @@ export async function waitForAgents({
   intervalMs = AGENT_POLL_MS,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+  isUnreachable = isAppUnreachable,
+  onUnreachable = () => {},
 }) {
   const startedAt = now();
   let agents = [];
   let failures = 0;
+  let warned = false;
   for (;;) {
     try {
       agents = await fetchAgents();
       failures = 0;
       if (evaluateAgentWait(agents, mode)) return { timedOut: false, agents };
     } catch (e) {
-      failures += 1;
-      if (failures >= 3) throw e;
+      if (isUnreachable(e)) {
+        if (!warned) { warned = true; onUnreachable(e); }
+      } else {
+        failures += 1;
+        if (failures >= 3) throw e;
+      }
     }
     if (now() - startedAt >= timeoutMs) return { timedOut: true, agents };
     await sleep(intervalMs);
@@ -447,6 +473,8 @@ async function agentCommand(list) {
     if (parsed.ok === false) throw new Error(parsed.error || 'agent.status failed');
     return parsed.agents || [];
   };
+  const waitsOut = unreachableWaitPolicy(flags.port);
+  const warnUnreachable = () => { console.error('… app not reachable, waiting… (terminals keep running; Ctrl-C stops waiting)'); };
   const finish = (result, withLines) => {
     printAgents(result.agents, withLines);
     if (result.timedOut && !flags.json) console.error(`✗ timed out after ${waitSeconds}s`);
@@ -471,6 +499,8 @@ async function agentCommand(list) {
       fetchAgents: () => statusOf({ terminalId: parsed.terminalId }),
       mode: 'all',
       timeoutMs: waitSeconds * 1000,
+      isUnreachable: waitsOut,
+      onUnreachable: warnUnreachable,
     });
     return finish(result, true);
   }
@@ -491,13 +521,16 @@ async function agentCommand(list) {
     const mode = pickFlagFrom(list, '--children') || 'all';
     if (mode !== 'any' && mode !== 'all') throw new Error('usage: agent wait [--id <terminalId> | --children any|all] [--timeout <s>]');
     if (!id) {
-      const first = await statusOf({ caller });
-      if (!first.length) throw new Error(caller ? `no child agents for ${caller}` : 'no child agents (run inside a BBARIT tab or pass --caller <id>)');
+      // App closed: skip the empty check and wait for it (links are restored on restart).
+      const first = await statusOf({ caller }).catch((e) => { if (waitsOut(e)) return null; throw e; });
+      if (first && !first.length) throw new Error(caller ? `no child agents for ${caller}` : 'no child agents (run inside a BBARIT tab or pass --caller <id>)');
     }
     const result = await waitForAgents({
       fetchAgents: () => statusOf(id ? { terminalId: id } : { caller }),
       mode: id ? 'all' : mode,
       timeoutMs: waitSeconds * 1000,
+      isUnreachable: waitsOut,
+      onUnreachable: warnUnreachable,
     });
     return finish(result, false);
   }

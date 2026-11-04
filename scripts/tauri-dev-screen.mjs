@@ -229,6 +229,9 @@ function isTauriDevCliProcess(command) {
 }
 
 function isOctoUiDebugProcess(command) {
+  // The PTY holder is the same debug binary run with `--mode pty-holder`; it
+  // outlives the app on purpose, so a stale-process sweep must never kill it.
+  if (/\s--mode\s+pty-holder(\s|$)/.test(command)) return false;
   const executable = command.split(/\s+/, 1)[0] || '';
   const debugTargets = [
     resolve(root, 'src-tauri/target/debug/octo-ui'),

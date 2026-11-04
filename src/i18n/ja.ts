@@ -67,6 +67,8 @@ export const ja: Record<TranslationKey, string> = {
   'settings.terminal.tmuxAutoStart.desc': '新しいシェルタブを開くときに自動的にtmuxセッションを開始します',
   'settings.terminal.confirmOnClose': '閉じる確認',
   'settings.terminal.confirmOnClose.desc': '実行中のプロセスがあるターミナルを閉じるとき確認メッセージを表示します',
+  'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
+  'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
   'settings.terminal.autoSaveFiles': 'ファイル自動保存',
   'settings.terminal.showProjectName': 'プロジェクト名を表示',
   'settings.terminal.shellType': 'シェルの種類',

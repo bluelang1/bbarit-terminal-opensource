@@ -23,7 +23,7 @@ import {
 import { useConfig, getConfigSnapshot } from '../config/ConfigContext';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '../i18n/en';
-import { LATEST_OPENAI_STT_MODEL } from '../config/schema';
+import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit } from '../config/schema';
 import type { AgentConfig, TerminalConfig, EditorConfig, NoteTemplate, SttConfig } from '../config/schema';
 import { getModelsForCliType } from '../config/modelPresets';
 import { kvGet, kvSet, kvDelete } from '../hooks/useKV';
@@ -2162,6 +2162,17 @@ export function SettingsPanel({
                   />
                   <span className="setting-description">
                     {t('settings.terminal.confirmOnClose.desc')}
+                  </span>
+                </div>
+                <div className="setting-item">
+                  <label>{t('settings.terminal.keepRunningOnQuit')}</label>
+                  <input
+                    type="checkbox"
+                    checked={effectiveKeepRunningOnQuit(terminalSettings.keepRunningOnQuit, import.meta.env.DEV)}
+                    onChange={(e) => updateTerminalSetting('keepRunningOnQuit', e.target.checked)}
+                  />
+                  <span className="setting-description">
+                    {t('settings.terminal.keepRunningOnQuit.desc')}
                   </span>
                 </div>
               </div>

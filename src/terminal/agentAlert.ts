@@ -73,6 +73,8 @@ export interface AgentStatusEventDetail {
   looking: boolean;
   /** 레코드가 모두 지워져 7501 상태가 없어졌다(기존 I/O 기반 표시로 돌아감). */
   cleared?: boolean;
+  /** 저장된 출력을 재생하다 나온 보고(과거 것). 에이전트 노트를 만들지 않는다. */
+  replaying?: boolean;
 }
 
 export const AGENT_STATUS_EVENT = 'octo-agent-status';

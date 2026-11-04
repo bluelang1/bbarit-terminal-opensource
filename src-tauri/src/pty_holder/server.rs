@@ -583,8 +583,10 @@ impl Holder {
     }
 
     fn serve_client(self: &Arc<Self>, mut stream: UnixStream) -> io::Result<()> {
-        stream.set_read_timeout(Some(HELLO_TIMEOUT))?;
-        let first = proto::read_frame(&mut stream)?;
+        stream
+            .set_read_timeout(Some(HELLO_TIMEOUT))
+            .map_err(quiet_before_hello)?;
+        let first = proto::read_frame(&mut stream).map_err(quiet_before_hello)?;
         if first.kind != proto::HELLO {
             let _ = send_bye(&mut stream, "expected HELLO");
             return Err(io::Error::new(
@@ -1078,6 +1080,32 @@ struct StartedPty {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+}
+
+/// A liveness probe (`UnixStream::connect` in the app) hangs up before HELLO; macOS then
+/// fails setsockopt with EINVAL. Report such hang-ups as EOF so they are not logged.
+fn quiet_before_hello(e: io::Error) -> io::Error {
+    match e.raw_os_error() {
+        Some(code) if code == libc::EINVAL || code == libc::ENOTCONN || code == libc::ECONNRESET => {
+            io::Error::new(io::ErrorKind::UnexpectedEof, e)
+        }
+        _ => e,
+    }
+}
+
+#[cfg(test)]
+mod hello_tests {
+    use super::*;
+
+    #[test]
+    fn a_probe_hang_up_before_hello_is_not_an_error_worth_logging() {
+        for code in [libc::EINVAL, libc::ENOTCONN, libc::ECONNRESET] {
+            let e = quiet_before_hello(io::Error::from_raw_os_error(code));
+            assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{code}");
+        }
+        let other = quiet_before_hello(io::Error::new(io::ErrorKind::InvalidData, "bad"));
+        assert_eq!(other.kind(), io::ErrorKind::InvalidData);
+    }
 }
 
 /// Exactly the argv/cwd/env the app sent: the holder's own environment never leaks in.

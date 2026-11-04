@@ -595,6 +595,7 @@ fn spawn_req(id: &str, script: &str) -> SpawnRequest {
         rows: 24,
         cols: 80,
         scope_token: "test-scope".into(),
+        replace: false,
     }
 }
 
@@ -660,7 +661,7 @@ fn holder_backend_end_to_end_without_duplicates() {
     let rec = app2.recovered();
     assert_eq!(rec.len(), 1);
     assert_eq!((rec[0].id.as_str(), rec[0].pid), ("h1", Some(pid)));
-    let tail = b2.tail("h1").unwrap();
+    let tail = b2.attach_snapshot("h1").unwrap();
     assert!(tail.contains("A1 é") && tail.contains("B2:x"), "{tail:?}");
     assert_eq!(
         b2.read("h1"),
@@ -756,11 +757,37 @@ fn holder_backend_reports_exit_like_in_process() {
     // Reaped: the pid may already be someone else's, so it is no longer reported.
     assert_eq!(b.pid("e1"), Ok(None));
     assert!(b.list().iter().all(|t| t.pid.is_none()));
-    // Respawning the same id replaces it (no reattach UI yet).
+    // An ended terminal may be respawned under the same id.
     b.spawn(spawn_req("e1", "printf again; sleep 30")).unwrap();
     let mut again = String::new();
     read_until(b, "e1", "again", &mut again);
     b.close("e1").unwrap();
+}
+
+#[test]
+fn a_running_id_is_refused_unless_replace_is_asked_for() {
+    let th = TestHolder::default();
+    let backend = HolderBackend::connect(&th.socket).unwrap();
+    let b: &dyn PtyBackend = &backend;
+    b.spawn(spawn_req("k1", "printf first; sleep 30")).unwrap();
+    let pid = b.pid("k1").unwrap().expect("pid");
+    let mut out = String::new();
+    read_until(b, "k1", "first", &mut out);
+    // A create_shell that missed the recovery list must not kill the running program.
+    assert_eq!(
+        b.spawn(spawn_req("k1", "printf second; sleep 30")),
+        Err(crate::pty_backend::PTY_ALIVE_IN_HOLDER.to_string())
+    );
+    assert!(b.alive("k1"));
+    assert_eq!(b.pid("k1"), Ok(Some(pid)));
+    // Explicit intent replaces it.
+    let mut req = spawn_req("k1", "printf second; sleep 30");
+    req.replace = true;
+    b.spawn(req).unwrap();
+    let mut out2 = String::new();
+    read_until(b, "k1", "second", &mut out2);
+    wait_gone(pid, "replaced shell");
+    b.close("k1").unwrap();
 }
 
 /// Manual check against a real holder process (`octo-ui --mode pty-holder --socket …`):
@@ -789,6 +816,7 @@ fn live_holder_client() {
                 rows: 24,
                 cols: 80,
                 scope_token: crate::new_scope_token(),
+                replace: false,
             })
             .unwrap();
             b.write("live-1", "echo hello-from-holder\n").unwrap();

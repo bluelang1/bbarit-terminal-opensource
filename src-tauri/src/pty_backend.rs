@@ -27,6 +27,9 @@ const PTY_READ_MAX_BYTES: usize = 64 * 1024;
 
 pub(crate) const PTY_NOT_FOUND: &str = "PTY not found";
 pub(crate) const PTY_DISCONNECTED: &str = "PTY disconnected";
+/// `create_shell` for an id whose program is still running in the PTY holder (the
+/// frontend missed the recovery list): it must attach to it, not replace it.
+pub(crate) const PTY_ALIVE_IN_HOLDER: &str = "PTY alive in holder";
 
 /// A fully built command plus the PTY it should run in.
 pub struct SpawnRequest {
@@ -36,6 +39,9 @@ pub struct SpawnRequest {
     pub cols: u16,
     /// `BBARIT_TERM_SCOPE` value already planted in `cmd`; swept on close.
     pub scope_token: String,
+    /// The caller means to end a still-running terminal under this id. Without it the
+    /// holder backend refuses a live id (`PTY_ALIVE_IN_HOLDER`); in-process ignores it.
+    pub replace: bool,
 }
 
 /// One live terminal as seen by app-wide sweeps (exit, window close).
@@ -62,8 +68,12 @@ pub trait PtyBackend: Send + Sync {
     fn close(&self, id: &str) -> Result<(), String>;
     /// True while the reader thread is still running.
     fn alive(&self, id: &str) -> bool;
-    /// Accumulated output (front-trimmed), for replay / inspection.
+    /// Accumulated output (front-trimmed), for inspection. Leaves the read queue alone.
     fn tail(&self, id: &str) -> Result<String, String>;
+    /// The reattach/replay copy: the accumulated output, with the read queue drained under
+    /// the same lock, so `read()` afterwards returns only output produced after this copy
+    /// (nothing renders twice). Only the frontend's replay path calls it.
+    fn attach_snapshot(&self, id: &str) -> Result<String, String>;
     fn idle_ms(&self, id: &str) -> Result<u64, String>;
     /// Shell pid; Err("PTY not found") for an unknown id, Ok(None) if the OS gave none.
     fn pid(&self, id: &str) -> Result<Option<u32>, String>;
@@ -165,17 +175,86 @@ impl PtySelection {
         })
     }
 
-    /// App exit. True when the backend took care of every terminal itself (the holder
-    /// gets GOODBYE kill_all and kills + sweeps there); false means the caller sweeps.
-    pub fn on_app_exit(&self) -> bool {
+    /// `pty_list_recovered` payload: terminals to attach to instead of creating (holder
+    /// only; the in-process backend never outlives the app, so it has none).
+    pub fn recovered_list(&self) -> serde_json::Value {
+        let chosen = self.chosen.get_or_init(|| self.choose());
+        #[cfg(unix)]
+        if let Some(holder) = &chosen.holder {
+            return serde_json::to_value(holder.recovered_now()).unwrap_or_else(|_| serde_json::json!([]));
+        }
+        let _ = chosen;
+        serde_json::json!([])
+    }
+
+    /// True once the PTYs live in the holder (resolved and attached).
+    pub fn uses_holder(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.chosen.get().is_some_and(|c| c.holder.is_some())
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// App exit with the GOODBYE `reason` from `exit_goodbye_reason`. True when the
+    /// backend took care of every terminal itself (holder: `kill_all` kills + sweeps
+    /// there, `quit`/`handover` keep them running); false means the caller sweeps.
+    pub fn on_app_exit(&self, reason: ExitReason) -> bool {
         #[cfg(unix)]
         if let Some(holder) = self.chosen.get().and_then(|c| c.holder.as_ref()) {
-            // Phase 2a keeps today's quit semantics (terminals end with the app);
-            // "keep running on quit" needs the reattach UI (phase 2b).
-            holder.goodbye("kill_all");
+            holder.goodbye(reason.as_str());
             return true;
         }
+        let _ = reason;
         false
+    }
+}
+
+/// GOODBYE reason on app exit (docs/PTY_HOLDER_DAEMON.md 3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitReason {
+    /// App only; the holder keeps every terminal.
+    Quit,
+    /// Update relaunch; the next app attaches to the same holder.
+    Handover,
+    /// End every terminal (holder releases, sweeps and exits).
+    KillAll,
+}
+
+impl ExitReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExitReason::Quit => "quit",
+            ExitReason::Handover => "handover",
+            ExitReason::KillAll => "kill_all",
+        }
+    }
+}
+
+/// The menu's "quit and end all terminals" wins; an update relaunch hands over;
+/// otherwise `terminal.keepRunningOnQuit` decides.
+pub fn exit_goodbye_reason(keep_running_on_quit: bool, kill_all_requested: bool, handover: bool) -> ExitReason {
+    if kill_all_requested {
+        ExitReason::KillAll
+    } else if handover {
+        ExitReason::Handover
+    } else if keep_running_on_quit {
+        ExitReason::Quit
+    } else {
+        ExitReason::KillAll
+    }
+}
+
+/// `terminal.keepRunningOnQuit`: default true, but a debug build keeps it only when
+/// the setting is explicitly true (dev rebuilds replace the holder binary; decision 9).
+pub fn keep_running_on_quit(setting: Option<bool>, debug_build: bool) -> bool {
+    if debug_build {
+        setting == Some(true)
+    } else {
+        setting.unwrap_or(true)
     }
 }
 
@@ -202,6 +281,9 @@ impl PtyBackend for PtySelection {
     }
     fn tail(&self, id: &str) -> Result<String, String> {
         self.resolved().ok_or_else(not_found)?.tail(id)
+    }
+    fn attach_snapshot(&self, id: &str) -> Result<String, String> {
+        self.resolved().ok_or_else(not_found)?.attach_snapshot(id)
     }
     fn idle_ms(&self, id: &str) -> Result<u64, String> {
         self.resolved().ok_or_else(not_found)?.idle_ms(id)
@@ -246,7 +328,7 @@ pub struct InProcessBackend {
 
 impl PtyBackend for InProcessBackend {
     fn spawn(&self, req: SpawnRequest) -> Result<(), String> {
-        let SpawnRequest { terminal_id, cmd, rows, cols, scope_token } = req;
+        let SpawnRequest { terminal_id, cmd, rows, cols, scope_token, .. } = req;
         let pty_system = native_pty_system();
 
         let pty_pair = pty_system
@@ -377,6 +459,18 @@ impl PtyBackend for InProcessBackend {
             }
             None => Err(PTY_NOT_FOUND.to_string()),
         }
+    }
+
+    fn attach_snapshot(&self, id: &str) -> Result<String, String> {
+        let ptys = self.ptys.lock().unwrap();
+        let Some(instance) = ptys.get(id) else {
+            return Err(PTY_NOT_FOUND.to_string());
+        };
+        // The reader appends and queues under this lock, so every chunk is either in the
+        // copy (and drained here) or arrives through read() afterwards.
+        let buf = instance.output_buffer.lock().unwrap();
+        while instance.output_rx.try_recv().is_ok() {}
+        Ok(buf.clone())
     }
 
     fn idle_ms(&self, id: &str) -> Result<u64, String> {
@@ -535,6 +629,12 @@ impl OutputQueue {
     pub(crate) fn mark_truncated(&mut self) {
         self.dropped_output = true;
     }
+
+    /// The receiver was emptied on purpose (its bytes were delivered another way).
+    #[cfg(unix)]
+    pub(crate) fn clear_truncated(&mut self) {
+        self.dropped_output = false;
+    }
 }
 
 pub(crate) fn new_output_channel() -> (OutputQueue, Receiver<String>) {
@@ -589,10 +689,12 @@ fn spawn_utf8_reader_thread(
                 }
             }
 
-            // Also append to the output buffer if provided.
+            // Also append to the output buffer if provided. Queue under the same lock so
+            // attach_snapshot never sees a chunk in the buffer that is still on its way.
             if let Some(ref buf_arc) = output_buffer {
                 if let Ok(mut buf) = buf_arc.lock() {
                     append_output_buffer(&mut buf, &data);
+                    return queue.send(data);
                 }
             }
 
@@ -1005,7 +1107,8 @@ mod tests {
             assert_eq!(sel.read("x"), Err("PTY not found".to_string()));
             assert_eq!(sel.close("x"), Ok(()));
             assert!(sel.list().is_empty() && !sel.alive("x"));
-            assert!(!sel.on_app_exit(), "in-process exit sweep stays with the caller");
+            assert!(!sel.on_app_exit(ExitReason::Quit), "in-process exit sweep stays with the caller");
+            assert_eq!(sel.recovered_list(), serde_json::json!([]));
             let info = sel.info();
             assert_eq!(info["kind"], "in-process");
             assert_eq!(info["recovered"], serde_json::json!([]));
@@ -1018,10 +1121,34 @@ mod tests {
             rows: 24,
             cols: 80,
             scope_token: TEST_SCOPE.into(),
+            replace: false,
         })
         .unwrap();
         assert_eq!(sel.list().len(), 1);
         sel.close("s1").unwrap();
+    }
+
+    #[test]
+    fn goodbye_reason_selection() {
+        use ExitReason::*;
+        // (keep_running, kill_all requested, handover) → reason
+        assert_eq!(exit_goodbye_reason(true, false, false), Quit);
+        assert_eq!(exit_goodbye_reason(false, false, false), KillAll);
+        assert_eq!(exit_goodbye_reason(true, false, true), Handover);
+        assert_eq!(exit_goodbye_reason(false, false, true), Handover, "updates keep terminals");
+        assert_eq!(exit_goodbye_reason(true, true, false), KillAll, "the menu item wins");
+        assert_eq!(exit_goodbye_reason(true, true, true), KillAll);
+        assert_eq!((Quit.as_str(), Handover.as_str(), KillAll.as_str()), ("quit", "handover", "kill_all"));
+    }
+
+    #[test]
+    fn keep_running_on_quit_defaults_true_but_debug_needs_explicit_true() {
+        assert!(keep_running_on_quit(None, false));
+        assert!(!keep_running_on_quit(Some(false), false));
+        assert!(keep_running_on_quit(Some(true), false));
+        assert!(!keep_running_on_quit(None, true), "dev default is kill_all");
+        assert!(!keep_running_on_quit(Some(false), true));
+        assert!(keep_running_on_quit(Some(true), true));
     }
 
     #[test]
@@ -1057,6 +1184,7 @@ mod tests {
                 rows: 24,
                 cols: 80,
                 scope_token: TEST_SCOPE.into(),
+                replace: false,
             })
             .unwrap();
     }
@@ -1102,6 +1230,36 @@ mod tests {
         assert_eq!(list[0].scope_token, TEST_SCOPE);
         b.close("t1").unwrap();
         assert!(b.list().is_empty());
+    }
+
+    #[test]
+    fn attach_snapshot_takes_the_buffer_and_drains_the_queue() {
+        let b = InProcessBackend::default();
+        spawn(&b, "t3", "printf 'one\\n'; read l; printf 'two:%s\\n' \"$l\"; sleep 30");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !b.tail("t3").unwrap().contains("one") {
+            assert!(Instant::now() < deadline, "no output");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // tail() is a read-only copy: the queue still holds "one".
+        assert!(b.tail("t3").unwrap().contains("one"));
+        // A webview reload replays the snapshot; read() must not hand "one" over again.
+        let snap = b.attach_snapshot("t3").unwrap();
+        assert!(snap.contains("one"), "{snap:?}");
+        assert_eq!(b.read("t3"), Ok(None));
+        b.write("t3", "x\n").unwrap();
+        let mut out = String::new();
+        while !out.contains("two:x") {
+            assert!(Instant::now() < deadline, "no echo; got {out:?}");
+            if let Ok(Some(chunk)) = b.read("t3") {
+                out.push_str(&chunk);
+            } else {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        assert!(!out.contains("one"), "{out:?}");
+        assert_eq!(b.attach_snapshot("nope"), Err("PTY not found".to_string()));
+        b.close("t3").unwrap();
     }
 
     #[test]
