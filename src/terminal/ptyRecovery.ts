@@ -46,6 +46,14 @@ export function describePtyBackend(rec: Pick<PtyRecovery, 'kind' | 'fallbackReas
   return `${ko ? 'PTY 홀더' : 'PTY holder'}${how}${why}`;
 }
 
+/**
+ * The one-time "terminals now run apart from the app" notice: holder in use, release build
+ * (dev keeps the holder opt-in), and quitting really keeps terminals (keepRunningOnQuit).
+ */
+export function holderIntroWanted(rec: Pick<PtyRecovery, 'kind'>, devBuild: boolean, keepRunningOnQuit: boolean): boolean {
+  return rec.kind === 'holder' && !devBuild && keepRunningOnQuit;
+}
+
 type InvokeLike = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 // ── registry (one per app run) ──

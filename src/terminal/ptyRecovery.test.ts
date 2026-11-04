@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
-  describePtyBackend, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
+  describePtyBackend, holderIntroWanted, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
   omittedBytesLine, placeUnknownRecovered, planAfterProbe, recoveredPtyFor, recoveredStartPlan,
   resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
 } from './ptyRecovery';
@@ -175,5 +175,15 @@ describe('unknown holder terminals', () => {
   it('returns the same array when every terminal is known', () => {
     const projects: P[] = [{ id: 'p1', workDir: '/w', terminals: [{ id: 'a', name: 'a' }] }];
     expect(placeUnknownRecovered(projects, [entry('a')], make).projects).toBe(projects);
+  });
+});
+
+describe('holder intro notice', () => {
+  it('shows only for the holder in release builds when quitting keeps terminals', () => {
+    const holder = { kind: 'holder' as const };
+    expect(holderIntroWanted(holder, false, true)).toBe(true);
+    expect(holderIntroWanted(holder, false, false)).toBe(false);
+    expect(holderIntroWanted(holder, true, true)).toBe(false);
+    expect(holderIntroWanted({ kind: 'in-process' }, false, true)).toBe(false);
   });
 });

@@ -142,7 +142,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, holderIntroWanted, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -153,6 +153,7 @@ import { useSkills } from './skills/useSkills';
 import { useFileWatcher } from './hooks/useFileWatcher';
 import type { Skill } from './skills/types';
 import type { McpServerConfig, ShellType } from './config/schema';
+import { effectiveKeepRunningOnQuit } from './config/schema';
 import { getConfigSnapshot, useConfig } from './config/ConfigContext';
 import { DashboardLayout, normalizeDashboardLayout, type DashboardLayoutData } from './split/DashboardLayout';
 import { countTextLines, countUtf8Bytes, extractExternalDropPathsFromDataTransfer, isLineCountEligiblePath } from './utils/fileTreeMeta';
@@ -5600,7 +5601,9 @@ Office project scaffold created by BBARIT Terminal.
           pushToast('pty-holder-spawn-fallback', ko ? 'PTY 홀더를 대체 방식으로 시작함' : 'PTY holder started another way', describePtyBackend(rec, ko), 15000);
         }
         // First holder attach of this install (release builds; dev keeps the holder opt-in).
-        if (rec.kind === 'holder' && !import.meta.env.DEV && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
+        // Its text says quitting keeps terminals, so only when keepRunningOnQuit is in effect.
+        const keepsRunning = effectiveKeepRunningOnQuit(getConfigSnapshot().terminal?.keepRunningOnQuit, import.meta.env.DEV);
+        if (holderIntroWanted(rec, import.meta.env.DEV, keepsRunning) && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
           void kvSet('octo-pty-holder-intro-notice', '1');
           pushToast('pty-holder-intro',
             ko ? '터미널이 앱과 따로 실행됩니다' : 'Terminals now run apart from the app',
