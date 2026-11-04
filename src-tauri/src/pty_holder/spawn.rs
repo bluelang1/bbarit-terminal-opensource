@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 const SOCKET_WAIT: Duration = Duration::from_secs(5);
 /// launchctl / systemd-run normally answer in milliseconds.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(5);
+/// A launchd job (or its plist) younger than this may belong to a spawner that is still
+/// inside its `SOCKET_WAIT` (another dev app, a test): the stale cleanup leaves it alone.
+pub const STALE_MIN_AGE: Duration = Duration::from_secs(SOCKET_WAIT.as_secs() + 5);
 /// `setsid` forces the phase 2a spawn (skips launchd/systemd).
 pub const SPAWN_ENV: &str = "BBARIT_PTY_HOLDER_SPAWN";
 
@@ -222,52 +225,104 @@ pub fn spawn_holder(run_dir: &Path) -> Result<PathBuf, String> {
 
 pub fn spawn_holder_with(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> {
     super::ensure_private_dir(run_dir)?;
+    let forced_setsid = std::env::var(SPAWN_ENV).is_ok_and(|v| v.trim() == "setsid");
+    if forced_setsid {
+        let (_, socket, log_path) = new_paths(run_dir)?;
+        let log = open_log(&log_path)?;
+        return spawn_setsid(exe, &socket, log, &log_path, Some(format!("{SPAWN_ENV}=setsid")));
+    }
+    spawn_service_or_setsid(exe, run_dir)
+}
+
+/// macOS: a one-shot launchd job, else setsid.
+#[cfg(target_os = "macos")]
+fn spawn_service_or_setsid(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> {
+    let (instance, socket, log_path) = new_paths(run_dir)?;
+    open_log(&log_path)?; // created 0600 here; launchd appends to it (StandardErrorPath)
+    let started = start_service(
+        "launchd",
+        || launchd::spawn(exe, run_dir, &instance, &socket, &log_path),
+        || wait_for_socket(&socket, &log_path),
+        // Started but never listened: do not leave a late holder behind.
+        |label| launchd::bootout(label),
+    );
+    match started {
+        Ok(socket) => {
+            // Off the startup path: each launchctl call may take up to TOOL_TIMEOUT, and
+            // the young-job rule waits STALE_MIN_AGE between its two looks.
+            let dir = run_dir.to_path_buf();
+            std::thread::spawn(move || launchd::cleanup_stale(&dir));
+            Ok(socket)
+        }
+        Err(why) => setsid_fallback(exe, run_dir, why),
+    }
+}
+
+/// Linux: a transient systemd user service, else setsid.
+#[cfg(target_os = "linux")]
+fn spawn_service_or_setsid(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> {
+    let (instance, socket, log_path) = new_paths(run_dir)?;
+    open_log(&log_path)?;
+    let started = start_service(
+        "systemd",
+        || systemd::spawn(exe, &instance, &socket, &log_path),
+        || wait_for_socket(&socket, &log_path),
+        |unit| systemd::stop(unit),
+    );
+    started.or_else(|why| setsid_fallback(exe, run_dir, why))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn spawn_service_or_setsid(exe: &Path, run_dir: &Path) -> Result<PathBuf, String> {
+    let (_, socket, log_path) = new_paths(run_dir)?;
+    let log = open_log(&log_path)?;
+    spawn_setsid(exe, &socket, log, &log_path, None)
+}
+
+/// `(instance, <run>/<prefix>.<instance>.sock, ….log)` for a new holder.
+fn new_paths(run_dir: &Path) -> Result<(String, PathBuf, PathBuf), String> {
     let instance = super::new_instance_id();
     let base = format!("{}.{instance}", super::file_prefix());
     let socket = run_dir.join(format!("{base}.sock"));
     super::check_socket_path(&socket)?;
     let log_path = run_dir.join(format!("{base}.log"));
-    let log = std::fs::OpenOptions::new()
+    Ok((instance, socket, log_path))
+}
+
+fn open_log(log_path: &Path) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(&log_path)
-        .map_err(|e| format!("open {}: {e}", log_path.display()))?;
-    let forced_setsid = std::env::var(SPAWN_ENV).is_ok_and(|v| v.trim() == "setsid");
-    #[allow(unused_mut)]
-    let mut fallback: Option<String> = forced_setsid.then(|| format!("{SPAWN_ENV}=setsid"));
-    #[cfg(target_os = "macos")]
-    if !forced_setsid {
-        drop(log); // launchd opens the log itself (StandardErrorPath)
-        match launchd::spawn(exe, run_dir, &instance, &socket, &log_path) {
-            Ok(label) => {
-                return wait_for_socket(&socket, &log_path).inspect_err(|_| {
-                    // Started but never listened: do not leave a late holder behind.
-                    launchd::bootout(&label);
-                });
-            }
-            Err(e) => {
-                safe_eprintln!("[pty-holder] launchd spawn failed, using setsid: {e}");
-                fallback = Some(format!("launchd: {e}"));
-            }
-        }
-        let log = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&log_path)
-            .map_err(|e| format!("open {}: {e}", log_path.display()))?;
-        return spawn_setsid(exe, &socket, log, &log_path, fallback);
-    }
-    #[cfg(target_os = "linux")]
-    if !forced_setsid {
-        match systemd::spawn(exe, &instance, &socket, &log_path) {
-            Ok(_unit) => return wait_for_socket(&socket, &log_path),
-            Err(e) => {
-                safe_eprintln!("[pty-holder] systemd-run failed, using setsid: {e}");
-                fallback = Some(format!("systemd: {e}"));
-            }
-        }
-    }
-    spawn_setsid(exe, &socket, log, &log_path, fallback)
+        .open(log_path)
+        .map_err(|e| format!("open {}: {e}", log_path.display()))
+}
+
+/// launchd/systemd failed (or its holder never listened): one setsid try under fresh
+/// paths, with the reason kept for `spawnFallbackReason`.
+#[allow(dead_code)] // macOS / Linux only
+fn setsid_fallback(exe: &Path, run_dir: &Path, why: String) -> Result<PathBuf, String> {
+    safe_eprintln!("[pty-holder] {why}; using setsid");
+    let (_, socket, log_path) = new_paths(run_dir)?;
+    let log = open_log(&log_path)?;
+    spawn_setsid(exe, &socket, log, &log_path, Some(why))
+}
+
+/// Start a holder as a service job (`start`), then wait for its socket. A job that started
+/// but never listened is stopped (`stop`) so no late holder is left behind. Err carries the
+/// fallback reason ("launchd: …").
+#[allow(dead_code)] // macOS / Linux only
+fn start_service<J>(
+    service: &str,
+    start: impl FnOnce() -> Result<J, String>,
+    wait: impl FnOnce() -> Result<PathBuf, String>,
+    stop: impl FnOnce(&J),
+) -> Result<PathBuf, String> {
+    let job = start().map_err(|e| format!("{service}: {e}"))?;
+    wait().map_err(|e| {
+        stop(&job);
+        format!("{service}: job started but {e}")
+    })
 }
 
 /// The phase 2a spawn: same exe in its own session, reaped by a thread of this app.
@@ -388,6 +443,7 @@ pub(super) mod launchd {
     use std::collections::HashSet;
     use std::path::Path;
     use std::process::Command;
+    use std::time::Duration;
 
     /// `com.bbarit.terminal.<prefix>.`: dev and release jobs never touch each other.
     pub fn label_prefix() -> String {
@@ -424,54 +480,99 @@ pub(super) mod launchd {
             .collect()
     }
 
-    /// Labels to boot out (finished jobs only: booting out a live holder SIGHUPs every
-    /// terminal in it) and the plist files in the run dir whose job is not running.
+    /// One of our plist files in the run dir.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PlistFile {
+        pub label: String,
+        pub path: std::path::PathBuf,
+        /// Since its last modification (None: mtime unreadable, treated as young).
+        pub age: Option<Duration>,
+    }
+
+    /// What the stale cleanup may touch, from two `launchctl list` looks taken at least
+    /// `min_age` apart (`before`, `now`) and our plists:
+    /// - boot out a label only if its job is finished (`-`) in both looks, and its plist,
+    ///   when it is ours, is at least `min_age` old. Booting out a live holder SIGHUPs every
+    ///   terminal in it; a job another spawner just bootstrapped shows `-` only until it
+    ///   launches, or until that spawner's own `SOCKET_WAIT` bootout.
+    /// - remove a plist only if it is at least `min_age` old and its job is not running.
+    ///
+    /// Labels are one namespace per uid while plists are per run dir, so a label with no
+    /// plist here may belong to another run dir: the two looks are what make it safe.
     pub fn plan_cleanup(
-        jobs: &[(Option<u32>, String)],
-        plists: &[(String, std::path::PathBuf)],
+        before: &[(Option<u32>, String)],
+        now: &[(Option<u32>, String)],
+        plists: &[PlistFile],
+        min_age: Duration,
     ) -> (Vec<String>, Vec<std::path::PathBuf>) {
-        let stale: Vec<String> = jobs.iter().filter(|j| j.0.is_none()).map(|j| j.1.clone()).collect();
-        let live: HashSet<&str> = jobs.iter().filter(|j| j.0.is_some()).map(|j| j.1.as_str()).collect();
+        let finished_before: HashSet<&str> =
+            before.iter().filter(|j| j.0.is_none()).map(|j| j.1.as_str()).collect();
+        let live: HashSet<&str> = now.iter().filter(|j| j.0.is_some()).map(|j| j.1.as_str()).collect();
+        let old = |p: &PlistFile| p.age.is_some_and(|a| a >= min_age);
+        let stale = now
+            .iter()
+            .filter(|(pid, label)| pid.is_none() && finished_before.contains(label.as_str()))
+            .filter(|(_, label)| plists.iter().filter(|p| &p.label == label).all(old))
+            .map(|(_, label)| label.clone())
+            .collect();
         let remove = plists
             .iter()
-            .filter(|(label, _)| !live.contains(label.as_str()))
-            .map(|(_, path)| path.clone())
+            .filter(|p| old(p) && !live.contains(p.label.as_str()))
+            .map(|p| p.path.clone())
             .collect();
         (stale, remove)
     }
 
-    /// `(label, path)` of our `<prefix>.<instance>.plist` files.
-    fn plists_in(run_dir: &Path) -> Vec<(String, std::path::PathBuf)> {
+    /// Our `<prefix>.<instance>.plist` files (dotted instances are another build's).
+    pub fn plists_in(run_dir: &Path) -> Vec<PlistFile> {
         let prefix = format!("{}.", super::super::file_prefix());
         let Ok(entries) = std::fs::read_dir(run_dir) else {
             return Vec::new();
         };
-        entries
+        let mut found: Vec<PlistFile> = entries
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name();
                 let instance = name.to_str()?.strip_prefix(&prefix)?.strip_suffix(".plist")?.to_string();
-                (!instance.is_empty() && !instance.contains('.')).then(|| (label_for(&instance), e.path()))
+                if instance.is_empty() || instance.contains('.') {
+                    return None;
+                }
+                let age = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+                Some(PlistFile { label: label_for(&instance), path: e.path(), age })
             })
-            .collect()
+            .collect();
+        found.sort_by(|a, b| a.path.cmp(&b.path));
+        found
     }
 
-    /// Boot out our finished jobs (they stay listed as `- 0 <label>` forever otherwise)
-    /// and remove plists of jobs that are not running.
-    pub fn cleanup_stale(run_dir: &Path) {
-        let list = match run_tool(Command::new("launchctl").arg("list")) {
-            Ok((st, out, _)) if st.success() => out,
+    fn list_our_jobs() -> Option<Vec<(Option<u32>, String)>> {
+        match run_tool(Command::new("launchctl").arg("list")) {
+            Ok((st, out, _)) if st.success() => Some(our_jobs(&out, &label_prefix())),
             Ok((st, _, err)) => {
                 safe_eprintln!("[pty-holder] launchctl list: {st} {}", err.trim());
-                return;
+                None
             }
             Err(e) => {
                 safe_eprintln!("[pty-holder] launchctl list: {e}");
-                return;
+                None
             }
-        };
-        let jobs = our_jobs(&list, &label_prefix());
-        let (stale, remove) = plan_cleanup(&jobs, &plists_in(run_dir));
+        }
+    }
+
+    /// Boot out our finished jobs (they stay listed as `- 0 <label>` forever otherwise)
+    /// and remove plists of jobs that are not running, leaving anything younger than
+    /// `STALE_MIN_AGE` alone. Blocks for `STALE_MIN_AGE`: run it on a background thread.
+    pub fn cleanup_stale(run_dir: &Path) {
+        cleanup_stale_with(run_dir, super::STALE_MIN_AGE);
+    }
+
+    pub fn cleanup_stale_with(run_dir: &Path, min_age: Duration) {
+        let Some(before) = list_our_jobs() else { return };
+        if !min_age.is_zero() {
+            std::thread::sleep(min_age);
+        }
+        let Some(now) = list_our_jobs() else { return };
+        let (stale, remove) = plan_cleanup(&before, &now, &plists_in(run_dir), min_age);
         for label in stale {
             bootout(&label);
         }
@@ -540,7 +641,6 @@ pub(super) mod launchd {
                 .map(str::to_string)
                 .ok_or_else(|| format!("{} is not UTF-8", p.display()))
         };
-        cleanup_stale(run_dir);
         let label = label_for(instance);
         let argv = vec![
             utf8(exe)?,
@@ -634,6 +734,15 @@ mod systemd {
         a
     }
 
+    /// Best effort: a unit that started but whose holder never listened.
+    pub fn stop(unit: &str) {
+        match run_tool(Command::new("systemctl").args(["--user", "stop", unit])) {
+            Ok((st, _, _)) if st.success() => {}
+            Ok((st, _, err)) => safe_eprintln!("[pty-holder] systemctl --user stop {unit}: {st} {}", err.trim()),
+            Err(e) => safe_eprintln!("[pty-holder] systemctl --user stop {unit}: {e}"),
+        }
+    }
+
     pub fn spawn(exe: &Path, instance: &str, socket: &Path, log: &Path) -> Result<String, String> {
         let unit = unit_for(instance);
         let args = argv(exe, socket, log, &unit, &super::holder_env());
@@ -671,7 +780,16 @@ mod tests {
         super::super::ensure_private_dir(&dir).unwrap();
         let sock = dir.join("x.sock");
         drop(std::os::unix::net::UnixListener::bind(&sock).unwrap()); // file stays, nobody listens
-        let probe = UnixStream::connect(&sock).map(|_| ());
+        // Tests fork in parallel: a child forked while the listener fd was open keeps a copy
+        // of it until its exec (CLOEXEC), so a connect can briefly still succeed. Retry.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let probe = loop {
+            let probe = UnixStream::connect(&sock).map(|_| ());
+            if probe.is_err() || Instant::now() >= deadline {
+                break probe;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
         assert_eq!(classify(true, proto::PROTOCOL_VERSION + 1, probe), Candidate::Stale);
         let missing = UnixStream::connect(dir.join("none.sock")).map(|_| ());
         assert_eq!(classify(true, proto::PROTOCOL_VERSION, missing), Candidate::Stale);
@@ -703,13 +821,19 @@ mod tests {
         let dev = launchd::our_jobs(list, "com.bbarit.terminal.pty-holder.dev.");
         assert_eq!(dev, vec![(None, "com.bbarit.terminal.pty-holder.dev.12345678".to_string())]);
 
-        let p = |l: &str| PathBuf::from(format!("/r/{l}.plist"));
+        let old = Some(STALE_MIN_AGE + Duration::from_secs(1));
+        let plist = |l: &str, path: &str, age: Option<Duration>| launchd::PlistFile {
+            label: format!("com.bbarit.terminal.pty-holder.{l}"),
+            path: PathBuf::from(format!("/r/{path}.plist")),
+            age,
+        };
         let plists = vec![
-            ("com.bbarit.terminal.pty-holder.0a1b2c3d".to_string(), p("a")), // finished
-            ("com.bbarit.terminal.pty-holder.deadbeef".to_string(), p("b")), // live: keep
-            ("com.bbarit.terminal.pty-holder.99999999".to_string(), p("c")), // not listed
+            plist("0a1b2c3d", "a", old), // finished
+            plist("deadbeef", "b", old), // live: keep
+            plist("99999999", "c", old), // not listed
         ];
-        let (bootout, remove) = launchd::plan_cleanup(&jobs, &plists);
+        // Same rows in both looks: the old behavior.
+        let (bootout, remove) = launchd::plan_cleanup(&jobs, &jobs, &plists, STALE_MIN_AGE);
         assert_eq!(
             bootout,
             vec![
@@ -718,7 +842,107 @@ mod tests {
             ],
             "only `-` rows; never the live 4242"
         );
-        assert_eq!(remove, vec![p("a"), p("c")]);
+        assert_eq!(remove, vec![PathBuf::from("/r/a.plist"), PathBuf::from("/r/c.plist")]);
+    }
+
+    #[test]
+    fn the_stale_cleanup_leaves_young_jobs_and_plists_of_other_spawners_alone() {
+        let label = |l: &str| format!("com.bbarit.terminal.pty-holder.{l}");
+        let min = STALE_MIN_AGE;
+        let old = Some(min + Duration::from_secs(1));
+        let young = Some(Duration::from_millis(300));
+        let plist = |l: &str, age: Option<Duration>| launchd::PlistFile {
+            label: label(l),
+            path: PathBuf::from(format!("/r/{l}.plist")),
+            age,
+        };
+        // First look (STALE_MIN_AGE ago) and now.
+        let before = vec![
+            (None, label("finished")),     // `-` both times, old plist: stale
+            (None, label("justbooted")),   // another spawner's job, not launched yet...
+            (None, label("foreign")),      // `-` both times, plist in another run dir
+            (None, label("youngplist")),   // `-` both times, but its plist is fresh
+        ];
+        let now = vec![
+            (None, label("finished")),
+            (Some(4242), label("justbooted")), // ...now running
+            (None, label("foreign")),
+            (None, label("youngplist")),
+            (None, label("newcomer")),         // bootstrapped after the first look
+        ];
+        let plists = vec![
+            plist("finished", old),
+            plist("justbooted", young),
+            plist("youngplist", young),
+            plist("newcomer", young),
+            plist("unlisted-old", old),     // job gone: plist removable
+            plist("unlisted-young", young), // being written by a concurrent spawner
+            plist("unknown-age", None),
+        ];
+        let (bootout, remove) = launchd::plan_cleanup(&before, &now, &plists, min);
+        assert_eq!(bootout, vec![label("finished"), label("foreign")]);
+        let removed: Vec<String> =
+            remove.iter().map(|p| p.file_stem().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(removed, vec!["finished", "unlisted-old"]);
+        // A zero age limit (manual cleanup in the live test) is the plain rule.
+        let all_old: Vec<_> = plists.iter().cloned().map(|mut p| { p.age = Some(Duration::ZERO); p }).collect();
+        let (bootout, _) = launchd::plan_cleanup(&now, &now, &all_old, Duration::ZERO);
+        assert_eq!(bootout, vec![label("finished"), label("foreign"), label("youngplist"), label("newcomer")]);
+    }
+
+    #[test]
+    fn plists_in_matches_only_our_instance_files() {
+        let dir = std::env::temp_dir().join(format!("bbarit-pl-{}", super::super::new_instance_id()));
+        super::super::ensure_private_dir(&dir).unwrap();
+        for name in [
+            "pty-holder.dev.abcd1234.plist", // ours (tests are debug builds)
+            "pty-holder.dev.x.y.plist",      // dotted instance: not ours
+            "pty-holder.dev..plist",         // empty instance
+            "pty-holder.abcd1234.plist",     // the release build's
+            "pty-holder.dev.abcd1234.json",
+            "other.plist",
+        ] {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let found = launchd::plists_in(&dir);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].label, "com.bbarit.terminal.pty-holder.dev.abcd1234");
+        assert_eq!(found[0].path, dir.join("pty-holder.dev.abcd1234.plist"));
+        assert!(found[0].age.is_some_and(|a| a < Duration::from_secs(60)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_service_job_that_never_listens_is_stopped_and_reported() {
+        use std::cell::RefCell;
+        let stopped = RefCell::new(Vec::<String>::new());
+        // Started, but the socket never opened: the job is stopped, the caller falls back.
+        let r = start_service(
+            "launchd",
+            || Ok("job-1".to_string()),
+            || Err("holder did not open /r/x.sock within 5s".to_string()),
+            |j: &String| stopped.borrow_mut().push(j.clone()),
+        );
+        assert_eq!(r.unwrap_err(), "launchd: job started but holder did not open /r/x.sock within 5s");
+        assert_eq!(*stopped.borrow(), vec!["job-1".to_string()]);
+        // Could not start: nothing to stop.
+        let r = start_service(
+            "systemd",
+            || Err::<String, _>("systemd-run: No such file or directory".to_string()),
+            || unreachable!("no wait without a job"),
+            |j: &String| stopped.borrow_mut().push(j.clone()),
+        );
+        assert_eq!(r.unwrap_err(), "systemd: systemd-run: No such file or directory");
+        assert_eq!(stopped.borrow().len(), 1);
+        // Listening: the job stays.
+        let r = start_service(
+            "launchd",
+            || Ok("job-2".to_string()),
+            || Ok(PathBuf::from("/r/y.sock")),
+            |j: &String| stopped.borrow_mut().push(j.clone()),
+        );
+        assert_eq!(r.unwrap(), PathBuf::from("/r/y.sock"));
+        assert_eq!(stopped.borrow().len(), 1);
     }
 
     #[test]

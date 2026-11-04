@@ -95,11 +95,17 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
   `BBARIT_PTY_HOLDER_IDLE_EXIT_MS` 를 넣는다. rlimit 은 넘기지 않는다(launchd 기본값).
   launchd 홀더는 `getsid == 1`(launchd 세션)이고 `pgid == pid` 다. setsid 홀더처럼 세션 리더는 아니다. 터미널은 각자
   세션을 만들므로 동작은 같다.
-- **낡은 잡 정리**: bootstrap 전에 `launchctl list` 를 한 번 읽는다. 우리 접두사이면서 instance 에 점이 없는 레이블만
-  다룬다. 그래서 릴리스는 개발 잡을 건드리지 않고, 개발도 릴리스 잡을 건드리지 않는다. PID 칸이 `-` 인 것만
-  `bootout gui/<uid>/<label>` 한다. 그 뒤 run 디렉터리의 plist 중 살아 있는 잡이 아닌 것을 지운다.
-  bootstrap 이 성공했는데 소켓이 `SOCKET_WAIT`(5 초, 그대로) 안에 열리지 않으면 그 레이블을 bootout 하고 오류를 낸다
-  (in-process 폴백). 늦게 뜬 홀더가 남지 않게 하려는 것이다.
+- **낡은 잡 정리**: 우리 접두사이면서 instance 에 점이 없는 레이블만 다룬다. 그래서 릴리스는 개발 잡을 건드리지 않고,
+  개발도 릴리스 잡을 건드리지 않는다. (3b 수정) 레이블은 uid 마다 한 이름공간인데 plist 는 run 디렉터리마다 따로라,
+  동시에 띄우는 다른 spawner(다른 worktree 의 dev 앱, live 테스트)의 막 bootstrap 한 잡(PID 아직 `-`)이나 쓰는 중인
+  plist 를 지울 수 있었다. 그래서 정리는 **소켓이 열린 뒤 백그라운드 스레드**에서 하고(시작 경로에서 launchctl 대기 제거),
+  `launchctl list` 를 `STALE_MIN_AGE`(= `SOCKET_WAIT` + 5 초 = 10 초) 간격으로 두 번 읽는다. 두 번 다 `-` 이고, 우리 plist 가
+  있으면 그 mtime 이 10 초보다 오래된 레이블만 `bootout gui/<uid>/<label>` 한다. plist 는 10 초보다 오래됐고 잡이 돌고 있지
+  않을 때만 지운다(`plan_cleanup`, `plists_in`).
+  bootstrap 이 성공했는데 소켓이 `SOCKET_WAIT`(5 초, 그대로) 안에 열리지 않으면 그 레이블을 bootout 한다(늦게 뜬 홀더가
+  남지 않게). (3b) 그 뒤 새 경로로 setsid 를 한 번 시도하고 이유(`launchd: job started but …`)를
+  `spawnFallbackReason` 에 남긴다. Linux 도 같다: systemd-run 은 성공했는데 소켓이 안 열리면 `systemctl --user stop <unit>`
+  (최선 노력) 후 setsid (`start_service`).
 - **폴백**: launchd(macOS)·systemd-run(Linux)이 실패하면 2a 의 setsid 로 띄운다. 실패 원인은 도구 없음, 0 이 아닌 종료,
   5 초 타임아웃, UTF-8 이 아닌 경로, gui 도메인 없음(ssh 세션) 등이다. 이유는 `pty_backend_info.spawnFallbackReason` 에
   남는다(이 앱이 띄운 그 소켓일 때만). `BBARIT_PTY_HOLDER_SPAWN=setsid` 로 setsid 를 강제할 수 있다(디버깅·비교용).

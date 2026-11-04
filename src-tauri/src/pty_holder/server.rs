@@ -34,7 +34,7 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Queued-but-unwritten bytes for one client before it is dropped (it resyncs via TAIL).
 const CLIENT_BACKLOG_MAX: usize = 32 * 1024 * 1024;
-/// Cap on how long kill_all / shutdown wait for release sweeps.
+/// Cap on how long shutdown waits for release sweeps and a running GOODBYE kill_all.
 const SWEEP_WAIT: Duration = Duration::from_secs(10);
 
 pub struct Config {
@@ -545,7 +545,65 @@ pub struct Holder {
     shutdown: AtomicBool,
     /// Why the holder is shutting down (logged as "exiting: <why>").
     shutdown_reason: Mutex<Option<String>>,
-    sweeps: AtomicUsize,
+    /// Release sweeps and GOODBYE kill_all in progress: serve() waits for them before the
+    /// process ends, so a SIGTERM during kill_all (macOS logout: the app's kill_all and
+    /// launchd's TERM overlap) never cuts the kill short.
+    sweeps: Sweeps,
+}
+
+/// Count of kill/sweep work still running, with a wakeup when it reaches zero.
+#[derive(Default)]
+struct Sweeps {
+    running: Mutex<usize>,
+    done: Condvar,
+}
+
+/// Decrements the count when the kill/sweep work it was created for ends (or panics).
+struct SweepTurn<'a>(&'a Sweeps);
+
+impl Sweeps {
+    fn begin(&self) -> SweepTurn<'_> {
+        *self.running.lock().unwrap_or_else(|p| p.into_inner()) += 1;
+        SweepTurn(self)
+    }
+
+    /// For work that ends on another thread: call `end` there.
+    fn begin_detached(&self) {
+        std::mem::forget(self.begin());
+    }
+
+    fn end(&self) {
+        let mut n = self.running.lock().unwrap_or_else(|p| p.into_inner());
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            self.done.notify_all();
+        }
+    }
+
+    /// Wait until nothing runs, at most `cap`. True when it drained in time.
+    fn wait_idle(&self, cap: Duration) -> bool {
+        let deadline = Instant::now() + cap;
+        let mut n = self.running.lock().unwrap_or_else(|p| p.into_inner());
+        while *n > 0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            n = self.done.wait_timeout(n, left).unwrap_or_else(|p| p.into_inner()).0;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn running(&self) -> usize {
+        *self.running.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+impl Drop for SweepTurn<'_> {
+    fn drop(&mut self) {
+        self.0.end();
+    }
 }
 
 impl Holder {
@@ -565,7 +623,7 @@ impl Holder {
             cfg,
             shutdown: AtomicBool::new(false),
             shutdown_reason: Mutex::new(None),
-            sweeps: AtomicUsize::new(0),
+            sweeps: Sweeps::default(),
         })
     }
 
@@ -609,7 +667,9 @@ impl Holder {
                 }
             }
         }
-        // Release sweeps run on their own threads; let them finish before the process ends.
+        // Release sweeps run on their own threads, and a GOODBYE kill_all may still be running
+        // on its client thread (a SIGTERM arrived meanwhile): let them finish before the
+        // process ends, or HUP-ignoring children of those terminals survive.
         self.wait_for_sweeps();
         let mut st = self.lock();
         if let Some(c) = st.client.take() {
@@ -619,9 +679,8 @@ impl Holder {
     }
 
     fn wait_for_sweeps(&self) {
-        let deadline = Instant::now() + SWEEP_WAIT;
-        while self.sweeps.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
+        if !self.sweeps.wait_idle(SWEEP_WAIT) {
+            safe_eprintln!("[pty-holder] kill/sweep still running after {SWEEP_WAIT:?}; exiting anyway");
         }
     }
 
@@ -789,6 +848,24 @@ impl Holder {
     pub fn kill_all_for_test(&self) {
         self.kill_all();
         self.begin_shutdown("test cleanup");
+    }
+
+    /// Test hook: what the SIGTERM watcher does.
+    #[cfg(test)]
+    pub fn stop_for_test(&self, why: &str) {
+        self.begin_shutdown(why);
+    }
+
+    /// Test hook: terminals the holder still has (released ones are gone).
+    #[cfg(test)]
+    pub fn terminal_count(&self) -> usize {
+        self.lock().terms.len()
+    }
+
+    /// Test hook: release sweeps / kill_all still running.
+    #[cfg(test)]
+    pub fn sweeps_running(&self) -> usize {
+        self.sweeps.running()
     }
 
     /// Test hook: drop the controlling client without BYE, as a broken socket would.
@@ -1078,7 +1155,7 @@ impl Holder {
     fn release(self: &Arc<Self>, handle: u32) {
         // Counted before the terminal leaves the map: serve() waits for this counter, and
         // removing the last terminal may start a DRAIN shutdown.
-        self.sweeps.fetch_add(1, Ordering::SeqCst);
+        self.sweeps.begin_detached();
         let term = {
             let mut st = self.lock();
             let term = st.terms.remove(&handle);
@@ -1089,18 +1166,21 @@ impl Holder {
             term
         };
         let Some(term) = term else {
-            self.sweeps.fetch_sub(1, Ordering::SeqCst);
+            self.sweeps.end();
             return;
         };
         let holder = Arc::clone(self);
         thread::spawn(move || {
             kill_term(term, true);
-            holder.sweeps.fetch_sub(1, Ordering::SeqCst);
+            holder.sweeps.end();
         });
     }
 
     /// GOODBYE kill_all: release everything, one combined scope sweep, then return.
+    /// Counted in `sweeps` for its whole run, so a shutdown that starts meanwhile
+    /// (SIGTERM) waits for it instead of ending the process mid-kill.
     fn kill_all(&self) {
+        let _turn = self.sweeps.begin();
         let terms: Vec<Term> = {
             let mut st = self.lock();
             st.idle_since = Instant::now();

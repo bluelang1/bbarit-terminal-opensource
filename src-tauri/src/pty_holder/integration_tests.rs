@@ -226,6 +226,19 @@ fn alive(pid: u32) -> bool {
     super::pid_alive(pid)
 }
 
+/// Alive and not a zombie (a killed child stays a zombie until its reap thread runs).
+fn running(pid: u32) -> bool {
+    if !alive(pid) {
+        return false;
+    }
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
+}
+
 fn wait_gone(pid: u32, what: &str) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while alive(pid) {
@@ -947,7 +960,8 @@ fn live_spawn_detached_holder() {
         // A finished one-shot job stays listed as `- 0 <label>` until the next spawn's cleanup.
         assert_eq!(launchctl_pid(label), Some(None), "finished job listed with pid -");
         println!("LIVE after kill_all: {label} listed with pid -");
-        super::spawn::launchd::cleanup_stale(&run);
+        // Zero age limit: the plist is seconds old (the app's own cleanup waits STALE_MIN_AGE).
+        super::spawn::launchd::cleanup_stale_with(&run, Duration::ZERO);
         assert_eq!(launchctl_pid(label), None, "stale job booted out");
         let plists: Vec<_> = std::fs::read_dir(&run)
             .unwrap()
@@ -1027,4 +1041,39 @@ fn sigterm_removes_socket_and_info_and_leaves_terminals_to_the_hangup() {
     assert_eq!(wait_for_file(&hup_file).trim(), "hup", "shell ended by SIGHUP");
     drop(backend);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sigterm_during_goodbye_kill_all_waits_for_the_kill() {
+    // macOS logout: the app's GOODBYE kill_all and launchd's SIGTERM overlap. The holder
+    // must not end (and leave HUP/TERM-ignoring children behind) while kill_all still runs.
+    let mut th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (handle, pid) = a.spawn(
+        "stubborn",
+        "trap '' HUP TERM; printf ready; while :; do sleep 1; done",
+        &[],
+        "test-scope-kill-all",
+    );
+    a.output_until(handle, "ready");
+    a.send_json(
+        proto::GOODBYE,
+        0,
+        &proto::Goodbye {
+            reason: "kill_all".into(),
+        },
+    );
+    // kill_all has taken the terminals (its TERM → 300 ms → KILL is still ahead)...
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while th.holder.terminal_count() > 0 {
+        assert!(Instant::now() < deadline, "kill_all never started");
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(th.holder.sweeps_running() > 0 || !running(pid), "kill_all is not counted");
+    // ...when the SIGTERM arrives.
+    th.holder.stop_for_test("SIGTERM");
+    assert!(th.wait_stopped(Duration::from_secs(15)), "holder never stopped");
+    // serve() returning is the process exit: by then the stubborn shell must be gone.
+    assert!(!running(pid), "a TERM/HUP-ignoring terminal outlived the holder");
+    assert_eq!(th.holder.sweeps_running(), 0);
 }
