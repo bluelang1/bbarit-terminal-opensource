@@ -555,6 +555,7 @@ TCC 항목 이름)를 PR 체크리스트에 넣는다.
   handover 표시 → **곧바로** 홀더에 GOODBYE handover → `request_restart()` → 8 초(`RELAUNCH_WATCHDOG`) 안에 안 끝나면 그
   스레드에서 `tauri::process::restart`(새 프로세스 + exit). `handleUpdate` 는 이 커맨드를 쓰고, 없으면 예전 `relaunch()` 경로.
   실기: 이 커맨드로 1 초 안에 새 pid, 같은 홀더(로그 `client attached` 만 늘어남), tick 루프 끊김 없음.
+- **재시작 한 번만**: 워치독과 RunEvent::Exit(Tauri 재시작)은 `RESTARTING` 을 `swap(true)` 해 먼저 잡은 쪽만 재실행한다(`exit_restart_action`). 워치독이 먼저면 Exit 는 Tauri 재시작으로 돌아가지 않고 기다리며, 그 사이 "종료하고 모든 터미널 끝내기"는 재실행 없이 끝낸다.
 - **Windows**: `pty_holder_wanted(.., unix)` 는 unix 가 아니면 항상 false 라 `fallbackReason` 이 없고(폴백 토스트 없음), 설정 체크박스는 꺼짐·비활성(macOS/Linux 전용).
 - **테스트**: `integration_tests::{an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours,
   a_draining_holder_keeps_exited_terminals_until_they_are_released}`(스레드 홀더 둘: v1 은 draining·ACK·attach·입력·끝난 id 재사용,

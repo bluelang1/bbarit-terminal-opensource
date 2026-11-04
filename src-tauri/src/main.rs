@@ -3945,15 +3945,60 @@ const RELAUNCH_WATCHDOG: Duration = Duration::from_secs(8);
 #[tauri::command(async)]
 fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
     HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
+    RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
     state.pty_selection.on_app_exit(exit_reason_now());
     let env = app.env();
     std::thread::spawn(move || {
         std::thread::sleep(RELAUNCH_WATCHDOG);
+        if !claim_restart(&RESTARTING) {
+            return; // RunEvent::Exit got there first; Tauri's restart (or a quit) is under way.
+        }
         safe_eprintln!("[update] restart request not handled within {RELAUNCH_WATCHDOG:?}; relaunching directly");
         agent_rpc_stop_all();
         tauri::process::restart(&env);
     });
     app.request_restart();
+}
+
+/// `app_relaunch_for_update` asked Tauri to restart (its RunEvent::Exit respawns the app).
+static RELAUNCH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Someone (the watchdog or RunEvent::Exit) has taken the update relaunch: there must be
+/// exactly one, or two apps start and the later HELLO takes the other's terminals.
+static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True for the first caller only.
+fn claim_restart(restarting: &std::sync::atomic::AtomicBool) -> bool {
+    !restarting.swap(true, Ordering::SeqCst)
+}
+
+/// What RunEvent::Exit does about an update relaunch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitRestart {
+    /// Not a relaunch: an ordinary exit.
+    Ordinary,
+    /// We claimed it: let Tauri's own restart run after the handler.
+    Tauri,
+    /// The watchdog claimed it first and is respawning: do not let Tauri spawn a second app.
+    WaitForWatchdog,
+    /// "Quit and end all terminals" came during the relaunch window: claim it (stops the
+    /// watchdog) and exit without relaunching.
+    Quit,
+}
+
+fn exit_restart_action(
+    relaunch_requested: bool,
+    kill_all_requested: bool,
+    restarting: &std::sync::atomic::AtomicBool,
+) -> ExitRestart {
+    if !relaunch_requested {
+        ExitRestart::Ordinary
+    } else if !claim_restart(restarting) {
+        ExitRestart::WaitForWatchdog
+    } else if kill_all_requested {
+        ExitRestart::Quit
+    } else {
+        ExitRestart::Tauri
+    }
 }
 
 /// "Quit and end all terminals" (menu / command palette).
@@ -4011,6 +4056,36 @@ mod pty_holder_gate_tests {
         assert_eq!(exit_goodbye_reason(true, false, true), ExitReason::Handover);
         assert_eq!(exit_goodbye_reason(true, true, true), ExitReason::KillAll);
         assert_eq!(super::RELAUNCH_WATCHDOG, std::time::Duration::from_secs(8));
+    }
+
+    #[test]
+    fn only_one_update_relaunch_ever_runs() {
+        use super::{claim_restart, exit_restart_action, ExitRestart};
+        use std::sync::atomic::AtomicBool;
+        let flag = AtomicBool::new(false);
+        assert!(claim_restart(&flag), "first caller restarts");
+        assert!(!claim_restart(&flag), "second caller backs off");
+
+        // (relaunch requested, kill_all requested) with nobody restarting yet.
+        let fresh = || AtomicBool::new(false);
+        assert_eq!(exit_restart_action(false, false, &fresh()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(false, true, &fresh()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(true, false, &fresh()), ExitRestart::Tauri);
+        assert_eq!(exit_restart_action(true, true, &fresh()), ExitRestart::Quit);
+        // An ordinary exit never claims (a later relaunch could still run).
+        let idle = fresh();
+        exit_restart_action(false, false, &idle);
+        assert!(claim_restart(&idle));
+
+        // Exit first: it claims, so the watchdog (claim_restart) backs off.
+        let exit_first = fresh();
+        assert_eq!(exit_restart_action(true, false, &exit_first), ExitRestart::Tauri);
+        assert!(!claim_restart(&exit_first));
+        // Watchdog first: Exit must not let Tauri spawn a second app.
+        let watchdog_first = fresh();
+        assert!(claim_restart(&watchdog_first));
+        assert_eq!(exit_restart_action(true, false, &watchdog_first), ExitRestart::WaitForWatchdog);
+        assert_eq!(exit_restart_action(true, true, &watchdog_first), ExitRestart::WaitForWatchdog);
     }
 
     #[test]
@@ -10380,6 +10455,12 @@ fn main() {
             // which never goes through CloseRequested (prevent_close) above. Reap
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
+                // Decide the update relaunch first, so a watchdog firing meanwhile backs off.
+                let restart = exit_restart_action(
+                    RELAUNCH_REQUESTED.load(Ordering::SeqCst),
+                    KILL_TERMINALS_ON_EXIT.load(Ordering::SeqCst),
+                    &RESTARTING,
+                );
                 agent_rpc_stop_all();
                 // Holder backend: GOODBYE quit/handover keeps the terminals (no sweep);
                 // kill_all makes the holder kill and sweep them. In-process: sweep here.
@@ -10388,6 +10469,19 @@ fn main() {
                     .is_some_and(|state| state.pty_selection.on_app_exit(exit_reason_now()));
                 if !handled {
                     sweep_all_scopes_on_exit(_app_handle);
+                }
+                match restart {
+                    ExitRestart::Ordinary | ExitRestart::Tauri => {}
+                    ExitRestart::WaitForWatchdog => {
+                        // The watchdog's process::restart exits this process; never return
+                        // into Tauri's restart. Bounded in case the watchdog died.
+                        std::thread::sleep(Duration::from_secs(10));
+                        std::process::exit(0);
+                    }
+                    ExitRestart::Quit => {
+                        _app_handle.cleanup_before_exit();
+                        std::process::exit(0);
+                    }
                 }
             }
         });
