@@ -1,6 +1,6 @@
 # PTY 홀더 데몬: 앱을 꺼도 터미널이 살아 있게
 
-작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현(실기 확인 전).** 결정 필요 항목은 맨 끝에 있다.
+작성일 2026-11-03. 상태: **설계 2판(코드 대조 리뷰 반영). 0·1단계 완료, 2a(홀더·프로토콜·`HolderBackend`, Rust) 완료, 2b(프런트 재부착·agentLinks·종료 UX) 구현(실기 확인 전). 3a(launchd/systemd-run 분리 spawn, 홀더 SIGTERM 정리, Rust) 구현.** 결정 필요 항목은 맨 끝에 있다.
 
 ## 1. 문제
 
@@ -83,6 +83,51 @@ herdr-core 는 이 문제를 "터미널은 작은 데몬(holder)이 쥐고, 앱�
 - 홀더가 죽으면 그 안의 터미널은 죽는다(홀더가 부모다). 앱은 다음 연결에서 사라진 터미널을
   `holder_lost` 로 표시하고 "같은 폴더에서 다시 시작" 을 제안한다(기존 재시작 경로).
 - 재부팅 뒤도 같다. 저장된 프로젝트의 터미널은 지금처럼 다시 만든다.
+
+구현 메모: 3a(Rust) — `pty_holder/spawn.rs`(`spawn_holder_with`, `launchd`·`systemd` 하위 모듈, `describe`),
+`server.rs`(SIGTERM/SIGINT), `proto.rs`(`HolderInfo` 필드), `pty_backend.rs`(`info()`). 위 계획과 다르게 간 점:
+- **macOS launchd**: plist 는 `<run>/<prefix>.<instance>.plist`(0600), 레이블은 `com.bbarit.terminal.<prefix>.<instance>`
+  (릴리스 `com.bbarit.terminal.pty-holder.<8hex>`, 개발 `….pty-holder.dev.<8hex>`. instance 는 spawn 마다 새 난수라
+  레이블도 spawn 마다 고유하다). `ProgramArguments` = exe + `--mode pty-holder --socket <path> --spawn-method launchd
+  --job <label>`. 뒤 두 쌍은 홀더가 정보 파일에 `spawnMethod`/`label` 을 쓰게 하려고 더했다. 그 밖의 키는 `RunAtLoad`,
+  `KeepAlive=false`, `AbandonProcessGroup`, `ProcessType=Interactive`, `WorkingDirectory=/`, stdin/stdout `/dev/null`,
+  `StandardErrorPath`=기존 홀더 로그다. env 는 `HOME`, `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, 그리고 앱에 있을 때만
+  `BBARIT_PTY_HOLDER_IDLE_EXIT_MS` 를 넣는다. rlimit 은 넘기지 않는다(launchd 기본값).
+  launchd 홀더는 `getsid == 1`(launchd 세션)이고 `pgid == pid` 다. setsid 홀더처럼 세션 리더는 아니다. 터미널은 각자
+  세션을 만들므로 동작은 같다.
+- **낡은 잡 정리**: bootstrap 전에 `launchctl list` 를 한 번 읽는다. 우리 접두사이면서 instance 에 점이 없는 레이블만
+  다룬다. 그래서 릴리스는 개발 잡을 건드리지 않고, 개발도 릴리스 잡을 건드리지 않는다. PID 칸이 `-` 인 것만
+  `bootout gui/<uid>/<label>` 한다. 그 뒤 run 디렉터리의 plist 중 살아 있는 잡이 아닌 것을 지운다.
+  bootstrap 이 성공했는데 소켓이 `SOCKET_WAIT`(5 초, 그대로) 안에 열리지 않으면 그 레이블을 bootout 하고 오류를 낸다
+  (in-process 폴백). 늦게 뜬 홀더가 남지 않게 하려는 것이다.
+- **폴백**: launchd(macOS)·systemd-run(Linux)이 실패하면 2a 의 setsid 로 띄운다. 실패 원인은 도구 없음, 0 이 아닌 종료,
+  5 초 타임아웃, UTF-8 이 아닌 경로, gui 도메인 없음(ssh 세션) 등이다. 이유는 `pty_backend_info.spawnFallbackReason` 에
+  남는다(이 앱이 띄운 그 소켓일 때만). `BBARIT_PTY_HOLDER_SPAWN=setsid` 로 setsid 를 강제할 수 있다(디버깅·비교용).
+- **Linux**: `systemd-run --user --collect --quiet --service-type=exec -p KillMode=process -p StandardError=append:<log>
+  --unit bbarit-<prefix의 .을 -로>-<instance> [-E BBARIT_PTY_HOLDER_IDLE_EXIT_MS=…] -- <exe> … --spawn-method systemd --job <unit>`.
+  `StandardError=append:` 는 systemd 240 이상이 필요하다. 그보다 오래된 systemd 에서는 실패해 setsid 로 간다.
+  이 Mac 에서는 argv 테스트만 했고, 실제 systemd 실행과 Linux 빌드(`cfg(target_os="linux")` 분기)는 CI(ubuntu)가 처음 확인한다.
+- **정보 파일·`pty_backend_info`**: `HolderInfo` 에 선택 필드 `spawnMethod`("launchd"|"systemd"|"setsid"|"manual"),
+  `label`, `unit` 을 더했다. 2a/2b 파일도 그대로 읽힌다. `pty_backend_info`(holder)에는 `spawnMethod`, `label`/`unit`,
+  `spawnFallbackReason` 이 붙는다. 프로토콜 버전은 그대로 1 이다.
+- **홀더 SIGTERM/SIGINT**: `sigaction` 핸들러는 원자 변수 하나만 쓰고, 감시 스레드가 일반 종료 경로를 시작한다.
+  새 접속을 받지 않고, `.sock`/`.json` 을 지운 뒤 `[pty-holder] exiting: SIGTERM` 을 남긴다. 터미널을 kill 하거나
+  스윕하지 않는다(그것은 GOODBYE `kill_all` 의 일이다). 다만 홀더가 끝나면 PTY master 가 닫히므로 커널이 세션 리더에
+  SIGHUP 을 보내고, 보통의 셸은 끝난다. 3.1 의 "홀더가 죽으면 터미널도 죽는다" 와 같은 결과다. 차이는 파일이 깨끗이
+  지워진다는 점이다. 새 크레이트는 더하지 않았다(`libc` 만 씀). `kill_all` 뒤 launchd 잡은 `-  0  <label>` 로 남고,
+  다음 spawn 의 정리에서 내려간다.
+- **테스트**: `spawn::tests::{launchctl_list_rows_are_split_into_live_and_finished_jobs, launchd_plist_is_a_one_shot_interactive_job
+  (plutil -lint), holder_env_carries_only_what_the_holder_reads, systemd_run_argv, describe_reads_the_info_file_and_the_fallback_reason}`,
+  `proto::tests::holder_info_spawn_fields_are_optional_and_camel_case`,
+  `integration_tests::sigterm_removes_socket_and_info_and_leaves_terminals_to_the_hangup`(테스트 바이너리를 실제 홀더 프로세스로
+  띄우고 TERM 을 보낸다. 셸의 HUP 트랩으로 SIGHUP 종료를 확인한다). 수동(ignored) `live_spawn_detached_holder` 는 macOS 에서
+  launchd 경로를 확인한다. `launchctl list` 의 live pid → `kill_all` 뒤 `-` → `cleanup_stale` 로 사라지고 plist 도 지워지는지
+  본다. `BBARIT_PTY_HOLDER_SPAWN=setsid` 로는 setsid 경로를 확인한다.
+- **실기(dev 앱, 2026-11-04)**: `pty_backend_info` = `kind:"holder"`, `spawnMethod:"launchd"`,
+  `label:"com.bbarit.terminal.pty-holder.dev.<id>"`. `launchctl list` 에 live pid 로 보였다. 셸 탭에서 1 초 tick 루프를 돌리며
+  앱을 `kill -TERM` 해도 홀더와 루프는 살아 있었고, 다시 띄운 앱이 같은 소켓에 붙어(`recovered` 2) tick 이 끊기지 않았다.
+  `app_quit_kill_terminals` 뒤에는 홀더 로그가 `exiting: GOODBYE kill_all` 이었고 레이블은 `-  0` 으로 남았다. 다음 시작에서
+  그 레이블은 bootout 되고 plist 도 지워졌다. 폴백은 실기에서 일어나지 않았다(강제 env 로만 확인).
 
 ### 3.2 소켓과 신뢰 경계
 
