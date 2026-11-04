@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
-  describePtyBackend, holderIntroWanted, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
-  omittedBytesLine, placeUnknownRecovered, planAfterProbe, recoveredPtyFor, recoveredStartPlan,
+  describePtyBackend, holderIntroWanted, hostDebugBuild, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
+  omittedBytesLine, placeUnknownRecovered, planAfterProbe, ptyHolderDefaultOn, recoveredPtyFor, recoveredStartPlan,
   resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
 } from './ptyRecovery';
 
@@ -185,5 +185,29 @@ describe('holder intro notice', () => {
     expect(holderIntroWanted(holder, false, false)).toBe(false);
     expect(holderIntroWanted(holder, true, true)).toBe(false);
     expect(holderIntroWanted({ kind: 'in-process' }, false, true)).toBe(false);
+  });
+});
+
+describe('host build defaults (pty_backend_info.defaultOn / debugBuild)', () => {
+  it('prefers what the host reports over the Vite flag', () => {
+    // `tauri build --debug`: Rust debug_assertions on, Vite DEV off.
+    expect(hostDebugBuild({ debugBuild: true }, false)).toBe(true);
+    expect(hostDebugBuild({}, false)).toBe(false);
+    expect(hostDebugBuild({}, true)).toBe(true);
+    expect(ptyHolderDefaultOn({ defaultOn: false, debugBuild: true }, false)).toBe(false);
+    expect(ptyHolderDefaultOn({ defaultOn: false }, false)).toBe(false); // e.g. Windows release
+    expect(ptyHolderDefaultOn({ debugBuild: true }, false)).toBe(false);
+    expect(ptyHolderDefaultOn({}, false)).toBe(true);
+  });
+
+  it('loadPtyRecovery keeps defaultOn/debugBuild from pty_backend_info', async () => {
+    resetPtyRecoveryForTests();
+    const invokeFn = (async (cmd: string) => (cmd === 'pty_backend_info'
+      ? { kind: 'in-process', defaultOn: false, debugBuild: true }
+      : [])) as <T>(command: string) => Promise<T>;
+    const rec = await loadPtyRecovery(invokeFn);
+    expect(rec.defaultOn).toBe(false);
+    expect(rec.debugBuild).toBe(true);
+    resetPtyRecoveryForTests();
   });
 });

@@ -161,8 +161,22 @@ impl PtySelection {
     /// for the holder how it was started: `spawnMethod` ("launchd" | "systemd" | "setsid"),
     /// `label` (launchd) / `unit` (systemd), `spawnFallbackReason` (why not launchd/systemd),
     /// and `holders` (every holder in use: the primary first, then older-protocol ones being
-    /// drained). `socket`/`spawnMethod`/… describe the primary.
+    /// drained). `socket`/`spawnMethod`/… describe the primary. Always: `defaultOn` (the
+    /// holder is used when `terminal.ptyHolder` is unset, for this build and OS) and
+    /// `debugBuild`, so settings show the host's defaults instead of guessing from Vite.
     pub fn info(&self) -> serde_json::Value {
+        let mut info = self.backend_info();
+        if let Some(obj) = info.as_object_mut() {
+            obj.insert(
+                "defaultOn".into(),
+                pty_holder_wanted(None, cfg!(debug_assertions), cfg!(unix)).into(),
+            );
+            obj.insert("debugBuild".into(), cfg!(debug_assertions).into());
+        }
+        info
+    }
+
+    fn backend_info(&self) -> serde_json::Value {
         let chosen = self.chosen.get_or_init(|| self.choose());
         #[cfg(unix)]
         if let Some(holder) = &chosen.holder {
@@ -1140,6 +1154,9 @@ mod tests {
             assert_eq!(info["kind"], "in-process");
             assert_eq!(info["recovered"], serde_json::json!([]));
             assert!(info["fallbackReason"].is_null(), "{setting:?}: {info}");
+            // Test builds are debug builds: the holder is opt-in there.
+            assert_eq!(info["defaultOn"], false, "{info}");
+            assert_eq!(info["debugBuild"], true, "{info}");
         }
         let sel = PtySelection::new(None);
         sel.spawn(SpawnRequest {

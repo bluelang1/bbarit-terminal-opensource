@@ -24,7 +24,7 @@ import { useConfig, getConfigSnapshot } from '../config/ConfigContext';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '../i18n/en';
 import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit, effectivePtyHolder } from '../config/schema';
-import { describePtyBackend, getPtyRecovery } from '../terminal/ptyRecovery';
+import { describePtyBackend, getPtyRecovery, hostDebugBuild, ptyHolderDefaultOn } from '../terminal/ptyRecovery';
 import type { AgentConfig, TerminalConfig, EditorConfig, NoteTemplate, SttConfig } from '../config/schema';
 import { getModelsForCliType } from '../config/modelPresets';
 import { kvGet, kvSet, kvDelete } from '../hooks/useKV';
@@ -2169,7 +2169,7 @@ export function SettingsPanel({
                   <label>{t('settings.terminal.ptyHolder')}</label>
                   <input
                     type="checkbox"
-                    checked={effectivePtyHolder(terminalSettings.ptyHolder, import.meta.env.DEV, IS_WINDOWS)}
+                    checked={effectivePtyHolder(terminalSettings.ptyHolder, ptyHolderDefaultOn(getPtyRecovery(), import.meta.env.DEV), IS_WINDOWS)}
                     disabled={IS_WINDOWS}
                     onChange={(e) => updateTerminalSetting('ptyHolder', e.target.checked ? 'on' : 'off')}
                   />
@@ -2183,7 +2183,7 @@ export function SettingsPanel({
                   <label>{t('settings.terminal.keepRunningOnQuit')}</label>
                   <input
                     type="checkbox"
-                    checked={effectiveKeepRunningOnQuit(terminalSettings.keepRunningOnQuit, import.meta.env.DEV)}
+                    checked={effectiveKeepRunningOnQuit(terminalSettings.keepRunningOnQuit, hostDebugBuild(getPtyRecovery(), import.meta.env.DEV))}
                     onChange={(e) => updateTerminalSetting('keepRunningOnQuit', e.target.checked)}
                   />
                   <span className="setting-description">

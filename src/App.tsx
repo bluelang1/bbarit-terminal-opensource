@@ -142,7 +142,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, holderIntroWanted, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -5602,8 +5602,9 @@ Office project scaffold created by BBARIT Terminal.
         }
         // First holder attach of this install (release builds; dev keeps the holder opt-in).
         // Its text says quitting keeps terminals, so only when keepRunningOnQuit is in effect.
-        const keepsRunning = effectiveKeepRunningOnQuit(getConfigSnapshot().terminal?.keepRunningOnQuit, import.meta.env.DEV);
-        if (holderIntroWanted(rec, import.meta.env.DEV, keepsRunning) && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
+        const debugBuild = hostDebugBuild(rec, import.meta.env.DEV);
+        const keepsRunning = effectiveKeepRunningOnQuit(getConfigSnapshot().terminal?.keepRunningOnQuit, debugBuild);
+        if (holderIntroWanted(rec, debugBuild, keepsRunning) && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
           void kvSet('octo-pty-holder-intro-notice', '1');
           pushToast('pty-holder-intro',
             ko ? '터미널이 앱과 따로 실행됩니다' : 'Terminals now run apart from the app',

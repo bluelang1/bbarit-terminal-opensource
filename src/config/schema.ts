@@ -57,12 +57,15 @@ export function effectiveKeepRunningOnQuit(value: boolean | undefined, devBuild:
 }
 
 /**
- * Effective `terminal.ptyHolder` (dev builds need an explicit "on"); mirrors `pty_holder_wanted`.
- * Always off on Windows: there is no holder there.
+ * Effective `terminal.ptyHolder`; mirrors `pty_holder_wanted`. `defaultOn` is the host's
+ * answer for an unset (or unknown) value (`pty_backend_info.defaultOn`: release builds on,
+ * debug builds off). Always off on Windows: there is no holder there.
  */
-export function effectivePtyHolder(value: string | undefined, devBuild: boolean, windows = false): boolean {
+export function effectivePtyHolder(value: string | undefined, defaultOn: boolean, windows = false): boolean {
   if (windows) return false;
-  return devBuild ? value === 'on' : value !== 'off';
+  if (value === 'on') return true;
+  if (value === 'off') return false;
+  return defaultOn;
 }
 
 export interface AgentConfig {
