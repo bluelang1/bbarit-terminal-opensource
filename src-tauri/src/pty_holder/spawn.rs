@@ -108,12 +108,23 @@ pub fn discover(run_dir: &Path) -> Vec<(PathBuf, HolderInfo)> {
     found
 }
 
-/// Socket of a live holder that speaks our protocol, or a freshly started one.
-/// Files of dead holders are removed on the way.
-pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
+/// Live holders in the run dir, by protocol version relative to `ours`.
+#[derive(Debug, Default)]
+pub struct Found {
+    /// A holder of our protocol (the first one, by file name).
+    pub ours: Option<PathBuf>,
+    /// Holders of an older protocol we can still attach to: `(socket, version)`. They
+    /// keep their terminals until those end; the app recovers and DRAINs them (3.6).
+    pub older: Vec<(PathBuf, u32)>,
+    /// A newer protocol than ours (an app downgrade): it cannot be talked to.
+    pub newer: Option<u32>,
+}
+
+/// Look at every holder info file in `run_dir`; files of dead holders are removed.
+pub fn scan(run_dir: &Path, ours: u32) -> Result<Found, String> {
     super::ensure_private_dir(run_dir)?;
     prune_old_logs(run_dir);
-    let mut other_version: Option<u32> = None;
+    let mut found = Found::default();
     for (info_path, info) in discover(run_dir) {
         let socket = PathBuf::from(&info.socket);
         // Only sockets inside our private run dir are trusted (or cleaned up).
@@ -126,25 +137,45 @@ pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
         } else {
             Ok(())
         };
-        match classify(alive, info.version, probe) {
+        match classify(alive, info.version, ours, probe) {
             Candidate::Stale => {
                 let _ = std::fs::remove_file(&info_path);
                 let _ = std::fs::remove_file(&socket);
             }
-            Candidate::Live => return Ok(socket),
-            // Another version's holder keeps its terminals; DRAIN + a second holder is phase 3.
+            Candidate::Live => {
+                found.ours.get_or_insert(socket);
+            }
+            Candidate::OtherVersion(v) if proto::can_attach_older(v, ours) => {
+                found.older.push((socket, v));
+            }
             Candidate::OtherVersion(v) => {
-                other_version.get_or_insert(v);
+                found.newer.get_or_insert(v);
             }
             Candidate::Unsure => {}
         }
     }
-    // Until phase 3 (DRAIN + several holders) a second holder would strand the old one's
-    // terminals unseen: run in-process instead and say why (pty_backend_info.fallbackReason).
-    if let Some(v) = other_version {
+    Ok(found)
+}
+
+/// Socket of a live holder that speaks our protocol, or a freshly started one.
+/// Older holders are left to `HolderSet` (recover + DRAIN); a newer one with no holder
+/// of ours keeps the app in-process (its terminals would be stranded unseen).
+pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
+    find_or_spawn_version(run_dir, proto::protocol_version())
+}
+
+pub fn find_or_spawn_version(run_dir: &Path, ours: u32) -> Result<PathBuf, String> {
+    pick_or_spawn(run_dir, scan(run_dir, ours)?, ours)
+}
+
+/// `found.ours`, else (no newer holder) a new holder.
+pub fn pick_or_spawn(run_dir: &Path, found: Found, ours: u32) -> Result<PathBuf, String> {
+    if let Some(socket) = found.ours {
+        return Ok(socket);
+    }
+    if let Some(v) = found.newer {
         return Err(format!(
-            "a PTY holder from another app version (protocol {v}, this app {}) is still running; terminals run inside the app until it exits",
-            proto::PROTOCOL_VERSION
+            "a PTY holder from a newer app version (protocol {v}, this app {ours}) is still running; terminals run inside the app until it exits"
         ));
     }
     spawn_holder(run_dir)
@@ -156,7 +187,7 @@ enum Candidate {
     Stale,
     /// A holder of our protocol answers on the socket.
     Live,
-    /// A holder of another protocol answers on the socket.
+    /// A holder of another protocol answers on the socket (older: recover + DRAIN it).
     OtherVersion(u32),
     /// Its process exists but the socket did not take the connection for another reason:
     /// leave it alone, but do not let it keep this app in-process either.
@@ -164,14 +195,14 @@ enum Candidate {
 }
 
 /// What an info file stands for. The pid alone is not enough: a stale json whose pid was
-/// reused by an unrelated process must not read as "another version is running" (which
-/// keeps the app in-process), so a holder counts only if its socket accepts a connection.
-fn classify(pid_alive: bool, version: u32, connect: std::io::Result<()>) -> Candidate {
+/// reused by an unrelated process must not read as "another version is running", so a
+/// holder counts only if its socket accepts a connection.
+fn classify(pid_alive: bool, version: u32, ours: u32, connect: std::io::Result<()>) -> Candidate {
     if !pid_alive {
         return Candidate::Stale;
     }
     match connect {
-        Ok(()) if version == proto::PROTOCOL_VERSION => Candidate::Live,
+        Ok(()) if version == ours => Candidate::Live,
         Ok(()) => Candidate::OtherVersion(version),
         Err(e)
             if matches!(
@@ -432,6 +463,12 @@ fn holder_env() -> Vec<(String, String)> {
     env.push(("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string()));
     if let Ok(v) = std::env::var(super::server::IDLE_EXIT_ENV) {
         env.push((super::server::IDLE_EXIT_ENV.to_string(), v));
+    }
+    // Debug builds: the holder must speak the overridden version too (setsid inherits it).
+    if cfg!(debug_assertions) {
+        if let Ok(v) = std::env::var(proto::VERSION_OVERRIDE_ENV) {
+            env.push((proto::VERSION_OVERRIDE_ENV.to_string(), v));
+        }
     }
     env
 }
@@ -764,14 +801,15 @@ mod tests {
     #[test]
     fn a_holder_counts_only_when_its_socket_answers() {
         let ours = proto::PROTOCOL_VERSION;
-        assert_eq!(classify(false, ours, Ok(())), Candidate::Stale);
-        assert_eq!(classify(true, ours, Ok(())), Candidate::Live);
-        assert_eq!(classify(true, ours + 1, Ok(())), Candidate::OtherVersion(ours + 1));
+        assert_eq!(classify(false, ours, ours, Ok(())), Candidate::Stale);
+        assert_eq!(classify(true, ours, ours, Ok(())), Candidate::Live);
+        assert_eq!(classify(true, ours + 1, ours, Ok(())), Candidate::OtherVersion(ours + 1));
+        assert_eq!(classify(true, ours, ours + 1, Ok(())), Candidate::OtherVersion(ours), "older");
         // Reused pid from a stale json: nobody listens, so it is not "another version".
         let refused = || Err(Error::from(ErrorKind::ConnectionRefused));
-        assert_eq!(classify(true, ours + 1, refused()), Candidate::Stale);
-        assert_eq!(classify(true, ours, Err(Error::from(ErrorKind::NotFound))), Candidate::Stale);
-        assert_eq!(classify(true, ours + 1, Err(Error::from(ErrorKind::TimedOut))), Candidate::Unsure);
+        assert_eq!(classify(true, ours + 1, ours, refused()), Candidate::Stale);
+        assert_eq!(classify(true, ours, ours, Err(Error::from(ErrorKind::NotFound))), Candidate::Stale);
+        assert_eq!(classify(true, ours + 1, ours, Err(Error::from(ErrorKind::TimedOut))), Candidate::Unsure);
     }
 
     #[test]
@@ -790,9 +828,10 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert_eq!(classify(true, proto::PROTOCOL_VERSION + 1, probe), Candidate::Stale);
+        let ours = proto::PROTOCOL_VERSION;
+        assert_eq!(classify(true, ours + 1, ours, probe), Candidate::Stale);
         let missing = UnixStream::connect(dir.join("none.sock")).map(|_| ());
-        assert_eq!(classify(true, proto::PROTOCOL_VERSION, missing), Candidate::Stale);
+        assert_eq!(classify(true, ours, ours, missing), Candidate::Stale);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -984,7 +1023,8 @@ mod tests {
     fn holder_env_carries_only_what_the_holder_reads() {
         let env = holder_env();
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert!(keys.iter().all(|k| ["HOME", "PATH", super::super::server::IDLE_EXIT_ENV].contains(k)), "{keys:?}");
+        let allowed = ["HOME", "PATH", super::super::server::IDLE_EXIT_ENV, proto::VERSION_OVERRIDE_ENV];
+        assert!(keys.iter().all(|k| allowed.contains(k)), "{keys:?}");
         assert!(keys.contains(&"PATH"));
     }
 

@@ -42,6 +42,8 @@ pub struct Config {
     /// Only connections from this uid are served (getpeereid / SO_PEERCRED).
     pub allowed_uid: u32,
     pub instance: String,
+    /// Protocol version this holder speaks (HELLO must match; WELCOME reports it).
+    pub version: u32,
 }
 
 impl Config {
@@ -51,6 +53,7 @@ impl Config {
             idle_exit,
             allowed_uid: current_uid(),
             instance,
+            version: proto::protocol_version(),
         }
     }
 }
@@ -230,7 +233,7 @@ fn write_info(
     let info = proto::HolderInfo {
         pid: std::process::id(),
         socket: socket.to_string_lossy().into_owned(),
-        version: proto::PROTOCOL_VERSION,
+        version: proto::protocol_version(),
         build: env!("CARGO_PKG_VERSION").to_string(),
         instance: instance.to_string(),
         spawn_method: Some(spawned.method.clone()),
@@ -746,7 +749,7 @@ impl Holder {
             ));
         }
         let hello: proto::Hello = proto::parse(&first)?;
-        if let Err(why) = hello.check() {
+        if let Err(why) = hello.check(self.cfg.version) {
             let _ = send_bye(&mut stream, &why);
             return Err(io::Error::new(io::ErrorKind::InvalidData, why));
         }
@@ -780,7 +783,7 @@ impl Holder {
             let mut handles: Vec<u32> = st.terms.keys().copied().collect();
             handles.sort_unstable();
             let welcome = proto::Welcome {
-                version: proto::PROTOCOL_VERSION,
+                version: self.cfg.version,
                 instance: self.cfg.instance.clone(),
                 terminals: handles.iter().map(|h| st.terms[h].entry(*h)).collect(),
             };
@@ -854,6 +857,12 @@ impl Holder {
     #[cfg(test)]
     pub fn stop_for_test(&self, why: &str) {
         self.begin_shutdown(why);
+    }
+
+    /// Test hook: DRAIN received.
+    #[cfg(test)]
+    pub fn is_draining(&self) -> bool {
+        self.lock().draining
     }
 
     /// Test hook: terminals the holder still has (released ones are gone).
@@ -971,7 +980,20 @@ impl Holder {
             }
             proto::DRAIN => {
                 let mut st = self.lock();
+                if !st.draining {
+                    safe_eprintln!("[pty-holder] draining: {} terminal(s) left", st.terms.len());
+                }
                 st.draining = true;
+                if let Ok(f) = proto::encode_json(
+                    proto::ACK,
+                    0,
+                    &proto::Ack {
+                        of: "DRAIN".into(),
+                        terminals: st.terms.len(),
+                    },
+                ) {
+                    self.send_to_client(&mut st, f);
+                }
                 self.exit_if_drained(&st);
             }
             proto::PING => self.reply(proto::encode(proto::PONG, 0, &frame.payload)),
@@ -1198,8 +1220,12 @@ impl Holder {
         crate::sweep_scopes(&refs, &[]);
     }
 
+    /// A draining holder ends once its last terminal is released. Not when they have
+    /// merely exited: the app that drains it still replays their tails and the
+    /// "exited (code N)" banner, then RELEASEs. (Exited ones nobody releases go with
+    /// the ordinary idle exit: no live terminal and no client.)
     fn exit_if_drained(&self, st: &State) {
-        if st.draining && st.terms.values().all(|t| t.reaped) {
+        if st.draining && st.terms.is_empty() {
             self.begin_shutdown("drained");
         }
     }

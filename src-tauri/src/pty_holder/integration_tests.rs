@@ -2,6 +2,7 @@
 //! (docs/PTY_HOLDER_DAEMON.md 5).
 
 use super::client::HolderBackend;
+use super::multi::HolderSet;
 use super::proto::{self, Frame};
 use super::server::{self, Config, Holder, ModeTracker, TailRing, TAIL_BYTES};
 use crate::pty_backend::{PtyBackend, SpawnRequest};
@@ -60,6 +61,10 @@ struct TestHolder {
 
 impl TestHolder {
     fn start(idle_exit: Duration, allowed_uid: u32) -> Self {
+        Self::start_version(idle_exit, allowed_uid, proto::PROTOCOL_VERSION)
+    }
+
+    fn start_version(idle_exit: Duration, allowed_uid: u32, version: u32) -> Self {
         // /tmp keeps sun_path short (the macOS per-user temp dir is long).
         let dir = PathBuf::from(format!("/tmp/bbh-{}", super::new_instance_id()));
         let socket = dir.join("h.sock");
@@ -67,7 +72,8 @@ impl TestHolder {
         let holder = Holder::new(Config {
             idle_exit,
             allowed_uid,
-            instance: "test".into(),
+            instance: format!("test-v{version}"),
+            version,
         });
         let serving = {
             let holder = Arc::clone(&holder);
@@ -1076,4 +1082,146 @@ fn a_sigterm_during_goodbye_kill_all_waits_for_the_kill() {
     // serve() returning is the process exit: by then the stubborn shell must be gone.
     assert!(!running(pid), "a TERM/HUP-ignoring terminal outlived the holder");
     assert_eq!(th.holder.sweeps_running(), 0);
+}
+
+// ─── Update across a protocol change: older holder drained, new one primary (3.6) ───
+
+#[test]
+fn an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours() {
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+
+    // The previous app (old protocol) left a running terminal and an exited one behind.
+    {
+        let prev = HolderBackend::connect_version(&old.socket, old_v).unwrap();
+        let p: &dyn PtyBackend = &prev;
+        p.spawn(spawn_req(
+            "old1",
+            "printf 'OLD-READY\\n'; while read l; do printf 'OLD:%s\\n' \"$l\"; done",
+        ))
+        .unwrap();
+        let mut out = String::new();
+        read_until(p, "old1", "OLD-READY", &mut out);
+        p.spawn(spawn_req("old2", "printf 'bye'; exit 3")).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while p.alive("old2") {
+            assert!(Instant::now() < deadline, "old2 never exited");
+            thread::sleep(Duration::from_millis(20));
+        }
+        prev.goodbye("handover");
+    }
+
+    // The updated app: our protocol is new_v; the old holder is attached in old_v.
+    let primary = HolderBackend::connect_version(&new.socket, new_v).unwrap();
+    let set = HolderSet::with_older(primary, vec![(old.socket.clone(), old_v)]);
+    let b: &dyn PtyBackend = &set;
+
+    // Draining (and the holder says so), but still there for its terminals.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !(old.holder.is_draining() && set.holders_info()[1]["drainAcked"] == true) {
+        assert!(Instant::now() < deadline, "DRAIN never reached the old holder");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!new.holder.is_draining());
+    let ids: Vec<String> = set.recovered_now().into_iter().map(|e| e.id).collect();
+    assert_eq!(ids, vec!["old1".to_string(), "old2".to_string()]);
+    let info = set.holders_info();
+    assert_eq!(info.len(), 2, "{info:?}");
+    assert_eq!((info[0]["version"].as_u64(), info[0]["primary"].as_bool()), (Some(new_v as u64), Some(true)));
+    assert_eq!(info[0]["draining"], false);
+    assert_eq!((info[1]["version"].as_u64(), info[1]["draining"].as_bool()), (Some(old_v as u64), Some(true)));
+    assert_eq!(info[1]["terminals"], 2);
+
+    // Attach to the old terminal: replay, type, read.
+    assert!(set.attach_snapshot("old1").unwrap().contains("OLD-READY"));
+    assert!(set.tail("old2").unwrap().contains("bye"));
+    b.write("old1", "ping\n").unwrap();
+    let mut out = String::new();
+    read_until(b, "old1", "OLD:ping", &mut out);
+    b.resize("old1", 30, 100).unwrap();
+    // A create_shell for the running id must attach, not start a second program.
+    assert_eq!(b.spawn(spawn_req("old1", "true")), Err(crate::pty_backend::PTY_ALIVE_IN_HOLDER.to_string()));
+
+    // New terminals go to the new holder only.
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    assert_eq!(new.holder.terminal_count(), 1);
+    assert_eq!(old.holder.terminal_count(), 2);
+    assert_eq!(set.older_index_of("new1"), None);
+    // The exited old terminal is released after its banner; reusing its id spawns on ours.
+    b.spawn(spawn_req("old2", "printf 'AGAIN\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "old2", "AGAIN", &mut out);
+    assert_eq!(set.older_index_of("old2"), None);
+    assert_eq!(new.holder.terminal_count(), 2);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while old.holder.terminal_count() != 1 {
+        assert!(Instant::now() < deadline, "old2 was not released in the old holder");
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!old.holder.is_shutting_down(), "a draining holder with a live terminal stays");
+    assert_eq!(b.list().len(), 3);
+
+    // Closing the last old terminal ends the old holder; the set reports one holder.
+    let old_pid = b.pid("old1").unwrap().expect("pid");
+    b.close("old1").unwrap();
+    wait_gone(old_pid, "old1 after release");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "drained holder kept running");
+    let info = set.holders_info();
+    assert_eq!(info.len(), 1, "{info:?}");
+    assert_eq!(info[0]["primary"], true);
+    assert_eq!(b.read("old1"), Err(crate::pty_backend::PTY_NOT_FOUND.to_string()));
+    b.close("new1").unwrap();
+    b.close("old2").unwrap();
+}
+
+#[test]
+fn a_draining_holder_keeps_exited_terminals_until_they_are_released() {
+    let mut th = TestHolder::default();
+    let (mut a, _, _) = Raw::connect(&th.socket);
+    let (h, _) = a.spawn("ex", "printf done; exit 0", &[], "test-scope-drain");
+    loop {
+        if a.next().kind == proto::EXITED {
+            break;
+        }
+    }
+    a.send(proto::DRAIN, 0, &[]);
+    let ack = loop {
+        let f = a.next();
+        if f.kind == proto::ACK {
+            break proto::parse::<proto::Ack>(&f).unwrap();
+        }
+    };
+    assert_eq!(ack, proto::Ack { of: "DRAIN".into(), terminals: 1 });
+    // Exited but not released: the app still has to replay its tail. Still serving.
+    thread::sleep(Duration::from_millis(300));
+    assert!(!th.holder.is_shutting_down(), "drained before the exited terminal was released");
+    // A SPAWN is refused while draining.
+    a.send_json(
+        proto::SPAWN,
+        0,
+        &proto::Spawn {
+            id: "late".into(),
+            argv: vec!["/bin/sh".into()],
+            cwd: None,
+            env: BTreeMap::new(),
+            rows: 24,
+            cols: 80,
+            scope: "s".into(),
+        },
+    );
+    let refused = loop {
+        let f = a.next();
+        if f.kind == proto::SPAWN_FAILED {
+            break proto::parse::<proto::SpawnFailed>(&f).unwrap();
+        }
+    };
+    assert!(refused.error.contains("draining"), "{refused:?}");
+    // DRAIN again is harmless; the RELEASE of the last terminal ends it.
+    a.send(proto::DRAIN, 0, &[]);
+    a.send(proto::RELEASE, h, &[]);
+    assert!(th.wait_stopped(Duration::from_secs(10)), "holder did not exit when drained");
 }

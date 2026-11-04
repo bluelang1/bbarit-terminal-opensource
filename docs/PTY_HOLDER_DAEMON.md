@@ -523,6 +523,29 @@ coalition·responsible pid 는 대상 프로세스에 `kill -ABRT` 를 보내 �
 문제없었음). 홀더 SIGTERM 정리를 더한다. 실행 파일 교체는 새 inode 만 허용한다. 설치 빌드 실기(번들 교체 + `relaunch()`,
 TCC 항목 이름)를 PR 체크리스트에 넣는다.
 
+구현 메모: 3b — `pty_holder/multi.rs`(`HolderSet`), `proto.rs`(`protocol_version`, `ACK`), `spawn.rs`(`scan`/`Found`,
+`pick_or_spawn`), `client.rs`(연결별 `version`, `drain`), `server.rs`(DRAIN ACK, drained 규칙). 3.6 과 다르게·자세히 간 점:
+- **다중 홀더**: 앱은 시작 때 run 디렉터리의 정보 파일을 모두 본다(`spawn::scan`). 우리 프로토콜 버전의 홀더가 있으면
+  그것이 primary, 없으면 새로 띄운다. **더 오래된** 버전(`MIN_ATTACH_VERSION`(1) ≤ v < 우리)의 살아 있는 홀더에는 **그
+  버전으로** HELLO 해 붙고(지금까지 모든 버전은 프레임·페이로드가 같다) DRAIN 을 보낸다. 그 홀더의 터미널은 복구 목록에
+  들어가 attach·write·resize·close 가 되지만 SPAWN 은 절대 보내지 않는다. `HolderSet` 이 터미널 id → 홀더 맵으로 호출을
+  나눈다(맵에 없으면 primary). 이전 홀더에서 아직 도는 id 로 `create_shell` 이 오면 `"PTY alive in holder"`(프런트는 붙음),
+  끝난 id 면 거기서 RELEASE 하고 primary 에 띄운다. 이전 홀더의 마지막 터미널을 닫으면 앱은 그 홀더에 GOODBYE quit 를
+  보낸다(곧 drained 로 끝나므로 재접속하지 않게). 버전이 같으면 `HolderSet` 은 primary 하나뿐이고 모든 호출이 그대로 간다.
+  **더 새로운** 버전(다운그레이드)만 있고 우리 버전이 없으면 예전처럼 in-process 로 폴백하고 이유를 남긴다.
+- **DRAIN**: 홀더는 ACK 프레임(18, `{of:"DRAIN", terminals:n}`)으로 답한다. 3b 이전 홀더는 ACK 를 안 보내므로 앱은 기다리지
+  않는다(`drainAcked` 로만 보인다). 여러 번 받아도 같다. **종료 조건을 "모든 터미널이 끝남"에서 "모든 터미널이 RELEASE 됨"으로
+  바꿨다**: 꺼진 사이 끝난 터미널만 남은 이전 홀더가 DRAIN 받자마자 끝나면 새 앱이 tail·"종료됨" 배너를 못 보이고 새 셸을
+  띄우기 때문이다. 아무도 RELEASE 하지 않는 끝난 터미널은 평소의 유휴 종료(클라이언트 없음 60 초)로 정리된다.
+- **`pty_backend_info.holders`**: `[{socket, version, primary, draining, drainAcked, terminals, connected, spawnMethod, label?,
+  unit?, spawnFallbackReason}]`. primary 가 먼저이고, 이전 홀더는 연결돼 있거나 터미널이 남아 있을 때만 나온다.
+  `kind`/`socket`/`spawnMethod` 등 최상위 필드는 primary 를 가리킨다.
+- **버전 흉내(디버그 빌드만)**: `BBARIT_PTY_HOLDER_PROTO_VERSION=<n>` 이면 앱과 그 앱이 띄우는 홀더가 버전 n 을 말한다
+  (launchd/systemd 홀더 env 에도 넘김). 두 번째 빌드 없이 다중 홀더 경로를 실기로 확인하려는 것이다. 릴리스 빌드는 무시한다.
+- **테스트**: `integration_tests::{an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours,
+  a_draining_holder_keeps_exited_terminals_until_they_are_released}`(스레드 홀더 둘: v1 은 draining·ACK·attach·입력·끝난 id 재사용,
+  새 터미널은 v2, 마지막 RELEASE 뒤 v1 종료), `proto::tests::{version_override_is_debug_only_and_sane, ack_round_trip}`.
+
 각 단계는 별도 PR 이고, 2단계부터는 개발 빌드 실기(앱 종료 → 재시작 → 탭 화면·입력·7501
 상태 복원, 업데이트 재시작 시 Claude 작업이 계속 도는지)를 PR 체크리스트에 넣는다.
 

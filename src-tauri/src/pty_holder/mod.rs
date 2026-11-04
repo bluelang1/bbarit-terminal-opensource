@@ -7,11 +7,13 @@
 //! - `proto`: frame format and JSON payloads (version 1).
 //! - `server`: the holder itself (spawn, pump, reap, tail ring, mode tracking).
 //! - `spawn`: how the app starts a detached holder (launchd / systemd-run / setsid).
-//! - `client`: `HolderBackend`, the app side.
+//! - `client`: `HolderBackend`, the app side of one holder connection.
+//! - `multi`: `HolderSet`, the primary holder plus older-protocol holders being drained (3.6).
 //!
 //! Unix only. Windows keeps `InProcessBackend` (phase 4).
 
 pub mod client;
+pub mod multi;
 pub mod proto;
 pub mod server;
 pub mod spawn;

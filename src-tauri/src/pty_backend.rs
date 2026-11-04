@@ -97,7 +97,7 @@ pub struct PtySelection {
 struct Chosen {
     backend: Arc<dyn PtyBackend>,
     #[cfg(unix)]
-    holder: Option<Arc<crate::pty_holder::client::HolderBackend>>,
+    holder: Option<Arc<crate::pty_holder::multi::HolderSet>>,
     /// Why the holder was wanted but not used.
     fallback_reason: Option<String>,
 }
@@ -135,12 +135,12 @@ impl PtySelection {
         }
         #[cfg(unix)]
         {
-            use crate::pty_holder::client::HolderBackend;
+            use crate::pty_holder::multi::HolderSet;
             let dir = match &self.run_dir {
                 Some(dir) => Ok(dir.clone()),
                 None => crate::pty_holder::run_dir(),
             };
-            match dir.and_then(|dir| HolderBackend::attach_or_spawn(&dir)) {
+            match dir.and_then(|dir| HolderSet::attach_or_spawn(&dir)) {
                 Ok(holder) => {
                     let holder = Arc::new(holder);
                     safe_eprintln!("[pty] terminals live in the pty holder at {}", holder.socket().display());
@@ -158,7 +158,9 @@ impl PtySelection {
 
     /// `pty_backend_info` payload: `{kind, socket?, recovered, fallbackReason?, lost?}`, plus
     /// for the holder how it was started: `spawnMethod` ("launchd" | "systemd" | "setsid"),
-    /// `label` (launchd) / `unit` (systemd), `spawnFallbackReason` (why not launchd/systemd).
+    /// `label` (launchd) / `unit` (systemd), `spawnFallbackReason` (why not launchd/systemd),
+    /// and `holders` (every holder in use: the primary first, then older-protocol ones being
+    /// drained). `socket`/`spawnMethod`/… describe the primary.
     pub fn info(&self) -> serde_json::Value {
         let chosen = self.chosen.get_or_init(|| self.choose());
         #[cfg(unix)]
@@ -169,6 +171,7 @@ impl PtySelection {
                 "socket": socket.to_string_lossy(),
                 "recovered": holder.recovered(),
                 "lost": holder.lost_reason(),
+                "holders": holder.holders_info(),
             });
             if let (Some(obj), serde_json::Value::Object(spawn)) =
                 (info.as_object_mut(), crate::pty_holder::spawn::describe(&socket))

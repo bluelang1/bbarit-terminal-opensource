@@ -14,6 +14,34 @@ use std::collections::BTreeMap;
 use std::io::{self, Read};
 
 pub const PROTOCOL_VERSION: u32 = 1;
+/// Oldest holder protocol this app can still attach to (to recover and drain it).
+/// Every version so far shares the frame format and payloads.
+pub const MIN_ATTACH_VERSION: u32 = 1;
+/// Debug builds only: pretend to speak this protocol version (app and the holders it
+/// starts), to exercise the multi-holder update path without a second build.
+pub const VERSION_OVERRIDE_ENV: &str = "BBARIT_PTY_HOLDER_PROTO_VERSION";
+
+/// The protocol version this process speaks: `PROTOCOL_VERSION`, or in debug builds
+/// `BBARIT_PTY_HOLDER_PROTO_VERSION` when it is a number >= 1.
+pub fn protocol_version() -> u32 {
+    version_from(cfg!(debug_assertions), std::env::var(VERSION_OVERRIDE_ENV).ok().as_deref())
+}
+
+fn version_from(debug_build: bool, value: Option<&str>) -> u32 {
+    if !debug_build {
+        return PROTOCOL_VERSION;
+    }
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v >= 1)
+        .unwrap_or(PROTOCOL_VERSION)
+}
+
+/// A live holder of `version` can be attached to for recovery (and drained) by an app
+/// speaking `ours`: an older protocol we still understand.
+pub fn can_attach_older(version: u32, ours: u32) -> bool {
+    version >= MIN_ATTACH_VERSION && version < ours
+}
 pub const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 pub const HEADER_LEN: usize = 9;
 pub const CLIENT_NAME: &str = "bbarit-app";
@@ -26,6 +54,7 @@ pub const RESIZE: u8 = 8;
 pub const SIGNAL: u8 = 9;
 pub const RELEASE: u8 = 10;
 pub const GOODBYE: u8 = 13;
+/// Refuse new SPAWNs and exit once the last terminal is released (idempotent; ACK).
 pub const DRAIN: u8 = 14;
 // holder → app
 pub const WELCOME: u8 = 2;
@@ -36,6 +65,8 @@ pub const EXITED: u8 = 11;
 pub const TAIL: u8 = 12;
 /// The holder is dropping this client (a newer HELLO took over, or a bad HELLO).
 pub const BYE: u8 = 17;
+/// Reply to DRAIN (`Ack`). Holders before phase 3b do not send it: never wait for it.
+pub const ACK: u8 = 18;
 // both ways
 pub const PING: u8 = 15;
 pub const PONG: u8 = 16;
@@ -118,19 +149,24 @@ pub struct Hello {
 
 impl Hello {
     pub fn current() -> Self {
+        Self::with_version(protocol_version())
+    }
+
+    /// HELLO in a given protocol version (an older holder being recovered and drained).
+    pub fn with_version(version: u32) -> Self {
         Hello {
-            version: PROTOCOL_VERSION,
+            version,
             client: CLIENT_NAME.to_string(),
             pid: std::process::id(),
             build: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
 
-    /// Holder-side gate: same protocol version and our client name.
-    pub fn check(&self) -> Result<(), String> {
-        if self.version != PROTOCOL_VERSION {
+    /// Holder-side gate: the holder's protocol version and our client name.
+    pub fn check(&self, holder_version: u32) -> Result<(), String> {
+        if self.version != holder_version {
             return Err(format!(
-                "protocol version {} not supported (holder speaks {PROTOCOL_VERSION})",
+                "protocol version {} not supported (holder speaks {holder_version})",
                 self.version
             ));
         }
@@ -228,6 +264,14 @@ pub struct Goodbye {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bye {
     pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ack {
+    /// The frame acknowledged: "DRAIN".
+    pub of: String,
+    /// Terminals the holder still has (it exits when this reaches 0 while draining).
+    pub terminals: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,17 +392,40 @@ mod tests {
 
     #[test]
     fn hello_version_and_client_are_checked() {
-        assert!(Hello::current().check().is_ok());
+        assert!(Hello::current().check(PROTOCOL_VERSION).is_ok());
         let mut bad = Hello::current();
         bad.version = 2;
-        assert!(bad.check().unwrap_err().contains("protocol version 2"));
+        assert!(bad.check(PROTOCOL_VERSION).unwrap_err().contains("protocol version 2"));
+        assert!(bad.check(2).is_ok(), "a v2 holder takes a v2 HELLO");
+        assert_eq!(Hello::with_version(7).version, 7);
         let mut other = Hello::current();
         other.client = "someone".into();
-        assert!(other.check().is_err());
+        assert!(other.check(PROTOCOL_VERSION).is_err());
         // Round trip through a frame.
         let f = encode_json(HELLO, 0, &Hello::current()).unwrap();
         let back: Hello = parse(&read_frame(&mut &f[..]).unwrap()).unwrap();
         assert_eq!(back, Hello::current());
+    }
+
+    #[test]
+    fn version_override_is_debug_only_and_sane() {
+        assert_eq!(version_from(true, None), PROTOCOL_VERSION);
+        assert_eq!(version_from(true, Some(" 2 ")), 2);
+        assert_eq!(version_from(true, Some("0")), PROTOCOL_VERSION);
+        assert_eq!(version_from(true, Some("x")), PROTOCOL_VERSION);
+        assert_eq!(version_from(false, Some("2")), PROTOCOL_VERSION, "release ignores it");
+        assert!(can_attach_older(1, 2));
+        assert!(!can_attach_older(2, 2), "same version is the primary, not a legacy holder");
+        assert!(!can_attach_older(3, 2), "a newer holder cannot be understood");
+        assert!(!can_attach_older(0, 2));
+    }
+
+    #[test]
+    fn ack_round_trip() {
+        let f = encode_json(ACK, 0, &Ack { of: "DRAIN".into(), terminals: 2 }).unwrap();
+        let frame = read_frame(&mut &f[..]).unwrap();
+        assert_eq!(frame.kind, ACK);
+        assert_eq!(parse::<Ack>(&frame).unwrap(), Ack { of: "DRAIN".into(), terminals: 2 });
     }
 
     #[test]

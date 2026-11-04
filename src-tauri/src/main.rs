@@ -3899,7 +3899,8 @@ mod scope_sweep_tests {
 }
 
 /// Which backend owns the tab PTYs: `{kind: "in-process" | "holder", socket?, recovered: [...],
-/// fallbackReason?, lost?, spawnMethod?, label?, unit?, spawnFallbackReason?}`. `recovered` lists terminals that outlived the previous app run.
+/// fallbackReason?, lost?, spawnMethod?, label?, unit?, spawnFallbackReason?, holders?}`. `recovered` lists terminals that outlived the previous app run;
+/// `holders` lists every holder in use (primary first, then older-protocol ones being drained).
 /// Async: the first call may start the holder.
 #[tauri::command(async)]
 fn pty_backend_info(state: State<'_, AppState>) -> serde_json::Value {
