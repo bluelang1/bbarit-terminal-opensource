@@ -3306,7 +3306,10 @@ fn create_shell(
     })
 }
 
-// Write data to PTY
+// Write data to PTY. Stays a main-thread command on purpose: async commands run as
+// separate tokio tasks, so two fire-and-forget writes (XTerminal onData, paste then Enter)
+// could land out of order. It never waits for the backend choice (`OnceLock::get`) and the
+// holder write only queues a frame, so it does not block.
 #[tauri::command]
 fn write_to_pty(
     state: State<'_, AppState>,
@@ -3325,7 +3328,8 @@ fn read_from_pty(
     state.pty.read(&terminal_id)
 }
 
-// Resize PTY
+// Resize PTY. Main thread like write_to_pty: the last resize must win, which concurrent
+// async tasks would not guarantee. Non-blocking for the same reasons.
 #[tauri::command]
 fn resize_pty(
     state: State<'_, AppState>,
@@ -7778,8 +7782,9 @@ fn pty_idle_ms(state: State<'_, AppState>, terminal_id: String) -> Result<u64, S
     state.pty.idle_ms(&terminal_id)
 }
 
-// Check if a PTY process is still alive (reader thread running)
-#[tauri::command]
+// Check if a PTY process is still alive (reader thread running). Read-only and awaited by
+// every caller, so it runs off the main thread.
+#[tauri::command(async)]
 fn check_pty_alive(state: State<'_, AppState>, terminal_id: String) -> bool {
     state.pty.alive(&terminal_id)
 }
