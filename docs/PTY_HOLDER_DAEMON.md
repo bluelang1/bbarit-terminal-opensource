@@ -542,6 +542,14 @@ TCC 항목 이름)를 PR 체크리스트에 넣는다.
   `kind`/`socket`/`spawnMethod` 등 최상위 필드는 primary 를 가리킨다.
 - **버전 흉내(디버그 빌드만)**: `BBARIT_PTY_HOLDER_PROTO_VERSION=<n>` 이면 앱과 그 앱이 띄우는 홀더가 버전 n 을 말한다
   (launchd/systemd 홀더 env 에도 넘김). 두 번째 빌드 없이 다중 홀더 경로를 실기로 확인하려는 것이다. 릴리스 빌드는 무시한다.
+- **업데이트 재시작(스파이크 E2ⓑ 의 원인)**: 권한 문제가 아니다(`capabilities/default.json` 의 `process:default` 에
+  `allow-exit`·`allow-restart` 가 들어 있다). `plugin:process|restart`/`exit` 는 `request_restart`/`exit` 가 이벤트 루프에
+  `RequestExit` 를 **올려 두기만** 하고 unit 을 돌려주므로 `invoke` 는 곧바로 `null` 이다. 실제 종료(RunEvent::Exit → GOODBYE →
+  재실행)는 루프가 그 메시지를 처리할 때 일어나는데, 백그라운드 dev 앱에서 3 초·13 초로 들쭉날쭉했다(첫 시도는 13 초 뒤에야
+  새 pid). 스파이크는 그 전에 "안 됨"으로 봤을 가능성이 크다. 그래서 `app_relaunch_for_update`(async 커맨드)를 더했다:
+  handover 표시 → **곧바로** 홀더에 GOODBYE handover → `request_restart()` → 8 초(`RELAUNCH_WATCHDOG`) 안에 안 끝나면 그
+  스레드에서 `tauri::process::restart`(새 프로세스 + exit). `handleUpdate` 는 이 커맨드를 쓰고, 없으면 예전 `relaunch()` 경로.
+  실기: 이 커맨드로 1 초 안에 새 pid, 같은 홀더(로그 `client attached` 만 늘어남), tick 루프 끊김 없음.
 - **테스트**: `integration_tests::{an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours,
   a_draining_holder_keeps_exited_terminals_until_they_are_released}`(스레드 홀더 둘: v1 은 draining·ACK·attach·입력·끝난 id 재사용,
   새 터미널은 v2, 마지막 RELEASE 뒤 v1 종료), `proto::tests::{version_override_is_debug_only_and_sane, ack_round_trip}`.

@@ -160,6 +160,7 @@ pub fn scan(run_dir: &Path, ours: u32) -> Result<Found, String> {
 /// Socket of a live holder that speaks our protocol, or a freshly started one.
 /// Older holders are left to `HolderSet` (recover + DRAIN); a newer one with no holder
 /// of ours keeps the app in-process (its terminals would be stranded unseen).
+#[cfg(test)]
 pub fn find_or_spawn(run_dir: &Path) -> Result<PathBuf, String> {
     find_or_spawn_version(run_dir, proto::protocol_version())
 }

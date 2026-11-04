@@ -148,6 +148,7 @@ pub struct Hello {
 }
 
 impl Hello {
+    #[cfg(test)]
     pub fn current() -> Self {
         Self::with_version(protocol_version())
     }

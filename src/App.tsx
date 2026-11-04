@@ -10442,14 +10442,20 @@ Office project scaffold created by BBARIT Terminal.
           if (!proceed) return;
         }
         await pendingNativeUpdateRef.current.downloadAndInstall();
-        // PTY holder: GOODBYE handover instead of kill_all, the relaunched app reattaches.
-        await invoke('pty_prepare_handover').catch(() => {});
+        // PTY holder: GOODBYE handover (sent before the restart, not at RunEvent::Exit), then
+        // restart with a watchdog: `relaunch()` alone only queues an exit request and may
+        // leave the app up for seconds (docs/PTY_HOLDER_DAEMON.md 3.6).
         try {
-          await relaunch();
-        } catch (e) {
-          // Still running: the next ordinary quit must not hand over (keepRunningOnQuit decides).
-          await invoke('pty_cancel_handover').catch(() => {});
-          throw e;
+          await invoke('app_relaunch_for_update');
+        } catch {
+          await invoke('pty_prepare_handover').catch(() => {});
+          try {
+            await relaunch();
+          } catch (e) {
+            // Still running: the next ordinary quit must not hand over (keepRunningOnQuit decides).
+            await invoke('pty_cancel_handover').catch(() => {});
+            throw e;
+          }
         }
         return;
       }

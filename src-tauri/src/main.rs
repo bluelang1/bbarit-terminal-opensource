@@ -3932,6 +3932,30 @@ fn pty_cancel_handover() {
     HANDOVER_ON_EXIT.store(false, Ordering::SeqCst);
 }
 
+/// How long `app_relaunch_for_update` lets Tauri's own restart run before doing it itself.
+const RELAUNCH_WATCHDOG: Duration = Duration::from_secs(8);
+
+/// Update relaunch (docs/PTY_HOLDER_DAEMON.md 3.6). `plugin:process|restart` only posts an
+/// exit request to the event loop and returns null at once; the exit (RunEvent::Exit with
+/// the GOODBYE, then the respawn) happens whenever the loop next runs, measured 3–13 s in a
+/// background dev app and not at all within the spike's window. So: mark the handover, say
+/// GOODBYE handover to the holder(s) right now (the terminals are safe whatever happens
+/// next), ask Tauri to restart, and if this process is still here after
+/// `RELAUNCH_WATCHDOG`, respawn and exit directly.
+#[tauri::command(async)]
+fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
+    HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
+    state.pty_selection.on_app_exit(exit_reason_now());
+    let env = app.env();
+    std::thread::spawn(move || {
+        std::thread::sleep(RELAUNCH_WATCHDOG);
+        safe_eprintln!("[update] restart request not handled within {RELAUNCH_WATCHDOG:?}; relaunching directly");
+        agent_rpc_stop_all();
+        tauri::process::restart(&env);
+    });
+    app.request_restart();
+}
+
 /// "Quit and end all terminals" (menu / command palette).
 #[tauri::command]
 fn app_quit_kill_terminals(app: AppHandle) {
@@ -3977,6 +4001,16 @@ fn pty_holder_setting(config: &serde_json::Value) -> Option<String> {
 mod pty_holder_gate_tests {
     use super::{keep_running_on_quit_setting, pty_holder_mode, pty_holder_setting};
     use serde_json::json;
+
+    #[test]
+    fn an_update_relaunch_hands_over_unless_the_menu_asked_to_end_all() {
+        use crate::pty_backend::{exit_goodbye_reason, ExitReason};
+        // app_relaunch_for_update sets the handover flag before it says GOODBYE.
+        assert_eq!(exit_goodbye_reason(false, false, true), ExitReason::Handover);
+        assert_eq!(exit_goodbye_reason(true, false, true), ExitReason::Handover);
+        assert_eq!(exit_goodbye_reason(true, true, true), ExitReason::KillAll);
+        assert_eq!(super::RELAUNCH_WATCHDOG, std::time::Duration::from_secs(8));
+    }
 
     #[test]
     fn a_failed_relaunch_cancels_the_handover() {
@@ -10164,6 +10198,7 @@ fn main() {
             pty_list_recovered,
             pty_prepare_handover,
             pty_cancel_handover,
+            app_relaunch_for_update,
             app_quit_kill_terminals,
             destroy_pty,
             debug_log,
