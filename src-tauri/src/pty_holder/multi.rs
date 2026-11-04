@@ -129,13 +129,17 @@ impl HolderSet {
         self.primary.lost_reason()
     }
 
-    /// GOODBYE to every holder (older ones first; `kill_all` ends their terminals too).
+    /// GOODBYE to every holder (older ones first; `kill_all` ends their terminals too, and
+    /// reaches an older holder that still owns terminals even after its link was closed).
     pub fn goodbye(&self, reason: &str) {
-        for backend in &self.older {
-            if backend.is_connected() {
+        let routes = self.routes();
+        for (i, backend) in self.older.iter().enumerate() {
+            let owns_terminals = routes.values().any(|&j| j == i);
+            if backend.is_connected() || (reason == "kill_all" && owns_terminals) {
                 backend.goodbye(reason);
             }
         }
+        drop(routes);
         self.primary.goodbye(reason);
     }
 

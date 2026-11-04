@@ -1225,3 +1225,47 @@ fn a_draining_holder_keeps_exited_terminals_until_they_are_released() {
     a.send(proto::RELEASE, h, &[]);
     assert!(th.wait_stopped(Duration::from_secs(10)), "holder did not exit when drained");
 }
+
+/// The previous app (protocol `old_v`) left `old1` running in `old`; the updated app's set
+/// has `new` as primary and `old` attached in `old_v`.
+fn set_with_an_older_holder(old: &TestHolder, old_v: u32, new: &TestHolder, new_v: u32) -> HolderSet {
+    {
+        let prev = HolderBackend::connect_version(&old.socket, old_v).unwrap();
+        let p: &dyn PtyBackend = &prev;
+        p.spawn(spawn_req("old1", "printf 'OLD-READY\\n'; sleep 30")).unwrap();
+        let mut out = String::new();
+        read_until(p, "old1", "OLD-READY", &mut out);
+        prev.goodbye("handover");
+    }
+    let primary = HolderBackend::connect_version(&new.socket, new_v).unwrap();
+    let set = HolderSet::with_older(primary, vec![(old.socket.clone(), old_v)]);
+    assert_eq!(set.older_index_of("old1"), Some(0));
+    set
+}
+
+#[test]
+fn kill_all_after_the_handover_goodbye_reconnects_and_ends_every_holder() {
+    // Update relaunch: GOODBYE handover goes out at once; "quit and end all terminals" can
+    // still come before the app exits, when no connection is left.
+    let old_v = proto::PROTOCOL_VERSION;
+    let new_v = old_v + 1;
+    let mut old = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), old_v);
+    let mut new = TestHolder::start_version(Duration::from_secs(60), server::current_uid(), new_v);
+    let set = set_with_an_older_holder(&old, old_v, &new, new_v);
+    let b: &dyn PtyBackend = &set;
+    b.spawn(spawn_req("new1", "printf 'NEW-READY\\n'; sleep 30")).unwrap();
+    let mut out = String::new();
+    read_until(b, "new1", "NEW-READY", &mut out);
+    let (old_pid, new_pid) = (b.pid("old1").unwrap().unwrap(), b.pid("new1").unwrap().unwrap());
+
+    set.goodbye("handover");
+    thread::sleep(Duration::from_millis(300));
+    assert!(running(old_pid) && running(new_pid), "handover keeps the terminals");
+    assert!(!old.holder.is_shutting_down() && !new.holder.is_shutting_down());
+
+    set.goodbye("kill_all");
+    wait_gone(old_pid, "old1 after kill_all");
+    wait_gone(new_pid, "new1 after kill_all");
+    assert!(old.wait_stopped(Duration::from_secs(10)), "old holder kept running");
+    assert!(new.wait_stopped(Duration::from_secs(10)), "new holder kept running");
+}

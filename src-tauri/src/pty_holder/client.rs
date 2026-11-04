@@ -19,7 +19,7 @@ use crate::pty_backend::{
     TerminalInfo, Utf8Reassembler, PTY_ALIVE_IN_HOLDER, PTY_DISCONNECTED, PTY_NOT_FOUND,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -380,6 +380,9 @@ impl HolderBackend {
 
     /// GOODBYE {reason} ("quit" | "handover" | "kill_all") and disconnect. Waits briefly
     /// for the frame to leave (the app is usually about to exit).
+    ///
+    /// `kill_all` with no connection (an update handover already said GOODBYE, or the link
+    /// dropped) reconnects once just to send it: the user asked to end every terminal.
     pub fn goodbye(&self, reason: &str) {
         self.inner.closing.store(true, Ordering::SeqCst);
         if let Ok(f) = proto::encode_json(
@@ -389,7 +392,10 @@ impl HolderBackend {
                 reason: reason.to_string(),
             },
         ) {
-            let _ = self.inner.send(f);
+            if self.inner.send(f.clone()).is_err() && reason == "kill_all" {
+                self.goodbye_on_new_connection(&f);
+                return;
+            }
         }
         let link = self.inner.take_link();
         if let Some(link) = link {
@@ -398,6 +404,26 @@ impl HolderBackend {
                 let _ = flushed.recv_timeout(GOODBYE_FLUSH);
             }
             let _ = link.stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    /// HELLO, send `frame` (a GOODBYE), and wait briefly for the holder to hang up.
+    fn goodbye_on_new_connection(&self, frame: &[u8]) {
+        let socket = self.socket();
+        match connect_session(&socket, self.inner.version) {
+            Ok(mut session) => {
+                let _ = session.stream.write_all(frame);
+                let _ = session.stream.flush();
+                // The holder closes after handling GOODBYE; wait for that, briefly.
+                let _ = session.stream.set_read_timeout(Some(GOODBYE_FLUSH));
+                let deadline = Instant::now() + GOODBYE_FLUSH * 3;
+                let mut sink = [0u8; 4096];
+                while Instant::now() < deadline
+                    && matches!(session.stream.read(&mut sink), Ok(n) if n > 0)
+                {}
+                let _ = session.stream.shutdown(std::net::Shutdown::Both);
+            }
+            Err(e) => safe_eprintln!("[pty-holder] GOODBYE after reconnect to {}: {e}", socket.display()),
         }
     }
 
