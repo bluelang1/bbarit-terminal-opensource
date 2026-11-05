@@ -5813,8 +5813,9 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
-/// List monospace/coding-friendly system fonts for the font picker.
-#[tauri::command]
+/// List installed font families for the Custom font picker (the UI ranks
+/// monospace-looking names first). Async: enumeration must not block the UI thread.
+#[tauri::command(async)]
 fn list_system_fonts() -> Result<Vec<String>, String> {
     use font_kit::source::SystemSource;
     let source = SystemSource::new();

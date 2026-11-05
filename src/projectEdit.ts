@@ -15,6 +15,8 @@ export interface ProjectEditForm {
   displayName: string;
   styleIndex: number;
   fontIndex: number;
+  /** Family used when fontIndex is CUSTOM_FONT_INDEX ('' = none chosen). */
+  customFontFamily?: string;
   /** '' = auto-detect, a gh login, or GITHUB_ACCOUNT_NONE. */
   githubAccount: string;
 }
@@ -25,6 +27,7 @@ export interface ProjectEditUpdates {
   displayName?: string;
   styleIndex: number;
   fontIndex: number;
+  customFontFamily: string | undefined;
   githubAccount: string | undefined;
 }
 
@@ -53,6 +56,8 @@ export function projectEditUpdates(
       ...(renamed ? { name: displayName, displayName } : {}),
       styleIndex: form.styleIndex,
       fontIndex: form.fontIndex,
+      // Kept even when a preset is picked, so switching back to Custom restores it.
+      customFontFamily: form.customFontFamily?.trim() || undefined,
       githubAccount: projectGithubAccountFor(form.path, form.githubAccount),
     },
     displayName,
