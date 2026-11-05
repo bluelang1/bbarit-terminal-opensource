@@ -42,10 +42,15 @@ describe('getEffectiveFont', () => {
     expect(getEffectiveFont(1, 'Menlo')).toBe("'JetBrains Mono', monospace");
   });
 
-  it('quotes the custom family', () => {
-    expect(getEffectiveFont(CUSTOM_FONT_INDEX, '  FiraCode Nerd Font Mono ')).toBe('"FiraCode Nerd Font Mono", monospace');
-    expect(getEffectiveFont(CUSTOM_FONT_INDEX, 'Menlo')).toBe('"Menlo", monospace');
-    expect(getEffectiveFont(CUSTOM_FONT_INDEX, '3270 Nerd Font')).toBe('"3270 Nerd Font", monospace');
+  it('quotes the custom family and falls back to the default preset', () => {
+    const fallback = FONTS[0].value;
+    expect(getEffectiveFont(CUSTOM_FONT_INDEX, '  FiraCode Nerd Font Mono ')).toBe(`"FiraCode Nerd Font Mono", ${fallback}`);
+    expect(getEffectiveFont(CUSTOM_FONT_INDEX, 'Menlo')).toBe(`"Menlo", ${fallback}`);
+    expect(getEffectiveFont(CUSTOM_FONT_INDEX, '3270 Nerd Font')).toBe(`"3270 Nerd Font", ${fallback}`);
+  });
+
+  it('does not rank "Unicode" names as monospace', () => {
+    expect(rankSystemFonts(['Arial Unicode MS', 'Zed Code', 'Helvetica'])).toEqual(['Zed Code', 'Arial Unicode MS', 'Helvetica']);
   });
 
   it('Custom without a family falls back to the default preset instead of an empty string', () => {

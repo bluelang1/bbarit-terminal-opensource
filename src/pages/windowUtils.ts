@@ -2,7 +2,7 @@
  * Utility for sub-windows (orchestra, scrum, debate) to read project/theme
  * data from URL search params and localStorage.
  */
-import { FONTS, STYLES } from '../theme';
+import { FONTS, STYLES, getEffectiveFont } from '../theme';
 import type { StyleTheme, FontOption } from '../theme';
 import { kvGet } from '../hooks/useKV';
 
@@ -14,6 +14,7 @@ export interface SubWindowProject {
   workDir: string;
   styleIndex: number;
   fontIndex: number;
+  customFontFamily?: string;
 }
 
 /** Read project ID from URL search params (?projectId=xxx) */
@@ -34,6 +35,7 @@ export async function loadProjectsFromStorage(): Promise<SubWindowProject[]> {
       workDir: p.workDir || '',
       styleIndex: typeof p.styleIndex === 'number' ? p.styleIndex : 0,
       fontIndex: typeof p.fontIndex === 'number' ? p.fontIndex : 0,
+      customFontFamily: typeof p.customFontFamily === 'string' ? p.customFontFamily : undefined,
     }));
   } catch {
     return [];
@@ -51,6 +53,8 @@ export async function getSubWindowContext(): Promise<{
   const projectId = getProjectIdFromUrl();
   const project = projects.find(p => p.id === projectId) || projects[0] || null;
   const style = project ? (STYLES[project.styleIndex] || STYLES[0]) : STYLES[0];
-  const font = project ? (FONTS[project.fontIndex] || FONTS[0]) : FONTS[0];
+  const font = project
+    ? { name: FONTS[project.fontIndex]?.name || 'Custom', value: getEffectiveFont(project.fontIndex, project.customFontFamily) }
+    : FONTS[0];
   return { project, projects, style, font };
 }

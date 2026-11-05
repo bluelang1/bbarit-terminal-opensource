@@ -45,7 +45,7 @@ export function getEffectiveFont(fontIndex: number, customFontFamily?: string): 
   if (fontIndex === CUSTOM_FONT_INDEX) {
     // Custom without a chosen family falls back to the default preset.
     return customFontFamily?.trim()
-      ? `${cssFontFamilyName(customFontFamily)}, monospace`
+      ? `${cssFontFamilyName(customFontFamily)}, ${FONTS[DEFAULT_FONT_INDEX].value}`
       : FONTS[DEFAULT_FONT_INDEX].value;
   }
   return (FONTS[fontIndex] || FONTS[DEFAULT_FONT_INDEX]).value;
@@ -57,7 +57,7 @@ export function fontDisplayName(fontIndex: number, customFontFamily?: string): s
   return (FONTS[fontIndex] || FONTS[DEFAULT_FONT_INDEX]).name;
 }
 
-const MONO_HINT = /mono|code|nerd|term|consol|courier|menlo|monaco|hack|d2coding|fixed|iosevka|inconsolata/i;
+const MONO_HINT = /mono|(?<!uni)code|nerd|term|consol|courier|menlo|monaco|hack|d2coding|fixed|iosevka|inconsolata/i;
 
 /**
  * System font families for the Custom picker: filtered by `query` (case-insensitive
