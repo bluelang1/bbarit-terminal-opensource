@@ -5,6 +5,14 @@ import {
   omittedBytesLine, onRecoveryWait, placeUnknownRecovered, planAfterProbe, ptyHolderDefaultOn, recoveredPtyFor, recoveredStartPlan,
   resetPtyRecoveryForTests, setPtyRecovery, takeRecoveryWaitNotice, withoutRecovered, type RecoveredPty, type RecoveryWaitEvent,
 } from './ptyRecovery';
+import { en, type TranslationKey } from '../i18n/en';
+import { ko } from '../i18n/ko';
+import { ja } from '../i18n/ja';
+import { zh } from '../i18n/zh';
+import { fr } from '../i18n/fr';
+import { de } from '../i18n/de';
+import { it as it_ } from '../i18n/it';
+import { es } from '../i18n/es';
 
 const entry = (id: string, extra: Partial<RecoveredPty> = {}): RecoveredPty => ({
   handle: 1, id, exited: false, dropped_bytes: 0, modes: { decset: [], kitty_keyboard: 0 }, ...extra,
@@ -194,16 +202,32 @@ describe('replay prefix', () => {
   });
 
   it('omitted-bytes line only when bytes were dropped', () => {
-    expect(omittedBytesLine(0)).toBe('');
-    expect(omittedBytesLine(3 * 1024 * 1024)).toContain('[앱이 꺼진 동안 3 MB 생략]');
-    expect(omittedBytesLine(1000)).toContain('0.1 MB');
-    expect(omittedBytesLine(25.4 * 1024 * 1024)).toContain('25 MB');
+    const omitted = ko['pty.recovered.omitted'];
+    expect(omittedBytesLine(0, omitted)).toBe('');
+    expect(omittedBytesLine(3 * 1024 * 1024, omitted)).toContain('[앱이 꺼진 동안 3 MB 생략]');
+    expect(omittedBytesLine(3 * 1024 * 1024, en['pty.recovered.omitted'])).toContain('[3 MB omitted while the app was closed]');
+    expect(omittedBytesLine(1000, omitted)).toContain('0.1 MB');
+    expect(omittedBytesLine(25.4 * 1024 * 1024, omitted)).toContain('25 MB');
   });
 
   it('exited banner decision', () => {
-    expect(exitedBannerText(entry('a'))).toBeNull();
-    expect(exitedBannerText(entry('a', { exited: true, exit_code: 2 }))).toBe('종료됨 (code 2)');
-    expect(exitedBannerText(entry('a', { exited: true, exit_code: null }))).toBe('종료됨');
+    const banner = (e: RecoveredPty, l: Record<TranslationKey, string>) =>
+      exitedBannerText(e, l['pty.recovered.exitedCode'], l['pty.recovered.exited']);
+    expect(banner(entry('a'), ko)).toBeNull();
+    expect(banner(entry('a', { exited: true, exit_code: 2 }), ko)).toBe('종료됨 (code 2)');
+    expect(banner(entry('a', { exited: true, exit_code: null }), ko)).toBe('종료됨');
+    expect(banner(entry('a', { exited: true, exit_code: 2 }), en)).toBe('Exited (code 2)');
+    expect(banner(entry('a', { exited: true, exit_code: null }), en)).toBe('Exited');
+  });
+
+  it('every locale keeps the recovery placeholders', () => {
+    for (const l of [en, ko, ja, zh, fr, de, it_, es]) {
+      expect(l['pty.recovered.omitted']).toContain('{n}');
+      expect(l['pty.recovered.exitedCode']).toContain('{code}');
+      for (const k of ['pty.recovery.waiting', 'pty.recovered.tab', 'pty.recovered.project', 'pty.recovered.exitedHint', 'pty.intro.title', 'pty.intro.desc', 'pty.unixOnly'] as const) {
+        expect(l[k]).toBeTruthy();
+      }
+    }
   });
 });
 
