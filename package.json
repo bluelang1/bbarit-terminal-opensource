@@ -1,7 +1,7 @@
 {
   "name": "octo-ui",
   "private": true,
-  "version": "1.1.61",
+  "version": "1.1.62",
   "type": "module",
   "scripts": {
     "dev": "node scripts/vite-dev.mjs",
