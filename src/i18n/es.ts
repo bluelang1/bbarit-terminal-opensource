@@ -72,6 +72,8 @@ export const es: Record<TranslationKey, string> = {
   'settings.terminal.ptyHolder.now': 'Now',
   'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
   'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
+  'pty.recovery.waiting': "Waiting to recover terminals…",
+  'pty.recovery.waitingDesc': "The PTY holder has not answered yet. Your terminals open as soon as it does.",
   'settings.terminal.autoSaveFiles': 'Guardar archivos automáticamente',
   'settings.terminal.showProjectName': 'Mostrar nombre del proyecto',
   'settings.terminal.shellType': 'Tipo de shell',

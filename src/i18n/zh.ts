@@ -72,6 +72,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.terminal.ptyHolder.now': 'Now',
   'settings.terminal.keepRunningOnQuit': 'Keep terminals running on quit',
   'settings.terminal.keepRunningOnQuit.desc': 'With the PTY holder on, quitting leaves terminals and agents running and the next start reattaches them. The "Quit and End All Terminals" menu item always ends them.',
+  'pty.recovery.waiting': "Waiting to recover terminals…",
+  'pty.recovery.waitingDesc': "The PTY holder has not answered yet. Your terminals open as soon as it does.",
   'settings.terminal.autoSaveFiles': '自动保存文件',
   'settings.terminal.showProjectName': '显示项目名称',
   'settings.terminal.shellType': 'Shell 类型',

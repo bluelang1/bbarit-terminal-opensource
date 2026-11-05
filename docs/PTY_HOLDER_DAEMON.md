@@ -406,6 +406,7 @@ trait PtyBackend: Send + Sync {
   프런트는 `pty_backend_info` → (holder 면) `pty_list_recovered` 를 부르고 결과를 레지스트리에 둔다. 한 번의 시도는 15 초
   상한이고, 실패·시간 초과는 in-process 로 보지 않고 백오프(0.5→10 초)로 다시 묻는다. 답이 올 때까지 프로젝트 복원
   (= `create_shell`)을 하지 않는다.
+  두 번째 시도까지 실패하면 실행당 한 번 "터미널 복구 대기 중…" 토스트를 띄우고(`onRecoveryWait`), 목록이 오면 지운다.
 - 복구 터미널은 비활성 탭이어도 **마운트 때 바로** 재생·읽기 루프를 시작한다(3.5-1 의 "재생은 활성화 때" 와 다름):
   읽기 루프가 돌지 않으면 홀더 큐가 차서 잘린다.
 - 꺼진 사이 끝난 터미널: tail + modes 재생, 모드 해제, `close_pty`(RELEASE), `octo-pty-exited`, 배너

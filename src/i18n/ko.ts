@@ -368,6 +368,8 @@ export const ko: Record<TranslationKey, string> = {
   'settings.terminal.ptyHolder.now': '현재',
   'settings.terminal.keepRunningOnQuit': '종료해도 터미널 유지',
   'settings.terminal.keepRunningOnQuit.desc': 'PTY 홀더가 켜져 있으면 앱을 종료해도 터미널과 에이전트가 계속 돌고, 다시 열면 이어 붙습니다. 메뉴의 "종료하고 모든 터미널 끝내기"는 항상 전부 끝냅니다.',
+  'pty.recovery.waiting': "터미널 복구 대기 중…",
+  'pty.recovery.waitingDesc': "PTY 홀더의 응답을 기다리고 있습니다. 응답이 오면 터미널이 바로 열립니다.",
   'terminal.closeConfirmTitle': '터미널을 닫으시겠습니까?',
   'terminal.closeConfirmMessage': '이 터미널에서 프로세스가 아직 실행 중입니다.',
   // PptxEditor presets

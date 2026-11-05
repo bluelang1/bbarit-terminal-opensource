@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, getPtyRecovery,
   describePtyBackend, holderIntroWanted, hostDebugBuild, isAliveInHolderError, isRestoredTerminal, loadPtyRecovery, markAwaitingRestart, markRecoveredHandled,
-  omittedBytesLine, placeUnknownRecovered, planAfterProbe, ptyHolderDefaultOn, recoveredPtyFor, recoveredStartPlan,
-  resetPtyRecoveryForTests, setPtyRecovery, withoutRecovered, type RecoveredPty,
+  omittedBytesLine, onRecoveryWait, placeUnknownRecovered, planAfterProbe, ptyHolderDefaultOn, recoveredPtyFor, recoveredStartPlan,
+  resetPtyRecoveryForTests, setPtyRecovery, takeRecoveryWaitNotice, withoutRecovered, type RecoveredPty, type RecoveryWaitEvent,
 } from './ptyRecovery';
 
 const entry = (id: string, extra: Partial<RecoveredPty> = {}): RecoveredPty => ({
@@ -101,6 +101,61 @@ describe('recovered-id gating', () => {
     expect(attempts).toBeGreaterThan(2);
     expect(settled).toBe(false);
     expect(getPtyRecovery().kind).toBe('in-process'); // untouched default, never "loaded"
+    resetPtyRecoveryForTests();
+  });
+
+  it('the waiting notice is due once per launch, from the 2nd failed attempt', () => {
+    resetPtyRecoveryForTests();
+    expect(takeRecoveryWaitNotice(1)).toBe(false);
+    expect(takeRecoveryWaitNotice(2)).toBe(true);
+    expect(takeRecoveryWaitNotice(3)).toBe(false);
+    expect(takeRecoveryWaitNotice(2)).toBe(false);
+    resetPtyRecoveryForTests();
+    expect(takeRecoveryWaitNotice(5)).toBe(true); // a late first look still shows it once
+    expect(takeRecoveryWaitNotice(6)).toBe(false);
+    resetPtyRecoveryForTests();
+  });
+
+  it('loadPtyRecovery says waiting once after the 2nd failure and ready on success', async () => {
+    resetPtyRecoveryForTests();
+    const events: RecoveryWaitEvent[] = [];
+    const off = onRecoveryWait((e) => { events.push(e); });
+    let n = 0;
+    const invokeFn = async <T,>(cmd: string): Promise<T> => {
+      if (cmd === 'pty_backend_info') {
+        n += 1;
+        if (n <= 4) throw new Error('holder slow');
+        return { kind: 'holder' } as T;
+      }
+      return [] as T;
+    };
+    const late: RecoveryWaitEvent[] = [];
+    const rec = await loadPtyRecovery(invokeFn, {
+      timeoutMs: 5,
+      backoffMs: [0],
+      sleep: async () => {
+        // A listener that subscribes while waiting hears 'waiting' at once.
+        if (n === 3 && late.length === 0) onRecoveryWait((e) => { late.push(e); });
+      },
+    });
+    expect(rec.kind).toBe('holder');
+    expect(events).toEqual(['waiting', 'ready']);
+    expect(late).toEqual(['waiting', 'ready']);
+    off();
+    resetPtyRecoveryForTests();
+  });
+
+  it('a quick answer (one failure at most) never shows the waiting notice', async () => {
+    resetPtyRecoveryForTests();
+    const events: RecoveryWaitEvent[] = [];
+    onRecoveryWait((e) => { events.push(e); });
+    let n = 0;
+    const invokeFn = async <T,>(cmd: string): Promise<T> => {
+      if (cmd === 'pty_backend_info' && (n += 1) === 1) throw new Error('once');
+      return (cmd === 'pty_backend_info' ? { kind: 'in-process' } : []) as T;
+    };
+    await loadPtyRecovery(invokeFn, { timeoutMs: 5, backoffMs: [0], sleep: async () => {} });
+    expect(events).toEqual([]);
     resetPtyRecoveryForTests();
   });
 

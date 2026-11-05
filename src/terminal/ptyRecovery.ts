@@ -155,9 +155,11 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
       try {
         const result = await attempt();
         setPtyRecovery(result);
+        if (waitNoticeShown) emitRecoveryWait('ready');
         return result;
       } catch (err) {
         opts.onRetry?.(n + 1, err);
+        if (takeRecoveryWaitNotice(n + 1)) emitRecoveryWait('waiting');
         await sleep(backoff[Math.min(n, backoff.length - 1)]);
       }
     }
@@ -165,11 +167,45 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
   return loading;
 }
 
+// ── "waiting for terminal recovery" notice (holder slow to answer) ──
+
+/** Failed attempts before the project area, still empty, says why. */
+export const RECOVERY_WAIT_NOTICE_AFTER = 2;
+export type RecoveryWaitEvent = 'waiting' | 'ready';
+let waitNoticeShown = false;
+let waitState: RecoveryWaitEvent | null = null;
+const waitListeners = new Set<(event: RecoveryWaitEvent) => void>();
+
+/** True exactly once per launch: the first failed attempt that reaches the threshold. */
+export function takeRecoveryWaitNotice(failedAttempts: number): boolean {
+  if (waitNoticeShown || failedAttempts < RECOVERY_WAIT_NOTICE_AFTER) return false;
+  waitNoticeShown = true;
+  return true;
+}
+
+function emitRecoveryWait(event: RecoveryWaitEvent): void {
+  waitState = event;
+  for (const listener of waitListeners) listener(event);
+}
+
+/**
+ * 'waiting' once the notice is due, 'ready' when the list arrives after it. A listener that
+ * subscribes while waiting gets 'waiting' at once. Returns the unsubscribe function.
+ */
+export function onRecoveryWait(listener: (event: RecoveryWaitEvent) => void): () => void {
+  waitListeners.add(listener);
+  if (waitState === 'waiting') listener('waiting');
+  return () => { waitListeners.delete(listener); };
+}
+
 /** Tests only: forget the memoized load and every per-run mark. */
 export function resetPtyRecoveryForTests(): void {
   loading = null;
   setPtyRecovery({ kind: 'in-process', recovered: [] });
   awaitingRestart.clear();
+  waitNoticeShown = false;
+  waitState = null;
+  waitListeners.clear();
 }
 
 /** `create_shell` refused because the id still runs in the holder: attach to it instead. */

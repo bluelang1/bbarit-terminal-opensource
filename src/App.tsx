@@ -141,7 +141,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -5585,11 +5585,24 @@ Office project scaffold created by BBARIT Terminal.
   // PTY holder reattach notices (docs/PTY_HOLDER_DAEMON.md 3.5-3.6): first recovery ever,
   // why the holder is not used, and one summary of recovered agents waiting for input.
   const ptyNoticeShownRef = useRef(false);
+  // The notice effect below runs once; read the current language through this ref.
+  const ptyNoticeTRef = useRef(t);
+  ptyNoticeTRef.current = t;
   useEffect(() => {
     const pushToast = (id: string, title: string, prompt: string, ms: number, terminalId = '', kind?: 'blocked') => {
       setTaskToasts((prev) => [...prev.filter((t) => t.id !== id), { id, terminalId, title, prompt, duration: '', kind }].slice(-4));
       taskToastTimersRef.current[id] = window.setTimeout(() => dismissTaskToast(id), ms);
     };
+    // Holder slow to answer: the project area stays empty (no shells until the recovery list
+    // arrives), so say why once per launch; the toast goes away when the list arrives.
+    const offRecoveryWait = onRecoveryWait((event) => {
+      if (event === 'waiting') {
+        const tr = ptyNoticeTRef.current;
+        pushToast('pty-recovery-waiting', tr('pty.recovery.waiting'), tr('pty.recovery.waitingDesc'), 10 * 60_000);
+      } else {
+        dismissTaskToast('pty-recovery-waiting');
+      }
+    });
     if (!ptyNoticeShownRef.current) {
       ptyNoticeShownRef.current = true;
       void loadPtyRecovery(invoke).then(async (rec) => {
@@ -5638,7 +5651,7 @@ Office project scaffold created by BBARIT Terminal.
       }, 2000);
     };
     window.addEventListener('octo-pty-recovered', onRecovered as EventListener);
-    return () => { window.removeEventListener('octo-pty-recovered', onRecovered as EventListener); if (timer) window.clearTimeout(timer); };
+    return () => { offRecoveryWait(); window.removeEventListener('octo-pty-recovered', onRecovered as EventListener); if (timer) window.clearTimeout(timer); };
   }, []);
   useEffect(() => {
     const proj = activeProject;
