@@ -38,7 +38,8 @@ import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { TerminalAssistBar } from './components/TerminalAssistBar';
 import { TerminalPersonaButton } from './components/TerminalPersonaButton';
 import { OctoGear, OctoNote, OctoPencil, OctoPlane, OctoPlus, OctoShell, OctoSkill, OctoSpark, OctoTrash, OctoX, OctoAddRoot, OctoAntler } from './octoIcons';
-import { FONTS, STYLES, DARK_STYLES, LIGHT_STYLES, WACKY_STYLES, getEffectiveFont } from './theme';
+import { FONTS, STYLES, DARK_STYLES, LIGHT_STYLES, WACKY_STYLES, getEffectiveFont, CUSTOM_FONT_INDEX, DEFAULT_FONT_INDEX, fontDisplayName } from './theme';
+import { CustomFontPicker } from './components/CustomFontPicker';
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
@@ -2524,12 +2525,13 @@ function App() {
   const [newProjectDisplayName, setNewProjectDisplayName] = useState('');
   const [newProjectCategory, setNewProjectCategory] = useState<ProjectCategory>('coding');
   const [newStyleIndex, setNewStyleIndex] = useState(0);
-  const [newFontIndex, setNewFontIndex] = useState(0);
+  const [newFontIndex, setNewFontIndex] = useState(DEFAULT_FONT_INDEX);
+  const [newCustomFontFamily, setNewCustomFontFamily] = useState('');
   const [showAllNewProjectThemes, setShowAllNewProjectThemes] = useState(false);
   // Same modal edits an existing project when set (sidebar pencil / context menu).
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   // New-project theme/font picks to restore after an edit pre-filled them.
-  const preEditStyleFontRef = useRef<{ styleIndex: number; fontIndex: number } | null>(null);
+  const preEditStyleFontRef = useRef<{ styleIndex: number; fontIndex: number; customFontFamily: string } | null>(null);
   // '' = auto-detect, a gh login, or GITHUB_ACCOUNT_NONE (see Project.githubAccount).
   const [newProjectGithubAccount, setNewProjectGithubAccount] = useState('');
   const [githubAccountsInfo, setGithubAccountsInfo] = useState<{ accounts: string[]; active: string | null }>({ accounts: [], active: null });
@@ -2621,6 +2623,7 @@ function App() {
     if (saved) {
       setNewStyleIndex(saved.styleIndex);
       setNewFontIndex(saved.fontIndex);
+      setNewCustomFontFamily(saved.customFontFamily);
     }
   }, [showNewProjectModal, editingProjectId]);
 
@@ -5426,14 +5429,15 @@ Office project scaffold created by BBARIT Terminal.
     setNewProjectDisplayName(project.displayName || project.name || '');
     setNewProjectCategory(project.category || 'coding');
     if (!preEditStyleFontRef.current) {
-      preEditStyleFontRef.current = { styleIndex: newStyleIndex, fontIndex: newFontIndex };
+      preEditStyleFontRef.current = { styleIndex: newStyleIndex, fontIndex: newFontIndex, customFontFamily: newCustomFontFamily };
     }
     setNewStyleIndex(project.styleIndex >= 0 && project.styleIndex < STYLES.length ? project.styleIndex : 0);
-    setNewFontIndex(project.fontIndex >= 0 && project.fontIndex < FONTS.length ? project.fontIndex : 0);
+    setNewFontIndex(project.fontIndex >= 0 && project.fontIndex < FONTS.length ? project.fontIndex : DEFAULT_FONT_INDEX);
+    setNewCustomFontFamily(project.customFontFamily || '');
     setNewProjectGithubAccount(project.githubAccount || '');
     setEditingProjectId(project.id);
     setShowNewProjectModal(true);
-  }, [newStyleIndex, newFontIndex]);
+  }, [newStyleIndex, newFontIndex, newCustomFontFamily]);
   const renameTerminal = useCallback((projectId: string, terminalId: string) => {
     const project = projectsRef.current.find((p) => p.id === projectId);
     const terminal = project?.terminals.find((t) => t.id === terminalId);
@@ -7159,6 +7163,7 @@ Office project scaffold created by BBARIT Terminal.
             category: 'coding',
             styleIndex: newStyleIndex,
             fontIndex: newFontIndex,
+            customFontFamily: newCustomFontFamily.trim() || undefined,
             terminals: [terminal],
             activeTerminalId: terminal.id,
           };
@@ -14134,6 +14139,7 @@ Office project scaffold created by BBARIT Terminal.
         displayName: newProjectDisplayName,
         styleIndex: newStyleIndex,
         fontIndex: newFontIndex,
+        customFontFamily: newCustomFontFamily,
         githubAccount: newProjectGithubAccount,
       }, normalizeFsPath);
       const duplicate = workDirChanged && projects.some((p) => p.id !== editingProject.id && normalizeFsPath(p.workDir) === path);
@@ -14157,7 +14163,7 @@ Office project scaffold created by BBARIT Terminal.
         displayName,
         styleIndex: newStyleIndex,
         fontIndex: newFontIndex,
-        customFontFamily: editingProject.customFontFamily,
+        customFontFamily: updates.customFontFamily,
       });
       setNewProjectSshStatus(null);
       setShowNewProjectModal(false);
@@ -14192,6 +14198,7 @@ Office project scaffold created by BBARIT Terminal.
     const terminal = createTerminal(isSshProject ? 'Server Shell' : undefined);
     const styleIndex = newStyleIndex;
     const fontIndex = newFontIndex;
+    const customFontFamily = newCustomFontFamily.trim() || undefined;
 
     setProjects((prev) => {
       const icon = projectNumberIcon(prev.length + 1);
@@ -14205,6 +14212,7 @@ Office project scaffold created by BBARIT Terminal.
         category: projectCategory,
         styleIndex,
         fontIndex,
+        customFontFamily,
         githubAccount,
         terminals: [terminal],
         activeTerminalId: terminal.id
@@ -14222,7 +14230,7 @@ Office project scaffold created by BBARIT Terminal.
     setNewProjectCategory('coding');
     setNewProjectSshStatus(null);
     // recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, category: newProjectCategory });
-    recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, category: projectCategory });
+    recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, customFontFamily, category: projectCategory });
   };
 
   const openRecentProject = (rp: RecentProjectEntry) => {
@@ -16111,17 +16119,20 @@ Office project scaffold created by BBARIT Terminal.
             </div>
 
             <div className="form-group">
-              <label>{t('app.project.font' as any)} ({FONTS[newFontIndex].name})</label>
+              <label>{t('app.project.font' as any)} ({fontDisplayName(newFontIndex, newCustomFontFamily)})</label>
               <div className="font-grid">
                 {FONTS.map((font, idx) => (
-                  <button key={idx} className={`font-option ${newFontIndex === idx ? 'active' : ''}`}
-                    style={{ fontFamily: font.value }}
+                  <button key={idx} type="button" className={`font-option ${newFontIndex === idx ? 'active' : ''}`}
+                    style={{ fontFamily: getEffectiveFont(idx, newCustomFontFamily) }}
                     onClick={() => setNewFontIndex(idx)}
                     title={`${t('app.project.font' as any)}: ${font.name}`}>
                     {font.name}
                   </button>
                 ))}
               </div>
+              {newFontIndex === CUSTOM_FONT_INDEX && (
+                <CustomFontPicker value={newCustomFontFamily} onChange={setNewCustomFontFamily} />
+              )}
             </div>
           </div>
 

@@ -6343,6 +6343,68 @@ body.ftree-dragging * {
   background: color-mix(in srgb, var(--accent-color) 20%, transparent);
 }
 
+/* Custom font picker (project modal) */
+.custom-font-picker {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+}
+
+.custom-font-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-color);
+  background: color-mix(in srgb, var(--bg-color) 80%, black);
+  border: 1px solid color-mix(in srgb, var(--text-color) 16%, transparent);
+  outline: none;
+}
+
+.custom-font-list {
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--text-color) 16%, transparent);
+  border-top: none;
+}
+
+.custom-font-item {
+  display: block;
+  width: 100%;
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 12px;
+  color: var(--text-color);
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.custom-font-item:hover {
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+
+.custom-font-item.active {
+  border-left-color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 20%, transparent);
+}
+
+.custom-font-empty {
+  padding: 8px 10px;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.custom-font-preview {
+  margin-top: 6px;
+  font-size: 13px;
+  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .style-option {
   width: 38px;
   height: 32px;

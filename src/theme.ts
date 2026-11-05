@@ -10,12 +10,15 @@ export type StyleTheme = {
   accent: string;
 };
 
-// Font options — all fonts are bundled via @font-face or fontsource.
-// Tauri WKWebView cannot access system fonts, so only bundled fonts work.
-// All fonts must be monospace for proper terminal rendering.
+// Font options. Presets are bundled via @font-face (public/fonts, App.css),
+// except the first one, which prefers an installed Nerd Font and falls back to
+// the bundled Fira Code. WKWebView/WebView2 render installed system fonts by
+// family name, so "Custom" can use anything `list_system_fonts` reports.
+// All fonts should be monospace for proper terminal rendering.
+// Keep ordering stable: projects store `fontIndex`.
 export const FONTS: FontOption[] = [
-  // --- English (bundled in public/fonts/) ---
-  { name: "Fira Code", value: "'Fira Code', monospace" },
+  // --- English ---
+  { name: "FiraCode Nerd Font Mono", value: "'FiraCode Nerd Font Mono', 'Fira Code', monospace" },
   { name: "JetBrains Mono", value: "'JetBrains Mono', monospace" },
   { name: "Source Code Pro", value: "'Source Code Pro', monospace" },
   { name: "Cascadia Code", value: "'Cascadia Code', monospace" },
@@ -29,14 +32,43 @@ export const FONTS: FontOption[] = [
 
 export const CUSTOM_FONT_INDEX = FONTS.length - 1;
 
+/** Index new projects start with (the FiraCode Nerd Font Mono preset). */
+export const DEFAULT_FONT_INDEX = 0;
+
+/** A single family name as a CSS string (always quoted, so names like "3270 Nerd Font" stay valid). */
+export function cssFontFamilyName(name: string): string {
+  return `"${name.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 /** Resolve the effective CSS font-family string for a project. */
 export function getEffectiveFont(fontIndex: number, customFontFamily?: string): string {
-  if (fontIndex === CUSTOM_FONT_INDEX && customFontFamily?.trim()) {
-    const name = customFontFamily.trim();
-    const quoted = name.includes(' ') || name.includes("'") ? `"${name}"` : name;
-    return `${quoted}, monospace`;
+  if (fontIndex === CUSTOM_FONT_INDEX) {
+    // Custom without a chosen family falls back to the default preset.
+    return customFontFamily?.trim()
+      ? `${cssFontFamilyName(customFontFamily)}, ${FONTS[DEFAULT_FONT_INDEX].value}`
+      : FONTS[DEFAULT_FONT_INDEX].value;
   }
-  return (FONTS[fontIndex] || FONTS[0]).value;
+  return (FONTS[fontIndex] || FONTS[DEFAULT_FONT_INDEX]).value;
+}
+
+/** Display name for a project's font (the custom family name when Custom is chosen). */
+export function fontDisplayName(fontIndex: number, customFontFamily?: string): string {
+  if (fontIndex === CUSTOM_FONT_INDEX) return customFontFamily?.trim() || FONTS[CUSTOM_FONT_INDEX].name;
+  return (FONTS[fontIndex] || FONTS[DEFAULT_FONT_INDEX]).name;
+}
+
+const MONO_HINT = /mono|(?<!uni)code|nerd|term|consol|courier|menlo|monaco|hack|d2coding|fixed|iosevka|inconsolata/i;
+
+/**
+ * System font families for the Custom picker: filtered by `query` (case-insensitive
+ * substring), monospace-looking names first, otherwise in the given order.
+ */
+export function rankSystemFonts(families: string[], query = ''): string[] {
+  const q = query.trim().toLowerCase();
+  const matches = q ? families.filter((f) => f.toLowerCase().includes(q)) : families.slice();
+  const mono = matches.filter((f) => MONO_HINT.test(f));
+  const rest = matches.filter((f) => !MONO_HINT.test(f));
+  return [...mono, ...rest];
 }
 
 // Style themes.

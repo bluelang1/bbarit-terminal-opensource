@@ -68,11 +68,24 @@ describe('project GitHub account', () => {
   });
 
   it('restores the new-project theme and font after leaving edit mode', () => {
-    const open = appSection('const openEditProjectModal = useCallback', '}, [newStyleIndex, newFontIndex]);');
-    expect(open).toContain('preEditStyleFontRef.current = { styleIndex: newStyleIndex, fontIndex: newFontIndex };');
+    const open = appSection('const openEditProjectModal = useCallback', '}, [newStyleIndex, newFontIndex, newCustomFontFamily]);');
+    expect(open).toContain('preEditStyleFontRef.current = { styleIndex: newStyleIndex, fontIndex: newFontIndex, customFontFamily: newCustomFontFamily };');
+    expect(open).toContain("setNewCustomFontFamily(project.customFontFamily || '');");
     const reset = appSection('if (showNewProjectModal || !editingProjectId) return;', '}, [showNewProjectModal, editingProjectId]);');
     expect(reset).toContain('setNewStyleIndex(saved.styleIndex);');
     expect(reset).toContain('setNewFontIndex(saved.fontIndex);');
+    expect(reset).toContain('setNewCustomFontFamily(saved.customFontFamily);');
+  });
+
+  it('shows the custom font picker in the modal and saves the family', () => {
+    const modal = appSection('const renderNewProjectModal = () => {', '{/* Bottom fixed buttons */}');
+    expect(modal).toContain('{newFontIndex === CUSTOM_FONT_INDEX && (');
+    expect(modal).toContain('<CustomFontPicker value={newCustomFontFamily} onChange={setNewCustomFontFamily} />');
+    const edit = appSection('if (editingProject) {', "const projectCategory: ProjectCategory = 'coding';");
+    expect(edit).toContain('customFontFamily: newCustomFontFamily,');
+    const create = appSection("const projectCategory: ProjectCategory = 'coding';", 'const openRecentProject = ');
+    expect(create).toContain('const customFontFamily = newCustomFontFamily.trim() || undefined;');
+    expect(create).toContain('customFontFamily,\n        githubAccount,');
   });
 
   it('localizes the new strings in every locale with placeholders intact', () => {

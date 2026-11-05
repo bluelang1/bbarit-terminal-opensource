@@ -48,6 +48,15 @@ describe('projectEditUpdates', () => {
   });
 });
 
+describe('projectEditUpdates custom font', () => {
+  it('saves the trimmed custom family, or clears it when empty', () => {
+    expect(projectEditUpdates(project, { ...form, fontIndex: 7, customFontFamily: ' FiraCode Nerd Font Mono ' }).updates)
+      .toMatchObject({ fontIndex: 7, customFontFamily: 'FiraCode Nerd Font Mono' });
+    const cleared = projectEditUpdates(project, { ...form, customFontFamily: '  ' }).updates;
+    expect('customFontFamily' in cleared && cleared.customFontFamily).toBe(undefined);
+  });
+});
+
 describe('projectGithubAccountFor', () => {
   it('stores logins and "none", drops auto and SSH projects', () => {
     expect(projectGithubAccountFor('/work/repo', 'me')).toBe('me');
