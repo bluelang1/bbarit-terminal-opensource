@@ -29,7 +29,6 @@ import { codexConfigWithTrust } from './devreview/codexTrust';
 import { deriveBrokerHarnessName, lifecycleFromBrokerStatus, normalizeBrokerSessionRecords, selectPreferredBrokerHarnessId, selectRestorableBrokerSessions, statusAfterDeveloperCommand, type BrokerHarnessLifecycle, type BrokerSessionRecord } from './devreview/brokerSessionStore';
 import { BrokerHarnessModal, type BrokerHarness } from './components/BrokerHarnessModal';
 import { SettingsPanel, getAgentSettings, getEditorSettings, getTerminalSettings, getNoteTemplates, type EditorSettings, type TerminalSettings } from './components/SettingsPanel';
-import { GithubStarNudge } from './components/GithubStarNudge';
 import { RELEASE_REPO_MAC, RELEASE_REPO_WIN } from './config/endpoints';
 
 import { CommandPaletteLite, type PaletteCommand } from './components/CommandPaletteLite';
@@ -23143,7 +23142,6 @@ Office project scaffold created by BBARIT Terminal.
         commands={paletteCommands}
       />
 
-      <GithubStarNudge onOpenUrl={(url) => { void openExternalUrl(url); }} />
 
       {/* Skills Panel */}
       <React.Suspense fallback={null}>
