@@ -2174,7 +2174,7 @@ export function SettingsPanel({
                     onChange={(e) => updateTerminalSetting('ptyHolder', e.target.checked ? 'on' : 'off')}
                   />
                   <span className="setting-description">
-                    {IS_WINDOWS && <>{locale === 'ko' ? 'macOS/Linux 전용입니다.' : 'macOS/Linux only.'}{' '}</>}
+                    {IS_WINDOWS && <>{t('pty.unixOnly')}{' '}</>}
                     {t('settings.terminal.ptyHolder.desc')}{' '}
                     {t('settings.terminal.ptyHolder.now')}: {describePtyBackend(getPtyRecovery(), locale === 'ko')}
                   </span>

@@ -141,7 +141,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -1821,17 +1821,22 @@ function upsertRecentProject(list: RecentProjectEntry[], next: Omit<RecentProjec
   return [entry, ...filtered].slice(0, 20);
 }
 
-/** Holder terminals without a saved tab → a "복구됨" tab in the project with the same folder,
- *  else one "복구된 터미널" project. Layouts get the new ids. Never kills anything. */
-function placeRecoveredTerminals(projects: Project[], recovered: readonly RecoveredPty[]): Project[] {
+/** Holder terminals without a saved tab → a "Recovered" (`pty.recovered.tab`) tab in the project
+ *  with the same folder, else one `pty.recovered.project` project. Layouts get the new ids.
+ *  Never kills anything. */
+function placeRecoveredTerminals(
+  projects: Project[],
+  recovered: readonly RecoveredPty[],
+  labels: { tab: string; project: string },
+): Project[] {
   const before = new Map(projects.map((p) => [p.id, p.terminals.length]));
   const { projects: placed } = placeUnknownRecovered<TerminalInstance, Project>(projects, recovered, {
-    terminal: (e) => ({ ...createTerminal('복구됨'), id: e.id, lastWorkDir: e.cwd || undefined }),
+    terminal: (e) => ({ ...createTerminal(labels.tab), id: e.id, lastWorkDir: e.cwd || undefined }),
     project: (entries, terminals) => ({
       id: `recovered-${Date.now()}`,
       workDir: entries.find((e) => e.cwd)?.cwd || '/',
-      name: '복구된 터미널',
-      displayName: '복구된 터미널',
+      name: labels.project,
+      displayName: labels.project,
       icon: projectNumberIcon(projects.length + 1),
       category: 'coding',
       styleIndex: 0,
@@ -2085,6 +2090,9 @@ const calculateTerminalPosition = (
 
 function App() {
   const { t, locale } = useTranslation();
+  // For callbacks/effects that run once but must speak the current language.
+  const tLatestRef = useRef(t);
+  tLatestRef.current = t;
   const { updateConfig } = useConfig();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loungeUnreadCounts, setLoungeUnreadCounts] = useState<LoungeUnreadCounts>(loadLoungeUnreadCounts);
@@ -2212,7 +2220,10 @@ function App() {
     // Holder terminals that outlived the previous run (docs/PTY_HOLDER_DAEMON.md 3.5): known
     // before any XTerminal mounts. Unsaved ones join the project with the same folder.
     const recovery = await loadPtyRecovery(invoke);
-    projectsToOpen = placeRecoveredTerminals(projectsToOpen, recovery.recovered);
+    projectsToOpen = placeRecoveredTerminals(projectsToOpen, recovery.recovered, {
+      tab: tLatestRef.current('pty.recovered.tab'),
+      project: tLatestRef.current('pty.recovered.project'),
+    });
     let resolvedActiveProjectId = preferredActiveId;
     let startupSshError: string | null = null;
     let restoredActiveProject = projectsToOpen.find((p) => p.id === resolvedActiveProjectId) || null;
@@ -5590,6 +5601,16 @@ Office project scaffold created by BBARIT Terminal.
       setTaskToasts((prev) => [...prev.filter((t) => t.id !== id), { id, terminalId, title, prompt, duration: '', kind }].slice(-4));
       taskToastTimersRef.current[id] = window.setTimeout(() => dismissTaskToast(id), ms);
     };
+    // Holder slow to answer: the project area stays empty (no shells until the recovery list
+    // arrives), so say why once per launch; the toast goes away when the list arrives.
+    const offRecoveryWait = onRecoveryWait((event) => {
+      if (event === 'waiting') {
+        const tr = tLatestRef.current;
+        pushToast('pty-recovery-waiting', tr('pty.recovery.waiting'), tr('pty.recovery.waitingDesc'), 10 * 60_000);
+      } else {
+        dismissTaskToast('pty-recovery-waiting');
+      }
+    });
     if (!ptyNoticeShownRef.current) {
       ptyNoticeShownRef.current = true;
       void loadPtyRecovery(invoke).then(async (rec) => {
@@ -5605,11 +5626,7 @@ Office project scaffold created by BBARIT Terminal.
         const keepsRunning = effectiveKeepRunningOnQuit(getConfigSnapshot().terminal?.keepRunningOnQuit, debugBuild);
         if (holderIntroWanted(rec, debugBuild, keepsRunning) && !(await kvGet('octo-pty-holder-intro-notice').catch(() => null))) {
           void kvSet('octo-pty-holder-intro-notice', '1');
-          pushToast('pty-holder-intro',
-            ko ? '터미널이 앱과 따로 실행됩니다' : 'Terminals now run apart from the app',
-            ko ? "앱을 닫아도 터미널은 계속 실행됩니다. 메뉴의 '종료하고 모든 터미널 끝내기'로 모두 종료할 수 있습니다"
-              : "Terminals keep running after you close the app. Use 'Quit and End All Terminals' in the menu to end them all.",
-            20000);
+          pushToast('pty-holder-intro', tLatestRef.current('pty.intro.title'), tLatestRef.current('pty.intro.desc'), 20000);
         }
         const live = rec.recovered.filter((e) => !e.exited).length;
         if (live > 0 && !(await kvGet('octo-pty-holder-recovered-notice').catch(() => null))) {
@@ -5638,7 +5655,7 @@ Office project scaffold created by BBARIT Terminal.
       }, 2000);
     };
     window.addEventListener('octo-pty-recovered', onRecovered as EventListener);
-    return () => { window.removeEventListener('octo-pty-recovered', onRecovered as EventListener); if (timer) window.clearTimeout(timer); };
+    return () => { offRecoveryWait(); window.removeEventListener('octo-pty-recovered', onRecovered as EventListener); if (timer) window.clearTimeout(timer); };
   }, []);
   useEffect(() => {
     const proj = activeProject;

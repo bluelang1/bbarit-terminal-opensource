@@ -155,9 +155,11 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
       try {
         const result = await attempt();
         setPtyRecovery(result);
+        if (waitNoticeShown) emitRecoveryWait('ready');
         return result;
       } catch (err) {
         opts.onRetry?.(n + 1, err);
+        if (takeRecoveryWaitNotice(n + 1)) emitRecoveryWait('waiting');
         await sleep(backoff[Math.min(n, backoff.length - 1)]);
       }
     }
@@ -165,11 +167,45 @@ export function loadPtyRecovery(invokeFn: InvokeLike, opts: LoadPtyRecoveryOptio
   return loading;
 }
 
+// ── "waiting for terminal recovery" notice (holder slow to answer) ──
+
+/** Failed attempts before the project area, still empty, says why. */
+export const RECOVERY_WAIT_NOTICE_AFTER = 2;
+export type RecoveryWaitEvent = 'waiting' | 'ready';
+let waitNoticeShown = false;
+let waitState: RecoveryWaitEvent | null = null;
+const waitListeners = new Set<(event: RecoveryWaitEvent) => void>();
+
+/** True exactly once per launch: the first failed attempt that reaches the threshold. */
+export function takeRecoveryWaitNotice(failedAttempts: number): boolean {
+  if (waitNoticeShown || failedAttempts < RECOVERY_WAIT_NOTICE_AFTER) return false;
+  waitNoticeShown = true;
+  return true;
+}
+
+function emitRecoveryWait(event: RecoveryWaitEvent): void {
+  waitState = event;
+  for (const listener of waitListeners) listener(event);
+}
+
+/**
+ * 'waiting' once the notice is due, 'ready' when the list arrives after it. A listener that
+ * subscribes while waiting gets 'waiting' at once. Returns the unsubscribe function.
+ */
+export function onRecoveryWait(listener: (event: RecoveryWaitEvent) => void): () => void {
+  waitListeners.add(listener);
+  if (waitState === 'waiting') listener('waiting');
+  return () => { waitListeners.delete(listener); };
+}
+
 /** Tests only: forget the memoized load and every per-run mark. */
 export function resetPtyRecoveryForTests(): void {
   loading = null;
   setPtyRecovery({ kind: 'in-process', recovered: [] });
   awaitingRestart.clear();
+  waitNoticeShown = false;
+  waitState = null;
+  waitListeners.clear();
 }
 
 /** `create_shell` refused because the id still runs in the holder: attach to it instead. */
@@ -248,15 +284,15 @@ export function formatMegabytes(bytes: number): string {
   return mb >= 10 ? String(Math.round(mb)) : String(Math.max(0.1, Math.round(mb * 10) / 10));
 }
 
-/** "[앱이 꺼진 동안 N MB 생략]" before the replay, or '' when nothing was dropped. */
-export function omittedBytesLine(droppedBytes: number | undefined | null, template = '[앱이 꺼진 동안 {n} MB 생략]'): string {
+/** The `pty.recovered.omitted` line ({n} = MB) before the replay, or '' when nothing was dropped. */
+export function omittedBytesLine(droppedBytes: number | undefined | null, template: string): string {
   const n = Number(droppedBytes) || 0;
   if (n <= 0) return '';
   return `\x1b[2m${template.replace('{n}', formatMegabytes(n))}\x1b[0m\r\n`;
 }
 
-/** "종료됨 (code N)" for a terminal that ended while the app was closed, else null. */
-export function exitedBannerText(entry: RecoveredPty | undefined, template = '종료됨 (code {code})', noCode = '종료됨'): string | null {
+/** `pty.recovered.exitedCode` ({code}) / `pty.recovered.exited` for a terminal that ended while the app was closed, else null. */
+export function exitedBannerText(entry: RecoveredPty | undefined, template: string, noCode: string): string | null {
   if (!entry?.exited) return null;
   return typeof entry.exit_code === 'number' ? template.replace('{code}', String(entry.exit_code)) : noCode;
 }
@@ -270,7 +306,7 @@ type PlaceProject<T extends PlaceTerminal> = { id: string; workDir: string; term
 
 /**
  * Holder terminals without a saved tab: attach each to the project whose workDir equals its
- * cwd (a "복구됨" tab), else collect them in one synthetic project. Never drops any.
+ * cwd (a `pty.recovered.tab` tab), else collect them in one synthetic project. Never drops any.
  */
 export function placeUnknownRecovered<T extends PlaceTerminal, P extends PlaceProject<T>>(
   projects: P[],

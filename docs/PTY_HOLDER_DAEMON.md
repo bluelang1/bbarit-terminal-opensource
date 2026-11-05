@@ -406,6 +406,7 @@ trait PtyBackend: Send + Sync {
   프런트는 `pty_backend_info` → (holder 면) `pty_list_recovered` 를 부르고 결과를 레지스트리에 둔다. 한 번의 시도는 15 초
   상한이고, 실패·시간 초과는 in-process 로 보지 않고 백오프(0.5→10 초)로 다시 묻는다. 답이 올 때까지 프로젝트 복원
   (= `create_shell`)을 하지 않는다.
+  두 번째 시도까지 실패하면 실행당 한 번 "터미널 복구 대기 중…" 토스트를 띄우고(`onRecoveryWait`), 목록이 오면 지운다.
 - 복구 터미널은 비활성 탭이어도 **마운트 때 바로** 재생·읽기 루프를 시작한다(3.5-1 의 "재생은 활성화 때" 와 다름):
   읽기 루프가 돌지 않으면 홀더 큐가 차서 잘린다.
 - 꺼진 사이 끝난 터미널: tail + modes 재생, 모드 해제, `close_pty`(RELEASE), `octo-pty-exited`, 배너
@@ -555,7 +556,7 @@ TCC 항목 이름)를 PR 체크리스트에 넣는다.
   handover 표시 → **곧바로** 홀더에 GOODBYE handover → `request_restart()` → 8 초(`RELAUNCH_WATCHDOG`) 안에 안 끝나면 그
   스레드에서 `tauri::process::restart`(새 프로세스 + exit). `handleUpdate` 는 이 커맨드를 쓰고, 없으면 예전 `relaunch()` 경로.
   실기: 이 커맨드로 1 초 안에 새 pid, 같은 홀더(로그 `client attached` 만 늘어남), tick 루프 끊김 없음.
-- **재시작 한 번만**: 워치독과 RunEvent::Exit(Tauri 재시작)은 `RESTARTING` 을 `swap(true)` 해 먼저 잡은 쪽만 재실행한다(`exit_restart_action`). 워치독이 먼저면 Exit 는 Tauri 재시작으로 돌아가지 않고 기다리며, 그 사이 "종료하고 모든 터미널 끝내기"는 재실행 없이 끝낸다.
+- **재시작 한 번만**: 워치독과 RunEvent::Exit(Tauri 재시작)은 `RESTARTING` 을 `swap(true)` 해 먼저 잡은 쪽만 재실행한다(`exit_restart_action`). 워치독이 먼저면 Exit 는 Tauri 재시작으로 돌아가지 않고 기다리며, 그 사이 "종료하고 모든 터미널 끝내기"는 재실행 없이 끝낸다. 이를 위해 `RELAUNCH_FATE`(열림/재실행/종료)를 둔다: `app_quit_kill_terminals`(메뉴 포함)는 `app.exit` 전에 `commit_quit`, 워치독은 `process::restart` 직전에 `commit_relaunch` 를 해 먼저 잡은 쪽이 이긴다. 워치독이 이미 재시작을 잡았어도 그 직전 전에 kill_all 이 오면 워치독은 재실행하지 않고 Exit 가 `Quit` 로 끝낸다(재실행이 이미 시작된 뒤에만 kill_all 이 진다).
 - **Windows**: `pty_holder_wanted(.., unix)` 는 unix 가 아니면 항상 false 라 `fallbackReason` 이 없고(폴백 토스트 없음), 설정 체크박스는 꺼짐·비활성(macOS/Linux 전용).
 - **테스트**: `integration_tests::{an_older_holder_is_recovered_and_drained_while_new_terminals_go_to_ours,
   a_draining_holder_keeps_exited_terminals_until_they_are_released}`(스레드 홀더 둘: v1 은 draining·ACK·attach·입력·끝난 id 재사용,

@@ -3759,11 +3759,11 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         const showExited = async (entry: RecoveredPty) => {
           markRecoveredHandled(terminalId);
           const buffered = await invoke<string>('pty_attach_snapshot', { terminalId }).catch(() => '');
-          await replayOutput(omittedBytesLine(entry.dropped_bytes) + decsetPrefix(entry.modes) + (buffered || '') + decsetReset(entry.modes));
+          await replayOutput(omittedBytesLine(entry.dropped_bytes, t('pty.recovered.omitted')) + decsetPrefix(entry.modes) + (buffered || '') + decsetReset(entry.modes));
           await invoke('close_pty', { terminalId }).catch(() => {});
           notifyPtyExited(terminalId);
           if (disposed) return;
-          const banner = `\r\n\x1b[7m ${exitedBannerText({ ...entry, exited: true }) || ''} \x1b[0m \x1b[2m${t('terminal.recoveredExitedHint' as Parameters<typeof t>[0], 'Enter 를 누르면 같은 폴더에서 다시 시작합니다')}\x1b[0m\r\n`;
+          const banner = `\r\n\x1b[7m ${exitedBannerText({ ...entry, exited: true }, t('pty.recovered.exitedCode'), t('pty.recovered.exited')) || ''} \x1b[0m \x1b[2m${t('pty.recovered.exitedHint')}\x1b[0m\r\n`;
           term.write(banner);
           markAwaitingRestart(terminalId, banner);
           armRestartOnEnter();
@@ -3781,7 +3781,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           }
           if (disposed) return;
           // Modes the 1 MiB tail may have lost (alt screen, mouse, bracketed paste), then the tail.
-          const prefix = entry ? omittedBytesLine(entry.dropped_bytes) + decsetPrefix(entry.modes) : '';
+          const prefix = entry ? omittedBytesLine(entry.dropped_bytes, t('pty.recovered.omitted')) + decsetPrefix(entry.modes) : '';
           if (prefix || buffered) await replayOutput(prefix + buffered);
           if (disposed) return;
           // Same size may send no SIGWINCH: nudge cols-1 → cols so TUIs redraw (herdr's nudge).
