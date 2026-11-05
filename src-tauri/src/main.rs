@@ -3967,6 +3967,11 @@ fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
         if in_process {
             sweep_all_scopes_on_exit(&watchdog_app);
         }
+        // "Quit and end all terminals" since the claim: RunEvent::Exit ends the app instead.
+        if !commit_relaunch(&RELAUNCH_FATE) {
+            safe_eprintln!("[update] quit-and-end-all requested during the relaunch; not relaunching");
+            return;
+        }
         tauri::process::restart(&env);
     });
     app.request_restart();
@@ -3977,6 +3982,31 @@ static RELAUNCH_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// Someone (the watchdog or RunEvent::Exit) has taken the update relaunch: there must be
 /// exactly one, or two apps start and the later HELLO takes the other's terminals.
 static RESTARTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether a claimed update relaunch really respawns. Decided once, between the watchdog
+/// (right before `process::restart`) and "Quit and end all terminals", so kill_all wins
+/// whenever it comes before the respawn is under way.
+static RELAUNCH_FATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(FATE_OPEN);
+const FATE_OPEN: u8 = 0;
+const FATE_RELAUNCH: u8 = 1;
+const FATE_QUIT: u8 = 2;
+
+/// Watchdog, right before `process::restart`: true = relaunch; false = kill_all won.
+fn commit_relaunch(fate: &std::sync::atomic::AtomicU8) -> bool {
+    match fate.compare_exchange(FATE_OPEN, FATE_RELAUNCH, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => true,
+        Err(now) => now == FATE_RELAUNCH,
+    }
+}
+
+/// "Quit and end all terminals": true = no relaunch will start (the respawn was not yet
+/// committed); false = the watchdog is already respawning.
+fn commit_quit(fate: &std::sync::atomic::AtomicU8) -> bool {
+    match fate.compare_exchange(FATE_OPEN, FATE_QUIT, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => true,
+        Err(now) => now == FATE_QUIT,
+    }
+}
 
 /// True for the first caller only.
 fn claim_restart(restarting: &std::sync::atomic::AtomicBool) -> bool {
@@ -3992,8 +4022,9 @@ enum ExitRestart {
     Tauri,
     /// The watchdog claimed it first and is respawning: do not let Tauri spawn a second app.
     WaitForWatchdog,
-    /// "Quit and end all terminals" came during the relaunch window: claim it (stops the
-    /// watchdog) and exit without relaunching.
+    /// "Quit and end all terminals" came during the relaunch window: exit without
+    /// relaunching. Before the watchdog fired, claiming stops it; after its claim, the
+    /// committed quit fate (`commit_quit`) makes it skip `process::restart`.
     Quit,
 }
 
@@ -4001,11 +4032,16 @@ fn exit_restart_action(
     relaunch_requested: bool,
     kill_all_requested: bool,
     restarting: &std::sync::atomic::AtomicBool,
+    fate: &std::sync::atomic::AtomicU8,
 ) -> ExitRestart {
     if !relaunch_requested {
         ExitRestart::Ordinary
     } else if !claim_restart(restarting) {
-        ExitRestart::WaitForWatchdog
+        if kill_all_requested && commit_quit(fate) {
+            ExitRestart::Quit
+        } else {
+            ExitRestart::WaitForWatchdog
+        }
     } else if kill_all_requested {
         ExitRestart::Quit
     } else {
@@ -4016,7 +4052,14 @@ fn exit_restart_action(
 /// "Quit and end all terminals" (menu / command palette).
 #[tauri::command]
 fn app_quit_kill_terminals(app: AppHandle) {
+    request_quit_kill_terminals(&app);
+}
+
+/// Flag the kill_all GOODBYE and, before `app.exit` is queued, take the relaunch fate so an
+/// update watchdog that already claimed the restart does not respawn the app.
+fn request_quit_kill_terminals(app: &AppHandle) {
     KILL_TERMINALS_ON_EXIT.store(true, Ordering::SeqCst);
+    commit_quit(&RELAUNCH_FATE);
     app.exit(0);
 }
 
@@ -4072,32 +4115,72 @@ mod pty_holder_gate_tests {
 
     #[test]
     fn only_one_update_relaunch_ever_runs() {
-        use super::{claim_restart, exit_restart_action, ExitRestart};
-        use std::sync::atomic::AtomicBool;
+        use super::{claim_restart, exit_restart_action, ExitRestart, FATE_OPEN};
+        use std::sync::atomic::{AtomicBool, AtomicU8};
+        let open = || AtomicU8::new(FATE_OPEN);
         let flag = AtomicBool::new(false);
         assert!(claim_restart(&flag), "first caller restarts");
         assert!(!claim_restart(&flag), "second caller backs off");
 
         // (relaunch requested, kill_all requested) with nobody restarting yet.
         let fresh = || AtomicBool::new(false);
-        assert_eq!(exit_restart_action(false, false, &fresh()), ExitRestart::Ordinary);
-        assert_eq!(exit_restart_action(false, true, &fresh()), ExitRestart::Ordinary);
-        assert_eq!(exit_restart_action(true, false, &fresh()), ExitRestart::Tauri);
-        assert_eq!(exit_restart_action(true, true, &fresh()), ExitRestart::Quit);
+        assert_eq!(exit_restart_action(false, false, &fresh(), &open()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(false, true, &fresh(), &open()), ExitRestart::Ordinary);
+        assert_eq!(exit_restart_action(true, false, &fresh(), &open()), ExitRestart::Tauri);
+        assert_eq!(exit_restart_action(true, true, &fresh(), &open()), ExitRestart::Quit);
         // An ordinary exit never claims (a later relaunch could still run).
         let idle = fresh();
-        exit_restart_action(false, false, &idle);
+        exit_restart_action(false, false, &idle, &open());
         assert!(claim_restart(&idle));
 
         // Exit first: it claims, so the watchdog (claim_restart) backs off.
         let exit_first = fresh();
-        assert_eq!(exit_restart_action(true, false, &exit_first), ExitRestart::Tauri);
+        assert_eq!(exit_restart_action(true, false, &exit_first, &open()), ExitRestart::Tauri);
         assert!(!claim_restart(&exit_first));
         // Watchdog first: Exit must not let Tauri spawn a second app.
         let watchdog_first = fresh();
         assert!(claim_restart(&watchdog_first));
-        assert_eq!(exit_restart_action(true, false, &watchdog_first), ExitRestart::WaitForWatchdog);
-        assert_eq!(exit_restart_action(true, true, &watchdog_first), ExitRestart::WaitForWatchdog);
+        assert_eq!(exit_restart_action(true, false, &watchdog_first, &open()), ExitRestart::WaitForWatchdog);
+    }
+
+    #[test]
+    fn kill_all_beats_a_watchdog_that_already_claimed_the_restart() {
+        use super::{
+            claim_restart, commit_quit, commit_relaunch, exit_restart_action, ExitRestart, FATE_OPEN,
+            FATE_QUIT, FATE_RELAUNCH,
+        };
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+        let claimed = || {
+            let r = AtomicBool::new(false);
+            assert!(claim_restart(&r), "watchdog claims first");
+            r
+        };
+        // (kill_all requested, fate when RunEvent::Exit runs) -> (action, watchdog relaunches?)
+        let table = [
+            (false, FATE_OPEN, ExitRestart::WaitForWatchdog, true),
+            (true, FATE_OPEN, ExitRestart::Quit, false),
+            // app_quit_kill_terminals already committed the quit before Exit ran.
+            (true, FATE_QUIT, ExitRestart::Quit, false),
+            // The watchdog is already in process::restart: too late, never a second app.
+            (true, FATE_RELAUNCH, ExitRestart::WaitForWatchdog, true),
+            (false, FATE_RELAUNCH, ExitRestart::WaitForWatchdog, true),
+        ];
+        for (kill_all, start, action, relaunches) in table {
+            let fate = AtomicU8::new(start);
+            assert_eq!(exit_restart_action(true, kill_all, &claimed(), &fate), action, "{kill_all} {start}");
+            assert_eq!(commit_relaunch(&fate), relaunches, "{kill_all} {start}");
+        }
+
+        // The commit is decided once, by whoever comes first; repeats keep the answer.
+        let fate = AtomicU8::new(FATE_OPEN);
+        assert!(commit_quit(&fate));
+        assert!(commit_quit(&fate));
+        assert!(!commit_relaunch(&fate));
+        assert_eq!(fate.load(Ordering::SeqCst), FATE_QUIT);
+        let fate = AtomicU8::new(FATE_OPEN);
+        assert!(commit_relaunch(&fate));
+        assert!(!commit_quit(&fate));
+        assert!(commit_relaunch(&fate));
     }
 
     #[test]
@@ -10083,8 +10166,7 @@ fn main() {
                     if event.id().as_ref() == "edit-select-all" {
                         let _ = app.emit("menu-select-all", ());
                     } else if event.id().as_ref() == "quit-kill-terminals" {
-                        KILL_TERMINALS_ON_EXIT.store(true, Ordering::SeqCst);
-                        app.exit(0);
+                        request_quit_kill_terminals(app);
                     }
                 });
             }
@@ -10473,6 +10555,7 @@ fn main() {
                     RELAUNCH_REQUESTED.load(Ordering::SeqCst),
                     KILL_TERMINALS_ON_EXIT.load(Ordering::SeqCst),
                     &RESTARTING,
+                    &RELAUNCH_FATE,
                 );
                 agent_rpc_stop_all();
                 // Holder backend: GOODBYE quit/handover keeps the terminals (no sweep);
