@@ -10590,6 +10590,9 @@ fn main() {
             pet::pet_hide,
             pet::pet_tour_active,
             pet::pet_tour_end,
+            pet::weather::pet_location,
+            pet::weather::pet_weather_now,
+            pet::weather::pet_weather_city_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

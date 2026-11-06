@@ -14,6 +14,8 @@
 //! tour asks `pet_tour_active` (the start event can fire before its listener exists).
 //! Design: docs/superpowers/specs/2026-11-06-desktop-pet-design.md.
 
+pub mod weather;
+
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

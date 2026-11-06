@@ -54,7 +54,7 @@ turns weather on, ~0.1° only, no IP geolocation), "Weather".
 ---
 
 ### Task 1: Rust weather host
-**Files:** Create `src-tauri/src/pet_weather.rs`; modify `src-tauri/src/main.rs` (mod + 3 commands),
+**Files:** Create `src-tauri/src/pet/weather.rs` (`pet::weather`); modify `src-tauri/src/main.rs` (3 commands), `src-tauri/src/pet.rs` (`pub mod weather`), `src-tauri/Entitlements.plist` (location entitlement for the hardened runtime),
 `src-tauri/Cargo.toml` (+ `objc2-core-location`), `src-tauri/Cargo.lock`, `src-tauri/Info.plist`.
 **Produces:** `round_tenth(f64) -> f64`; `forecast_url(lat, lon) -> Url`; `geocode_url(query, lang) -> Url`;
 `parse_forecast(&Value) -> Result<PetWeatherNow, String>` (`{ code, precipitation, isDay, temperature }`);
@@ -63,7 +63,7 @@ turns weather on, ~0.1° only, no IP geolocation), "Weather".
 Commands: `pet_weather_now(lat, lon)`, `pet_weather_city_search(query, language)`, `pet_location(ask) -> { status, lat, lon }`.
 - [ ] Tests: rounding (incl. negatives, NaN rejected), URL has exactly one decimal and the four `current` fields,
   geocode URL encodes Hangul, parse of the real response shape, missing fields → Err, config gate (only `true`),
-  status table. FAIL → implement → PASS (`cargo test ... pet_weather::`). `cargo check --locked`. Commit.
+  status table. FAIL → implement → PASS (`cargo test ... pet::`). `cargo check --locked`. Commit.
 
 ### Task 2: Weather model + config
 **Files:** Create `src/pet/weather.ts`, `src/pet/weather.test.ts`; modify `src/config/schema.ts`, `src/config/schema.test.ts`.

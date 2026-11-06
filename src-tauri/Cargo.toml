@@ -99,6 +99,9 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
+# Desktop pet weather: CoreLocation (pet/weather.rs). 0.2.2 is the version already in the
+# lock (via objc2-ui-kit), so only the octo-ui dependency list changes.
+objc2-core-location = { version = "0.2", default-features = false, features = ["std", "CLLocationManager", "CLLocation"] }
 
 # Windows: mark the bridge listen socket non-inheritable so spawned PTY/WebView2
 # children don't inherit it and keep it alive (zombie LISTENING) after the app
