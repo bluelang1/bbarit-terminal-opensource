@@ -49,7 +49,7 @@ const LANDED_MS = 1200;
 
 const O = '#3b1f47';
 
-type Sprite = { rows: string[]; palette: Record<string, string> };
+export type Sprite = { rows: string[]; palette: Record<string, string> };
 
 const PETAL_PAL = { o: O, p: '#ffb3c8', h: '#ffe4ec', d: '#f07fa0' };
 const PETALS: string[][] = [
@@ -159,9 +159,14 @@ function base(kind: ParticleKind, rand: () => number): Particle {
 /** Where a breath puff starts (canvas px, just beside the head) and which way it drifts. */
 export type BreathOrigin = { x: number; y: number; dir: 1 | -1 };
 
+/** Which season particles may fall (weather.ts seasonGate: real weather wins when it is on). */
+export type SeasonGate = { seasonSnow: boolean; seasonFalling: boolean };
+const OPEN_GATE: SeasonGate = { seasonSnow: true, seasonFalling: true };
+
 /**
  * Maybe one new season particle in a `w` x `h` box (call every SPAWN_EVERY_MS). Winter
- * breath puffs need `mouth` (where the character breathes out, canvas px).
+ * breath puffs need `mouth` (where the character breathes out, canvas px). `gate` turns
+ * off the seasonal snow (real weather on) and the petals / leaves / shimmer (rain, snow).
  */
 export function spawnFor(
   cal: PetCalendar,
@@ -169,8 +174,10 @@ export function spawnFor(
   w: number,
   h: number,
   mouth: BreathOrigin | null = null,
+  gate: SeasonGate = OPEN_GATE,
 ): Particle | null {
   const roll = rand();
+  if (cal.season !== 'winter' && !gate.seasonFalling) return null;
   if (cal.season === 'spring') {
     if (roll >= CHANCE.petal) return null;
     const p = base('petal', rand);
@@ -186,7 +193,7 @@ export function spawnFor(
       const p = base('puff', rand);
       return { ...p, x: mouth.x, y: mouth.y, vx: mouth.dir * 12, vy: -10, life: 1300, front: true };
     }
-    if (roll >= CHANCE.puff + CHANCE.snow) return null;
+    if (!gate.seasonSnow || roll >= CHANCE.puff + CHANCE.snow) return null;
     const p = base('snow', rand);
     return { ...p, x: rand() * w, y: -6, vx: -3 + rand() * 6, vy: 16 + rand() * 10, variant: rand() < 0.35 ? 1 : 0 };
   }
@@ -299,9 +306,10 @@ export function particleAlpha(p: Particle): number {
   return Math.max(0, Math.min(1, p.age / FADE_IN_MS, (p.life - p.age) / fadeOut));
 }
 
-type DrawCtx = Pick<CanvasRenderingContext2D, 'fillStyle' | 'fillRect' | 'globalAlpha'>;
+export type DrawCtx = Pick<CanvasRenderingContext2D, 'fillStyle' | 'fillRect' | 'globalAlpha'>;
 
-function drawSprite(ctx: DrawCtx, sp: Sprite, left: number, top: number, px: number): void {
+/** Art rows at canvas px (left, top), each art pixel `px` px (one fillRect per run). */
+export function drawSprite(ctx: DrawCtx, sp: Sprite, left: number, top: number, px: number): void {
   sp.rows.forEach((row, r) => {
     let c = 0;
     while (c < row.length) {

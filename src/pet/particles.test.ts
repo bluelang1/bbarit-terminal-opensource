@@ -47,6 +47,19 @@ describe('spawnFor', () => {
     expect(spawnFor(cal('winter'), rolls(0), W, H, null)?.kind).toBe('snow');
   });
 
+  it('real weather gates the season: no seasonal snow, no falling petals / leaves in rain', () => {
+    const noSnow = { seasonSnow: false, seasonFalling: true };
+    for (let i = 0; i < 50; i++) {
+      const r = (i + 0.5) / 50;
+      expect(spawnFor(cal('winter'), rolls(r), W, H, null, noSnow)?.kind ?? null, `roll ${r}`).not.toBe('snow');
+    }
+    // Breath puffs are the pet's, not the weather's.
+    expect(spawnFor(cal('winter'), rolls(0), W, H, { x: 1, y: 1, dir: 1 }, noSnow)?.kind).toBe('puff');
+    expect(spawnFor(cal('spring'), rolls(0), W, H, null, noSnow)?.kind).toBe('petal');
+    const wet = { seasonSnow: false, seasonFalling: false };
+    for (const s of ['spring', 'summer', 'autumn'] as const) expect(spawnFor(cal(s), rolls(0), W, H, null, wet), s).toBeNull();
+  });
+
   it('season particles keep running on special days', () => {
     expect(spawnFor(cal('autumn', 'pepero'), rolls(0), W, H)?.kind).toBe('leaf');
     expect(spawnFor(cal('winter', 'christmas'), rolls(0.1), W, H)?.kind).toBe('snow');

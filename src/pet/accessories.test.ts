@@ -8,10 +8,12 @@ import {
   BITE_MS,
   drawAccessories,
   drawAccessory,
+  accessoryRise,
   headRise,
   type AccessoryId,
 } from './accessories';
 import type { PetCalendar } from './calendar';
+import type { PetWeather } from './weather';
 
 const IDS = Object.keys(ACCESSORIES) as AccessoryId[];
 
@@ -37,7 +39,7 @@ describe('ACCESSORIES art', () => {
 
   it('treats have 3 bite frames, wearables 1', () => {
     for (const id of IDS) {
-      if (id === 'laptop') continue;
+      if (id === 'laptop' || id === 'umbrella' || id === 'umbrellaHigh') continue;
       const treat = id === 'pepero' || id === 'chocolate' || id === 'candy';
       expect(ACCESSORIES[id].frames).toHaveLength(treat ? 3 : 1);
       if (treat) expect(ACCESSORIES[id].anchor).toBe('hand');
@@ -294,3 +296,67 @@ describe('headRise', () => {
     expect(headRise(['witchHat', 'pumpkin'])).toBe(ACCESSORIES.witchHat.frames[0].oy);
   });
 });
+
+describe('umbrella', () => {
+  const cal = (season: PetCalendar['season'], special: PetCalendar['special'] = null): PetCalendar => ({ season, special });
+  const wx = (kind: PetWeather['kind']): PetWeather => ({ kind, heavy: false, night: false });
+
+  it('one frame at the hand, behind the body, canopy above the head', () => {
+    const u = ACCESSORIES.umbrella;
+    expect(u.anchor).toBe('hand');
+    expect(u.behind).toBe(true);
+    expect(u.frames).toHaveLength(1);
+    // The canopy top clears OCTO's head with room to spare.
+    const idle = OCTO_PACK.animations.idle[0];
+    expect(accessoryRise(idle, ['umbrella'])).toBeGreaterThanOrEqual(8);
+  });
+
+  it('out in rain, drizzle and thunder while awake on its feet', () => {
+    for (const k of ['rain', 'drizzle', 'thunder'] as const) {
+      for (const anim of ['idle', 'walk', 'sit', 'wave', 'happy'] as const) {
+        expect(accessoriesFor(cal('autumn'), anim, wx(k)), `${k} ${anim}`).toContain('umbrella');
+      }
+    }
+    for (const anim of ['held', 'fall', 'slip', 'getup', 'eat', 'busy', 'sleep'] as const) {
+      expect(accessoriesFor(cal('autumn'), anim, wx('rain')), anim).not.toContain('umbrella');
+    }
+    for (const k of ['clear', 'cloudy', 'fog', 'snow'] as const) {
+      expect(accessoriesFor(cal('autumn'), 'walk', wx(k)), k).not.toContain('umbrella');
+    }
+    expect(accessoriesFor(cal('autumn'), 'walk', null)).not.toContain('umbrella');
+  });
+
+  it('replaces whatever else is carried, keeps what is worn', () => {
+    expect(accessoriesFor(cal('autumn', 'halloween'), 'walk', wx('rain'))).toEqual(['witchHat', 'umbrellaHigh']);
+    expect(accessoriesFor(cal('winter', 'christmas'), 'idle', wx('rain'))).toEqual(['santaHat', 'santaSuit', 'umbrellaHigh']);
+    expect(accessoriesFor(cal('winter'), 'idle', wx('rain'))).toEqual(['scarf', 'umbrella']);
+    expect(accessoriesFor(cal('summer'), 'idle', wx('rain'))).toEqual(['sunglasses', 'umbrella']);
+    // Eating a treat on a rainy treat day: the treat, no umbrella.
+    expect(accessoriesFor(cal('autumn', 'pepero'), 'eat', wx('rain'))).toEqual(['pepero']);
+  });
+});
+
+describe('accessoryRise', () => {
+  const idle = OCTO_PACK.animations.idle[0];
+
+  it('matches headRise for hats, 0 for things below the head', () => {
+    expect(accessoryRise(idle, [])).toBe(0);
+    expect(accessoryRise(idle, ['scarf', 'pepero', 'sunglasses'])).toBe(0);
+    expect(accessoryRise(idle, ['santaHat'])).toBe(headRise(['santaHat']));
+    expect(accessoryRise(idle, ['witchHat', 'umbrella'])).toBe(
+      Math.max(headRise(['witchHat']), accessoryRise(idle, ['umbrella'])),
+    );
+  });
+
+  it('the high umbrella clears every hat: canopy rim above the hat top', () => {
+    const rimBelowTip = 8; // canopy rows from its tip to the rim
+    for (const hat of ['santaHat', 'witchHat'] as const) {
+      expect(accessoryRise(idle, ['umbrellaHigh']) - rimBelowTip, hat).toBeGreaterThan(headRise([hat]));
+    }
+  });
+
+  it('0 on a frame without a head anchor (user pack)', () => {
+    expect(accessoryRise({ rows: ['a'], ms: 100 }, ['umbrella', 'santaHat'])).toBe(0);
+  });
+});
+

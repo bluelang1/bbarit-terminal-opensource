@@ -15,6 +15,7 @@
 
 import type { Anchor, AnchorName, AnimName, CharacterPack, PackFrame } from './pack';
 import { treatFor, type PetCalendar } from './calendar';
+import { rainy, type PetWeather } from './weather';
 
 export type AccessoryId =
   | 'santaHat'
@@ -26,7 +27,9 @@ export type AccessoryId =
   | 'pepero'
   | 'chocolate'
   | 'candy'
-  | 'laptop';
+  | 'laptop'
+  | 'umbrella'
+  | 'umbrellaHigh';
 
 /** `rows` drawn with art pixel (ox, oy) on the anchor point. */
 export type AccessoryFrame = { rows: string[]; ox: number; oy: number };
@@ -337,6 +340,94 @@ export const ACCESSORIES: Record<AccessoryId, Accessory> = {
     ],
     palette: { o: O, p: '#ff6fa0', h: '#ffd1e1', x: '#9fd8ff' },
   },
+  umbrella: {
+    anchor: 'hand',
+    behind: true,
+    // Upright canopy over the head; the pole slants from the tentacle tip up behind the
+    // head to the canopy's center.
+    frames: [
+      {
+        rows: [
+          '............o............',
+          '.........ooooooo.........',
+          '......ooohhyyyYYooo......',
+          '....oohhhYYyyyYYYyyoo....',
+          '...ohhyYYYYyyyYYYYyyyo...',
+          '..ohyyYYYYyyyyYYYYyyyyo..',
+          '.ohyyyYYYYyyyyyYYYYyyyyo.',
+          'ooooyYoooYyoooyYoooYyoooo',
+          'o...oo...oo.k.oo...oo...o',
+          '.............k...........',
+          '.............k...........',
+          '..............k..........',
+          '..............k..........',
+          '...............k.........',
+          '...............k.........',
+          '................k........',
+          '................k........',
+          '.................k.......',
+          '.................k.......',
+          '..................k......',
+          '..................k......',
+          '...................k.....',
+          '...................k.....',
+          '....................k....',
+          '....................k....',
+          '.....................k...',
+        ],
+        ox: 21,
+        oy: 26,
+      },
+    ],
+    palette: { o: O, y: '#ffd23f', Y: '#ffab2e', h: '#fff1a8', k: '#5b3a2e' },
+  },
+  umbrellaHigh: {
+    anchor: 'hand',
+    behind: true,
+    // The same umbrella held higher, clear of a hat (witch hat, Santa hat).
+    frames: [
+      {
+        rows: [
+          '............o............',
+          '.........ooooooo.........',
+          '......ooohhyyyYYooo......',
+          '....oohhhYYyyyYYYyyoo....',
+          '...ohhyYYYYyyyYYYYyyyo...',
+          '..ohyyYYYYyyyyYYYYyyyyo..',
+          '.ohyyyYYYYyyyyyYYYYyyyyo.',
+          'ooooyYoooYyoooyYoooYyoooo',
+          'o...oo...oo.k.oo...oo...o',
+          '............k............',
+          '.............k...........',
+          '.............k...........',
+          '..............k..........',
+          '..............k..........',
+          '..............k..........',
+          '...............k.........',
+          '...............k.........',
+          '...............k.........',
+          '................k........',
+          '................k........',
+          '.................k.......',
+          '.................k.......',
+          '.................k.......',
+          '..................k......',
+          '..................k......',
+          '..................k......',
+          '...................k.....',
+          '...................k.....',
+          '....................k....',
+          '....................k....',
+          '....................k....',
+          '.....................k...',
+          '.....................k...',
+        ],
+        ox: 21,
+        oy: 33,
+      },
+    ],
+    palette: { o: O, y: '#ffd23f', Y: '#ffab2e', h: '#fff1a8', k: '#5b3a2e' },
+  },
   laptop: {
     anchor: 'front',
     behind: true,
@@ -376,11 +467,16 @@ const SEASON_WEAR: Partial<Record<PetCalendar['season'], AccessoryId[]>> = {
   summer: ['sunglasses'],
 };
 
+/** Out in the rain on its feet: the umbrella is up (not held, falling, eating, typing, asleep). */
+const UMBRELLA_ANIMS: ReadonlySet<AnimName> = new Set<AnimName>(['idle', 'walk', 'sit', 'wave', 'happy']);
+
 /**
- * What the pet wears / holds for `cal` while playing `anim`, back to front order is the
- * caller's (behind ones first). Nothing during `slip` (it is upside down; hats fall off).
+ * What the pet wears / holds for `cal` (and `weather`, when weather is on and known) while
+ * playing `anim`, back to front order is the caller's (behind ones first). Nothing during
+ * `slip` (it is upside down; hats fall off). In rain the umbrella replaces anything else
+ * carried in the hand (the pumpkin); worn things stay.
  */
-export function accessoriesFor(cal: PetCalendar, anim: AnimName): AccessoryId[] {
+export function accessoriesFor(cal: PetCalendar, anim: AnimName, weather: PetWeather | null = null): AccessoryId[] {
   if (anim === 'slip') return [];
   const special = (cal.special && SPECIAL_WEAR[cal.special]) || [];
   const taken = new Set(special.map((id) => ACCESSORIES[id].anchor));
@@ -388,6 +484,11 @@ export function accessoriesFor(cal: PetCalendar, anim: AnimName): AccessoryId[] 
   const out = [...season, ...special];
   // Typing while Claude works: whatever it carries (the pumpkin) is put down for the laptop.
   if (anim === 'busy') return [...out.filter((id) => ACCESSORIES[id].anchor !== 'hand'), 'laptop'];
+  if (rainy(weather) && UMBRELLA_ANIMS.has(anim)) {
+    const worn = out.filter((id) => ACCESSORIES[id].anchor !== 'hand');
+    // Under a hat the umbrella is held higher so the hat never pokes through the canopy.
+    return [...worn, headRise(worn) > 0 ? 'umbrellaHigh' : 'umbrella'];
+  }
   const treat = treatFor(cal.special);
   if (treat && anim === 'eat') out.push(TREAT_IDS[treat]);
   return out;
@@ -481,3 +582,22 @@ export function headRise(ids: AccessoryId[]): number {
   }
   return rise;
 }
+
+/**
+ * Rows the accessories stick out above `frame`'s head anchor (hats, the umbrella canopy held
+ * up from the hand), so the bubble can clear them. 0 without a head anchor (user packs never
+ * draw accessories they have no anchors for).
+ */
+export function accessoryRise(frame: PackFrame, ids: AccessoryId[]): number {
+  const head = frame.anchors?.head;
+  if (!head) return 0;
+  let rise = 0;
+  for (const id of ids) {
+    const acc = ACCESSORIES[id];
+    const a = frame.anchors?.[acc.anchor];
+    if (!a) continue;
+    for (const f of acc.frames) rise = Math.max(rise, head.y - (a.y - f.oy));
+  }
+  return rise;
+}
+
