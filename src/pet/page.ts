@@ -111,11 +111,12 @@ export function savePos(storage: StorageLike | undefined, p: SavedPos): void {
   }
 }
 
-/** Index of the frame showing `elapsedMs` into a looping animation. */
-export function frameIndexAt(frames: PackFrame[], elapsedMs: number): number {
+/** Index of the frame showing `elapsedMs` into an animation: looping, or (loop false) played once and held on its last frame. */
+export function frameIndexAt(frames: PackFrame[], elapsedMs: number, loop = true): number {
   if (frames.length <= 1) return 0;
   const total = frames.reduce((sum, f) => sum + f.ms, 0);
   if (!(total > 0)) return 0;
+  if (!loop && elapsedMs >= total) return frames.length - 1;
   let t = ((elapsedMs % total) + total) % total;
   for (let i = 0; i < frames.length; i++) {
     if (t < frames[i].ms) return i;

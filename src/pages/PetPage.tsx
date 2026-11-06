@@ -7,6 +7,10 @@
 // the engine mood, a speech bubble (blocked / just done) and an unseen-done badge. While a
 // bubble shows the window widens / grows upward around the body box (petWindowLayout);
 // the body stays on the same screen spot.
+// Seasons and special days (src/pet/calendar.ts, re-read on show and every minute): the pet
+// wears shared accessories by its pack anchors, eats treats on treat days, slips on ice in
+// winter, and season particles fall inside the body box (drawn on the same canvas, so they
+// never take clicks and stop with the loop).
 // Design: docs/superpowers/specs/2026-11-06-desktop-pet-design.md.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -19,9 +23,32 @@ import { Menu } from '@tauri-apps/api/menu';
 import { exit } from '@tauri-apps/plugin-process';
 import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig } from '../config/schema';
 import { getTranslation, type Locale, type TranslationKey } from '../i18n';
-import { PET_H, PET_W, clampToWorkArea, initialState, step, type PetState, type WorkArea } from '../pet/engine';
-import { framesFor, type CharacterPack } from '../pet/pack';
+import {
+  PET_H,
+  PET_W,
+  SLIP_MS,
+  clampToWorkArea,
+  iceAlpha,
+  initialState,
+  step,
+  type PetState,
+  type WorkArea,
+} from '../pet/engine';
+import { ONE_SHOT_ANIMS, framesFor, type CharacterPack } from '../pet/pack';
 import { drawFrame } from '../pet/render';
+import { DEBUG_DATE_KEY, calendarFor, petDate, treatFor, type PetCalendar } from '../pet/calendar';
+import { ACCESSORIES, accessoriesFor, biteFrame, drawAccessories, headRise } from '../pet/accessories';
+import {
+  MAX_PARTICLES,
+  SPAWN_EVERY_MS,
+  drawIce,
+  drawParticles,
+  spawnDizzy,
+  spawnFor,
+  stepParticles,
+  type BreathOrigin,
+  type Particle,
+} from '../pet/particles';
 import { ART_PX, BUBBLE_ART, TAIL_ART, TAIL_OVERLAP, petArtStyle } from '../pet/bubbleArt';
 import {
   DEFAULT_PACK,
@@ -50,6 +77,7 @@ const DRAG_TICK_MS = 16;
 const SLEEP_TICK_MS = 250;
 const AREA_REFRESH_MS = 30_000;
 const SAVE_EVERY_MS = 2_000;
+const CALENDAR_REFRESH_MS = 60_000;
 const DRAG_THRESHOLD_PX = 3;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
 /** Gap between the tail element's bottom (tip + its shadow row) and the head's top row. */
@@ -103,6 +131,16 @@ type Runtime = {
   menuOpen: boolean;
   savedAt: number;
   savedKey: string;
+  cal: PetCalendar;
+  calAt: number;
+  particles: Particle[];
+  spawnAcc: number;
+  /** Dizzy stars already spawned for the current slip. */
+  dizzy: boolean;
+  /** Where winter breath puffs start (set by draw from the frame's body anchor). */
+  breath: BreathOrigin | null;
+  /** The last paint had particles or ice, so the next one must clear them. */
+  paintedLive: boolean;
   kick: () => void;
   persist: () => void;
   relayout: () => void;
@@ -114,6 +152,20 @@ function safeStorage(): Storage | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Debug builds only: localStorage['bbarit.pet.debugDate'] = 'YYYY-MM-DD' (src/pet/calendar.ts petDate). */
+function debugDate(): string | null {
+  if (!import.meta.env.DEV) return null;
+  try {
+    return safeStorage()?.getItem(DEBUG_DATE_KEY) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function currentCalendar(): PetCalendar {
+  return calendarFor(petDate(new Date(), debugDate(), import.meta.env.DEV));
 }
 
 export default function PetPage() {
@@ -162,6 +214,13 @@ export default function PetPage() {
       menuOpen: false,
       savedAt: 0,
       savedKey: '',
+      cal: currentCalendar(),
+      calAt: performance.now(),
+      particles: [],
+      spawnAcc: 0,
+      dizzy: false,
+      breath: null,
+      paintedLive: false,
       kick: () => {},
       persist: () => {},
       relayout: () => {},
@@ -184,6 +243,12 @@ export default function PetPage() {
       savePos(safeStorage(), r.state);
     };
     r.persist = persist;
+
+    const refreshCalendar = () => {
+      r.cal = currentCalendar();
+      r.calAt = performance.now();
+      r.drawnKey = '';
+    };
 
     const loadConfigAndPack = async () => {
       if (!tauri) return;
@@ -225,12 +290,23 @@ export default function PetPage() {
 
     const draw = () => {
       if (!ctx || !r.state) return;
-      const frames = framesFor(r.pack, r.state.anim);
-      const idx = frameIndexAt(frames, r.animElapsed);
-      const flip = r.state.dir === -1;
-      const key = `${r.pack.id}|${r.state.anim}|${idx}|${flip}`;
-      if (key === r.drawnKey) return;
+      const st = r.state;
+      const anim = st.anim;
+      const frames = framesFor(r.pack, anim);
+      const idx = frameIndexAt(frames, r.animElapsed, !ONE_SHOT_ANIMS.has(anim));
+      const frame = frames[idx];
+      const flip = st.dir === -1;
+      const ids = accessoriesFor(r.cal, anim);
+      const treat = ids.find((id) => ACCESSORIES[id].frames.length > 1);
+      const bite = treat ? biteFrame(treat, r.animElapsed) : 0;
+      // The ice lies on the ground: only drawn while the body box is on it.
+      const onGround = !st.pinned && anim !== 'held' && anim !== 'fall';
+      const ice = onGround ? iceAlpha(st.ice) : 0;
+      const live = r.particles.length > 0 || ice > 0;
+      const key = `${r.pack.id}|${anim}|${idx}|${flip}|${ids.join(',')}|${bite}`;
+      if (key === r.drawnKey && !live && !r.paintedLive) return;
       r.drawnKey = key;
+      r.paintedLive = live;
       // Oversized user packs are scaled down to fit the window instead of being cut off.
       const scale = Math.max(
         1,
@@ -239,14 +315,57 @@ export default function PetPage() {
       const pack = scale === r.pack.scale ? r.pack : { ...r.pack, scale };
       const pw = pack.size.w * scale;
       const ph = pack.size.h * scale;
-      const headInset = packHeadroomRows(r.pack) * scale;
+      // Today's hat sticks out above the head: keep the bubble clear of it (packs with
+      // head anchors only; others never draw it).
+      const hasHead = framesFor(r.pack, 'idle')[0]?.anchors?.head !== undefined;
+      const rise = hasHead ? headRise(accessoriesFor(r.cal, 'idle')) : 0;
+      const headInset = (packHeadroomRows(r.pack) - rise) * scale;
       if (r.sprite.w !== pw || r.sprite.h !== ph || r.sprite.headInset !== headInset) {
         r.sprite = { w: pw, h: ph, headInset };
         applyDom(r.layout);
       }
+      const x0 = Math.round((PET_W - pw) / 2);
+      const y0 = PET_H - ph;
+      const at = (a: { x: number; y: number }) => ({ x: x0 + (flip ? pack.size.w - a.x : a.x) * scale, y: y0 + a.y * scale });
+      const body = frame.anchors?.body;
+      if (body && anim !== 'slip' && anim !== 'getup') {
+        const p = at(body);
+        const dir = flip ? -1 : 1;
+        r.breath = { x: p.x + dir * pw * 0.42, y: p.y - 10, dir };
+      } else {
+        r.breath = null;
+      }
+      // Dizzy stars circle above the pet once it has landed on its back.
+      if (anim === 'slip' && !r.dizzy && frames.length > 1 && r.animElapsed >= frames[0].ms) {
+        r.dizzy = true;
+        const head = frame.anchors?.head;
+        const cy = head ? at(head).y - 8 : y0 + ph / 3;
+        r.particles.push(...spawnDizzy(PET_W / 2, cy, Math.max(300, SLIP_MS - r.animElapsed)));
+      }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, PET_W, PET_H);
-      drawFrame(ctx, pack, frames[idx], Math.round((PET_W - pw) / 2), PET_H - ph, flip);
+      if (ice > 0 && st.ice) drawIce(ctx, st.ice.x - st.x, PET_H, ice);
+      drawParticles(ctx, r.particles, ART_PX, false);
+      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'behind');
+      drawFrame(ctx, pack, frame, x0, y0, flip);
+      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'front');
+      drawParticles(ctx, r.particles, ART_PX, true);
+    };
+
+    // Season particles: step every tick, maybe spawn one every SPAWN_EVERY_MS (capped).
+    const updateParticles = (dt: number) => {
+      if (r.state?.anim !== 'slip') {
+        r.dizzy = false;
+        if (r.particles.some((p) => p.kind === 'star')) r.particles = r.particles.filter((p) => p.kind !== 'star');
+      }
+      r.particles = stepParticles(r.particles, dt, PET_W, PET_H);
+      r.spawnAcc = Math.min(r.spawnAcc + dt, 4 * SPAWN_EVERY_MS);
+      while (r.spawnAcc >= SPAWN_EVERY_MS) {
+        r.spawnAcc -= SPAWN_EVERY_MS;
+        if (r.particles.length >= MAX_PARTICLES) continue;
+        const p = spawnFor(r.cal, Math.random, PET_W, PET_H, r.breath);
+        if (p) r.particles.push(p);
+      }
     };
 
     // Place the body box, bubble, tail and badge inside the window (window px). The body
@@ -323,7 +442,8 @@ export default function PetPage() {
       const anim = r.state?.anim;
       if (r.drag?.active || anim === 'held') return DRAG_TICK_MS;
       if (anim === 'fall') return FALL_TICK_MS;
-      if (anim === 'sleep') return SLEEP_TICK_MS;
+      // Falling petals / snow keep their frame rate while the pet sleeps.
+      if (anim === 'sleep' && r.particles.length === 0) return SLEEP_TICK_MS;
       return TICK_MS;
     };
 
@@ -334,6 +454,7 @@ export default function PetPage() {
       const dt = now - r.last;
       r.last = now;
       if (now - r.areasAt > AREA_REFRESH_MS) void refreshAreas();
+      if (now - r.calAt > CALENDAR_REFRESH_MS) refreshCalendar();
 
       if (r.menuOpen) {
         r.animElapsed += dt;
@@ -346,11 +467,14 @@ export default function PetPage() {
           dragging: r.drag?.active ? { x: r.drag.x, y: r.drag.y } : null,
           activity: r.activity,
           mood: moodFor(r.summary, Date.now(), r.lastDone?.atMs ?? null),
+          treat: treatFor(r.cal.special) !== null,
+          icy: r.cal.season === 'winter',
         });
         r.activity = false;
         r.animElapsed = r.state.anim === prevAnim ? r.animElapsed + dt : 0;
       }
       refreshBubble();
+      updateParticles(dt);
       draw();
       move();
       const settled = r.state.anim !== 'held' && r.state.anim !== 'fall';
@@ -381,7 +505,14 @@ export default function PetPage() {
       r.timer = window.setTimeout(tick, 0);
     };
 
-    const onDocVisibility = () => (document.hidden ? stop() : start());
+    const onDocVisibility = () => {
+      if (document.hidden) {
+        stop();
+        return;
+      }
+      refreshCalendar();
+      start();
+    };
     document.addEventListener('visibilitychange', onDocVisibility);
     window.addEventListener('pagehide', persist);
 
@@ -409,6 +540,7 @@ export default function PetPage() {
           if (r.visible) {
             // The owner just put BBARIT away: the pet wakes up, picks up settings changes.
             r.activity = true;
+            refreshCalendar();
             void loadConfigAndPack();
             void refreshAreas();
             start();

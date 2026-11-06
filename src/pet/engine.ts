@@ -15,6 +15,23 @@ export const FALL_G = 2000;
 /** A drop this close above the ground falls to it instead of pinning. */
 export const LAND_SNAP_PX = 40;
 
+/** Treat days: eat every 2-5 min of idle life, for 3-5 s. */
+export const EAT_EVERY_MS: [number, number] = [120_000, 300_000];
+export const EAT_MS: [number, number] = [3000, 5000];
+/** Winter: an ice patch every 3-6 min of walking, this far ahead of the pet's center. */
+export const ICE_EVERY_MS: [number, number] = [180_000, 360_000];
+export const ICE_AHEAD_PX = 70;
+/** Ice that is never reached melts away after this long; it fades over ICE_FADE_MS. */
+export const ICE_LIFE_MS = 12_000;
+export const ICE_FADE_MS = 1500;
+/** Slip (feet fly up, lies on its back) then get up. */
+export const SLIP_MS = 1900;
+export const GETUP_MS = 500;
+const SLIDE_MS = 300;
+const SLIDE_PX_PER_S = 50;
+/** No room ahead for ice (near an edge): try again after this much walking. */
+const ICE_RETRY_MS = 10_000;
+
 const WALK_MS: [number, number] = [2000, 8000];
 const REST_MS: [number, number] = [3000, 10_000];
 /** Longest physics step; a long stall (sleep/wake) must not teleport the pet. */
@@ -22,6 +39,9 @@ const MAX_PHYSICS_DT_MS = 250;
 const FALLBACK_AREA: WorkArea = { x: 0, y: 0, w: 1280, h: 800 };
 
 export type WorkArea = { x: number; y: number; w: number; h: number };
+
+/** Ice patch on the ground: x = screen px of its center; ms = time left before it is gone. */
+export type Ice = { x: number; ms: number; used: boolean };
 
 export type PetState = {
   anim: AnimName;
@@ -38,6 +58,11 @@ export type PetState = {
   vy: number;
   /** Claude mood seen on the previous settled tick (detects entering a mood). */
   lastMood: ClaudeMood;
+  /** Treat days: idle-life time left until the next snack (set on first use). */
+  eatInMs?: number;
+  /** Winter: walking time left until the next ice patch (set on first use). */
+  iceInMs?: number;
+  ice?: Ice | null;
 };
 
 export type PetInput = {
@@ -53,7 +78,17 @@ export type PetInput = {
    * place, happy jumps in place, busy works (walks at half speed), none is idle life.
    */
   mood: ClaudeMood;
+  /** Treat day (src/pet/calendar.ts treatFor): eats now and then while idle. */
+  treat: boolean;
+  /** Winter: walking now and then meets an ice patch and slips. */
+  icy: boolean;
 };
+
+/** Ice opacity: quick fade in, fade out over its last ICE_FADE_MS. */
+export function iceAlpha(ice: Ice | null | undefined): number {
+  if (!ice) return 0;
+  return Math.max(0, Math.min(1, ice.ms / ICE_FADE_MS, (ICE_LIFE_MS - ice.ms) / 300));
+}
 
 export function groundY(area: WorkArea): number {
   return area.y + area.h - PET_H;
@@ -115,6 +150,10 @@ function span(range: [number, number], rand: () => number): number {
   return range[0] + clamp(rand(), 0, 1) * (range[1] - range[0]);
 }
 
+function isInPlaceAction(a: AnimName): boolean {
+  return a === 'eat' || a === 'slip' || a === 'getup';
+}
+
 function isRestAnim(a: AnimName): boolean {
   return a === 'idle' || a === 'sit' || a === 'busy';
 }
@@ -144,6 +183,7 @@ export function initialState(areas: WorkArea[], saved?: Partial<PetState>): PetS
     actionMs: 0,
     vy: 0,
     lastMood: 'none',
+    ice: null,
   };
 }
 
@@ -154,10 +194,13 @@ function withRestAnim(s: PetState, busy: boolean): PetState {
   return s;
 }
 
-export function step(s: PetState, i: PetInput): PetState {
+export function step(s0: PetState, i: PetInput): PetState {
   const dt = Number.isFinite(i.dtMs) && i.dtMs > 0 ? i.dtMs : 0;
   const pdt = Math.min(dt, MAX_PHYSICS_DT_MS) / 1000;
   const areas = usable(i.areas);
+  // The ice patch melts on its own whatever the pet does.
+  const ice = s0.ice && s0.ice.ms - dt > 0 ? { ...s0.ice, ms: s0.ice.ms - dt } : null;
+  const s: PetState = { ...s0, ice };
 
   // 1. Being dragged: follow the pointer, wide awake.
   if (i.dragging) {
@@ -211,9 +254,23 @@ export function step(s: PetState, i: PetInput): PetState {
   if (n.idleMs >= SLEEP_AFTER_MS) return { ...n, anim: 'sleep', actionMs: 0 };
   if (n.anim === 'sleep') n = rest(n, i.rand);
 
-  // 6. Idle life (busy: rests with the busy animation, walks at half speed).
   const busy = mood === 'busy';
   const canWalk = !n.pinned && n.mode === 'walk';
+
+  // 6. In-place actions: eating a treat, slipping on ice and getting up. Busy ends them.
+  if (isInPlaceAction(n.anim)) {
+    if (busy || (n.anim === 'eat' && !i.treat)) n = rest(n, i.rand);
+    else return inPlace(n, dt, pdt, p.area, canWalk, i.rand);
+  }
+
+  // 7. Treat days: a snack now and then (idle life only, never while busy).
+  if (i.treat && !busy) {
+    const left = (n.eatInMs ?? span(EAT_EVERY_MS, i.rand)) - dt;
+    if (left <= 0) return { ...n, anim: 'eat', actionMs: span(EAT_MS, i.rand), eatInMs: span(EAT_EVERY_MS, i.rand) };
+    n.eatInMs = left;
+  }
+
+  // 8. Idle life (busy: rests with the busy animation, walks at half speed).
   if (n.anim === 'walk' && !canWalk) n = rest(n, i.rand);
   n.actionMs -= dt;
 
@@ -229,7 +286,16 @@ export function step(s: PetState, i: PetInput): PetState {
       x = lo;
       dir = 1;
     }
+    const before = n.x + PET_W / 2;
     n = { ...n, x, dir };
+    if (i.icy && !busy) {
+      const center = x + PET_W / 2;
+      if (n.ice && !n.ice.used && (before - n.ice.x) * (center - n.ice.x) <= 0) {
+        // Stepped on it: feet fly up. The patch fades out while the pet gets back up.
+        return { ...n, anim: 'slip', actionMs: SLIP_MS, ice: { ...n.ice, used: true, ms: Math.min(n.ice.ms, SLIP_MS + ICE_FADE_MS) } };
+      }
+      if (!n.ice) n = maybePlaceIce(n, dt, p.area, i.rand);
+    }
     if (n.actionMs <= 0) n = rest(n, i.rand);
     return busy ? withRestAnim(n, busy) : n;
   }
@@ -237,4 +303,33 @@ export function step(s: PetState, i: PetInput): PetState {
   if (n.actionMs <= 0) n = canWalk ? startWalk(n, i.rand) : rest(n, i.rand);
   else if (!isRestAnim(n.anim)) n = rest(n, i.rand);
   return withRestAnim(n, busy);
+}
+
+/** Count walking time down to the next ice patch and lay it just ahead when there is room. */
+function maybePlaceIce(n: PetState, dt: number, area: WorkArea, rand: () => number): PetState {
+  const left = (n.iceInMs ?? span(ICE_EVERY_MS, rand)) - dt;
+  if (left > 0) return { ...n, iceInMs: left };
+  const x = n.x + PET_W / 2 + n.dir * ICE_AHEAD_PX;
+  // The pet's center must reach it before the edge turns it around.
+  if (x < area.x + PET_W / 2 || x > maxX(area) + PET_W / 2) return { ...n, iceInMs: ICE_RETRY_MS };
+  const reachMs = (ICE_AHEAD_PX / WALK_PX_PER_S) * 1000 + 500;
+  return {
+    ...n,
+    ice: { x, ms: ICE_LIFE_MS, used: false },
+    iceInMs: span(ICE_EVERY_MS, rand),
+    actionMs: Math.max(n.actionMs, reachMs),
+  };
+}
+
+/** Eat in place; slip (sliding a little forward first), then get up and walk on. */
+function inPlace(n: PetState, dt: number, pdt: number, area: WorkArea, canWalk: boolean, rand: () => number): PetState {
+  const actionMs = n.actionMs - dt;
+  if (n.anim === 'eat') return actionMs <= 0 ? rest(n, rand) : { ...n, actionMs };
+  if (n.anim === 'slip') {
+    let x = n.x;
+    if (SLIP_MS - n.actionMs < SLIDE_MS) x = clamp(x + n.dir * SLIDE_PX_PER_S * pdt, area.x, maxX(area));
+    return actionMs <= 0 ? { ...n, x, anim: 'getup', actionMs: GETUP_MS } : { ...n, x, actionMs };
+  }
+  if (actionMs > 0) return { ...n, actionMs };
+  return canWalk ? { ...n, anim: 'walk', actionMs: span(WALK_MS, rand) } : rest(n, rand);
 }

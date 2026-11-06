@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  EAT_EVERY_MS,
+  EAT_MS,
+  GETUP_MS,
+  ICE_AHEAD_PX,
+  ICE_LIFE_MS,
+  SLIP_MS,
   clampToWorkArea,
   groundY,
   initialState,
@@ -17,7 +23,17 @@ const AREA: WorkArea = { x: 0, y: 25, w: 1440, h: 850 };
 const AREA2: WorkArea = { x: 1440, y: 0, w: 1920, h: 1055 };
 
 function input(over: Partial<PetInput> = {}): PetInput {
-  return { dtMs: 100, areas: [AREA], rand: () => 0.5, dragging: null, activity: false, mood: 'none', ...over };
+  return {
+    dtMs: 100,
+    areas: [AREA],
+    rand: () => 0.5,
+    dragging: null,
+    activity: false,
+    mood: 'none',
+    treat: false,
+    icy: false,
+    ...over,
+  };
 }
 
 function run(s: PetState, ms: number, over: Partial<PetInput> = {}): PetState {
@@ -298,5 +314,155 @@ describe('Claude mood', () => {
       const s = step(walking(), input({ mood, dragging: { x: 300, y: 200 } }));
       expect(s.anim).toBe('held');
     }
+  });
+});
+
+/** Steps for `ms`, collecting every anim seen in order (deduplicated runs). */
+function trace(s: PetState, ms: number, over: Partial<PetInput> = {}): { s: PetState; anims: string[] } {
+  const dt = over.dtMs ?? 100;
+  const anims: string[] = [];
+  for (let t = 0; t < ms; t += dt) {
+    s = step(s, input({ ...over, dtMs: dt }));
+    if (anims[anims.length - 1] !== s.anim) anims.push(s.anim);
+  }
+  return { s, anims };
+}
+
+describe('treat days (eating)', () => {
+  const resting = (over: Partial<PetState> = {}) => walking({ anim: 'idle', actionMs: 4000, ...over });
+
+  it('eats in place within the eat window (stubbed rand: earliest)', () => {
+    let s = resting();
+    let firstEat = -1;
+    for (let t = 0; t < EAT_EVERY_MS[0] + 5000; t += 100) {
+      const prevX = s.x;
+      s = step(s, input({ treat: true, activity: true, rand: () => 0 }));
+      if (s.anim === 'eat') {
+        if (firstEat < 0) firstEat = t;
+        expect(s.x).toBe(prevX);
+      }
+    }
+    expect(firstEat).toBeGreaterThanOrEqual(EAT_EVERY_MS[0] - 200);
+    expect(firstEat).toBeLessThanOrEqual(EAT_EVERY_MS[0] + 100);
+  });
+
+  it('eats for EAT_MS then goes back to idle life, and eats again later', () => {
+    const { anims } = trace(resting(), EAT_EVERY_MS[0] * 2 + EAT_MS[1] * 2, { treat: true, activity: true, rand: () => 0 });
+    const eats = anims.filter((a) => a === 'eat').length;
+    expect(eats).toBe(2);
+    expect(anims[anims.length - 1]).not.toBe('eat');
+  });
+
+  it('eats at most every EAT_EVERY_MS[1] with the latest rand', () => {
+    const { anims } = trace(resting(), EAT_EVERY_MS[1] - 1000, { treat: true, activity: true, rand: () => 0.999 });
+    expect(anims).not.toContain('eat');
+  });
+
+  it('never eats without a treat day', () => {
+    const { anims } = trace(resting(), 10 * 60_000, { activity: true, rand: () => 0, dtMs: 500 });
+    expect(anims).not.toContain('eat');
+  });
+
+  it('blocked: waves, never eats', () => {
+    const { anims } = trace(resting(), 10 * 60_000, { treat: true, mood: 'blocked', rand: () => 0, dtMs: 500 });
+    expect(anims).toEqual(['wave']);
+  });
+
+  it('a Claude mood interrupts eating', () => {
+    const eating = resting({ anim: 'eat', actionMs: 4000, eatInMs: 200_000 });
+    expect(step(eating, input({ treat: true, mood: 'blocked' })).anim).toBe('wave');
+    expect(step(eating, input({ treat: true, mood: 'happy' })).anim).toBe('happy');
+    expect(step(eating, input({ treat: true, mood: 'busy' })).anim).toBe('busy');
+    expect(step(eating, input({ treat: true, dragging: { x: 1, y: 1 } })).anim).toBe('held');
+  });
+
+  it('the day ending stops eating', () => {
+    const eating = resting({ anim: 'eat', actionMs: 4000, eatInMs: 200_000 });
+    expect(step(eating, input({ treat: false })).anim).not.toBe('eat');
+  });
+
+  it('asleep on a treat day: stays asleep, does not wake up to eat', () => {
+    const asleep = walking({ anim: 'sleep', actionMs: 0, idleMs: SLEEP_AFTER_MS + 1, eatInMs: 1 });
+    const { anims } = trace(asleep, 10 * 60_000, { treat: true, rand: () => 0, dtMs: 500 });
+    expect(anims).toEqual(['sleep']);
+  });
+
+  it('a pinned or stay-mode pet still eats (in place)', () => {
+    for (const over of [{ pinned: true, y: 300 }, { mode: 'stay' as const }]) {
+      const { anims } = trace(resting(over), EAT_EVERY_MS[0] + 1000, { treat: true, activity: true, rand: () => 0, dtMs: 500 });
+      expect(anims).toContain('eat');
+    }
+  });
+});
+
+describe('winter ice slip', () => {
+  const center = (s: PetState) => s.x + PET_W / 2;
+  const onIce = (over: Partial<PetState> = {}): PetState => {
+    const s = walking(over);
+    return { ...s, ice: { x: center(s) + s.dir * 3, ms: ICE_LIFE_MS, used: false } };
+  };
+
+  it('walking onto the ice slips in place-ish, gets up and walks on', () => {
+    let s = onIce();
+    s = run(s, 200, { icy: true });
+    expect(s.anim).toBe('slip');
+    expect(s.ice?.used).toBe(true);
+    const x = s.x;
+    const { s: after, anims } = trace(s, SLIP_MS + GETUP_MS + 200, { icy: true });
+    expect(anims.slice(0, 3)).toEqual(['slip', 'getup', 'walk']);
+    expect(after.x).toBeGreaterThan(x); // slid forward and walked on in the same direction
+    expect(after.dir).toBe(1);
+  });
+
+  it('the used ice fades away after the slip', () => {
+    const s = run(onIce(), 200, { icy: true });
+    const later = run(s, SLIP_MS + 3000, { icy: true });
+    expect(later.ice).toBeNull();
+  });
+
+  it('places ice just ahead while walking in winter (stubbed rand: earliest), then slips on it', () => {
+    let s = walking({ actionMs: 600_000 });
+    let placed: PetState['ice'] = null;
+    let slipped = false;
+    for (let t = 0; t < 7 * 60_000 && !slipped; t += 100) {
+      s = step(s, input({ icy: true, activity: true, rand: () => 0 }));
+      if (!placed && s.ice) {
+        placed = s.ice;
+        const d = (s.ice.x - center(s)) * s.dir;
+        expect(d).toBeGreaterThan(0);
+        expect(d).toBeLessThanOrEqual(ICE_AHEAD_PX);
+      }
+      if (s.anim === 'slip') slipped = true;
+    }
+    expect(placed).not.toBeNull();
+    expect(slipped).toBe(true);
+  });
+
+  it('never slips outside winter', () => {
+    const { anims, s } = trace(walking({ actionMs: 600_000 }), 10 * 60_000, { activity: true, rand: () => 0, dtMs: 200 });
+    expect(anims).not.toContain('slip');
+    expect(s.ice ?? null).toBeNull();
+    expect(step(onIce(), input({ icy: false })).anim).toBe('walk');
+  });
+
+  it('never slips while pinned or in stay mode (it does not walk)', () => {
+    for (const over of [{ pinned: true, y: 300 }, { mode: 'stay' as const }]) {
+      const { anims } = trace(onIce(over), 10 * 60_000, { icy: true, activity: true, rand: () => 0, dtMs: 200 });
+      expect(anims).not.toContain('slip');
+    }
+  });
+
+  it('Claude moods win: blocked waves, busy walks over the ice', () => {
+    expect(trace(onIce(), 60_000, { icy: true, mood: 'blocked' }).anims).toEqual(['wave']);
+    const busy = trace(onIce(), 1000, { icy: true, mood: 'busy' });
+    expect(busy.anims).not.toContain('slip');
+    const slipping = run(onIce(), 200, { icy: true });
+    expect(step(slipping, input({ icy: true, mood: 'blocked' })).anim).toBe('wave');
+    expect(step(slipping, input({ icy: true, dragging: { x: 1, y: 1 } })).anim).toBe('held');
+  });
+
+  it('sleep wins over a slip in progress', () => {
+    const slipping = { ...run(onIce(), 200, { icy: true }), idleMs: SLEEP_AFTER_MS - 50 };
+    expect(step(slipping, input({ icy: true })).anim).toBe('sleep');
   });
 });

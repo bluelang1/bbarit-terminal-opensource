@@ -147,6 +147,14 @@ describe('frameIndexAt', () => {
     expect(frameIndexAt(frames, 400)).toBe(0);
     expect(frameIndexAt([f(100)], 5000)).toBe(0);
   });
+
+  it('plays once and holds the last frame when loop is false', () => {
+    const frames = [f(100), f(300)];
+    expect(frameIndexAt(frames, 50, false)).toBe(0);
+    expect(frameIndexAt(frames, 150, false)).toBe(1);
+    expect(frameIndexAt(frames, 400, false)).toBe(1);
+    expect(frameIndexAt(frames, 99_999, false)).toBe(1);
+  });
 });
 
 describe('petMenuEntries', () => {
