@@ -3343,4 +3343,5 @@ export const it: Record<TranslationKey, string> = {
   'pet.bubble.done': 'Done',
   'pet.bubble.open': 'Open this tab',
   'pet.badge.unseen': 'Finished, not seen yet',
+  'pet.tour.end': 'End the character tour',
 };

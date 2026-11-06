@@ -27,8 +27,8 @@ export const ICE_FADE_MS = 1500;
 /** Slip (feet fly up, lies on its back) then get up. */
 export const SLIP_MS = 1900;
 export const GETUP_MS = 500;
-const SLIDE_MS = 300;
-const SLIDE_PX_PER_S = 50;
+export const SLIDE_MS = 300;
+export const SLIDE_PX_PER_S = 50;
 /** No room ahead for ice (near an edge): try again after this much walking. */
 const ICE_RETRY_MS = 10_000;
 

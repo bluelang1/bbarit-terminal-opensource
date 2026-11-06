@@ -11,6 +11,11 @@
 // wears shared accessories by its pack anchors, eats treats on treat days, slips on ice in
 // winter, and season particles fall inside the body box (drawn on the same canvas, so they
 // never take clicks and stop with the loop).
+// Character tour (Help > Character Tour, pet.rs start_pet_tour -> `pet-tour-start`): plays
+// every case scripted in src/pet/showcase.ts with a caption on top, then calls
+// `pet_tour_end` and returns to normal life. Clicking the caption or double-clicking the pet
+// ends it; its fake bubbles open nothing. Dev builds also play it each time the pet becomes
+// visible while localStorage['bbarit.pet.showcase'] = '1' (release builds ignore the key).
 // Design: docs/superpowers/specs/2026-11-06-desktop-pet-design.md.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -28,6 +33,7 @@ import {
   PET_W,
   SLIP_MS,
   clampToWorkArea,
+  groundY,
   iceAlpha,
   initialState,
   step,
@@ -69,6 +75,7 @@ import {
   type UserPackJson,
 } from '../pet/page';
 import { moodFor, type PetSummary } from '../pet/summary';
+import { showcaseAt, showcaseBubble, showcaseRequested, type ShowcaseView } from '../pet/showcase';
 import './PetPage.css';
 
 const TICK_MS = 83; // ~12 fps
@@ -86,6 +93,8 @@ const TAIL_TIP_GAP_PX = 0;
 const BUBBLE_LIFT_PX = (TAIL_ART.length - TAIL_OVERLAP) * ART_PX + TAIL_TIP_GAP_PX;
 const TAIL_W_PX = TAIL_ART[0].length * ART_PX;
 const TAIL_H_PX = TAIL_ART.length * ART_PX;
+/** Room for the tour caption above everything else while the tour runs. */
+const CAPTION_BAND_PX = 18;
 
 function bubbleKey(b: PetBubble | null): string {
   return b ? `${b.kind}|${b.terminalId}|${b.text}|${b.more}` : '';
@@ -141,6 +150,14 @@ type Runtime = {
   breath: BreathOrigin | null;
   /** The last paint had particles or ice, so the next one must clear them. */
   paintedLive: boolean;
+  /** Character tour: time played and the spot it started on (set on its first tick). */
+  tour: { elapsedMs: number; origin: { x: number; y: number } | null } | null;
+  /** What the tour shows this tick (calendar, fake summary, caption); null outside it. */
+  tourView: ShowcaseView | null;
+  /** Badge count on screen (real summary, or the tour's fake one). */
+  badge: number;
+  caption: string | null;
+  endTour: () => void;
   kick: () => void;
   persist: () => void;
   relayout: () => void;
@@ -152,6 +169,11 @@ function safeStorage(): Storage | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Debug builds only: localStorage['bbarit.pet.showcase'] = '1' (src/pet/showcase.ts). */
+function wantsShowcase(): boolean {
+  return import.meta.env.DEV && showcaseRequested(true, safeStorage());
 }
 
 /** Debug builds only: localStorage['bbarit.pet.debugDate'] = 'YYYY-MM-DD' (src/pet/calendar.ts petDate). */
@@ -178,6 +200,7 @@ export default function PetPage() {
   const [locale, setLocale] = useState<Locale>('en');
   const [bubble, setBubble] = useState<PetBubble | null>(null);
   const [unseenDone, setUnseenDone] = useState(0);
+  const [caption, setCaption] = useState<string | null>(null);
   // Pixel-art images for the bubble, tail and badges, rendered once (null without a canvas).
   const [artStyle] = useState(() =>
     petArtStyle(window.devicePixelRatio, () => document.createElement('canvas')),
@@ -221,6 +244,11 @@ export default function PetPage() {
       dizzy: false,
       breath: null,
       paintedLive: false,
+      tour: null,
+      tourView: null,
+      badge: 0,
+      caption: null,
+      endTour: () => {},
       kick: () => {},
       persist: () => {},
       relayout: () => {},
@@ -249,6 +277,9 @@ export default function PetPage() {
       r.calAt = performance.now();
       r.drawnKey = '';
     };
+
+    // The tour's calendar while it runs, else today's.
+    const cal = (): PetCalendar => r.tourView?.cal ?? r.cal;
 
     const loadConfigAndPack = async () => {
       if (!tauri) return;
@@ -296,7 +327,7 @@ export default function PetPage() {
       const idx = frameIndexAt(frames, r.animElapsed, !ONE_SHOT_ANIMS.has(anim));
       const frame = frames[idx];
       const flip = st.dir === -1;
-      const ids = accessoriesFor(r.cal, anim);
+      const ids = accessoriesFor(cal(), anim);
       const treat = ids.find((id) => ACCESSORIES[id].frames.length > 1);
       const bite = treat ? biteFrame(treat, r.animElapsed) : 0;
       // The ice lies on the ground: only drawn while the body box is on it.
@@ -318,7 +349,7 @@ export default function PetPage() {
       // Today's hat sticks out above the head: keep the bubble clear of it (packs with
       // head anchors only; others never draw it).
       const hasHead = framesFor(r.pack, 'idle')[0]?.anchors?.head !== undefined;
-      const rise = hasHead ? headRise(accessoriesFor(r.cal, 'idle')) : 0;
+      const rise = hasHead ? headRise(accessoriesFor(cal(), 'idle')) : 0;
       const headInset = (packHeadroomRows(r.pack) - rise) * scale;
       if (r.sprite.w !== pw || r.sprite.h !== ph || r.sprite.headInset !== headInset) {
         r.sprite = { w: pw, h: ph, headInset };
@@ -363,7 +394,7 @@ export default function PetPage() {
       while (r.spawnAcc >= SPAWN_EVERY_MS) {
         r.spawnAcc -= SPAWN_EVERY_MS;
         if (r.particles.length >= MAX_PARTICLES) continue;
-        const p = spawnFor(r.cal, Math.random, PET_W, PET_H, r.breath);
+        const p = spawnFor(cal(), Math.random, PET_W, PET_H, r.breath);
         if (p) r.particles.push(p);
       }
     };
@@ -408,7 +439,12 @@ export default function PetPage() {
     const move = () => {
       if (!r.state) return;
       const area = clampToWorkArea(r.state.x, r.state.y, r.areas).area;
-      const l = petWindowLayout(r.state, r.bubble ? { spriteH: r.sprite.h - r.sprite.headInset } : null, area);
+      const l = petWindowLayout(
+        r.state,
+        r.bubble ? { spriteH: r.sprite.h - r.sprite.headInset } : null,
+        area,
+        r.tour ? CAPTION_BAND_PX : 0,
+      );
       r.layout = l;
       const posChanged = !r.lastPos || r.lastPos.x !== l.x || r.lastPos.y !== l.y;
       const sizeChanged = !r.lastSize || r.lastSize.w !== l.w || r.lastSize.h !== l.h;
@@ -430,12 +466,97 @@ export default function PetPage() {
       applyDom(l);
     };
 
-    // Bubble / badge from the latest summary; React state only changes when they do.
+    // Bubble / badge from the latest summary (the tour's fake one while it runs); React
+    // state only changes when they do.
     const refreshBubble = () => {
-      const next = petBubble(r.summary, Date.now(), r.lastDone, r.labels);
+      const v = r.tourView;
+      const next = v ? showcaseBubble(v, r.labels) : petBubble(r.summary, Date.now(), r.lastDone, r.labels);
+      const badge = v ? v.summary.unseenDone : r.summary.unseenDone;
+      if (badge !== r.badge) {
+        r.badge = badge;
+        setUnseenDone(badge);
+      }
       if (bubbleKey(next) === bubbleKey(r.bubble)) return;
       r.bubble = next;
       setBubble(next);
+    };
+
+    const setTourCaption = (next: string | null) => {
+      if (next === r.caption) return;
+      r.caption = next;
+      setCaption(next);
+    };
+
+    // (Re)start the tour from its first step, at `spot` (window top-left, logical px) when
+    // the host gives one. Before the first state exists the page asks pet_tour_active itself.
+    const startTour = (spot: { x: number; y: number } | null) => {
+      if (!r.state) return;
+      if (spot && Number.isFinite(spot.x) && Number.isFinite(spot.y)) {
+        r.state = { ...r.state, x: spot.x, y: spot.y, pinned: false, anim: 'idle', vy: 0, actionMs: 0, ice: null };
+      }
+      r.tour = { elapsedMs: 0, origin: null };
+      r.tourView = null;
+      r.drag = null;
+      setDragging(false);
+      r.activity = true;
+      start();
+      r.kick();
+    };
+
+    // Back to normal life on the tour's starting spot (also when the owner ends it early).
+    const endTour = () => {
+      const tour = r.tour;
+      if (!tour) return;
+      r.tour = null;
+      r.tourView = null;
+      setTourCaption(null);
+      if (r.state && tour.origin) {
+        r.state = { ...r.state, anim: 'idle', x: tour.origin.x, y: tour.origin.y, vy: 0, actionMs: 0, ice: null };
+      }
+      r.animElapsed = 0;
+      r.activity = true;
+      r.drawnKey = '';
+      refreshBubble();
+      r.kick();
+      // The host drops its "show for the tour" override and re-applies the normal rules.
+      if (tauri) void invoke('pet_tour_end').catch((e) => console.warn('[pet] pet_tour_end failed:', e));
+    };
+    r.endTour = endTour;
+
+    // One tour tick: pose the pet from the script instead of stepping the engine. False
+    // when no tour runs (or it just ended), so the caller steps the engine as usual.
+    const tourTick = (dt: number): boolean => {
+      const tour = r.tour;
+      const st = r.state;
+      if (!tour || !st) return false;
+      // The owner grabbed the pet: the tour is over.
+      if (r.drag?.active) {
+        endTour();
+        return false;
+      }
+      tour.elapsedMs += dt;
+      const v = showcaseAt(tour.elapsedMs);
+      if (!v) {
+        endTour();
+        return false;
+      }
+      const area = clampToWorkArea(st.x, st.y, r.areas).area;
+      if (!tour.origin) {
+        tour.origin = { x: st.x, y: st.pinned ? st.y : Math.max(area.y, groundY(area)) };
+      }
+      const o = tour.origin;
+      const x = Math.min(Math.max(o.x + v.dx, area.x), Math.max(area.x, area.x + area.w - PET_W));
+      const iceX = o.x + PET_W / 2;
+      const ice = v.ice ? { x: iceX + v.ice.dx, ms: v.ice.ms, used: v.ice.used } : null;
+      const restart = v.index !== r.tourView?.index || v.anim !== st.anim;
+      r.state = { ...st, anim: v.anim, dir: v.dir, x, y: o.y - v.dy, vy: 0, actionMs: 0, idleMs: 0, ice };
+      r.animElapsed = restart ? 0 : r.animElapsed + dt;
+      if (v.cal && (v.cal.season !== r.tourView?.cal?.season || v.cal.special !== r.tourView?.cal?.special)) {
+        r.drawnKey = '';
+      }
+      r.tourView = v;
+      setTourCaption(v.caption);
+      return true;
     };
 
     const nextDelay = (): number => {
@@ -458,6 +579,8 @@ export default function PetPage() {
 
       if (r.menuOpen) {
         r.animElapsed += dt;
+      } else if (tourTick(dt)) {
+        // posed by the showcase script
       } else {
         const prevAnim = r.state.anim;
         r.state = step(r.state, {
@@ -478,7 +601,7 @@ export default function PetPage() {
       draw();
       move();
       const settled = r.state.anim !== 'held' && r.state.anim !== 'fall';
-      if (settled && now - r.savedAt > SAVE_EVERY_MS) {
+      if (settled && !r.tour && now - r.savedAt > SAVE_EVERY_MS) {
         r.savedAt = now;
         persist();
       }
@@ -524,7 +647,6 @@ export default function PetPage() {
           r.summary = { ...summary, unseenDone: Number(summary.unseenDone) || 0 };
           // A turn that finished while the pet was away is not celebrated later.
           if (doneEvent && r.visible) r.lastDone = { atMs: Date.now(), event: doneEvent };
-          setUnseenDone(r.summary.unseenDone);
           refreshBubble();
           r.kick();
         })
@@ -543,12 +665,23 @@ export default function PetPage() {
             refreshCalendar();
             void loadConfigAndPack();
             void refreshAreas();
+            if (wantsShowcase()) startTour(null);
             start();
           } else {
             r.drag = null;
             setDragging(false);
+            // Hidden mid-tour (the owner hid the pet, main closed): the tour is over.
+            endTour();
             stop();
           }
+        })
+      : null;
+
+    type TourStart = { spot: { x: number; y: number } | null };
+    const unlistenTour = tauri
+      ? listen<TourStart>('pet-tour-start', (e) => {
+          if (disposed) return;
+          startTour(e.payload?.spot ?? null);
         })
       : null;
 
@@ -567,6 +700,19 @@ export default function PetPage() {
       if (disposed) return;
       const saved = loadSavedPos(safeStorage());
       r.state = initialState(r.areas, { ...saved, mode: r.mode });
+      // Loaded for a tour (its start event may have fired before the listener existed).
+      let tour: TourStart | null = null;
+      if (tauri) {
+        await unlistenTour?.catch(() => undefined);
+        try {
+          tour = await invoke<TourStart | null>('pet_tour_active');
+        } catch (e) {
+          console.warn('[pet] pet_tour_active failed:', e);
+        }
+      }
+      if (disposed) return;
+      if (tour) startTour(tour.spot ?? null);
+      else if (wantsShowcase()) startTour(null);
       start();
     })();
 
@@ -577,6 +723,7 @@ export default function PetPage() {
       window.removeEventListener('pagehide', persist);
       void unlistenVisibility?.then((un) => un()).catch(() => {});
       void unlistenSummary?.then((un) => un()).catch(() => {});
+      void unlistenTour?.then((un) => un()).catch(() => {});
       if (rtRef.current === r) rtRef.current = null;
     };
   }, []);
@@ -643,10 +790,21 @@ export default function PetPage() {
     void invoke('pet_open_terminal', { terminalId }).catch((e) => console.warn('[pet] pet_open_terminal failed:', e));
   };
 
-  // Blocked tab first, then the latest unseen done, else main's last active tab.
+  // Blocked tab first, then the latest unseen done, else main's last active tab. During
+  // the tour it only ends the tour (its tabs are fake).
   const onDoubleClick = () => {
     const r = rtRef.current;
+    if (r?.tour) {
+      r.endTour();
+      return;
+    }
     openTerminal(r ? petOpenTarget(r.summary) : null);
+  };
+
+  // Fake tour bubbles open nothing.
+  const onBubbleClick = (terminalId: string) => {
+    if (rtRef.current?.tour) return;
+    openTerminal(terminalId);
   };
 
   const togglePin = () => {
@@ -728,7 +886,7 @@ export default function PetPage() {
             type="button"
             className={`pet-bubble ${bubble.kind}`}
             title={t('pet.bubble.open')}
-            onClick={() => openTerminal(bubble.terminalId)}
+            onClick={() => onBubbleClick(bubble.terminalId)}
           >
             <span className="pet-bubble-text">{bubble.text}</span>
             {bubble.more > 0 && <span className="pet-bubble-more">+{bubble.more}</span>}
@@ -740,6 +898,11 @@ export default function PetPage() {
             aria-hidden="true"
           />
         </>
+      )}
+      {caption && (
+        <button type="button" className="pet-caption" title={t('pet.tour.end')} onClick={() => rtRef.current?.endTour()}>
+          {caption}
+        </button>
       )}
       {unseenDone > 0 && (
         <div ref={badgeRef} className="pet-badge" title={t('pet.badge.unseen')}>

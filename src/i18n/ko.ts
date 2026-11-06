@@ -3401,4 +3401,5 @@ export const ko: Record<TranslationKey, string> = {
   'pet.bubble.done': '완료',
   'pet.bubble.open': '이 탭 열기',
   'pet.badge.unseen': '확인하지 않은 완료',
+  'pet.tour.end': '캐릭터 둘러보기 끝내기',
 };

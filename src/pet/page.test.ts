@@ -248,6 +248,16 @@ describe('petWindowLayout', () => {
     expect(l.bodyTop).toBe(l.h - PET_H);
   });
 
+  it('a top band grows the window upward and keeps the body on the same screen spot', () => {
+    const plain = petWindowLayout({ x: 500, y: 600 }, null, AREA, 18);
+    expect(plain).toEqual({ x: 500, y: 582, w: PET_W, h: PET_H + 18, bodyLeft: 0, bodyTop: 18 });
+    const withBubble = petWindowLayout({ x: 500, y: 600 }, { spriteH: PET_H }, AREA, 18);
+    const noBand = petWindowLayout({ x: 500, y: 600 }, { spriteH: PET_H }, AREA);
+    expect(withBubble.h).toBe(noBand.h + 18);
+    expect(withBubble.y + withBubble.bodyTop).toBe(600);
+    expect(withBubble.x + withBubble.bodyLeft).toBe(500);
+  });
+
   it('keeps the wider window inside the work area at the screen edges', () => {
     const left = petWindowLayout({ x: 0, y: 600 }, { spriteH: 96 }, AREA);
     expect(left.x).toBe(0);

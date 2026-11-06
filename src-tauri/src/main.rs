@@ -10184,8 +10184,17 @@ fn main() {
                     .paste()
                     .item(&select_all)
                     .build()?;
+                // Desktop pet character tour (pet::start_pet_tour, src/pet/showcase.ts).
+                let pet_tour = MenuItemBuilder::with_id(
+                    "pet-tour",
+                    if ko { "캐릭터 둘러보기" } else { "Character Tour" },
+                )
+                .build(app)?;
+                let help_menu = SubmenuBuilder::new(app, if ko { "도움말" } else { "Help" })
+                    .item(&pet_tour)
+                    .build()?;
                 let menu = MenuBuilder::new(app)
-                    .items(&[&app_menu, &edit_menu])
+                    .items(&[&app_menu, &edit_menu, &help_menu])
                     .build()?;
                 app.set_menu(menu)?;
                 app.on_menu_event(|app, event| {
@@ -10193,6 +10202,8 @@ fn main() {
                         let _ = app.emit("menu-select-all", ());
                     } else if event.id().as_ref() == "quit-kill-terminals" {
                         request_quit_kill_terminals(app);
+                    } else if event.id().as_ref() == "pet-tour" {
+                        pet::start_pet_tour(app);
                     }
                 });
             }
@@ -10577,6 +10588,8 @@ fn main() {
             pet::pet_open_main,
             pet::pet_open_terminal,
             pet::pet_hide,
+            pet::pet_tour_active,
+            pet::pet_tour_end,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

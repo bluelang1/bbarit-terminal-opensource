@@ -3399,6 +3399,7 @@ export const en = {
   'pet.bubble.done': 'Done',
   'pet.bubble.open': 'Open this tab',
   'pet.badge.unseen': 'Finished, not seen yet',
+  'pet.tour.end': 'End the character tour',
 };
 
 export type TranslationKey = keyof typeof en;

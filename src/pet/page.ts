@@ -209,20 +209,23 @@ export type PetWindowLayout = { x: number; y: number; w: number; h: number; body
  * Window rect for a body box at (body.x, body.y) (the engine's coordinates). Without a
  * bubble the window is the body box. With one it widens to BUBBLE_WIN_W (kept inside the
  * work area) and grows upward when the sprite leaves less than BUBBLE_BAND_H of headroom
- * (spriteH = body box bottom to the character's head top);
+ * (spriteH = body box bottom to the character's head top); `topBand` px more on top
+ * (the dev showcase caption, src/pet/showcase.ts).
  * bodyLeft/bodyTop place the body box inside the window so it never moves on screen.
  */
 export function petWindowLayout(
   body: { x: number; y: number },
   bubble: { spriteH: number } | null,
   area: WorkArea,
+  topBand = 0,
 ): PetWindowLayout {
   const bx = Math.round(body.x);
   const by = Math.round(body.y);
-  if (!bubble) return { x: bx, y: by, w: PET_W, h: PET_H, bodyLeft: 0, bodyTop: 0 };
+  const band = Math.max(0, Math.round(topBand));
+  if (!bubble) return { x: bx, y: by - band, w: PET_W, h: PET_H + band, bodyLeft: 0, bodyTop: band };
   const w = BUBBLE_WIN_W;
   const headroom = Math.max(0, PET_H - bubble.spriteH);
-  const h = PET_H + Math.max(0, BUBBLE_BAND_H - headroom);
+  const h = PET_H + Math.max(0, BUBBLE_BAND_H - headroom) + band;
   let x = bx - Math.round((w - PET_W) / 2);
   if (area.w >= w) x = Math.min(Math.max(x, Math.round(area.x)), Math.round(area.x + area.w) - w);
   // Never cut the body off: the window always covers the whole body box.

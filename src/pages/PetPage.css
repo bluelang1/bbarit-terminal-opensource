@@ -147,3 +147,38 @@
   background: none;
   image-rendering: pixelated;
 }
+
+/* Character tour caption (src/pet/showcase.ts): a small dark pixel chip at the top of the
+   window, in the band PetPage adds above everything while the tour runs. Click ends it. */
+.pet-caption {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 4px);
+  margin: 0;
+  padding: 0 4px;
+  border: 1px solid var(--pet-ink);
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font: 700 10px/12px -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pet-caption:focus {
+  outline: none;
+}
+
+.pet-art .pet-caption {
+  padding: 0 2px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-dark-bi);
+  background: none;
+  image-rendering: pixelated;
+}
