@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { buildPetSummary, moodFor, summaryEquals, type PetSummary, type PetSummaryRow } from './summary';
+import {
+  buildPetSummary,
+  isAgentCli,
+  moodFor,
+  newPetFeedMemory,
+  petFeedTick,
+  summaryEquals,
+  type PetFeedRow,
+  type PetSummary,
+  type PetSummaryRow,
+} from './summary';
 
 function row(over: Partial<PetSummaryRow> = {}): PetSummaryRow {
   return {
@@ -59,7 +69,77 @@ describe('buildPetSummary', () => {
       row({ terminalId: 'idle', state: 'idle' }),
       row({ terminalId: 'shell', state: 'done', turn: 3, seenTurn: 0, agentTab: false, reported7501: false }),
     ]);
-    expect(s).toEqual({ blocked: [], working: [], unseenDone: 2 });
+    expect(s).toMatchObject({ blocked: [], working: [], unseenDone: 2 });
+  });
+
+  it('latestDone is the most recently finished unseen tab', () => {
+    const s = buildPetSummary([
+      row({ terminalId: 'old', state: 'done', turn: 2, seenTurn: 1, since: 100 }),
+      row({ terminalId: 'new', state: 'done', turn: 2, seenTurn: 1, since: 900 }),
+      row({ terminalId: 'seen', state: 'done', turn: 2, seenTurn: 2, since: 5000 }),
+    ]);
+    expect(s.latestDone?.terminalId).toBe('new');
+    expect(buildPetSummary([row()]).latestDone).toBeUndefined();
+  });
+});
+
+describe('isAgentCli', () => {
+  it('is true for agent CLIs and false for shells / unknown', () => {
+    expect(isAgentCli('claude')).toBe(true);
+    expect(isAgentCli('codex')).toBe(true);
+    expect(isAgentCli('shell')).toBe(false);
+    expect(isAgentCli(undefined)).toBe(false);
+  });
+});
+
+describe('petFeedTick', () => {
+  function feed(over: Partial<PetFeedRow> = {}): PetFeedRow {
+    const { since: _since, ...rest } = row(over as Partial<PetSummaryRow>);
+    return rest;
+  }
+
+  it('since is when a tab entered its state and survives unchanged ticks', () => {
+    const mem = newPetFeedMemory();
+    petFeedTick(mem, [feed({ terminalId: 'a', state: 'working' })], 1000);
+    petFeedTick(mem, [feed({ terminalId: 'a', state: 'blocked' }), feed({ terminalId: 'b', state: 'blocked' })], 2000);
+    const r = petFeedTick(mem, [feed({ terminalId: 'b', state: 'blocked' }), feed({ terminalId: 'a', state: 'blocked' })], 3000);
+    expect(r.summary.blocked.map((t) => [t.terminalId, t.since])).toEqual([['a', 2000], ['b', 2000]]);
+  });
+
+  it('a closed tab drops out of the summary and the memory', () => {
+    const mem = newPetFeedMemory();
+    petFeedTick(mem, [feed({ terminalId: 'a', state: 'blocked' })], 1000);
+    const r = petFeedTick(mem, [], 2000);
+    expect(r.summary.blocked).toEqual([]);
+    expect(mem.since.size).toBe(0);
+    expect(mem.doneTurn.size).toBe(0);
+  });
+
+  it('fires doneEvent once when a reporting tab turns done, unseen', () => {
+    const mem = newPetFeedMemory();
+    expect(petFeedTick(mem, [feed({ state: 'working', turn: 1, seenTurn: 0 })], 1000).doneEvent).toBeUndefined();
+    const r = petFeedTick(mem, [feed({ state: 'done', turn: 1, seenTurn: 0, tab: 'T' })], 2000);
+    expect(r.doneEvent).toEqual({ terminalId: 't1', turn: 1, project: 'Proj', tab: 'T' });
+    expect(petFeedTick(mem, [feed({ state: 'done', turn: 1, seenTurn: 0 })], 3000).doneEvent).toBeUndefined();
+    petFeedTick(mem, [feed({ state: 'working', turn: 2, seenTurn: 1 })], 4000);
+    expect(petFeedTick(mem, [feed({ state: 'done', turn: 2, seenTurn: 1 })], 5000).doneEvent?.turn).toBe(2);
+  });
+
+  it('no doneEvent for a tab first seen already done (startup replay), seen turns, detached or unreported tabs', () => {
+    const mem = newPetFeedMemory();
+    expect(petFeedTick(mem, [feed({ state: 'done', turn: 4, seenTurn: 0 })], 1000).doneEvent).toBeUndefined();
+    const m2 = newPetFeedMemory();
+    petFeedTick(m2, [feed({ terminalId: 's', state: 'working' }), feed({ terminalId: 'd', state: 'working', detached: true }), feed({ terminalId: 'u', state: 'working', reported7501: false })], 1000);
+    const r = petFeedTick(
+      m2,
+      [
+        feed({ terminalId: 's', state: 'done', turn: 1, seenTurn: 1 }),
+        feed({ terminalId: 'd', state: 'done', turn: 1, seenTurn: 0, detached: true }),
+        feed({ terminalId: 'u', state: 'done', turn: 1, seenTurn: 0, reported7501: false }),
+      ],
+      2000,
+    );
+    expect(r.doneEvent).toBeUndefined();
   });
 });
 

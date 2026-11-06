@@ -9,7 +9,14 @@ import {
   monitorsToAreas,
   petMenuEntries,
   savePos,
+  petBubble,
+  petOpenTarget,
+  petWindowLayout,
+  BUBBLE_TEXT_MAX,
+  BUBBLE_WIN_W,
 } from './page';
+import { PET_H, PET_W } from './engine';
+import type { PetSummary, PetTab } from './summary';
 
 const userJson = (name: string, extra: Record<string, unknown> = {}) =>
   JSON.stringify({ ...OCTO_PACK, id: 'ignored', name, ...extra });
@@ -152,5 +159,76 @@ describe('petMenuEntries', () => {
 
   it('labels the toggle by the current pin state', () => {
     expect(petMenuEntries(true)[1]).toEqual({ id: 'pet-menu-pin', action: 'togglePin', labelKey: 'pet.menu.unpin' });
+  });
+});
+
+const tab = (id: string, over: Partial<PetTab> = {}): PetTab => ({ terminalId: id, projectId: 'p', project: 'Proj', tab: `Tab ${id}`, since: 0, ...over });
+const NONE: PetSummary = { blocked: [], working: [], unseenDone: 0 };
+const LABELS = { needsApproval: 'needs approval', done: 'Done' };
+
+describe('petBubble', () => {
+  it('blocked: "<project> · <tab>: needs approval" for the oldest, +N for the rest', () => {
+    const s: PetSummary = { ...NONE, blocked: [tab('a'), tab('b'), tab('c')] };
+    expect(petBubble(s, 0, null, LABELS)).toEqual({ kind: 'blocked', terminalId: 'a', text: 'Proj · Tab a: needs approval', more: 2 });
+    expect(petBubble({ ...NONE, blocked: [tab('a')] }, 0, null, LABELS)?.more).toBe(0);
+  });
+
+  it('truncates long text to one line with an ellipsis', () => {
+    const s: PetSummary = { ...NONE, blocked: [tab('a', { project: '아주아주긴프로젝트이름입니다정말로', tab: '클로드 새 세션' })] };
+    const text = petBubble(s, 0, null, { needsApproval: '승인 필요', done: '완료' })!.text;
+    expect(Array.from(text).length).toBe(BUBBLE_TEXT_MAX + 1);
+    expect(text.endsWith('…')).toBe(true);
+  });
+
+  it('done: "Done · <tab>" for 10 s after the done event, then nothing', () => {
+    const done = { atMs: 1000, event: { terminalId: 'd', turn: 1, project: 'Proj', tab: 'Claude' } };
+    expect(petBubble(NONE, 10_999, done, LABELS)).toEqual({ kind: 'done', terminalId: 'd', text: 'Done · Claude', more: 0 });
+    expect(petBubble(NONE, 11_001, done, LABELS)).toBeNull();
+  });
+
+  it('blocked wins over a fresh done', () => {
+    const done = { atMs: 1000, event: { terminalId: 'd', turn: 1, project: 'Proj', tab: 'Claude' } };
+    expect(petBubble({ ...NONE, blocked: [tab('a')] }, 2000, done, LABELS)?.kind).toBe('blocked');
+  });
+});
+
+describe('petOpenTarget', () => {
+  it('first blocked, else the latest unseen done, else none', () => {
+    expect(petOpenTarget({ ...NONE, blocked: [tab('a'), tab('b')], latestDone: tab('d') })).toBe('a');
+    expect(petOpenTarget({ ...NONE, unseenDone: 1, latestDone: tab('d') })).toBe('d');
+    expect(petOpenTarget(NONE)).toBeNull();
+  });
+});
+
+describe('petWindowLayout', () => {
+  const AREA = { x: 0, y: 25, w: 1440, h: 850 };
+
+  it('without a bubble the window is the body box', () => {
+    expect(petWindowLayout({ x: 500, y: 600 }, null, AREA)).toEqual({ x: 500, y: 600, w: PET_W, h: PET_H, bodyLeft: 0, bodyTop: 0 });
+  });
+
+  it('with a bubble the window widens around the body and the body stays on the same screen spot', () => {
+    const l = petWindowLayout({ x: 500, y: 600 }, { spriteH: 96 }, AREA);
+    expect(l.w).toBe(BUBBLE_WIN_W);
+    expect(l.h).toBe(PET_H); // 64 px of headroom above a 96 px body fits the bubble
+    expect(l.x + l.bodyLeft).toBe(500);
+    expect(l.y + l.bodyTop).toBe(600);
+    expect(l.bodyLeft).toBe((BUBBLE_WIN_W - PET_W) / 2);
+  });
+
+  it('grows upward for a tall body, keeping the body anchored', () => {
+    const l = petWindowLayout({ x: 500, y: 600 }, { spriteH: PET_H }, AREA);
+    expect(l.h).toBeGreaterThan(PET_H);
+    expect(l.y + l.bodyTop).toBe(600);
+    expect(l.bodyTop).toBe(l.h - PET_H);
+  });
+
+  it('keeps the wider window inside the work area at the screen edges', () => {
+    const left = petWindowLayout({ x: 0, y: 600 }, { spriteH: 96 }, AREA);
+    expect(left.x).toBe(0);
+    expect(left.bodyLeft).toBe(0);
+    const right = petWindowLayout({ x: AREA.w - PET_W, y: 600 }, { spriteH: 96 }, AREA);
+    expect(right.x + right.w).toBe(AREA.w);
+    expect(right.x + right.bodyLeft).toBe(AREA.w - PET_W);
   });
 });

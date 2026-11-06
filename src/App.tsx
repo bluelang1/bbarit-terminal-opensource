@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef, startTransition, useSyncExternalStore, useLayoutEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
-import { listen as tauriListen, emit as tauriEmit } from '@tauri-apps/api/event';
+import { listen as tauriListen, emit as tauriEmit, emitTo as tauriEmitTo } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { listenNativeDragDrop } from './utils/nativeDragDrop';
 import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi';
@@ -182,6 +182,7 @@ import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning } from './terminal/busyAgentTabs';
+import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
 import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
@@ -6419,6 +6420,58 @@ Office project scaffold created by BBARIT Terminal.
     workTargetCycleIndexRef.current = (index + 1) % history.length;
     completedTaskCycleIndexRef.current = workTargetCycleIndexRef.current;
     return openTaskCompleteTarget(target, false, true);
+  }, [openTaskCompleteTarget]);
+
+  // ── Desktop pet feed (src/pet/summary.ts, docs/superpowers/specs/2026-11-06-desktop-pet-design.md) ──
+  // This window keeps running while hidden/minimized, so it sends the pet window a compact
+  // Claude summary on change (plus a doneEvent once per finished turn) and again when the
+  // pet shows or asks. Popped-out tabs are left out; nothing is ever written to a PTY.
+  const petFeedMemoryRef = useRef(newPetFeedMemory());
+  const petSummaryRef = useRef<PetSummary>({ blocked: [], working: [], unseenDone: 0 });
+  useEffect(() => {
+    if (!isTauri()) return;
+    const rows: PetFeedRow[] = [];
+    for (const p of projects) {
+      for (const tm of p.terminals) {
+        const e = agentStatus.get(tm.id);
+        rows.push({
+          terminalId: tm.id,
+          projectId: p.id,
+          project: p.displayName || p.name || '',
+          tab: tm.name || '',
+          state: e ? e.state : busyTerminals.has(tm.id) ? 'working' : 'idle',
+          turn: e?.turn ?? 0,
+          seenTurn: e?.seenTurn ?? 0,
+          agentTab: isAgentCli(tm.cliType),
+          reported7501: !!e,
+          detached: detachedTerminalIds.has(tm.id),
+        });
+      }
+    }
+    const { summary, doneEvent } = petFeedTick(petFeedMemoryRef.current, rows, Date.now());
+    if (!doneEvent && summaryEquals(summary, petSummaryRef.current)) return;
+    petSummaryRef.current = summary;
+    void tauriEmitTo('pet', 'pet-summary', doneEvent ? { ...summary, doneEvent } : summary).catch(() => {});
+  }, [projects, agentStatus, busyTerminals, detachedTerminalIds]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const resend = () => { void tauriEmitTo('pet', 'pet-summary', petSummaryRef.current).catch(() => {}); };
+    // pet-visibility is emitted to the pet window; this window's listener (any target) hears it too.
+    const unVisibility = tauriListen<{ visible?: boolean }>('pet-visibility', (e) => { if (e.payload?.visible) resend(); });
+    // The pet page asks once its listener is attached (its first load can miss pet-visibility).
+    const unRequest = tauriListen('pet-summary-request', resend);
+    // pet_open_terminal (pet.rs) already showed and focused this window: switch to the tab
+    // the same way a toast click does.
+    const unFocus = tauriListen<{ terminalId?: string }>('pet-focus-terminal', (e) => {
+      const terminalId = e.payload?.terminalId;
+      if (!terminalId) return;
+      const project = projectsRef.current.find((p) => p.terminals.some((tm) => tm.id === terminalId));
+      if (!project) return;
+      openTaskCompleteTarget({ id: `pet-focus:${terminalId}`, projectId: project.id, terminalId, title: '' }, false);
+    });
+    return () => {
+      for (const un of [unVisibility, unRequest, unFocus]) void un.then((fn) => fn()).catch(() => {});
+    };
   }, [openTaskCompleteTarget]);
 
   const isPhysicalPositionOverEditor = useCallback((pos: { x: number; y: number }) => {

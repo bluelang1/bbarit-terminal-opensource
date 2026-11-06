@@ -18,6 +18,8 @@ pub const PET_LABEL: &str = "pet";
 const MAIN_LABEL: &str = "main";
 const PET_SIZE: f64 = 160.0;
 const PET_VISIBILITY_EVENT: &str = "pet-visibility";
+/// Pet -> main: switch to this tab (App.tsx listens and reuses the toast-click path).
+const PET_FOCUS_TERMINAL_EVENT: &str = "pet-focus-terminal";
 
 /// The owner hid the pet from its menu; stays hidden until the main window is shown again.
 static PET_SUPPRESSED: AtomicBool = AtomicBool::new(false);
@@ -34,6 +36,12 @@ pub struct UserPack {
 #[derive(Clone, Serialize)]
 struct PetVisibility {
     visible: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetFocusTerminal {
+    terminal_id: String,
 }
 
 /// The pet shows when it is enabled and the main window is away (hidden or minimized).
@@ -236,6 +244,20 @@ pub fn pet_open_main(app: AppHandle) {
     set_pet_visible(&app, false);
 }
 
+/// Pet double-click / bubble click: bring main back (as `pet_open_main`) and, with a tab
+/// id, ask main to switch to that tab. `None` leaves main on its last active tab.
+#[tauri::command(async)]
+pub fn pet_open_terminal(app: AppHandle, terminal_id: Option<String>) {
+    pet_open_main(app.clone());
+    if let Some(terminal_id) = terminal_id.filter(|id| !id.is_empty()) {
+        let _ = app.emit_to(
+            MAIN_LABEL,
+            PET_FOCUS_TERMINAL_EVENT,
+            PetFocusTerminal { terminal_id },
+        );
+    }
+}
+
 #[tauri::command(async)]
 pub fn pet_hide(app: AppHandle) {
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -274,6 +296,12 @@ mod tests {
         let packs = read_user_packs(&dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(packs, vec![UserPack { id: "a".into(), json: "{}".into() }]);
+    }
+
+    #[test]
+    fn pet_focus_terminal_payload_is_camel_case() {
+        let v = serde_json::to_value(PetFocusTerminal { terminal_id: "t-1".into() }).unwrap();
+        assert_eq!(v, json!({"terminalId": "t-1"}));
     }
 
     #[test]

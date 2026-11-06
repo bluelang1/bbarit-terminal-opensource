@@ -2,15 +2,22 @@
    so it applies before this lazy chunk loads. */
 
 .pet-root {
+  --pet-ink: #1b1b1f;
+  --pet-paper: #ffffff;
   position: relative;
   width: 100vw;
   height: 100vh;
+  overflow: hidden;
 }
 
+/* The body box (PET_W x PET_H); PetPage places it inside the window (wider while a bubble shows). */
 .pet-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
   display: block;
-  width: 100%;
-  height: 100%;
+  width: 160px;
+  height: 160px;
   image-rendering: pixelated;
   cursor: grab;
   touch-action: none;
@@ -18,4 +25,107 @@
 
 .pet-canvas.dragging {
   cursor: grabbing;
+}
+
+/* Pixel speech bubble: white fill, 1px dark outline with notched (pixel) corners, plus a
+   1px white halo outside it so the outline also reads on a dark desktop. Fixed colors:
+   the desktop behind the pet decides light or dark, not the app theme. */
+.pet-bubble {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 292px;
+  margin: 0;
+  padding: 3px 6px;
+  border: 0;
+  border-radius: 0;
+  background: var(--pet-paper);
+  color: var(--pet-ink);
+  font: 600 11px/14px -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow:
+    0 -1px 0 0 var(--pet-ink),
+    0 1px 0 0 var(--pet-ink),
+    -1px 0 0 0 var(--pet-ink),
+    1px 0 0 0 var(--pet-ink),
+    0 -2px 0 0 var(--pet-paper),
+    0 2px 0 0 var(--pet-paper),
+    -2px 0 0 0 var(--pet-paper),
+    2px 0 0 0 var(--pet-paper);
+  -webkit-font-smoothing: antialiased;
+}
+
+.pet-bubble:focus {
+  outline: none;
+}
+
+.pet-bubble-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pet-bubble-more {
+  flex: none;
+  padding: 0 3px;
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.pet-bubble.blocked .pet-bubble-text::before {
+  content: '!';
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 3px;
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.pet-bubble-tail {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 10px;
+  height: 5px;
+  line-height: 0;
+  pointer-events: none;
+}
+
+.pet-bubble-tail svg {
+  display: block;
+}
+
+.pet-px-line {
+  fill: var(--pet-ink);
+}
+
+.pet-px-fill {
+  fill: var(--pet-paper);
+}
+
+/* Unseen finished turns: small pixel count badge at the sprite's top-right. */
+.pet-badge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  min-width: 9px;
+  height: 11px;
+  padding: 0 2px;
+  background: var(--pet-paper);
+  color: var(--pet-ink);
+  font: 700 9px/11px ui-monospace, Menlo, monospace;
+  text-align: center;
+  pointer-events: none;
+  box-shadow:
+    0 -1px 0 0 var(--pet-ink),
+    0 1px 0 0 var(--pet-ink),
+    -1px 0 0 0 var(--pet-ink),
+    1px 0 0 0 var(--pet-ink);
 }

@@ -3,19 +3,23 @@
 // Renders the configured character pack on a canvas and moves its own window along the
 // bottom of the screen with the pure engine in src/pet/engine.ts. The loop runs on
 // setTimeout (~12 fps, slower while asleep) and stops while the window is hidden.
+// Claude state arrives from the main window as `pet-summary` (src/pet/summary.ts): it sets
+// the engine mood, a speech bubble (blocked / just done) and an unseen-done badge. While a
+// bubble shows the window widens / grows upward around the body box (petWindowLayout);
+// the body stays on the same screen spot.
 // Design: docs/superpowers/specs/2026-11-06-desktop-pet-design.md.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { emitTo, listen } from '@tauri-apps/api/event';
 import { availableMonitors, getCurrentWindow } from '@tauri-apps/api/window';
-import { LogicalPosition } from '@tauri-apps/api/dpi';
+import { LogicalPosition, LogicalSize } from '@tauri-apps/api/dpi';
 import { Menu } from '@tauri-apps/api/menu';
 import { exit } from '@tauri-apps/plugin-process';
 import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig } from '../config/schema';
 import { getTranslation, type Locale, type TranslationKey } from '../i18n';
-import { PET_H, PET_W, initialState, step, type PetState, type WorkArea } from '../pet/engine';
+import { PET_H, PET_W, clampToWorkArea, initialState, step, type PetState, type WorkArea } from '../pet/engine';
 import { framesFor, type CharacterPack } from '../pet/pack';
 import { drawFrame } from '../pet/render';
 import {
@@ -24,11 +28,18 @@ import {
   frameIndexAt,
   loadSavedPos,
   monitorsToAreas,
+  petBubble,
   petMenuEntries,
+  petOpenTarget,
+  petWindowLayout,
   savePos,
+  type PetBubble,
+  type PetLastDone,
   type PetMenuAction,
+  type PetWindowLayout,
   type UserPackJson,
 } from '../pet/page';
+import { moodFor, type PetSummary } from '../pet/summary';
 import './PetPage.css';
 
 const TICK_MS = 83; // ~12 fps
@@ -39,6 +50,23 @@ const AREA_REFRESH_MS = 30_000;
 const SAVE_EVERY_MS = 2_000;
 const DRAG_THRESHOLD_PX = 3;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
+/** Bubble box bottom above the sprite top (the 5 px tail sits in between). */
+const BUBBLE_LIFT_PX = 6;
+// Bubble tail, 1 CSS px per cell: o outline, w fill. Row 0 overlaps the bubble's bottom
+// outline so the tail opens into the bubble.
+const TAIL_ROWS = ['owwwwwwwwo', '.owwwwwwo.', '..owwwwo..', '...owwo...', '....oo....'];
+const TAIL_W = TAIL_ROWS[0].length;
+const TAIL_PIXELS = TAIL_ROWS.flatMap((row, y) =>
+  Array.from(row).flatMap((ch, x) => (ch === '.' ? [] : [{ x, y, line: ch === 'o' }])),
+);
+
+function bubbleKey(b: PetBubble | null): string {
+  return b ? `${b.kind}|${b.terminalId}|${b.text}|${b.more}` : '';
+}
+
+function labelsFor(locale: Locale) {
+  return { needsApproval: getTranslation(locale, 'pet.bubble.needsApproval'), done: getTranslation(locale, 'pet.bubble.done') };
+}
 
 type Drag = {
   /** Pointer offset inside the window at pointerdown (window top-left = screen - offset). */
@@ -63,6 +91,14 @@ type Runtime = {
   animElapsed: number;
   drawnKey: string;
   lastPos: { x: number; y: number } | null;
+  lastSize: { w: number; h: number } | null;
+  layout: PetWindowLayout;
+  /** Drawn sprite size inside the body box (bottom-centered). */
+  sprite: { w: number; h: number };
+  summary: PetSummary;
+  lastDone: PetLastDone | null;
+  bubble: PetBubble | null;
+  labels: { needsApproval: string; done: string };
   drag: Drag | null;
   activity: boolean;
   menuOpen: boolean;
@@ -70,6 +106,7 @@ type Runtime = {
   savedKey: string;
   kick: () => void;
   persist: () => void;
+  relayout: () => void;
 };
 
 function safeStorage(): Storage | undefined {
@@ -82,9 +119,14 @@ function safeStorage(): Storage | undefined {
 
 export default function PetPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const bubbleRef = useRef<HTMLButtonElement>(null);
+  const tailRef = useRef<HTMLDivElement>(null);
+  const badgeRef = useRef<HTMLDivElement>(null);
   const rtRef = useRef<Runtime | null>(null);
   const [dragging, setDragging] = useState(false);
   const [locale, setLocale] = useState<Locale>('en');
+  const [bubble, setBubble] = useState<PetBubble | null>(null);
+  const [unseenDone, setUnseenDone] = useState(0);
 
   useEffect(() => {
     const tauri = isTauri();
@@ -105,6 +147,13 @@ export default function PetPage() {
       animElapsed: 0,
       drawnKey: '',
       lastPos: null,
+      lastSize: null,
+      layout: { x: 0, y: 0, w: PET_W, h: PET_H, bodyLeft: 0, bodyTop: 0 },
+      sprite: { w: PET_W, h: PET_H },
+      summary: { blocked: [], working: [], unseenDone: 0 },
+      lastDone: null,
+      bubble: null,
+      labels: labelsFor('en'),
       drag: null,
       activity: true,
       menuOpen: false,
@@ -112,6 +161,7 @@ export default function PetPage() {
       savedKey: '',
       kick: () => {},
       persist: () => {},
+      relayout: () => {},
     };
     rtRef.current = r;
 
@@ -154,7 +204,9 @@ export default function PetPage() {
       r.mode = pet.mode;
       if (r.state) r.state = { ...r.state, mode: pet.mode };
       r.drawnKey = '';
-      setLocale(LOCALES.includes(language as Locale) ? (language as Locale) : 'en');
+      const loc = LOCALES.includes(language as Locale) ? (language as Locale) : 'en';
+      r.labels = labelsFor(loc);
+      setLocale(loc);
     };
 
     const refreshAreas = async () => {
@@ -184,18 +236,76 @@ export default function PetPage() {
       const pack = scale === r.pack.scale ? r.pack : { ...r.pack, scale };
       const pw = pack.size.w * scale;
       const ph = pack.size.h * scale;
+      if (r.sprite.w !== pw || r.sprite.h !== ph) {
+        r.sprite = { w: pw, h: ph };
+        applyDom(r.layout);
+      }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, PET_W, PET_H);
       drawFrame(ctx, pack, frames[idx], Math.round((PET_W - pw) / 2), PET_H - ph, flip);
     };
 
+    // Place the body box, bubble, tail and badge inside the window (window px). The body
+    // box always sits on the window's bottom edge.
+    const applyDom = (l: PetWindowLayout) => {
+      if (canvas) {
+        canvas.style.left = `${l.bodyLeft}px`;
+        canvas.style.top = `${l.bodyTop}px`;
+      }
+      // The sprite is drawn on the body box bottom, so its top is sprite.h above the window bottom.
+      const spriteTop = r.sprite.h;
+      const center = l.bodyLeft + PET_W / 2;
+      const b = bubbleRef.current;
+      if (b) {
+        const bw = b.offsetWidth;
+        const left = Math.max(2, Math.min(Math.round(center - bw / 2), l.w - bw - 2));
+        b.style.left = `${left}px`;
+        b.style.bottom = `${spriteTop + BUBBLE_LIFT_PX}px`;
+      }
+      const tail = tailRef.current;
+      if (tail) {
+        tail.style.left = `${Math.round(center - TAIL_W / 2)}px`;
+        tail.style.bottom = `${spriteTop + BUBBLE_LIFT_PX - TAIL_ROWS.length}px`;
+      }
+      const badge = badgeRef.current;
+      if (badge) {
+        badge.style.left = `${Math.round(center + r.sprite.w / 2 - 10)}px`;
+        badge.style.bottom = `${spriteTop - 8}px`;
+      }
+    };
+    r.relayout = () => applyDom(r.layout);
+
     const move = () => {
-      if (!win || !r.state) return;
-      const x = Math.round(r.state.x);
-      const y = Math.round(r.state.y);
-      if (r.lastPos && r.lastPos.x === x && r.lastPos.y === y) return;
-      r.lastPos = { x, y };
-      win.setPosition(new LogicalPosition(x, y)).catch(() => {});
+      if (!r.state) return;
+      const area = clampToWorkArea(r.state.x, r.state.y, r.areas).area;
+      const l = petWindowLayout(r.state, r.bubble ? { spriteH: r.sprite.h } : null, area);
+      r.layout = l;
+      const posChanged = !r.lastPos || r.lastPos.x !== l.x || r.lastPos.y !== l.y;
+      const sizeChanged = !r.lastSize || r.lastSize.w !== l.w || r.lastSize.h !== l.h;
+      r.lastPos = { x: l.x, y: l.y };
+      r.lastSize = { w: l.w, h: l.h };
+      if (!win) {
+        applyDom(l);
+        return;
+      }
+      if (sizeChanged) {
+        // Move the body inside the window only once the window has its new rect, so the
+        // character does not jump for a frame.
+        void Promise.all([win.setSize(new LogicalSize(l.w, l.h)), win.setPosition(new LogicalPosition(l.x, l.y))])
+          .catch(() => {})
+          .finally(() => applyDom(r.layout));
+        return;
+      }
+      if (posChanged) win.setPosition(new LogicalPosition(l.x, l.y)).catch(() => {});
+      applyDom(l);
+    };
+
+    // Bubble / badge from the latest summary; React state only changes when they do.
+    const refreshBubble = () => {
+      const next = petBubble(r.summary, Date.now(), r.lastDone, r.labels);
+      if (bubbleKey(next) === bubbleKey(r.bubble)) return;
+      r.bubble = next;
+      setBubble(next);
     };
 
     const nextDelay = (): number => {
@@ -224,11 +334,12 @@ export default function PetPage() {
           rand: Math.random,
           dragging: r.drag?.active ? { x: r.drag.x, y: r.drag.y } : null,
           activity: r.activity,
-          mood: 'none',
+          mood: moodFor(r.summary, Date.now(), r.lastDone?.atMs ?? null),
         });
         r.activity = false;
         r.animElapsed = r.state.anim === prevAnim ? r.animElapsed + dt : 0;
       }
+      refreshBubble();
       draw();
       move();
       const settled = r.state.anim !== 'held' && r.state.anim !== 'fall';
@@ -263,6 +374,23 @@ export default function PetPage() {
     document.addEventListener('visibilitychange', onDocVisibility);
     window.addEventListener('pagehide', persist);
 
+    const unlistenSummary = tauri
+      ? listen<PetSummary>('pet-summary', (e) => {
+          const p = e.payload;
+          if (disposed || !p || !Array.isArray(p.blocked) || !Array.isArray(p.working)) return;
+          const { doneEvent, ...summary } = p;
+          r.summary = { ...summary, unseenDone: Number(summary.unseenDone) || 0 };
+          // A turn that finished while the pet was away is not celebrated later.
+          if (doneEvent && r.visible) r.lastDone = { atMs: Date.now(), event: doneEvent };
+          setUnseenDone(r.summary.unseenDone);
+          refreshBubble();
+          r.kick();
+        })
+      : null;
+    // Ask main for the current summary once the listener is in place (the first
+    // pet-visibility can arrive before this page has loaded).
+    void unlistenSummary?.then(() => emitTo('main', 'pet-summary-request')).catch(() => {});
+
     const unlistenVisibility = tauri
       ? listen<{ visible: boolean }>('pet-visibility', (e) => {
           if (disposed) return;
@@ -295,11 +423,17 @@ export default function PetPage() {
       document.removeEventListener('visibilitychange', onDocVisibility);
       window.removeEventListener('pagehide', persist);
       void unlistenVisibility?.then((un) => un()).catch(() => {});
+      void unlistenSummary?.then((un) => un()).catch(() => {});
       if (rtRef.current === r) rtRef.current = null;
     };
   }, []);
 
   const t = (key: TranslationKey) => getTranslation(locale, key);
+
+  // The bubble's width is only known once rendered: place it (and the badge) right away.
+  useLayoutEffect(() => {
+    rtRef.current?.relayout();
+  }, [bubble, unseenDone]);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const r = rtRef.current;
@@ -309,14 +443,18 @@ export default function PetPage() {
     } catch {
       /* capture is best effort */
     }
+    // Offsets are relative to the body box (the canvas), which may sit inside a wider window.
+    const box = e.currentTarget.getBoundingClientRect();
+    const offX = e.clientX - box.left;
+    const offY = e.clientY - box.top;
     r.drag = {
-      offX: e.clientX,
-      offY: e.clientY,
+      offX,
+      offY,
       startX: e.screenX,
       startY: e.screenY,
       active: false,
-      x: e.screenX - e.clientX,
-      y: e.screenY - e.clientY,
+      x: e.screenX - offX,
+      y: e.screenY - offY,
     };
     r.activity = true;
   };
@@ -347,8 +485,15 @@ export default function PetPage() {
     }
   };
 
+  const openTerminal = (terminalId: string | null) => {
+    if (!isTauri()) return;
+    void invoke('pet_open_terminal', { terminalId }).catch((e) => console.warn('[pet] pet_open_terminal failed:', e));
+  };
+
+  // Blocked tab first, then the latest unseen done, else main's last active tab.
   const onDoubleClick = () => {
-    if (isTauri()) void invoke('pet_open_main').catch((e) => console.warn('[pet] pet_open_main failed:', e));
+    const r = rtRef.current;
+    openTerminal(r ? petOpenTarget(r.summary) : null);
   };
 
   const togglePin = () => {
@@ -419,6 +564,32 @@ export default function PetPage() {
         onPointerCancel={endDrag}
         onDoubleClick={onDoubleClick}
       />
+      {bubble && (
+        <>
+          <button
+            ref={bubbleRef}
+            type="button"
+            className={`pet-bubble ${bubble.kind}`}
+            title={t('pet.bubble.open')}
+            onClick={() => openTerminal(bubble.terminalId)}
+          >
+            <span className="pet-bubble-text">{bubble.text}</span>
+            {bubble.more > 0 && <span className="pet-bubble-more">+{bubble.more}</span>}
+          </button>
+          <div ref={tailRef} className="pet-bubble-tail" aria-hidden="true">
+            <svg width={TAIL_W} height={TAIL_ROWS.length} viewBox={`0 0 ${TAIL_W} ${TAIL_ROWS.length}`} shapeRendering="crispEdges">
+              {TAIL_PIXELS.map((px) => (
+                <rect key={`${px.x},${px.y}`} x={px.x} y={px.y} width="1" height="1" className={px.line ? 'pet-px-line' : 'pet-px-fill'} />
+              ))}
+            </svg>
+          </div>
+        </>
+      )}
+      {unseenDone > 0 && (
+        <div ref={badgeRef} className="pet-badge" title={t('pet.badge.unseen')}>
+          {unseenDone > 9 ? '9+' : unseenDone}
+        </div>
+      )}
     </div>
   );
 }

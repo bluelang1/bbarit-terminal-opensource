@@ -1,9 +1,11 @@
 // Pure helpers for the pet page (src/pages/PetPage.tsx) and its settings:
-// pack selection, monitor -> work area conversion, saved position, frame timing.
+// pack selection, monitor -> work area conversion, saved position, frame timing,
+// Claude bubbles and the window layout that makes room for them.
 
 import { OCTO_PACK } from './characters/octo';
 import { parsePack, type CharacterPack, type PackFrame } from './pack';
-import type { PetState, WorkArea } from './engine';
+import { PET_H, PET_W, type PetState, type WorkArea } from './engine';
+import { HAPPY_MS, type PetDoneEvent, type PetSummary } from './summary';
 
 /** Shape returned by the `pet_list_characters` command (pet.rs UserPack). */
 export type UserPackJson = { id: string; json: string };
@@ -137,4 +139,76 @@ export function petMenuEntries(pinned: boolean): PetMenuEntry[] {
     { id: 'pet-menu-hide', action: 'hide', labelKey: 'pet.menu.hide' },
     { id: 'pet-menu-quit', action: 'quit', labelKey: 'pet.menu.quit' },
   ];
+}
+
+/** Bubble text is one line: at most this many characters, then "…". */
+export const BUBBLE_TEXT_MAX = 28;
+/** Pet window width while a bubble shows (the body box stays PET_W wide inside it). */
+export const BUBBLE_WIN_W = 300;
+/** Room a bubble needs above the body sprite: bubble, tail and a small gap. */
+export const BUBBLE_BAND_H = 30;
+
+export type PetBubble = { kind: 'blocked' | 'done'; terminalId: string; text: string; more: number };
+export type PetLastDone = { atMs: number; event: PetDoneEvent };
+
+function oneLine(text: string): string {
+  const chars = Array.from(text.replace(/\s+/g, ' ').trim());
+  return chars.length > BUBBLE_TEXT_MAX ? `${chars.slice(0, BUBBLE_TEXT_MAX).join('')}…` : chars.join('');
+}
+
+/**
+ * The bubble above the pet: the oldest blocked tab ("<project> · <tab>: needs approval",
+ * `more` counts the other blocked tabs), else "Done · <tab>" for HAPPY_MS after a done.
+ */
+export function petBubble(
+  summary: PetSummary,
+  nowMs: number,
+  lastDone: PetLastDone | null,
+  labels: { needsApproval: string; done: string },
+): PetBubble | null {
+  const first = summary.blocked[0];
+  if (first) {
+    const where = [first.project, first.tab].filter(Boolean).join(' · ');
+    return { kind: 'blocked', terminalId: first.terminalId, text: oneLine(`${where}: ${labels.needsApproval}`), more: summary.blocked.length - 1 };
+  }
+  if (lastDone) {
+    const age = nowMs - lastDone.atMs;
+    if (age >= 0 && age < HAPPY_MS) {
+      const text = lastDone.event.tab ? `${labels.done} · ${lastDone.event.tab}` : labels.done;
+      return { kind: 'done', terminalId: lastDone.event.terminalId, text: oneLine(text), more: 0 };
+    }
+  }
+  return null;
+}
+
+/** Tab a double-click opens: first blocked, else the latest unseen done, else none (last active tab). */
+export function petOpenTarget(summary: PetSummary): string | null {
+  return summary.blocked[0]?.terminalId ?? summary.latestDone?.terminalId ?? null;
+}
+
+export type PetWindowLayout = { x: number; y: number; w: number; h: number; bodyLeft: number; bodyTop: number };
+
+/**
+ * Window rect for a body box at (body.x, body.y) (the engine's coordinates). Without a
+ * bubble the window is the body box. With one it widens to BUBBLE_WIN_W (kept inside the
+ * work area) and grows upward when the sprite leaves less than BUBBLE_BAND_H of headroom;
+ * bodyLeft/bodyTop place the body box inside the window so it never moves on screen.
+ */
+export function petWindowLayout(
+  body: { x: number; y: number },
+  bubble: { spriteH: number } | null,
+  area: WorkArea,
+): PetWindowLayout {
+  const bx = Math.round(body.x);
+  const by = Math.round(body.y);
+  if (!bubble) return { x: bx, y: by, w: PET_W, h: PET_H, bodyLeft: 0, bodyTop: 0 };
+  const w = BUBBLE_WIN_W;
+  const headroom = Math.max(0, PET_H - bubble.spriteH);
+  const h = PET_H + Math.max(0, BUBBLE_BAND_H - headroom);
+  let x = bx - Math.round((w - PET_W) / 2);
+  if (area.w >= w) x = Math.min(Math.max(x, Math.round(area.x)), Math.round(area.x + area.w) - w);
+  // Never cut the body off: the window always covers the whole body box.
+  x = Math.min(Math.max(x, bx + PET_W - w), bx);
+  const y = by - (h - PET_H);
+  return { x, y, w, h, bodyLeft: bx - x, bodyTop: by - y };
 }

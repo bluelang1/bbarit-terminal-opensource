@@ -3339,4 +3339,8 @@ export const ja: Record<TranslationKey, string> = {
   'pet.menu.unpin': 'Walk around again',
   'pet.menu.hide': 'Hide',
   'pet.menu.quit': 'Quit BBARIT',
+  'pet.bubble.needsApproval': 'needs approval',
+  'pet.bubble.done': 'Done',
+  'pet.bubble.open': 'Open this tab',
+  'pet.badge.unseen': 'Finished, not seen yet',
 };

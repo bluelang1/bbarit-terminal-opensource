@@ -10575,6 +10575,7 @@ fn main() {
             // Desktop pet
             pet::pet_list_characters,
             pet::pet_open_main,
+            pet::pet_open_terminal,
             pet::pet_hide,
         ])
         .build(tauri::generate_context!())
