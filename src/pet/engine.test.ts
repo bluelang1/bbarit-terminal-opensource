@@ -17,7 +17,7 @@ const AREA: WorkArea = { x: 0, y: 25, w: 1440, h: 850 };
 const AREA2: WorkArea = { x: 1440, y: 0, w: 1920, h: 1055 };
 
 function input(over: Partial<PetInput> = {}): PetInput {
-  return { dtMs: 100, areas: [AREA], rand: () => 0.5, dragging: null, activity: false, ...over };
+  return { dtMs: 100, areas: [AREA], rand: () => 0.5, dragging: null, activity: false, mood: 'none', ...over };
 }
 
 function run(s: PetState, ms: number, over: Partial<PetInput> = {}): PetState {
@@ -37,6 +37,7 @@ function walking(over: Partial<PetState> = {}): PetState {
     idleMs: 0,
     actionMs: 5000,
     vy: 0,
+    lastMood: 'none',
     ...over,
   };
 }
@@ -210,5 +211,92 @@ describe('work areas', () => {
     const s = run(initialState([]), 1000, { areas: [] });
     expect(Number.isFinite(s.x)).toBe(true);
     expect(Number.isFinite(s.y)).toBe(true);
+  });
+});
+
+describe('Claude mood', () => {
+  const asleep = (over: Partial<PetState> = {}) => walking({ anim: 'sleep', actionMs: 0, idleMs: SLEEP_AFTER_MS + 1, ...over });
+
+  it('blocked waves in place, never walks and never falls asleep', () => {
+    let s = walking();
+    const x = s.x;
+    for (let t = 0; t < SLEEP_AFTER_MS + 60_000; t += 1000) {
+      s = step(s, input({ dtMs: 1000, mood: 'blocked' }));
+      expect(s.anim).toBe('wave');
+      expect(s.x).toBe(x);
+      expect(s.idleMs).toBe(0);
+    }
+  });
+
+  it('blocked wakes a sleeping pet at once', () => {
+    const s = step(asleep(), input({ mood: 'blocked' }));
+    expect(s.anim).toBe('wave');
+    expect(s.idleMs).toBe(0);
+  });
+
+  it('happy jumps in place and resets the idle timer only on entry', () => {
+    let s = step(walking({ idleMs: 60_000 }), input({ mood: 'happy' }));
+    expect(s.anim).toBe('happy');
+    expect(s.idleMs).toBe(0);
+    const x = s.x;
+    s = run(s, 5000, { mood: 'happy' });
+    expect(s.anim).toBe('happy');
+    expect(s.x).toBe(x);
+    expect(s.idleMs).toBeGreaterThanOrEqual(4900);
+  });
+
+  it('happy wakes a sleeping pet, which can fall asleep again later', () => {
+    let s = step(asleep(), input({ mood: 'happy' }));
+    expect(s.anim).toBe('happy');
+    s = run(s, 10_000, { mood: 'happy' });
+    expect(s.anim).toBe('happy');
+    s = step(s, input({ mood: 'none' }));
+    expect(['idle', 'sit', 'walk']).toContain(s.anim);
+    s = run(s, SLEEP_AFTER_MS, { mood: 'none', dtMs: 1000 });
+    expect(s.anim).toBe('sleep');
+  });
+
+  it('busy shows the busy animation while standing and never sleeps', () => {
+    let s = step(walking({ anim: 'idle', actionMs: 5000 }), input({ mood: 'busy' }));
+    expect(s.anim).toBe('busy');
+    s = run(s, SLEEP_AFTER_MS + 60_000, { mood: 'busy', dtMs: 1000 });
+    expect(s.anim).not.toBe('sleep');
+    expect(s.idleMs).toBe(0);
+  });
+
+  it('busy wakes a sleeping pet', () => {
+    const s = step(asleep(), input({ mood: 'busy' }));
+    expect(s.anim).toBe('busy');
+  });
+
+  it('busy walks at half speed and still alternates walk and rest', () => {
+    const s = run(walking(), 1000, { mood: 'busy' });
+    expect(s.anim).toBe('walk');
+    expect(Math.abs(s.x - (600 + WALK_PX_PER_S / 2))).toBeLessThanOrEqual(1);
+    let r = run(walking({ actionMs: 300 }), 400, { mood: 'busy' });
+    expect(r.anim).toBe('busy');
+    r = run(r, 11_000, { mood: 'busy' });
+    expect(r.anim).toBe('walk');
+  });
+
+  it('back to none: busy animation turns into ordinary rest', () => {
+    let s = step(walking({ anim: 'idle', actionMs: 5000 }), input({ mood: 'busy' }));
+    s = step(s, input({ mood: 'none' }));
+    expect(['idle', 'sit']).toContain(s.anim);
+  });
+
+  it('wave and happy end into normal idle life when the mood clears', () => {
+    for (const mood of ['blocked', 'happy'] as const) {
+      let s = run(walking(), 1000, { mood });
+      s = step(s, input({ mood: 'none' }));
+      expect(['idle', 'sit', 'walk']).toContain(s.anim);
+    }
+  });
+
+  it('dragging wins over every mood', () => {
+    for (const mood of ['blocked', 'happy', 'busy'] as const) {
+      const s = step(walking(), input({ mood, dragging: { x: 300, y: 200 } }));
+      expect(s.anim).toBe('held');
+    }
   });
 });

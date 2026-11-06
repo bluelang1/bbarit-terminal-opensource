@@ -224,6 +224,7 @@ export default function PetPage() {
           rand: Math.random,
           dragging: r.drag?.active ? { x: r.drag.x, y: r.drag.y } : null,
           activity: r.activity,
+          mood: 'none',
         });
         r.activity = false;
         r.animElapsed = r.state.anim === prevAnim ? r.animElapsed + dt : 0;

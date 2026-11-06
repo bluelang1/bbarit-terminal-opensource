@@ -4,6 +4,7 @@
 // Coordinates are logical px; (x, y) is the pet window's top-left.
 
 import type { AnimName } from './pack';
+import type { ClaudeMood } from './summary';
 
 export const PET_W = 160;
 export const PET_H = 160;
@@ -35,6 +36,8 @@ export type PetState = {
   actionMs: number;
   /** Fall speed, px/s. */
   vy: number;
+  /** Claude mood seen on the previous settled tick (detects entering a mood). */
+  lastMood: ClaudeMood;
 };
 
 export type PetInput = {
@@ -43,8 +46,13 @@ export type PetInput = {
   rand: () => number;
   /** Window top-left while the owner drags the pet, else null. */
   dragging: { x: number; y: number } | null;
-  /** Owner input (or, later, Claude activity): resets the sleep timer. */
+  /** Owner input: resets the sleep timer. */
   activity: boolean;
+  /**
+   * Claude state from the main window (src/pet/summary.ts moodFor): blocked waves in
+   * place, happy jumps in place, busy works (walks at half speed), none is idle life.
+   */
+  mood: ClaudeMood;
 };
 
 export function groundY(area: WorkArea): number {
@@ -107,6 +115,10 @@ function span(range: [number, number], rand: () => number): number {
   return range[0] + clamp(rand(), 0, 1) * (range[1] - range[0]);
 }
 
+function isRestAnim(a: AnimName): boolean {
+  return a === 'idle' || a === 'sit' || a === 'busy';
+}
+
 function rest(s: PetState, rand: () => number): PetState {
   return { ...s, anim: rand() < 0.5 ? 'idle' : 'sit', actionMs: span(REST_MS, rand) };
 }
@@ -131,7 +143,15 @@ export function initialState(areas: WorkArea[], saved?: Partial<PetState>): PetS
     idleMs: 0,
     actionMs: 0,
     vy: 0,
+    lastMood: 'none',
   };
+}
+
+/** Resting shows `busy` while Claude works, else idle / sit. */
+function withRestAnim(s: PetState, busy: boolean): PetState {
+  if (busy && (s.anim === 'idle' || s.anim === 'sit')) return { ...s, anim: 'busy' };
+  if (!busy && s.anim === 'busy') return { ...s, anim: 'idle' };
+  return s;
 }
 
 export function step(s: PetState, i: PetInput): PetState {
@@ -169,17 +189,30 @@ export function step(s: PetState, i: PetInput): PetState {
   n.vy = 0;
   if (!n.pinned) n.y = ground;
 
-  // 4. Sleep / wake.
-  if (i.activity) {
+  // 4. Sleep / wake. Blocked and busy keep the pet awake; entering happy wakes it once.
+  const mood: ClaudeMood = i.mood ?? 'none';
+  const entered = mood !== n.lastMood;
+  n.lastMood = mood;
+  const awake = i.activity || mood === 'blocked' || mood === 'busy' || (mood === 'happy' && entered);
+  if (awake) {
     n.idleMs = 0;
-    if (n.anim === 'sleep') return rest({ ...n, anim: 'idle' }, () => 0);
+    if (n.anim === 'sleep') {
+      n = rest({ ...n, anim: 'idle' }, () => 0);
+      if (mood === 'none') return n;
+    }
   } else {
     n.idleMs += dt;
   }
+
+  // 5. Claude mood: wave / happy jump in place.
+  if (mood === 'blocked') return { ...n, anim: 'wave', actionMs: 0 };
+  if (mood === 'happy') return { ...n, anim: 'happy', actionMs: 0 };
+
   if (n.idleMs >= SLEEP_AFTER_MS) return { ...n, anim: 'sleep', actionMs: 0 };
   if (n.anim === 'sleep') n = rest(n, i.rand);
 
-  // 5. Idle life.
+  // 6. Idle life (busy: rests with the busy animation, walks at half speed).
+  const busy = mood === 'busy';
   const canWalk = !n.pinned && n.mode === 'walk';
   if (n.anim === 'walk' && !canWalk) n = rest(n, i.rand);
   n.actionMs -= dt;
@@ -187,7 +220,7 @@ export function step(s: PetState, i: PetInput): PetState {
   if (n.anim === 'walk') {
     const lo = p.area.x;
     const hi = maxX(p.area);
-    let x = n.x + n.dir * WALK_PX_PER_S * pdt;
+    let x = n.x + n.dir * WALK_PX_PER_S * (busy ? 0.5 : 1) * pdt;
     let dir = n.dir;
     if (x >= hi) {
       x = hi;
@@ -198,10 +231,10 @@ export function step(s: PetState, i: PetInput): PetState {
     }
     n = { ...n, x, dir };
     if (n.actionMs <= 0) n = rest(n, i.rand);
-    return n;
+    return busy ? withRestAnim(n, busy) : n;
   }
 
   if (n.actionMs <= 0) n = canWalk ? startWalk(n, i.rand) : rest(n, i.rand);
-  else if (n.anim !== 'idle' && n.anim !== 'sit') n = rest(n, i.rand);
-  return n;
+  else if (!isRestAnim(n.anim)) n = rest(n, i.rand);
+  return withRestAnim(n, busy);
 }
