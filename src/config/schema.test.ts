@@ -33,7 +33,7 @@ describe('pet config', () => {
   it('defaults on / octo / walk and survives validateConfig (unknown keys are dropped)', () => {
     expect(validateConfig({}).pet).toEqual(DEFAULT_PET_CONFIG);
     expect(validateConfig({ pet: { enabled: false, character: 'clawd', mode: 'stay' } }).pet)
-      .toEqual({ enabled: false, character: 'clawd', mode: 'stay' });
+      .toEqual({ enabled: false, character: 'clawd', mode: 'stay', weather: { enabled: false, city: null } });
   });
 
   it('only an explicit false disables, like pet.rs pet_enabled', () => {
@@ -46,5 +46,32 @@ describe('pet config', () => {
     expect(normalizePetConfig({ character: '  ', mode: 'run' })).toEqual(DEFAULT_PET_CONFIG);
     expect(normalizePetConfig([1, 2])).toEqual(DEFAULT_PET_CONFIG);
     expect(normalizePetConfig(null)).toEqual(DEFAULT_PET_CONFIG);
+  });
+
+  it('weather defaults off with no city and keeps a valid city', () => {
+    expect(DEFAULT_PET_CONFIG.weather).toEqual({ enabled: false, city: null });
+    const city = { name: '서울특별시', admin1: '서울특별시', country: '대한민국', lat: 37.566, lon: 126.9784 };
+    expect(validateConfig({ pet: { weather: { enabled: true, city } } }).pet.weather).toEqual({ enabled: true, city });
+    expect(normalizePetConfig({ weather: { enabled: true, city: { name: 'Paris', lat: 48.85, lon: 2.35, extra: 1 } } }).weather)
+      .toEqual({ enabled: true, city: { name: 'Paris', lat: 48.85, lon: 2.35 } });
+  });
+
+  it('weather: only an explicit true turns it on; bad cities are dropped', () => {
+    expect(normalizePetConfig({ weather: { enabled: 'yes' } }).weather.enabled).toBe(false);
+    expect(normalizePetConfig({ weather: [true] }).weather).toEqual({ enabled: false, city: null });
+    for (const city of [
+      { name: '', lat: 1, lon: 1 },
+      { name: 'x', lat: 91, lon: 1 },
+      { name: 'x', lat: 1, lon: -181 },
+      { name: 'x', lat: '1', lon: 1 },
+      { name: 'x', lat: Number.NaN, lon: 1 },
+      { name: 'x'.repeat(201), lat: 1, lon: 1 },
+      'Seoul',
+    ]) {
+      expect(normalizePetConfig({ weather: { enabled: true, city } }).weather.city, JSON.stringify(city)).toBeNull();
+    }
+    // Optional labels must be non-empty strings.
+    expect(normalizePetConfig({ weather: { city: { name: ' Busan ', admin1: 3, country: ' ', lat: 35.1, lon: 129.0 } } }).weather.city)
+      .toEqual({ name: 'Busan', lat: 35.1, lon: 129.0 });
   });
 });
