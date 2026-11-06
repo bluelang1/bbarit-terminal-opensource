@@ -14,7 +14,7 @@ default = []
 
 [dependencies]
 # "unstable": Window::add_child(child webview) for the internal browser.
-tauri = { version = "2", features = ["protocol-asset", "unstable"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable", "macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
