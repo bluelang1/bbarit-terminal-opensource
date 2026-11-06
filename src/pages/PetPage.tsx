@@ -282,6 +282,16 @@ export default function PetPage() {
 
     void (async () => {
       await Promise.all([loadConfigAndPack(), refreshAreas()]);
+      // A hide event can arrive before the listener above is attached (minimize + restore
+      // during the first load); ask the window itself so a hidden pet never starts its loop.
+      if (tauri) {
+        await unlistenVisibility?.catch(() => undefined);
+        try {
+          r.visible = await getCurrentWindow().isVisible();
+        } catch {
+          // keep the optimistic default
+        }
+      }
       if (disposed) return;
       const saved = loadSavedPos(safeStorage());
       r.state = initialState(r.areas, { ...saved, mode: r.mode });
