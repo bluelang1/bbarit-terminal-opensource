@@ -12,6 +12,8 @@ import {
   petBubble,
   petOpenTarget,
   petWindowLayout,
+  packHeadroomRows,
+  BUBBLE_BAND_H,
   BUBBLE_TEXT_MAX,
   BUBBLE_WIN_W,
 } from './page';
@@ -200,6 +202,20 @@ describe('petOpenTarget', () => {
   });
 });
 
+describe('packHeadroomRows', () => {
+  it('is the lowest head anchor y over every frame', () => {
+    const ys = Object.values(OCTO_PACK.animations).flatMap((fs) => (fs ?? []).map((f) => f.anchors?.head?.y ?? -1));
+    expect(Math.min(...ys)).toBeGreaterThan(0);
+    expect(packHeadroomRows(OCTO_PACK)).toBe(Math.min(...ys));
+  });
+
+  it('is 0 when a frame has no head anchor', () => {
+    const idle = [{ rows: ['a'], ms: 100 }];
+    const pack = { ...OCTO_PACK, animations: { ...OCTO_PACK.animations, idle } };
+    expect(packHeadroomRows(pack)).toBe(0);
+  });
+});
+
 describe('petWindowLayout', () => {
   const AREA = { x: 0, y: 25, w: 1440, h: 850 };
 
@@ -211,6 +227,7 @@ describe('petWindowLayout', () => {
     const l = petWindowLayout({ x: 500, y: 600 }, { spriteH: 96 }, AREA);
     expect(l.w).toBe(BUBBLE_WIN_W);
     expect(l.h).toBe(PET_H); // 64 px of headroom above a 96 px body fits the bubble
+    expect(BUBBLE_BAND_H).toBeLessThanOrEqual(64);
     expect(l.x + l.bodyLeft).toBe(500);
     expect(l.y + l.bodyTop).toBe(600);
     expect(l.bodyLeft).toBe((BUBBLE_WIN_W - PET_W) / 2);

@@ -2,8 +2,8 @@
    so it applies before this lazy chunk loads. */
 
 .pet-root {
-  --pet-ink: #1b1b1f;
-  --pet-paper: #ffffff;
+  --pet-ink: #3b1f47; /* OCTO outline, ART_PALETTE.o */
+  --pet-paper: #fff8ec; /* ART_PALETTE.w */
   position: relative;
   width: 100vw;
   height: 100vh;
@@ -27,8 +27,9 @@
   cursor: grabbing;
 }
 
-/* Pixel speech bubble: white fill, 1px dark outline with notched (pixel) corners, plus a
-   1px white halo outside it so the outline also reads on a dark desktop. Fixed colors:
+/* Speech bubble. PetPage sets pixel-art images (src/pet/bubbleArt.ts) as CSS variables on
+   .pet-root and adds .pet-art; the box is then a stretchable 9-slice border-image around the
+   HTML text. Without them (no canvas) it falls back to a plain outlined box. Fixed colors:
    the desktop behind the pet decides light or dark, not the app theme. */
 .pet-bubble {
   position: absolute;
@@ -37,18 +38,28 @@
   display: flex;
   align-items: center;
   gap: 4px;
+  min-width: 64px;
   max-width: 292px;
   margin: 0;
-  padding: 5px 11px;
+  padding: 5px 10px;
   border: 2px solid var(--pet-ink);
-  border-radius: 14px;
   background: var(--pet-paper);
   color: var(--pet-ink);
   font: 700 12px/16px -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
   white-space: nowrap;
   cursor: pointer;
-  box-shadow: 2px 2px 0 0 rgba(0, 0, 0, 0.28);
   -webkit-font-smoothing: antialiased;
+}
+
+.pet-art .pet-bubble {
+  /* border-width = the 9-slice edges (8 / 10 / 10 / 8 px); the image paints fill and edges. */
+  padding: 0 6px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-bubble-bw);
+  border-image: var(--pet-bubble-bi);
+  background: none;
+  image-rendering: pixelated;
 }
 
 .pet-bubble:focus {
@@ -62,44 +73,54 @@
 
 .pet-bubble-more {
   flex: none;
-  padding: 0 5px;
-  border-radius: 7px;
-  background: var(--pet-ink);
-  color: var(--pet-paper);
-  font-size: 10px;
-  line-height: 14px;
-}
-
-.pet-bubble.blocked .pet-bubble-text::before {
-  content: '!';
-  display: inline-block;
-  margin-right: 5px;
-  padding: 0 5px;
-  border-radius: 7px;
+  padding: 0 3px;
   background: var(--pet-ink);
   color: var(--pet-paper);
   font-size: 10px;
   line-height: 12px;
 }
 
+.pet-art .pet-bubble-more {
+  padding: 0 2px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-dark-bi);
+  background: none;
+  image-rendering: pixelated;
+}
+
+.pet-bubble.blocked .pet-bubble-text::before {
+  content: '!';
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 4px;
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+/* Pixel "!" badge: one text line tall, drawn by the image (the '!' char is hidden). */
+.pet-art .pet-bubble.blocked .pet-bubble-text::before {
+  content: '';
+  width: 14px;
+  height: 16px;
+  margin-right: 4px;
+  padding: 0;
+  vertical-align: top;
+  background: var(--pet-bang-img) 0 0 / 100% 100% no-repeat;
+  image-rendering: pixelated;
+}
+
+/* Sized by PetPage from TAIL_ART; joins the bubble's bottom edge. */
 .pet-bubble-tail {
   position: absolute;
   left: 0;
   bottom: 0;
-  line-height: 0;
   pointer-events: none;
-}
-
-.pet-bubble-tail svg {
-  display: block;
-}
-
-.pet-px-line {
-  fill: var(--pet-ink);
-}
-
-.pet-px-fill {
-  fill: var(--pet-paper);
+  background: var(--pet-tail-img) 0 0 / 100% 100% no-repeat;
+  image-rendering: pixelated;
 }
 
 /* Unseen finished turns: small pixel count badge at the sprite's top-right. */
@@ -107,17 +128,22 @@
   position: absolute;
   left: 0;
   bottom: 0;
-  min-width: 9px;
-  height: 11px;
+  min-width: 6px;
   padding: 0 2px;
+  border: 1px solid var(--pet-ink);
   background: var(--pet-paper);
   color: var(--pet-ink);
-  font: 700 9px/11px ui-monospace, Menlo, monospace;
+  font: 700 9px/10px ui-monospace, Menlo, monospace;
   text-align: center;
   pointer-events: none;
-  box-shadow:
-    0 -1px 0 0 var(--pet-ink),
-    0 1px 0 0 var(--pet-ink),
-    -1px 0 0 0 var(--pet-ink),
-    1px 0 0 0 var(--pet-ink);
+}
+
+.pet-art .pet-badge {
+  padding: 0 1px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-light-bi);
+  background: none;
+  image-rendering: pixelated;
 }

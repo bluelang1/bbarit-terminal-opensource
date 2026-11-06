@@ -10,7 +10,7 @@
 // Design: docs/superpowers/specs/2026-11-06-desktop-pet-design.md.
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from 'react';
+import type { CSSProperties, PointerEvent as ReactPointerEvent, MouseEvent as ReactMouseEvent } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { availableMonitors, getCurrentWindow } from '@tauri-apps/api/window';
@@ -22,12 +22,14 @@ import { getTranslation, type Locale, type TranslationKey } from '../i18n';
 import { PET_H, PET_W, clampToWorkArea, initialState, step, type PetState, type WorkArea } from '../pet/engine';
 import { framesFor, type CharacterPack } from '../pet/pack';
 import { drawFrame } from '../pet/render';
+import { ART_PX, BUBBLE_ART, TAIL_ART, TAIL_OVERLAP, petArtStyle } from '../pet/bubbleArt';
 import {
   DEFAULT_PACK,
   choosePack,
   frameIndexAt,
   loadSavedPos,
   monitorsToAreas,
+  packHeadroomRows,
   petBubble,
   petMenuEntries,
   petOpenTarget,
@@ -50,26 +52,12 @@ const AREA_REFRESH_MS = 30_000;
 const SAVE_EVERY_MS = 2_000;
 const DRAG_THRESHOLD_PX = 3;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
-/** Bubble box bottom above the sprite top (the 5 px tail sits in between). */
-const BUBBLE_LIFT_PX = 6;
-// Comic-style bubble tail, 1 CSS px per cell: o outline, w fill. The first TAIL_OVERLAP rows
-// cover the bubble's 2 px bottom border so the tail opens into the bubble; the tip slants
-// down-left onto the character's center.
-const TAIL_ROWS = [
-  'oowwwwwwwwwwoo',
-  'oowwwwwwwwwwoo',
-  'oowwwwwwwwoo..',
-  'oowwwwwwoo....',
-  'oowwwwoo......',
-  'oowwoo........',
-  'oooo..........',
-  'oo............',
-];
-const TAIL_OVERLAP = 2;
-const TAIL_W = TAIL_ROWS[0].length;
-const TAIL_PIXELS = TAIL_ROWS.flatMap((row, y) =>
-  Array.from(row).flatMap((ch, x) => (ch === '.' ? [] : [{ x, y, line: ch === 'o' }])),
-);
+/** Gap between the tail element's bottom (tip + its shadow row) and the head's top row. */
+const TAIL_TIP_GAP_PX = 0;
+/** Bubble box bottom above the head top: the part of the tail below the bubble, plus the gap. */
+const BUBBLE_LIFT_PX = (TAIL_ART.length - TAIL_OVERLAP) * ART_PX + TAIL_TIP_GAP_PX;
+const TAIL_W_PX = TAIL_ART[0].length * ART_PX;
+const TAIL_H_PX = TAIL_ART.length * ART_PX;
 
 function bubbleKey(b: PetBubble | null): string {
   return b ? `${b.kind}|${b.terminalId}|${b.text}|${b.more}` : '';
@@ -104,8 +92,8 @@ type Runtime = {
   lastPos: { x: number; y: number } | null;
   lastSize: { w: number; h: number } | null;
   layout: PetWindowLayout;
-  /** Drawn sprite size inside the body box (bottom-centered). */
-  sprite: { w: number; h: number };
+  /** Drawn sprite size inside the body box (bottom-centered); headInset = blank px above the head. */
+  sprite: { w: number; h: number; headInset: number };
   summary: PetSummary;
   lastDone: PetLastDone | null;
   bubble: PetBubble | null;
@@ -138,6 +126,10 @@ export default function PetPage() {
   const [locale, setLocale] = useState<Locale>('en');
   const [bubble, setBubble] = useState<PetBubble | null>(null);
   const [unseenDone, setUnseenDone] = useState(0);
+  // Pixel-art images for the bubble, tail and badges, rendered once (null without a canvas).
+  const [artStyle] = useState(() =>
+    petArtStyle(window.devicePixelRatio, () => document.createElement('canvas')),
+  );
 
   useEffect(() => {
     const tauri = isTauri();
@@ -160,7 +152,7 @@ export default function PetPage() {
       lastPos: null,
       lastSize: null,
       layout: { x: 0, y: 0, w: PET_W, h: PET_H, bodyLeft: 0, bodyTop: 0 },
-      sprite: { w: PET_W, h: PET_H },
+      sprite: { w: PET_W, h: PET_H, headInset: 0 },
       summary: { blocked: [], working: [], unseenDone: 0 },
       lastDone: null,
       bubble: null,
@@ -247,8 +239,9 @@ export default function PetPage() {
       const pack = scale === r.pack.scale ? r.pack : { ...r.pack, scale };
       const pw = pack.size.w * scale;
       const ph = pack.size.h * scale;
-      if (r.sprite.w !== pw || r.sprite.h !== ph) {
-        r.sprite = { w: pw, h: ph };
+      const headInset = packHeadroomRows(r.pack) * scale;
+      if (r.sprite.w !== pw || r.sprite.h !== ph || r.sprite.headInset !== headInset) {
+        r.sprite = { w: pw, h: ph, headInset };
         applyDom(r.layout);
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -263,25 +256,32 @@ export default function PetPage() {
         canvas.style.left = `${l.bodyLeft}px`;
         canvas.style.top = `${l.bodyTop}px`;
       }
-      // The sprite is drawn on the body box bottom, so its top is sprite.h above the window bottom.
-      const spriteTop = r.sprite.h;
+      // The sprite is drawn on the body box bottom, so its top is sprite.h above the window
+      // bottom; the bubble's tail and the badge go by the head, below the blank top rows.
+      const headTop = r.sprite.h - r.sprite.headInset;
       const center = l.bodyLeft + PET_W / 2;
       const b = bubbleRef.current;
+      // The tail's tip column sits on the character's center, inside the bubble's straight
+      // bottom edge (never under a rounded corner).
+      let tailLeft = Math.round(center - ART_PX / 2);
       if (b) {
         const bw = b.offsetWidth;
         const left = Math.max(2, Math.min(Math.round(center - bw / 2), l.w - bw - 2));
         b.style.left = `${left}px`;
-        b.style.bottom = `${spriteTop + BUBBLE_LIFT_PX}px`;
+        b.style.bottom = `${headTop + BUBBLE_LIFT_PX}px`;
+        const minTail = left + BUBBLE_ART.slice.left * ART_PX;
+        const maxTail = left + bw - BUBBLE_ART.slice.right * ART_PX - TAIL_W_PX;
+        tailLeft = Math.max(minTail, Math.min(tailLeft, maxTail));
       }
       const tail = tailRef.current;
       if (tail) {
-        tail.style.left = `${Math.round(center - 1)}px`;
-        tail.style.bottom = `${spriteTop + BUBBLE_LIFT_PX - TAIL_ROWS.length + TAIL_OVERLAP}px`;
+        tail.style.left = `${tailLeft}px`;
+        tail.style.bottom = `${headTop + BUBBLE_LIFT_PX - TAIL_H_PX + TAIL_OVERLAP * ART_PX}px`;
       }
       const badge = badgeRef.current;
       if (badge) {
         badge.style.left = `${Math.round(center + r.sprite.w / 2 - 10)}px`;
-        badge.style.bottom = `${spriteTop - 8}px`;
+        badge.style.bottom = `${headTop - 22}px`;
       }
     };
     r.relayout = () => applyDom(r.layout);
@@ -289,7 +289,7 @@ export default function PetPage() {
     const move = () => {
       if (!r.state) return;
       const area = clampToWorkArea(r.state.x, r.state.y, r.areas).area;
-      const l = petWindowLayout(r.state, r.bubble ? { spriteH: r.sprite.h } : null, area);
+      const l = petWindowLayout(r.state, r.bubble ? { spriteH: r.sprite.h - r.sprite.headInset } : null, area);
       r.layout = l;
       const posChanged = !r.lastPos || r.lastPos.x !== l.x || r.lastPos.y !== l.y;
       const sizeChanged = !r.lastSize || r.lastSize.w !== l.w || r.lastSize.h !== l.h;
@@ -575,7 +575,11 @@ export default function PetPage() {
   };
 
   return (
-    <div className="pet-root" onContextMenu={onContextMenu}>
+    <div
+      className={`pet-root${artStyle ? ' pet-art' : ''}`}
+      style={(artStyle ?? undefined) as CSSProperties | undefined}
+      onContextMenu={onContextMenu}
+    >
       <canvas
         ref={canvasRef}
         className={`pet-canvas${dragging ? ' dragging' : ''}`}
@@ -597,13 +601,12 @@ export default function PetPage() {
             <span className="pet-bubble-text">{bubble.text}</span>
             {bubble.more > 0 && <span className="pet-bubble-more">+{bubble.more}</span>}
           </button>
-          <div ref={tailRef} className="pet-bubble-tail" aria-hidden="true">
-            <svg width={TAIL_W} height={TAIL_ROWS.length} viewBox={`0 0 ${TAIL_W} ${TAIL_ROWS.length}`} shapeRendering="crispEdges">
-              {TAIL_PIXELS.map((px) => (
-                <rect key={`${px.x},${px.y}`} x={px.x} y={px.y} width="1" height="1" className={px.line ? 'pet-px-line' : 'pet-px-fill'} />
-              ))}
-            </svg>
-          </div>
+          <div
+            ref={tailRef}
+            className="pet-bubble-tail"
+            style={{ width: TAIL_W_PX, height: TAIL_H_PX }}
+            aria-hidden="true"
+          />
         </>
       )}
       {unseenDone > 0 && (

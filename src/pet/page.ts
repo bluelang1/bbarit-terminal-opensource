@@ -141,12 +141,28 @@ export function petMenuEntries(pinned: boolean): PetMenuEntry[] {
   ];
 }
 
+/**
+ * Blank rows above the character's head in every frame (lowest head anchor y): the bubble
+ * tail may reach down into them. 0 when any frame has no head anchor.
+ */
+export function packHeadroomRows(pack: CharacterPack): number {
+  let min = Infinity;
+  for (const frames of Object.values(pack.animations)) {
+    for (const f of frames ?? []) {
+      const y = f.anchors?.head?.y;
+      if (y === undefined || !Number.isFinite(y)) return 0;
+      min = Math.min(min, y);
+    }
+  }
+  return Number.isFinite(min) ? Math.max(0, Math.floor(min)) : 0;
+}
+
 /** Bubble text is one line: at most this many characters, then "…". */
 export const BUBBLE_TEXT_MAX = 28;
 /** Pet window width while a bubble shows (the body box stays PET_W wide inside it). */
 export const BUBBLE_WIN_W = 300;
-/** Room a bubble needs above the body sprite: bubble, tail and a small gap. */
-export const BUBBLE_BAND_H = 40;
+/** Room a bubble needs above the character's head: the 34 px pixel bubble, its tail and a small gap. */
+export const BUBBLE_BAND_H = 48;
 
 export type PetBubble = { kind: 'blocked' | 'done'; terminalId: string; text: string; more: number };
 export type PetLastDone = { atMs: number; event: PetDoneEvent };
@@ -191,7 +207,8 @@ export type PetWindowLayout = { x: number; y: number; w: number; h: number; body
 /**
  * Window rect for a body box at (body.x, body.y) (the engine's coordinates). Without a
  * bubble the window is the body box. With one it widens to BUBBLE_WIN_W (kept inside the
- * work area) and grows upward when the sprite leaves less than BUBBLE_BAND_H of headroom;
+ * work area) and grows upward when the sprite leaves less than BUBBLE_BAND_H of headroom
+ * (spriteH = body box bottom to the character's head top);
  * bodyLeft/bodyTop place the body box inside the window so it never moves on screen.
  */
 export function petWindowLayout(
