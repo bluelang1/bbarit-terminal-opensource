@@ -156,7 +156,8 @@ type Runtime = {
   tourView: ShowcaseView | null;
   /** Badge count on screen (real summary, or the tour's fake one). */
   badge: number;
-  caption: string | null;
+  /** i18n key of the tour caption on screen (translated at render, in the app language). */
+  caption: TranslationKey | null;
   endTour: () => void;
   kick: () => void;
   persist: () => void;
@@ -200,7 +201,7 @@ export default function PetPage() {
   const [locale, setLocale] = useState<Locale>('en');
   const [bubble, setBubble] = useState<PetBubble | null>(null);
   const [unseenDone, setUnseenDone] = useState(0);
-  const [caption, setCaption] = useState<string | null>(null);
+  const [caption, setCaption] = useState<TranslationKey | null>(null);
   // Pixel-art images for the bubble, tail and badges, rendered once (null without a canvas).
   const [artStyle] = useState(() =>
     petArtStyle(window.devicePixelRatio, () => document.createElement('canvas')),
@@ -481,7 +482,7 @@ export default function PetPage() {
       setBubble(next);
     };
 
-    const setTourCaption = (next: string | null) => {
+    const setTourCaption = (next: TranslationKey | null) => {
       if (next === r.caption) return;
       r.caption = next;
       setCaption(next);
@@ -555,7 +556,7 @@ export default function PetPage() {
         r.drawnKey = '';
       }
       r.tourView = v;
-      setTourCaption(v.caption);
+      setTourCaption(v.captionKey);
       return true;
     };
 
@@ -901,7 +902,7 @@ export default function PetPage() {
       )}
       {caption && (
         <button type="button" className="pet-caption" title={t('pet.tour.end')} onClick={() => rtRef.current?.endTour()}>
-          {caption}
+          {t(caption)}
         </button>
       )}
       {unseenDone > 0 && (

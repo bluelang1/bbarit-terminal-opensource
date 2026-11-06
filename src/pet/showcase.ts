@@ -15,6 +15,7 @@ import type { AnimName } from './pack';
 import { calendarFor, type PetCalendar } from './calendar';
 import { petBubble, type PetBubble, type PetLastDone } from './page';
 import { moodFor, type ClaudeMood, type PetSummary, type PetTab } from './summary';
+import type { TranslationKey } from '../i18n/en';
 
 /** localStorage key that also plays the tour on every show ('1'); dev builds only. */
 export const SHOWCASE_KEY = 'bbarit.pet.showcase';
@@ -35,8 +36,8 @@ export type ShowcaseSegment = { anim: AnimName; ms: number; motion?: ShowcaseMot
 
 export type ShowcaseStep = {
   id: string;
-  /** Shown as a small label at the top of the pet window. */
-  caption: string;
+  /** i18n key (pet.tour.step.<id>) of the small label at the top of the pet window. */
+  captionKey: TranslationKey;
   segments: ShowcaseSegment[];
   /** Calendar to wear (season accessories / particles, special day); none: the real one. */
   cal?: PetCalendar;
@@ -54,7 +55,7 @@ export type ShowcaseIce = { dx: number; ms: number; used: boolean };
 export type ShowcaseView = {
   index: number;
   id: string;
-  caption: string;
+  captionKey: TranslationKey;
   /** Time into the current step. */
   stepMs: number;
   anim: AnimName;
@@ -86,46 +87,50 @@ const walkMs = (px: number) => Math.round((px / WALK_PX_PER_S) * 1000);
 const SLIP_WALK_PX = 45;
 const SLIP_SLIDE_PX = (SLIDE_PX_PER_S * SLIDE_MS) / 1000;
 
-const pace = (id: string, caption: string, c?: PetCalendar): ShowcaseStep => ({
+/** Tour step ids; each has a caption `pet.tour.step.<id>` in every src/i18n locale. */
+type StepId =
+  | 'walk' | 'sit' | 'sleep' | 'held' | 'spring' | 'summer' | 'autumn' | 'winter' | 'ice'
+  | 'pepero' | 'valentine' | 'white' | 'halloween' | 'christmas' | 'busy' | 'done' | 'blocked' | 'unseen';
+
+const captionKey = (id: StepId): TranslationKey => `pet.tour.step.${id}` satisfies TranslationKey;
+const defineStep = (id: StepId, rest: Omit<ShowcaseStep, 'id' | 'captionKey'>): ShowcaseStep => ({
   id,
-  caption,
-  cal: c,
-  segments: [{ anim: 'walk', ms: STEP, motion: 'pace' }],
+  captionKey: captionKey(id),
+  ...rest,
 });
 
-const eat = (id: string, caption: string, c: PetCalendar): ShowcaseStep => ({
-  id,
-  caption,
-  cal: c,
-  segments: [
-    { anim: 'eat', ms: 4500 },
-    { anim: 'idle', ms: 1500 },
-  ],
-});
+const pace = (id: StepId, c?: PetCalendar): ShowcaseStep =>
+  defineStep(id, { cal: c, segments: [{ anim: 'walk', ms: STEP, motion: 'pace' }] });
+
+const eat = (id: StepId, c: PetCalendar): ShowcaseStep =>
+  defineStep(id, {
+    cal: c,
+    segments: [
+      { anim: 'eat', ms: 4500 },
+      { anim: 'idle', ms: 1500 },
+    ],
+  });
 
 /**
  * The tour, in order. Each step is about 6 s (slip / eat steps long enough to finish).
- * Add new steps here; showcase.test.ts pins the order.
+ * Add new steps here (and their pet.tour.step.<id> caption in src/i18n); showcase.test.ts
+ * pins the order.
  */
 export const SHOWCASE_STEPS: ShowcaseStep[] = [
-  pace('walk', '기본 · 걷기'),
-  { id: 'sit', caption: '기본 · 앉기', segments: [{ anim: 'sit', ms: STEP }] },
-  { id: 'sleep', caption: '기본 · 잠자기', segments: [{ anim: 'sleep', ms: STEP }] },
-  {
-    id: 'held',
-    caption: '들어 올림 → 떨어짐',
+  pace('walk'),
+  defineStep('sit', { segments: [{ anim: 'sit', ms: STEP }] }),
+  defineStep('sleep', { segments: [{ anim: 'sleep', ms: STEP }] }),
+  defineStep('held', {
     segments: [
       { anim: 'held', ms: 2500, motion: 'lift' },
       { anim: 'fall', ms: 3500, motion: 'drop' },
     ],
-  },
-  pace('spring', '봄 · 벚꽃', cal(4, 10)),
-  pace('summer', '여름 · 선글라스', cal(7, 20)),
-  pace('autumn', '가을 · 낙엽', cal(10, 10)),
-  pace('winter', '겨울 · 목도리 · 눈', cal(1, 10)),
-  {
-    id: 'ice',
-    caption: '겨울 · 빙판 꽈당',
+  }),
+  pace('spring', cal(4, 10)),
+  pace('summer', cal(7, 20)),
+  pace('autumn', cal(10, 10)),
+  pace('winter', cal(1, 10)),
+  defineStep('ice', {
     cal: cal(1, 10),
     ice: true,
     segments: [
@@ -135,39 +140,31 @@ export const SHOWCASE_STEPS: ShowcaseStep[] = [
       { anim: 'walk', ms: walkMs(SLIP_WALK_PX + SLIP_SLIDE_PX), motion: 'left' },
       { anim: 'idle', ms: 600 },
     ],
-  },
-  eat('pepero', '빼빼로데이 · 빼빼로 먹기', cal(11, 11)),
-  eat('valentine', '발렌타인데이 · 초콜릿 먹기', cal(2, 14)),
-  eat('white', '화이트데이 · 사탕 먹기', cal(3, 14)),
-  pace('halloween', '할로윈', cal(10, 31)),
-  pace('christmas', '크리스마스', cal(12, 25)),
-  {
-    id: 'busy',
-    caption: 'Claude 작업 중',
+  }),
+  eat('pepero', cal(11, 11)),
+  eat('valentine', cal(2, 14)),
+  eat('white', cal(3, 14)),
+  pace('halloween', cal(10, 31)),
+  pace('christmas', cal(12, 25)),
+  defineStep('busy', {
     summary: { ...EMPTY, working: [tab(1, 'bbarit', 'Claude')] },
     segments: [{ anim: 'busy', ms: STEP }],
-  },
-  {
-    id: 'done',
-    caption: 'Claude 완료',
+  }),
+  defineStep('done', {
     done: { terminalId: 'showcase-2', turn: 1, project: 'bbarit', tab: 'Claude' },
     segments: [{ anim: 'happy', ms: STEP }],
-  },
-  {
-    id: 'blocked',
-    caption: 'Claude 승인 대기',
+  }),
+  defineStep('blocked', {
     summary: {
       ...EMPTY,
       blocked: [tab(3, 'bbarit', 'Claude'), tab(4, 'api', 'Claude'), tab(5, 'web', 'Codex')],
     },
     segments: [{ anim: 'wave', ms: STEP }],
-  },
-  {
-    id: 'unseen',
-    caption: '확인 안 한 완료 배지',
+  }),
+  defineStep('unseen', {
     summary: { ...EMPTY, unseenDone: 3, latestDone: tab(6, 'bbarit', 'Claude') },
     segments: [{ anim: 'sit', ms: STEP }],
-  },
+  }),
 ];
 
 export function stepMs(step: ShowcaseStep): number {
@@ -250,7 +247,7 @@ export function showcaseAt(elapsedMs: number, steps: ShowcaseStep[] = SHOWCASE_S
     return {
       index,
       id: step.id,
-      caption: step.caption,
+      captionKey: step.captionKey,
       stepMs: t,
       ...pose,
       cal: step.cal ?? null,

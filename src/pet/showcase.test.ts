@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { en } from '../i18n/en';
+import { ko } from '../i18n/ko';
 import { ACCESSORIES, BITE_MS, accessoriesFor } from './accessories';
 import { treatFor } from './calendar';
 import { ICE_LIFE_MS, SLIP_MS, iceAlpha } from './engine';
@@ -57,13 +59,21 @@ describe('SHOWCASE_STEPS', () => {
     ]);
   });
 
-  it('every step lasts about 6 s and has a caption; the total adds up', () => {
+  it('every step lasts about 6 s; the total adds up', () => {
     for (const s of SHOWCASE_STEPS) {
       expect(stepMs(s), s.id).toBeGreaterThanOrEqual(5500);
       expect(stepMs(s), s.id).toBeLessThanOrEqual(7000);
-      expect(s.caption.length, s.id).toBeGreaterThan(0);
     }
     expect(SHOWCASE_TOTAL_MS).toBe(SHOWCASE_STEPS.reduce((sum, s) => sum + stepMs(s), 0));
+  });
+
+  it('captions are i18n keys pet.tour.step.<id>, translated in en and ko', () => {
+    for (const s of SHOWCASE_STEPS) {
+      expect(s.captionKey).toBe(`pet.tour.step.${s.id}`);
+      expect(en[s.captionKey].length, `en ${s.id}`).toBeGreaterThan(0);
+      expect(ko[s.captionKey].length, `ko ${s.id}`).toBeGreaterThan(0);
+      expect(ko[s.captionKey], `ko ${s.id} is real Korean`).not.toBe(en[s.captionKey]);
+    }
   });
 
   it('ids are unique', () => {
@@ -111,7 +121,7 @@ describe('showcaseAt', () => {
       const v = showcaseAt(startOf(s.id));
       expect(v?.index).toBe(i);
       expect(v?.id).toBe(s.id);
-      expect(v?.caption).toBe(s.caption);
+      expect(v?.captionKey).toBe(s.captionKey);
       expect(v?.stepMs).toBe(0);
     });
   });
@@ -201,8 +211,8 @@ describe('showcaseAt', () => {
 
   it('takes a custom step list', () => {
     const steps: ShowcaseStep[] = [
-      { id: 'a', caption: 'A', segments: [{ anim: 'sit', ms: 100 }] },
-      { id: 'b', caption: 'B', segments: [{ anim: 'idle', ms: 50 }] },
+      { id: 'a', captionKey: 'pet.tour.step.sit', segments: [{ anim: 'sit', ms: 100 }] },
+      { id: 'b', captionKey: 'pet.tour.step.walk', segments: [{ anim: 'idle', ms: 50 }] },
     ];
     expect(showcaseAt(99, steps)?.id).toBe('a');
     expect(showcaseAt(100, steps)?.id).toBe('b');
