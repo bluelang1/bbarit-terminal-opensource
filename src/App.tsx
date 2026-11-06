@@ -6428,8 +6428,10 @@ Office project scaffold created by BBARIT Terminal.
   // pet shows or asks. Popped-out tabs are left out; nothing is ever written to a PTY.
   const petFeedMemoryRef = useRef(newPetFeedMemory());
   const petSummaryRef = useRef<PetSummary>({ blocked: [], working: [], unseenDone: 0 });
+  // Only the main window feeds the pet: /harness loads this same App with its own snapshot.
+  const isPetFeedWindow = useMemo(() => !window.location.pathname.startsWith('/harness'), []);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !isPetFeedWindow) return;
     const rows: PetFeedRow[] = [];
     for (const p of projects) {
       for (const tm of p.terminals) {
@@ -6454,7 +6456,7 @@ Office project scaffold created by BBARIT Terminal.
     void tauriEmitTo('pet', 'pet-summary', doneEvent ? { ...summary, doneEvent } : summary).catch(() => {});
   }, [projects, agentStatus, busyTerminals, detachedTerminalIds]);
   useEffect(() => {
-    if (!isTauri()) return;
+    if (!isTauri() || !isPetFeedWindow) return;
     const resend = () => { void tauriEmitTo('pet', 'pet-summary', petSummaryRef.current).catch(() => {}); };
     // pet-visibility is emitted to the pet window; this window's listener (any target) hears it too.
     const unVisibility = tauriListen<{ visible?: boolean }>('pet-visibility', (e) => { if (e.payload?.visible) resend(); });

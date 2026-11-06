@@ -372,6 +372,9 @@ pub async fn pet_weather_now(lat: f64, lon: f64) -> Result<PetWeatherNow, String
 /// City search for the manual location (Settings, an explicit owner action).
 #[tauri::command(async)]
 pub async fn pet_weather_city_search(query: String, language: String) -> Result<Vec<PetCity>, String> {
+    if !weather_enabled_from_config() {
+        return Err("weather is off".into());
+    }
     let Some(url) = geocode_url(&query, &language) else {
         return Ok(Vec::new());
     };
@@ -381,11 +384,15 @@ pub async fn pet_weather_city_search(query: String, language: String) -> Result<
 /// The Mac's location (rounded) or why there is none. `ask` (Settings only) shows the
 /// permission prompt when it was never answered.
 #[tauri::command(async)]
-pub fn pet_location(app: tauri::AppHandle, ask: bool) -> PetLocation {
+pub async fn pet_location(app: tauri::AppHandle, ask: bool) -> PetLocation {
     if !weather_enabled_from_config() {
         return PetLocation::only(LocationStatus::Off);
     }
-    platform_location(&app, ask)
+    // platform_location blocks (locationServicesEnabled, up to 2 s waiting on the main
+    // thread): keep it off the async runtime's worker threads.
+    tauri::async_runtime::spawn_blocking(move || platform_location(&app, ask))
+        .await
+        .unwrap_or_else(|_| PetLocation::only(LocationStatus::Unavailable))
 }
 
 #[cfg(not(target_os = "macos"))]

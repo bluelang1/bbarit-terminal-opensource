@@ -332,6 +332,8 @@ pub fn pet_list_characters() -> Vec<UserPack> {
 
 #[tauri::command(async)]
 pub fn pet_open_main(app: AppHandle) {
+    // Opening BBARIT from the pet ends a running tour, so a later sync cannot re-show it.
+    *tour_state() = None;
     show_main(&app);
     let _guard = SYNC_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     set_pet_visible(&app, false);
