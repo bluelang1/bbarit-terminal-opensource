@@ -116,6 +116,24 @@ describe('framesFor', () => {
   it('returns the animation itself when present', () => {
     expect(framesFor(OCTO_PACK, 'walk')).toBe(OCTO_PACK.animations.walk);
   });
+
+  it('falls back slip -> fall and getup -> sit for packs without them', () => {
+    const result = parsePack(tinyPack(), 'x');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(framesFor(result.pack, 'slip')).toBe(result.pack.animations.fall);
+    expect(framesFor(result.pack, 'getup')).toBe(result.pack.animations.sit);
+  });
+
+  it('parses optional slip / getup animations from a user pack', () => {
+    const raw = tinyPack();
+    (raw.animations as Record<string, unknown>).slip = [{ rows: ['aa', '..'], ms: 100 }];
+    const result = parsePack(raw, 'x');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(framesFor(result.pack, 'slip')).toHaveLength(1);
+    expect(framesFor(result.pack, 'slip')[0].rows).toEqual(['aa', '..']);
+  });
 });
 
 describe('OCTO_PACK', () => {

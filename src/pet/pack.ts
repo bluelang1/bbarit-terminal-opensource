@@ -15,9 +15,33 @@ export type AnimName =
   | 'happy'
   | 'busy'
   | 'wave'
-  | 'eat';
+  | 'eat'
+  | 'slip'
+  | 'getup';
 
-export const ANIM_NAMES: AnimName[] = ['idle', 'walk', 'sit', 'sleep', 'held', 'fall', 'happy', 'busy', 'wave', 'eat'];
+export const ANIM_NAMES: AnimName[] = [
+  'idle',
+  'walk',
+  'sit',
+  'sleep',
+  'held',
+  'fall',
+  'happy',
+  'busy',
+  'wave',
+  'eat',
+  'slip',
+  'getup',
+];
+
+/**
+ * Optional animations that fall back to another one before idle: slipping on ice (feet fly
+ * up, lands on its back) looks like falling, getting up like sitting.
+ */
+const FALLBACK: Partial<Record<AnimName, RequiredAnim>> = { slip: 'fall', getup: 'sit' };
+
+/** Played once and held on the last frame instead of looping. */
+export const ONE_SHOT_ANIMS: ReadonlySet<AnimName> = new Set<AnimName>(['slip', 'getup']);
 
 export const REQUIRED_ANIMS = ['idle', 'walk', 'sit', 'sleep', 'held', 'fall'] as const satisfies readonly AnimName[];
 export type RequiredAnim = (typeof REQUIRED_ANIMS)[number];
@@ -142,8 +166,10 @@ export function parsePack(json: unknown, idFallback: string): ParseResult {
   };
 }
 
-/** Frames for `anim`, falling back to idle when the pack does not have it. */
+/** Frames for `anim`, falling back (slip -> fall, getup -> sit, else idle) when the pack does not have it. */
 export function framesFor(pack: CharacterPack, anim: AnimName): PackFrame[] {
   const frames = pack.animations[anim];
-  return frames && frames.length > 0 ? frames : pack.animations.idle;
+  if (frames && frames.length > 0) return frames;
+  const fallback = FALLBACK[anim];
+  return fallback ? pack.animations[fallback] : pack.animations.idle;
 }

@@ -299,6 +299,9 @@ const ARM_TO_MOUTH: Part = [
   '...............oddo.....',
 ];
 
+// Where the eat arm holds a treat: its tip, just right of the mouth.
+const EAT_HAND: Anchor = { x: 15, y: 15 };
+
 // ---------------------------------------------------------------- composition
 
 type Pose = {
@@ -308,6 +311,8 @@ type Pose = {
   legs: Part;
   legsTop?: number;
   extras?: Array<{ part: Part; top: number }>;
+  /** Grip point for held things when it is not the right outer tentacle (eat). */
+  hand?: Anchor;
 };
 
 function frameRows(p: Pose): string[] {
@@ -315,7 +320,7 @@ function frameRows(p: Pose): string[] {
   const headTop = p.headTop ?? 5;
   const g = canvas();
   stamp(g, head, headTop);
-  stamp(g, p.face, headTop + (head === HEAD_SQUASH ? 5 : 6));
+  stamp(g, p.face, headTop + faceRow(head));
   const legsTop = p.legsTop ?? H - p.legs.length;
   // Bridge any gap between the head's last row and the tentacles.
   for (let y = headTop + head.length; y < legsTop; y++) stamp(g, [head[head.length - 2]], y);
@@ -324,16 +329,54 @@ function frameRows(p: Pose): string[] {
   return g.map((row) => row.join(''));
 }
 
-function anchorsFor(headTop: number): PackFrame['anchors'] {
-  const head: Anchor = { x: 12, y: headTop };
-  const body: Anchor = { x: 12, y: headTop + 8 };
-  const hand: Anchor = { x: 19, y: headTop + 12 };
-  return { head, body, hand };
+function faceRow(head: Part): number {
+  return head === HEAD_SQUASH ? 5 : 6;
+}
+
+/**
+ * Accessory anchors (src/pet/accessories.ts). head: top-center of the head, kept 6 rows
+ * above the eyes (the squashed head starts 5 rows above them, so its anchor is one row
+ * higher) and following the eyes when they look right; body: center of the neck line where
+ * the tentacles start; hand: the right outer tentacle 3 rows above its tip.
+ */
+function anchorsFor(p: Pose): NonNullable<PackFrame['anchors']> {
+  const head = p.head ?? HEAD;
+  const headTop = p.headTop ?? 5;
+  const legsTop = p.legsTop ?? H - p.legs.length;
+  const eyes = headTop + faceRow(head);
+  const look = p.face === FACE_LOOK ? 1 : 0;
+  return {
+    head: { x: 12 + look, y: eyes - 6 },
+    body: { x: 12, y: legsTop },
+    hand: p.hand ?? { x: 22, y: legsTop + p.legs.length - 4 },
+  };
 }
 
 function frame(p: Pose, ms: number): PackFrame {
-  return { rows: frameRows(p), ms, anchors: anchorsFor(p.headTop ?? 5) };
+  return { rows: frameRows(p), ms, anchors: anchorsFor(p) };
 }
+
+/**
+ * The pose turned upside down (slipped on ice, lying on its back) and dropped back onto the
+ * ground row. Anchors point at the head, now at the bottom; accessories are not drawn on it.
+ */
+function upsideDown(p: Pose, ms: number): PackFrame {
+  const rows = frameRows(p).reverse();
+  let last = H - 1;
+  while (last > 0 && !/[^.]/.test(rows[last])) last--;
+  const drop = H - 1 - last;
+  const out = [...Array.from({ length: drop }, () => '.'.repeat(W)), ...rows.slice(0, H - drop)];
+  const top = out.findIndex((r) => /[^.]/.test(r));
+  return {
+    rows: out,
+    ms,
+    anchors: { head: { x: 12, y: top }, body: { x: 12, y: H - 12 }, hand: { x: 22, y: top + 4 } },
+  };
+}
+
+// Lying upside down after a slip: squashed head on the ground, tentacles waving in the air.
+const LIE_A: Pose = { head: HEAD_SQUASH, headTop: 2, face: FACE_SQUISH, legs: LEGS_FLARE_A, legsTop: 13 };
+const LIE_B: Pose = { ...LIE_A, legs: LEGS_FLARE_B };
 
 export const OCTO_PACK: CharacterPack = {
   id: 'octo',
@@ -392,8 +435,22 @@ export const OCTO_PACK: CharacterPack = {
       frame({ face: FACE_HAPPY, legs: LEGS_ONE_UP, extras: [{ part: ARM_UP_B, top: 11 }] }, 260),
     ],
     eat: [
-      frame({ face: FACE_CHEW_OPEN, legs: LEGS_ONE_UP, extras: [{ part: ARM_TO_MOUTH, top: 15 }] }, 260),
-      frame({ face: FACE_CHEW_SHUT, legs: LEGS_ONE_UP, extras: [{ part: ARM_TO_MOUTH, top: 15 }] }, 260),
+      frame({ face: FACE_CHEW_OPEN, legs: LEGS_ONE_UP, extras: [{ part: ARM_TO_MOUTH, top: 15 }], hand: EAT_HAND }, 260),
+      frame({ face: FACE_CHEW_SHUT, legs: LEGS_ONE_UP, extras: [{ part: ARM_TO_MOUTH, top: 15 }], hand: EAT_HAND }, 260),
+    ],
+    // Played once (src/pet/page.ts frameIndexAt): feet fly up, lands on its back, wiggles.
+    slip: [
+      frame({ headTop: 4, face: FACE_SURPRISED, legs: LEGS_FLARE_A, legsTop: 16 }, 220),
+      upsideDown({ ...LIE_A, face: FACE_SURPRISED }, 160),
+      upsideDown(LIE_A, 300),
+      upsideDown(LIE_B, 300),
+      upsideDown(LIE_A, 300),
+      upsideDown(LIE_B, 300),
+      upsideDown(LIE_A, 400),
+    ],
+    getup: [
+      frame({ head: HEAD_SQUASH, headTop: 8, face: FACE_SQUISH, legs: LEGS_SIT }, 260),
+      frame({ face: FACE_BLINK, legs: LEGS_STAND_CURL, headTop: 6 }, 240),
     ],
   },
 };
