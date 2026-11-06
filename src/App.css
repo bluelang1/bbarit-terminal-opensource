@@ -6419,7 +6419,9 @@ body.ftree-dragging * {
   font-weight: 700;
 }
 
-.style-option:hover { transform: scale(1.1); }
+/* No transform on hover: the project modal scrolls, and a scaled swatch at the edge
+   toggles the scrollbar and makes the whole popup jitter. */
+.style-option:hover { filter: brightness(1.25); }
 .style-option.active { border-width: 3px; }
 
 .modal-actions {

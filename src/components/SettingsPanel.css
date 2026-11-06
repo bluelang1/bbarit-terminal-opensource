@@ -461,13 +461,13 @@
 }
 
 /* Font grid */
-.font-grid {
+.settings-panel .font-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
   gap: 8px;
 }
 
-.font-option {
+.settings-panel .font-option {
   padding: 10px 8px;
   background: var(--settings-bg);
   border: 2px solid color-mix(in srgb, var(--settings-accent) 30%, transparent);
@@ -479,12 +479,12 @@
   text-align: center;
 }
 
-.font-option:hover {
+.settings-panel .font-option:hover {
   border-color: var(--settings-accent);
   transform: scale(1.02);
 }
 
-.font-option.active {
+.settings-panel .font-option.active {
   border-color: var(--settings-accent);
   background: color-mix(in srgb, var(--settings-accent) 15%, transparent);
   box-shadow: 0 0 8px color-mix(in srgb, var(--settings-accent) 30%, transparent);
