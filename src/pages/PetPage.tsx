@@ -11,6 +11,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { availableMonitors, getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalPosition } from '@tauri-apps/api/dpi';
+import { Menu } from '@tauri-apps/api/menu';
 import { exit } from '@tauri-apps/plugin-process';
 import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig } from '../config/schema';
 import { getTranslation, type Locale, type TranslationKey } from '../i18n';
@@ -23,7 +24,9 @@ import {
   frameIndexAt,
   loadSavedPos,
   monitorsToAreas,
+  petMenuEntries,
   savePos,
+  type PetMenuAction,
   type UserPackJson,
 } from '../pet/page';
 import './PetPage.css';
@@ -35,9 +38,6 @@ const SLEEP_TICK_MS = 250;
 const AREA_REFRESH_MS = 30_000;
 const SAVE_EVERY_MS = 2_000;
 const DRAG_THRESHOLD_PX = 3;
-const MENU_W = 150;
-const MENU_H = 108;
-const MENU_TIMEOUT_MS = 8_000;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
 
 type Drag = {
@@ -80,15 +80,9 @@ function safeStorage(): Storage | undefined {
   }
 }
 
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), Math.max(lo, hi));
-}
-
 export default function PetPage() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rtRef = useRef<Runtime | null>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [pinned, setPinned] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [locale, setLocale] = useState<Locale>('en');
 
@@ -280,8 +274,6 @@ export default function PetPage() {
             start();
           } else {
             r.drag = null;
-            r.menuOpen = false;
-            setMenu(null);
             setDragging(false);
             stop();
           }
@@ -293,7 +285,6 @@ export default function PetPage() {
       if (disposed) return;
       const saved = loadSavedPos(safeStorage());
       r.state = initialState(r.areas, { ...saved, mode: r.mode });
-      setPinned(r.state.pinned);
       start();
     })();
 
@@ -309,23 +300,8 @@ export default function PetPage() {
 
   const t = (key: TranslationKey) => getTranslation(locale, key);
 
-  const closeMenu = () => {
-    const r = rtRef.current;
-    if (r) r.menuOpen = false;
-    setMenu(null);
-  };
-
-  // The pet window never takes focus, so a click elsewhere cannot dismiss the menu; let it
-  // time out instead of freezing the pet.
-  useEffect(() => {
-    if (!menu) return;
-    const id = window.setTimeout(closeMenu, MENU_TIMEOUT_MS);
-    return () => window.clearTimeout(id);
-  }, [menu]);
-
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const r = rtRef.current;
-    if (menu) closeMenu();
     if (!r?.state || e.button !== 0) return;
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -374,45 +350,61 @@ export default function PetPage() {
     if (isTauri()) void invoke('pet_open_main').catch((e) => console.warn('[pet] pet_open_main failed:', e));
   };
 
-  const onContextMenu = (e: ReactMouseEvent<HTMLElement>) => {
-    e.preventDefault();
-    const r = rtRef.current;
-    if (!r?.state) return;
-    r.drag = null;
-    r.menuOpen = true;
-    setDragging(false);
-    setPinned(r.state.pinned);
-    setMenu({ x: clamp(e.clientX, 2, PET_W - MENU_W - 2), y: clamp(e.clientY, 2, PET_H - MENU_H - 2) });
-  };
-
   const togglePin = () => {
     const r = rtRef.current;
-    closeMenu();
     if (!r?.state) return;
     // Unpinned above the ground, the engine lets the pet fall back down and walk again.
     r.state = { ...r.state, pinned: !r.state.pinned, actionMs: 0 };
     r.activity = true;
-    setPinned(r.state.pinned);
     r.persist();
     r.kick();
   };
 
-  const openMain = () => {
-    closeMenu();
-    onDoubleClick();
-  };
-
   const hidePet = () => {
-    closeMenu();
     if (isTauri()) void invoke('pet_hide').catch((e) => console.warn('[pet] pet_hide failed:', e));
   };
 
   // Same path as Cmd-Q: app.exit -> RunEvent::Exit, where the PTY holder GOODBYE follows
   // terminal.keepRunningOnQuit (not the "quit and end all terminals" kill_all).
   const quitApp = () => {
-    closeMenu();
     rtRef.current?.persist();
     if (isTauri()) void exit(0).catch((e) => console.warn('[pet] exit failed:', e));
+  };
+
+  const menuActions: Record<PetMenuAction, () => void> = {
+    open: onDoubleClick,
+    togglePin,
+    hide: hidePet,
+    quit: quitApp,
+  };
+
+  // Native context menu: the pet window never takes focus, so an HTML menu could not be
+  // dismissed by clicking elsewhere; the OS menu closes on any outside click. On macOS
+  // popup() resolves once the menu has closed, so the pet holds still while it is open.
+  const onContextMenu = async (e: ReactMouseEvent<HTMLElement>) => {
+    e.preventDefault();
+    const r = rtRef.current;
+    if (!r?.state || r.menuOpen || !isTauri()) return;
+    r.drag = null;
+    r.menuOpen = true;
+    setDragging(false);
+    let menu: Menu | null = null;
+    try {
+      menu = await Menu.new({
+        items: petMenuEntries(r.state.pinned).map((entry) => ({
+          id: entry.id,
+          text: t(entry.labelKey),
+          action: () => menuActions[entry.action](),
+        })),
+      });
+      await menu.popup();
+    } catch (err) {
+      console.warn('[pet] context menu failed:', err);
+    } finally {
+      r.menuOpen = false;
+      r.kick();
+      void menu?.close().catch(() => {});
+    }
   };
 
   return (
@@ -426,27 +418,6 @@ export default function PetPage() {
         onPointerCancel={endDrag}
         onDoubleClick={onDoubleClick}
       />
-      {menu && (
-        <div
-          className="pet-menu"
-          role="menu"
-          style={{ left: menu.x, top: menu.y }}
-          onPointerDown={(e) => e.stopPropagation()}
-        >
-          <button type="button" role="menuitem" onClick={openMain}>
-            {t('pet.menu.open')}
-          </button>
-          <button type="button" role="menuitem" onClick={togglePin}>
-            {pinned ? t('pet.menu.unpin') : t('pet.menu.pin')}
-          </button>
-          <button type="button" role="menuitem" onClick={hidePet}>
-            {t('pet.menu.hide')}
-          </button>
-          <button type="button" role="menuitem" onClick={quitApp}>
-            {t('pet.menu.quit')}
-          </button>
-        </div>
-      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   frameIndexAt,
   loadSavedPos,
   monitorsToAreas,
+  petMenuEntries,
   savePos,
 } from './page';
 
@@ -136,5 +137,20 @@ describe('frameIndexAt', () => {
     expect(frameIndexAt(frames, 399)).toBe(1);
     expect(frameIndexAt(frames, 400)).toBe(0);
     expect(frameIndexAt([f(100)], 5000)).toBe(0);
+  });
+});
+
+describe('petMenuEntries', () => {
+  it('lists open, pin toggle, hide, quit in order with stable ids', () => {
+    expect(petMenuEntries(false)).toEqual([
+      { id: 'pet-menu-open', action: 'open', labelKey: 'pet.menu.open' },
+      { id: 'pet-menu-pin', action: 'togglePin', labelKey: 'pet.menu.pin' },
+      { id: 'pet-menu-hide', action: 'hide', labelKey: 'pet.menu.hide' },
+      { id: 'pet-menu-quit', action: 'quit', labelKey: 'pet.menu.quit' },
+    ]);
+  });
+
+  it('labels the toggle by the current pin state', () => {
+    expect(petMenuEntries(true)[1]).toEqual({ id: 'pet-menu-pin', action: 'togglePin', labelKey: 'pet.menu.unpin' });
   });
 });

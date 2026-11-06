@@ -121,3 +121,20 @@ export function frameIndexAt(frames: PackFrame[], elapsedMs: number): number {
   }
   return frames.length - 1;
 }
+
+export type PetMenuAction = 'open' | 'togglePin' | 'hide' | 'quit';
+export type PetMenuLabelKey = 'pet.menu.open' | 'pet.menu.pin' | 'pet.menu.unpin' | 'pet.menu.hide' | 'pet.menu.quit';
+export type PetMenuEntry = { id: string; action: PetMenuAction; labelKey: PetMenuLabelKey };
+
+/**
+ * Items of the pet's native right-click menu, top to bottom. Ids are stable (and prefixed
+ * so they never match the app menu's ids in main.rs on_menu_event).
+ */
+export function petMenuEntries(pinned: boolean): PetMenuEntry[] {
+  return [
+    { id: 'pet-menu-open', action: 'open', labelKey: 'pet.menu.open' },
+    { id: 'pet-menu-pin', action: 'togglePin', labelKey: pinned ? 'pet.menu.unpin' : 'pet.menu.pin' },
+    { id: 'pet-menu-hide', action: 'hide', labelKey: 'pet.menu.hide' },
+    { id: 'pet-menu-quit', action: 'quit', labelKey: 'pet.menu.quit' },
+  ];
+}
