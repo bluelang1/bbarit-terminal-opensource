@@ -1,0 +1,53 @@
+/* Desktop pet window (/pet). Page-level transparency lives in src/index.css (html.pet-page)
+   so it applies before this lazy chunk loads. */
+
+.pet-root {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+}
+
+.pet-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  cursor: grab;
+  touch-action: none;
+}
+
+.pet-canvas.dragging {
+  cursor: grabbing;
+}
+
+.pet-menu {
+  position: absolute;
+  z-index: 2;
+  min-width: 120px;
+  max-width: 150px;
+  padding: 3px;
+  background: #1e1e2e;
+  border: 1px solid #585b70;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.6);
+  font: 12px/1.3 -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #cdd6f4;
+}
+
+.pet-menu button {
+  display: block;
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.pet-menu button:hover,
+.pet-menu button:focus-visible {
+  background: #45475a;
+  outline: none;
+}

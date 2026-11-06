@@ -3323,4 +3323,19 @@ export const es: Record<TranslationKey, string> = {
   'orch.mergeResultMsg': "Exitosos: {ok}, fallidos: {fail}",
   'orch.conflictPreservedMsg': " (ramas en conflicto conservadas — se requiere merge manual)",
 
+  // Desktop pet
+  'settings.pet.title': 'Desktop pet',
+  'settings.pet.enabled': 'Show desktop pet',
+  'settings.pet.enabled.desc': 'When BBARIT is minimized or its window is closed, a small character lives on the desktop. Double-click it to bring BBARIT back.',
+  'settings.pet.character': 'Character',
+  'settings.pet.character.desc': 'Your own packs go in ~/.config/octo/characters/<id>/character.json; broken packs are skipped.',
+  'settings.pet.character.user': '(user)',
+  'settings.pet.mode': 'Movement',
+  'settings.pet.mode.walk': 'Walk around',
+  'settings.pet.mode.stay': 'Stay put',
+  'settings.pet.mode.desc': 'Walk along the bottom of the screen, or stay where it is.',
+  'pet.menu.open': 'Open BBARIT',
+  'pet.menu.pin': 'Stay here',
+  'pet.menu.unpin': 'Walk around again',
+  'pet.menu.hide': 'Hide',
 };

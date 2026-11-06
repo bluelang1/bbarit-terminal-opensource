@@ -142,6 +142,27 @@ export interface OllamaConfig {
   model: string;
 }
 
+/** Desktop pet (top-level `pet` in config.json). Rust reads `enabled` too (pet.rs pet_enabled). */
+export interface PetConfig {
+  /** Only an explicit `false` turns the pet off. */
+  enabled: boolean;
+  /** Bundled pack id (`octo`) or a user pack folder under ~/.config/octo/characters. */
+  character: string;
+  mode: 'walk' | 'stay';
+}
+
+export const DEFAULT_PET_CONFIG: PetConfig = { enabled: true, character: 'octo', mode: 'walk' };
+
+/** Fill and sanitize `pet` from untrusted config JSON. Mirrors pet.rs `pet_enabled`. */
+export function normalizePetConfig(raw: unknown): PetConfig {
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  return {
+    enabled: r.enabled !== false,
+    character: typeof r.character === 'string' && r.character.trim() ? r.character.trim() : DEFAULT_PET_CONFIG.character,
+    mode: r.mode === 'stay' ? 'stay' : 'walk',
+  };
+}
+
 export interface NoteTemplate {
   id: string;
   name: string;
@@ -298,6 +319,7 @@ export interface OctoConfig {
   dbConnections: DatabaseConnection[];
   projectConfigs: Record<string, ProjectConfig>;
   easterEggMedia: EasterEggMedia;
+  pet: PetConfig;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -442,6 +464,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   dbConnections: [],
   projectConfigs: {},
   easterEggMedia: { type: 'default', path: '' },
+  pet: { ...DEFAULT_PET_CONFIG },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -528,6 +551,7 @@ export function validateConfig(raw: unknown): OctoConfig {
     easterEggMedia: input.easterEggMedia && typeof input.easterEggMedia === 'object'
       ? { type: input.easterEggMedia.type || 'default', path: input.easterEggMedia.path || '' }
       : { type: 'default', path: '' },
+    pet: normalizePetConfig(input.pet),
   };
 }
 

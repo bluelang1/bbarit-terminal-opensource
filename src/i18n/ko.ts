@@ -3381,4 +3381,19 @@ export const ko: Record<TranslationKey, string> = {
   'orch.mergeResultMsg': "성공: {ok}개, 실패: {fail}개",
   'orch.conflictPreservedMsg': " (충돌 브랜치는 보존됨 — 수동 머지 필요)",
 
+  // Desktop pet
+  'settings.pet.title': '데스크톱 펫',
+  'settings.pet.enabled': '데스크톱 펫 보이기',
+  'settings.pet.enabled.desc': '빠릿을 최소화하거나 창을 닫으면 작은 캐릭터가 바탕화면에 나타납니다. 더블클릭하면 빠릿이 다시 열립니다.',
+  'settings.pet.character': '캐릭터',
+  'settings.pet.character.desc': '직접 만든 캐릭터는 ~/.config/octo/characters/<id>/character.json 에 둡니다. 형식이 잘못된 캐릭터는 건너뜁니다.',
+  'settings.pet.character.user': '(사용자)',
+  'settings.pet.mode': '움직임',
+  'settings.pet.mode.walk': '걸어다니기',
+  'settings.pet.mode.stay': '제자리에 있기',
+  'settings.pet.mode.desc': '화면 아래쪽을 따라 걸어다니거나 한 자리에 머뭅니다.',
+  'pet.menu.open': '빠릿 열기',
+  'pet.menu.pin': '여기 고정',
+  'pet.menu.unpin': '다시 걸어다니기',
+  'pet.menu.hide': '숨기기',
 };

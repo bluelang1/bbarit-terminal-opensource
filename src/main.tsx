@@ -59,9 +59,14 @@ summary,
 installBrutalistControlGuard();
 installMenuSelectAllBridge();
 
+// The desktop pet window (/pet) is a tiny transparent canvas: it skips Monaco, the DB
+// bootstrap, the config provider and the product notice gate (src/pages/PetPage.tsx).
+const IS_PET_WINDOW = window.location.pathname.startsWith('/pet');
+if (IS_PET_WINDOW) document.documentElement.classList.add('pet-page');
+
 // Monaco를 CDN 대신 로컬 번들로 구동 (오프라인 안전 + 버전 고정).
 // 별도 청크라 첫 페인트를 막지 않고, <Editor> 첫 마운트 전에 로드가 끝난다.
-void import('./editor/monacoSetup');
+if (!IS_PET_WINDOW) void import('./editor/monacoSetup');
 
 // Sub-pages loaded via hash routing for Tauri multi-window
 const App = lazy(() => import('./App.tsx'))
@@ -74,6 +79,7 @@ const SkillsStudioPage = lazy(() => import('./pages/SkillsStudioPage'))
 const BrowserPage = lazy(() => import('./pages/BrowserPage'))
 const ChatPage = lazy(() => import('./pages/ChatPage'))
 const ThreadPage = lazy(() => import('./pages/ThreadPage'))
+const PetPage = lazy(() => import('./pages/PetPage'))
 // Planning AI disabled from app routing for now.
 // const PlanningPage = lazy(() => import('./pages/PlanningPage'))
 
@@ -180,6 +186,15 @@ function RootRouter() {
 }
 
 createRoot(document.getElementById('root')!).render(
+  IS_PET_WINDOW ? (
+    <StrictMode>
+      <AppErrorBoundary>
+        <Suspense fallback={null}>
+          <PetPage />
+        </Suspense>
+      </AppErrorBoundary>
+    </StrictMode>
+  ) : (
   <StrictMode>
     <AppErrorBoundary>
       <ProductNoticeGate>
@@ -190,5 +205,6 @@ createRoot(document.getElementById('root')!).render(
         </AppBootstrap>
       </ProductNoticeGate>
     </AppErrorBoundary>
-  </StrictMode>,
+  </StrictMode>
+  ),
 )
