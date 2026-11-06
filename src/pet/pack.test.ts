@@ -92,6 +92,15 @@ describe('parsePack', () => {
     expectError(parsePack(raw2, 'x'), 'scale');
   });
 
+  it('keeps head / hand / body / front anchors and drops unknown ones', () => {
+    const json = tinyPack();
+    const anchors = { head: { x: 1, y: 0 }, front: { x: 2, y: 1 }, tail: { x: 0, y: 0 }, hand: { x: 'a', y: 1 } };
+    (json.animations as Record<string, unknown>).busy = [{ rows: ['.a', 'a.'], ms: 100, anchors }];
+    const r = parsePack(json, 'x');
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.pack.animations.busy?.[0].anchors).toEqual({ head: { x: 1, y: 0 }, front: { x: 2, y: 1 } });
+  });
+
   it('drops unknown animation names and keeps optional known ones', () => {
     const raw = tinyPack();
     (raw.animations as Record<string, unknown>).dance = [{ rows: ['aa', 'aa'], ms: 100 }];

@@ -149,6 +149,18 @@ const FACE_FOCUS: Part = [
   '...........odo..........',
 ];
 
+// Concentrating, looking right at the laptop screen (busy).
+const FACE_FOCUS_LOOK: Part = FACE_FOCUS.map((r) => '.' + r.slice(0, -1));
+
+// Eyes on the screen, mouth pulled to one side: hmm (busy variant).
+const FACE_HMM_LOOK: Part = [
+  '.........wo....wo.......',
+  '.........oo....oo.......',
+  '.........oo....oo.......',
+  '.......dd.......dd......',
+  '............ooo.........',
+];
+
 // Chewing: happy eyes, mouth open / closed.
 const FACE_CHEW_OPEN: Part = [
   '........oo....oo........',
@@ -240,25 +252,85 @@ const LEGS_SIT: Part = [
   '.oo...ooo......ooo...oo.',
 ];
 
-// Busy: two front tentacles tap like typing.
-const LEGS_TAP_A: Part = [
-  '...obbbbbbbbbbbbbbbbo...',
-  '..obbbbbbbbbbbbbbbbbbo..',
-  '..obbobbbobbbbobbbobbo..',
-  '.obbo.obbo.oo.obbo.obbo.',
-  '.obo..obbo....obo...obo.',
-  'obbo..obo.....oo...obbo.',
-  '.oo....o............oo..',
+// Busy: typing on the laptop (accessories.ts `laptop`, set down on the front anchor to the
+// right). The two left tentacles stand; three on the right reach onto the keyboard and tap
+// in turns (a tip lifted one row is a key being let go).
+const LEGS_TYPE_A: Part = [
+  '...obbbbbbbbbbbbbbbbooooo..',
+  '...obbbbbbbbbbbbbbbbbbbbbo.',
+  '...obbobbbbobbbbbbbbooobbo.',
+  '...obbo.obbo.obboobbbbboo..',
+  '...obo..obo..obboooooooo...',
+  '...obo.obbo...obo..........',
+  '....o...oo.....o...........',
 ];
 
-const LEGS_TAP_B: Part = [
-  '...obbbbbbbbbbbbbbbbo...',
-  '..obbbbbbbbbbbbbbbbbbo..',
-  '..obbobbbobbbbobbbobbo..',
-  '.obbo.obbo.oo.obbo.obbo.',
-  '.obo...obo....obbo..obo.',
-  'obbo....oo.....obo..obbo',
-  '.oo.............o....oo.',
+const LEGS_TYPE_B: Part = [
+  '...obbbbbbbbbbbbbbbbooooo..',
+  '...obbbbbbbbbbbbbbbbbbbbbo.',
+  '...obbobbbbobbbbbbbboooooo.',
+  '...obbo.obbo.obboobbbbbo...',
+  '...obo..obo..obbooooobbo...',
+  '...obo.obbo...obo....oo....',
+  '....o...oo.....o...........',
+];
+
+const LEGS_TYPE_C: Part = [
+  '...obbbbbbbbbbbbbbbbooooo..',
+  '...obbbbbbbbbbbbbbbbbbbbbo.',
+  '...obbobbbbobbbbbbbbooobbo.',
+  '...obbo.obbo.obboobbbbboo..',
+  '...obo..obo..obbooooobbo...',
+  '...obo.obbo...obo....oo....',
+  '....o...oo.....o...........',
+];
+
+// Busy variant: the right outer tentacle leaves the keyboard to scratch the top of the head
+// while the inner one rests on the keys.
+const LEGS_TYPE_REST: Part = [
+  '...obbbbbbbbbbbbbbbbo......',
+  '...obbbbbbbbbbbbbbbbbbbo...',
+  '...obbobbbbobbbbbbbboooo...',
+  '...obbo.obbo.obboobbbbbo...',
+  '...obo..obo..obbooooobbo...',
+  '...obo.obbo...obo....oo....',
+  '....o...oo.....o...........',
+];
+
+const ARM_SCRATCH_A: Part = [
+  '.............ooooo......',
+  '.............obbbooo....',
+  '.............ooobbboo...',
+  '...............ooobboo..',
+  '.................oobboo.',
+  '..................oobbo.',
+  '...................obboo',
+  '...................oobbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+];
+
+const ARM_SCRATCH_B: Part = [
+  '...........oooooo.......',
+  '...........obbbboooo....',
+  '...........ooooobbboo...',
+  '...............ooobboo..',
+  '.................oobboo.',
+  '..................oobbo.',
+  '...................obboo',
+  '...................oobbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
+  '....................obbo',
 ];
 
 // Wave: right outer tentacle raised beside the head (drawn as an overlay).
@@ -302,6 +374,9 @@ const ARM_TO_MOUTH: Part = [
 // Where the eat arm holds a treat: its tip, just right of the mouth.
 const EAT_HAND: Anchor = { x: 15, y: 15 };
 
+// The busy laptop's near end, on the bottom row: its screen stands at columns 22..30.
+const FRONT: Anchor = { x: 17, y: H - 1 };
+
 // ---------------------------------------------------------------- composition
 
 type Pose = {
@@ -313,19 +388,22 @@ type Pose = {
   extras?: Array<{ part: Part; top: number }>;
   /** Grip point for held things when it is not the right outer tentacle (eat). */
   hand?: Anchor;
+  /** Every part drawn this many columns to the right (busy: left, making room for the laptop). */
+  dx?: number;
 };
 
 function frameRows(p: Pose): string[] {
   const head = p.head ?? HEAD;
   const headTop = p.headTop ?? 5;
+  const dx = p.dx ?? 0;
   const g = canvas();
-  stamp(g, head, headTop);
-  stamp(g, p.face, headTop + faceRow(head));
+  stamp(g, head, headTop, dx);
+  stamp(g, p.face, headTop + faceRow(head), dx);
   const legsTop = p.legsTop ?? H - p.legs.length;
   // Bridge any gap between the head's last row and the tentacles.
-  for (let y = headTop + head.length; y < legsTop; y++) stamp(g, [head[head.length - 2]], y);
-  stamp(g, p.legs, legsTop);
-  for (const e of p.extras ?? []) stamp(g, e.part, e.top);
+  for (let y = headTop + head.length; y < legsTop; y++) stamp(g, [head[head.length - 2]], y, dx);
+  stamp(g, p.legs, legsTop, dx);
+  for (const e of p.extras ?? []) stamp(g, e.part, e.top, dx);
   return g.map((row) => row.join(''));
 }
 
@@ -337,18 +415,21 @@ function faceRow(head: Part): number {
  * Accessory anchors (src/pet/accessories.ts). head: top-center of the head, kept 6 rows
  * above the eyes (the squashed head starts 5 rows above them, so its anchor is one row
  * higher) and following the eyes when they look right; body: center of the neck line where
- * the tentacles start; hand: the right outer tentacle 3 rows above its tip.
+ * the tentacles start; hand: the right outer tentacle 3 rows above its tip; front: the
+ * ground to the right where the busy laptop's keyboard starts (FRONT).
  */
 function anchorsFor(p: Pose): NonNullable<PackFrame['anchors']> {
   const head = p.head ?? HEAD;
   const headTop = p.headTop ?? 5;
   const legsTop = p.legsTop ?? H - p.legs.length;
   const eyes = headTop + faceRow(head);
-  const look = p.face === FACE_LOOK ? 1 : 0;
+  const look = p.face === FACE_LOOK || p.face === FACE_FOCUS_LOOK || p.face === FACE_HMM_LOOK ? 1 : 0;
+  const dx = p.dx ?? 0;
   return {
-    head: { x: 12 + look, y: eyes - 6 },
-    body: { x: 12, y: legsTop },
-    hand: p.hand ?? { x: 22, y: legsTop + p.legs.length - 4 },
+    head: { x: 12 + look + dx, y: eyes - 6 },
+    body: { x: 12 + dx, y: legsTop },
+    hand: p.hand ?? { x: 22 + dx, y: legsTop + p.legs.length - 4 },
+    front: FRONT,
   };
 }
 
@@ -370,13 +451,31 @@ function upsideDown(p: Pose, ms: number): PackFrame {
   return {
     rows: out,
     ms,
-    anchors: { head: { x: 12, y: top }, body: { x: 12, y: H - 12 }, hand: { x: 22, y: top + 4 } },
+    anchors: { head: { x: 12, y: top }, body: { x: 12, y: H - 12 }, hand: { x: 22, y: top + 4 }, front: FRONT },
   };
 }
 
 // Lying upside down after a slip: squashed head on the ground, tentacles waving in the air.
 const LIE_A: Pose = { head: HEAD_SQUASH, headTop: 2, face: FACE_SQUISH, legs: LEGS_FLARE_A, legsTop: 13 };
 const LIE_B: Pose = { ...LIE_A, legs: LEGS_FLARE_B };
+
+// Busy (Claude working), about 10 s: typing bursts (tentacles tapping in turns, the head
+// bobbing now and then), then the short variant: scratching its head at the screen.
+// Busy poses stand 3 columns left of center so the laptop fits on the right.
+const BUSY_DX = -3;
+const TYPE_A = frame({ face: FACE_FOCUS_LOOK, legs: LEGS_TYPE_A, dx: BUSY_DX }, 150);
+const TYPE_B = frame({ face: FACE_FOCUS_LOOK, legs: LEGS_TYPE_B, dx: BUSY_DX }, 150);
+const TYPE_C = frame({ face: FACE_FOCUS_LOOK, legs: LEGS_TYPE_C, dx: BUSY_DX }, 150);
+const TYPE_BOB = frame({ face: FACE_FOCUS_LOOK, legs: LEGS_TYPE_B, headTop: 6, dx: BUSY_DX }, 150);
+const TYPE_BURST = [TYPE_A, TYPE_B, TYPE_C, TYPE_B, TYPE_A, TYPE_BOB, TYPE_C, TYPE_B];
+const SCRATCH_A = frame({ face: FACE_HMM_LOOK, legs: LEGS_TYPE_REST, extras: [{ part: ARM_SCRATCH_A, top: 3 }], dx: BUSY_DX }, 220);
+const SCRATCH_B = frame({ face: FACE_HMM_LOOK, legs: LEGS_TYPE_REST, extras: [{ part: ARM_SCRATCH_B, top: 3 }], dx: BUSY_DX }, 220);
+const BUSY_LOOP: PackFrame[] = [
+  ...Array.from({ length: 6 }, () => TYPE_BURST).flat(),
+  frame({ face: FACE_HMM_LOOK, legs: LEGS_TYPE_A, dx: BUSY_DX }, 500),
+  ...Array.from({ length: 3 }, () => [SCRATCH_A, SCRATCH_B]).flat(),
+  frame({ face: FACE_HMM_LOOK, legs: LEGS_TYPE_A, dx: BUSY_DX }, 400),
+];
 
 export const OCTO_PACK: CharacterPack = {
   id: 'octo',
@@ -427,8 +526,7 @@ export const OCTO_PACK: CharacterPack = {
       frame({ face: FACE_HAPPY, legs: LEGS_STAND_CURL, headTop: 6 }, 260),
     ],
     busy: [
-      frame({ face: FACE_FOCUS, legs: LEGS_TAP_A }, 140),
-      frame({ face: FACE_FOCUS, legs: LEGS_TAP_B, headTop: 6 }, 140),
+      ...BUSY_LOOP,
     ],
     wave: [
       frame({ face: FACE_HAPPY, legs: LEGS_ONE_UP, extras: [{ part: ARM_UP_A, top: 11 }] }, 260),

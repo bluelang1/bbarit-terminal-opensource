@@ -37,10 +37,33 @@ describe('ACCESSORIES art', () => {
 
   it('treats have 3 bite frames, wearables 1', () => {
     for (const id of IDS) {
+      if (id === 'laptop') continue;
       const treat = id === 'pepero' || id === 'chocolate' || id === 'candy';
       expect(ACCESSORIES[id].frames).toHaveLength(treat ? 3 : 1);
       if (treat) expect(ACCESSORIES[id].anchor).toBe('hand');
+      expect(ACCESSORIES[id].frameBy ?? 'bite').toBe('bite');
     }
+  });
+
+  it('laptop: on the front anchor behind the body, one size, code changes every frame', () => {
+    const lap = ACCESSORIES.laptop;
+    expect(lap.anchor).toBe('front');
+    expect(lap.behind).toBe(true);
+    expect(lap.frameBy).toBe('tick');
+    expect(lap.frames.length).toBeGreaterThanOrEqual(6);
+    const size = (f: (typeof lap.frames)[number]) => `${f.rows[0].length}x${f.rows.length}|${f.ox},${f.oy}`;
+    lap.frames.forEach((f, i) => {
+      expect(size(f)).toBe(size(lap.frames[0]));
+      const next = lap.frames[(i + 1) % lap.frames.length];
+      expect(f.rows.join('\n'), `frame ${i}`).not.toBe(next.rows.join('\n'));
+    });
+  });
+
+  it('the scarf is snug: at most one pixel wider than the head each side, short end', () => {
+    const f = ACCESSORIES.scarf.frames[0];
+    // OCTO's head is 18 wide (sit squash 20); the scarf may overhang by one each side.
+    expect(f.rows[0].length).toBeLessThanOrEqual(20);
+    expect(f.rows.length - f.oy).toBeLessThanOrEqual(5);
   });
 
   it('bites get smaller', () => {
@@ -53,11 +76,11 @@ describe('ACCESSORIES art', () => {
 });
 
 describe('OCTO anchors', () => {
-  it('every frame has head / hand / body anchors inside the sprite box', () => {
+  it('every frame has head / hand / body / front anchors inside the sprite box', () => {
     const { w, h } = OCTO_PACK.size;
     for (const name of ANIM_NAMES) {
       for (const f of OCTO_PACK.animations[name] ?? []) {
-        for (const a of ['head', 'hand', 'body'] as const) {
+        for (const a of ['head', 'hand', 'body', 'front'] as const) {
           const p = f.anchors?.[a];
           expect(p, `${name} ${a}`).toBeDefined();
           expect(p!.x).toBeGreaterThanOrEqual(0);
@@ -78,6 +101,42 @@ describe('OCTO anchors', () => {
         expect(f.rows[row].slice(x - 3, x + 3)).toMatch(/o/);
       }
     }
+  });
+});
+
+describe('OCTO busy', () => {
+  const busy = OCTO_PACK.animations.busy!;
+  const total = busy.reduce((sum, f) => sum + f.ms, 0);
+
+  it('loops in about 10 s', () => {
+    expect(total).toBeGreaterThanOrEqual(8000);
+    expect(total).toBeLessThanOrEqual(12_000);
+  });
+
+  it('typing frames reach the keyboard: tentacle pixels on the deck right of the front anchor', () => {
+    const lap = ACCESSORIES.laptop.frames[0];
+    const typing = busy.filter((f) => f.rows.slice(0, f.anchors!.head!.y).every((r) => !/[^.]/.test(r)));
+    expect(typing.length).toBeGreaterThan(busy.length / 2);
+    for (const f of typing) {
+      const front = f.anchors!.front!;
+      // Deck: the laptop's bottom 4 rows; the tentacle tips land on them.
+      const deckTop = front.y - lap.oy + lap.rows.length - 4;
+      const onDeck = f.rows.slice(deckTop, front.y).some((r) => /[ob]/.test(r.slice(front.x)));
+      expect(onDeck).toBe(true);
+    }
+  });
+
+  it('typing taps: consecutive typing frames differ', () => {
+    const distinct = new Set(busy.map((f) => f.rows.join('')));
+    expect(distinct.size).toBeGreaterThanOrEqual(4);
+  });
+
+  it('has a short variant with a tentacle up on the head (scratching)', () => {
+    const scratch = busy.filter((f) => f.rows.slice(0, f.anchors!.head!.y).some((r) => /[^.]/.test(r)));
+    expect(scratch.length).toBeGreaterThanOrEqual(2);
+    const ms = scratch.reduce((sum, f) => sum + f.ms, 0);
+    expect(ms).toBeGreaterThanOrEqual(1000);
+    expect(ms).toBeLessThanOrEqual(total / 3);
   });
 });
 
@@ -109,6 +168,14 @@ describe('accessoriesFor', () => {
     expect(accessoriesFor(cal('winter', 'valentine'), 'eat')).toEqual(['scarf', 'chocolate']);
     expect(accessoriesFor(cal('spring', 'white'), 'eat')).toEqual(['candy']);
     expect(accessoriesFor(cal('autumn', 'halloween'), 'eat')).not.toContain('pepero');
+  });
+
+  it('busy: a laptop on top of the outfit; carried things are put down', () => {
+    expect(accessoriesFor(cal('spring'), 'busy')).toEqual(['laptop']);
+    expect(accessoriesFor(cal('winter'), 'busy')).toEqual(['scarf', 'laptop']);
+    expect(accessoriesFor(cal('autumn', 'halloween'), 'busy')).toEqual(['witchHat', 'laptop']);
+    expect(accessoriesFor(cal('spring'), 'idle')).not.toContain('laptop');
+    expect(accessoriesFor(cal('autumn', 'pepero'), 'busy')).not.toContain('pepero');
   });
 
   it('nothing while lying upside down after a slip', () => {
@@ -182,6 +249,29 @@ describe('drawAccessories', () => {
     for (const layer of ['front', 'behind'] as const) {
       drawAccessories(ctx, pack, bare, ['santaHat', 'santaSuit', 'pumpkin', 'candy'], 0, 0, 4, false, 0, layer);
     }
+    expect(ctx.fillRect).not.toHaveBeenCalled();
+  });
+
+  it('animated accessories show frame tick % frames (laptop screen)', () => {
+    const busy = OCTO_PACK.animations.busy![0];
+    const calls = (tick: number) => {
+      const ctx = spyCtx();
+      const colors: string[] = [];
+      ctx.fillRect.mockImplementation(() => colors.push(ctx.fillStyle));
+      drawAccessories(ctx, OCTO_PACK, busy, ['laptop'], 0, 0, 4, false, 2, 'behind', tick);
+      return JSON.stringify([ctx.fillRect.mock.calls, colors]);
+    };
+    const n = ACCESSORIES.laptop.frames.length;
+    expect(calls(0)).not.toBe('[[],[]]');
+    expect(calls(1)).not.toBe(calls(0));
+    expect(calls(n)).toBe(calls(0));
+    expect(calls(n + 1)).toBe(calls(1));
+  });
+
+  it('skips the laptop on a frame without a front anchor', () => {
+    const ctx = spyCtx();
+    const noFront: PackFrame = { rows: frame.rows, ms: 100, anchors: { head: { x: 12, y: 5 }, hand: { x: 20, y: 20 } } };
+    drawAccessories(ctx, OCTO_PACK, noFront, ['laptop'], 0, 0, 4, false, 0, 'behind', 3);
     expect(ctx.fillRect).not.toHaveBeenCalled();
   });
 

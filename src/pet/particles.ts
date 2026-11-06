@@ -1,6 +1,7 @@
 // Season particles drawn in code inside the pet window (the body box canvas): cherry petals
 // in spring, heat shimmer in summer, maple / ginkgo leaves in autumn, snowflakes and breath
-// puffs in winter, plus dizzy stars after a slip and the ice patch it slips on.
+// puffs in winter, plus dizzy stars after a slip, sleep "Z"s over the head and the ice patch
+// it slips on.
 //
 // Pixel style like the speech bubble: art rows with OCTO's outline, ART_PX (2) CSS px per
 // art pixel, positions snapped to that grid. Cheap: at most MAX_PARTICLES alive, stepped on
@@ -9,7 +10,7 @@
 import { ART_PX } from './bubbleArt';
 import type { PetCalendar } from './calendar';
 
-export type ParticleKind = 'petal' | 'leaf' | 'snow' | 'puff' | 'shimmer' | 'star';
+export type ParticleKind = 'petal' | 'leaf' | 'snow' | 'puff' | 'shimmer' | 'star' | 'zzz';
 
 export type Particle = {
   kind: ParticleKind;
@@ -35,7 +36,7 @@ export const MAX_PARTICLES = 12;
 /** The page asks spawnFor for one new particle this often. */
 export const SPAWN_EVERY_MS = 250;
 /** Chance per spawn call, by kind. */
-const CHANCE: Record<Exclude<ParticleKind, 'star'>, number> = {
+const CHANCE: Record<Exclude<ParticleKind, 'star' | 'zzz'>, number> = {
   petal: 0.2,
   leaf: 0.13,
   snow: 0.12,
@@ -99,6 +100,14 @@ const SHIMMERS: string[][] = [
   ['w.', '.w', '.w', 'w.', 'w.', '.w'],
 ];
 
+// Sleep Z: small when it leaves the head, bigger as it rises.
+const Z_PAL = { o: O, w: '#ffffff', b: '#d9d2ff' };
+const ZS: string[][] = [
+  ['oooooo', 'owwwwo', 'ooowoo', 'oowooo', 'obbbbo', 'oooooo'],
+  ['ooooooo', 'owwwwwo', 'oooowoo', '.oowoo.', 'oowoooo', 'obbbbbo', 'ooooooo'],
+  ['oooooooo', 'owwwwwwo', 'owwwwwwo', 'oooowwoo', '.oowwoo.', 'oowwoooo', 'owwwwwwo', 'obbbbbbo', 'oooooooo'],
+];
+
 const STAR_PAL = { o: O, y: '#ffd23f', h: '#fff6c2' };
 const STARS: string[][] = [
   ['...o...', '..oyo..', 'ooyhyoo', 'oyyyyyo', '.oyyyo.', 'oyo.oyo', 'oo...oo'],
@@ -137,6 +146,9 @@ function spriteFor(p: Particle): Sprite {
     case 'star':
       // Big when passing in front, small at the back of the orbit.
       return { rows: STARS[Math.sin(p.phase) >= 0 ? 0 : 1], palette: STAR_PAL };
+    case 'zzz':
+      // Full size well before it starts fading out.
+      return { rows: ZS[Math.min(ZS.length - 1, Math.floor((p.age / p.life) * (ZS.length + 0.8)))], palette: Z_PAL };
   }
 }
 
@@ -207,6 +219,38 @@ export function spawnDizzy(cx: number, cy: number, lifeMs: number, n = 3): Parti
   }));
 }
 
+/** A new sleep Z leaves the head this often (while fewer than MAX_Z are alive). */
+export const Z_EVERY_MS = 1000;
+export const MAX_Z = 3;
+const Z_LIFE_MS = 2700;
+const Z_FADE_OUT_MS = 900;
+
+/**
+ * Maybe a new sleep "Z" (call every tick while asleep): starts just above `head` (canvas
+ * px, the top of the head) on the side the pet faces (`dir`) and drifts up and that way.
+ * None while MAX_Z are alive or the youngest left less than Z_EVERY_MS ago.
+ */
+export function spawnSleepZ(ps: Particle[], head: { x: number; y: number }, dir: 1 | -1): Particle | null {
+  let alive = 0;
+  for (const p of ps) {
+    if (p.kind !== 'zzz') continue;
+    if (++alive >= MAX_Z || p.age < Z_EVERY_MS) return null;
+  }
+  return {
+    kind: 'zzz',
+    x: head.x + dir * 14,
+    y: head.y - 6,
+    vx: dir * 9,
+    vy: -17,
+    age: 0,
+    life: Z_LIFE_MS,
+    variant: 0,
+    phase: 0,
+    front: true,
+    landed: false,
+  };
+}
+
 /** Where a particle is drawn: stars on their orbit, everything else at (x, y). */
 function drawPos(p: Particle): { x: number; y: number; front: boolean } {
   if (p.kind !== 'star') return { x: p.x, y: p.y, front: p.front };
@@ -231,7 +275,7 @@ export function stepParticles(ps: Particle[], dtMs: number, w: number, h: number
       continue;
     }
     if (!p.landed) {
-      const sway = p.kind === 'petal' ? 14 : p.kind === 'leaf' ? 18 : p.kind === 'snow' ? 6 : 0;
+      const sway = p.kind === 'petal' ? 14 : p.kind === 'leaf' ? 18 : p.kind === 'snow' ? 6 : p.kind === 'zzz' ? 5 : 0;
       p.phase += s * (p.kind === 'leaf' ? 2.2 : 3);
       p.x += (p.vx + Math.cos(p.phase) * sway) * s;
       p.y += p.vy * s;
@@ -251,7 +295,7 @@ export function stepParticles(ps: Particle[], dtMs: number, w: number, h: number
 
 /** Opacity from fade in / out. */
 export function particleAlpha(p: Particle): number {
-  const fadeOut = p.landed ? LANDED_MS : FADE_OUT_MS;
+  const fadeOut = p.landed ? LANDED_MS : p.kind === 'zzz' ? Z_FADE_OUT_MS : FADE_OUT_MS;
   return Math.max(0, Math.min(1, p.age / FADE_IN_MS, (p.life - p.age) / fadeOut));
 }
 

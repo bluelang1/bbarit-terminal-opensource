@@ -6,6 +6,8 @@
 //         sunglasses hang a fixed number of rows below it (OCTO puts the eyes 6 rows down).
 //   hand  where a held thing is gripped (tentacle tip). Treats are drawn up against it.
 //   body  center of the neck line, where the head meets the body / tentacles.
+//   front the ground in front of the character where it sets things down (the laptop it
+//         types on while Claude works): x the keyboard's near end, y the bottom sprite row.
 //
 // An accessory pixel is one pack pixel (drawn at the pack's scale), so accessories match
 // the character's chunky pixels. A frame without the anchor an accessory needs simply does
@@ -23,7 +25,8 @@ export type AccessoryId =
   | 'sunglasses'
   | 'pepero'
   | 'chocolate'
-  | 'candy';
+  | 'candy'
+  | 'laptop';
 
 /** `rows` drawn with art pixel (ox, oy) on the anchor point. */
 export type AccessoryFrame = { rows: string[]; ox: number; oy: number };
@@ -35,6 +38,11 @@ export type Accessory = {
   palette: Record<string, string>;
   /** Drawn before the body (the character's own pixels cover it), e.g. a carried pumpkin. */
   behind?: boolean;
+  /**
+   * Which frame is shown: 'bite' (default) the treat bite stage, 'tick' the pack frame index
+   * of the animation (tick % frames, e.g. code typed on the laptop screen).
+   */
+  frameBy?: 'bite' | 'tick';
 };
 
 const O = '#3b1f47'; // OCTO outline
@@ -57,6 +65,55 @@ const SANTA_HAT: AccessoryFrame = {
   ox: 12,
   oy: 6,
 };
+
+// Laptop on the ground, screen to the far side, keyboard deck reaching back toward the pet.
+// The screen shows LAPTOP_CODE being typed, LAPTOP_TYPE_STEP chars per frame, the last
+// LAPTOP_LINES lines visible with a cursor. Screen pixels: n background, colors code.
+const LAPTOP_BODY = [
+  '.....ooooooooo',
+  '.....o.......o',
+  '.....o.......o',
+  '.....o.......o',
+  '.....o.......o',
+  '.....o.......o',
+  '.....ooooooooo',
+  '...ossssssssso',
+  '..osksksksksSo',
+  '.oskskskskkSo.',
+  'oSSSSSSSSSSo..',
+  'oooooooooooo..',
+];
+const LAPTOP_SCREEN = { left: 6, top: 1, w: 7, h: 5 };
+// At most w - 2 chars per line, so the cursor always fits after it.
+const LAPTOP_CODE = ['GGG.Y', '.BBBB', '.PP.G', 'YYY', '..BBP', 'GGGG', '.YY.B'];
+const LAPTOP_LINES = 4;
+const LAPTOP_TYPE_STEP = 2;
+
+function laptopFrames(): AccessoryFrame[] {
+  const total = LAPTOP_CODE.reduce((n, l) => n + l.length, 0);
+  const frames: AccessoryFrame[] = [];
+  for (let typed = LAPTOP_TYPE_STEP; typed <= total; typed += LAPTOP_TYPE_STEP) {
+    // Lines typed so far; the last one partly, with the cursor after it.
+    const lines: string[] = [];
+    let left = typed;
+    for (const l of LAPTOP_CODE) {
+      if (left <= 0) break;
+      lines.push(l.slice(0, left));
+      left -= l.length;
+    }
+    const shown = lines.slice(-LAPTOP_LINES);
+    const rows = LAPTOP_BODY.map((r) => r.split(''));
+    const { left: sx, top: sy, w, h } = LAPTOP_SCREEN;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) rows[sy + y][sx + x] = 'n';
+    shown.forEach((line, i) => {
+      const y = sy + 1 + i;
+      for (let x = 0; x < line.length; x++) if (line[x] !== '.') rows[y][sx + 1 + x] = line[x];
+      if (i === shown.length - 1) rows[y][sx + 1 + line.length] = 'w';
+    });
+    frames.push({ rows: rows.map((r) => r.join('')), ox: 0, oy: LAPTOP_BODY.length - 1 });
+  }
+  return frames;
+}
 
 export const ACCESSORIES: Record<AccessoryId, Accessory> = {
   santaHat: {
@@ -130,19 +187,19 @@ export const ACCESSORIES: Record<AccessoryId, Accessory> = {
   },
   scarf: {
     anchor: 'body',
+    // A short knit wrap snug under the head (one pixel over its sides) with a small end
+    // hanging at the front.
     frames: [
       {
         rows: [
-          '.oooooooooooooooooooo.',
-          'orrwwrrwwrrwwrrwwrrwwo',
-          'oRRwwRRwwRRwwRRwwRRwso',
-          '.oooooooooooooooorrwwo',
-          '.................oRRso',
-          '.................orrwo',
-          '.................oRRso',
-          '..................oo..',
+          '.oooooooooooooooooo.',
+          'orrwwrrwwrrwwrrwwrro',
+          'oRRwwRRwwRRwwRRwwRRo',
+          '.ooooooooooooorrwoo.',
+          '.............oRRwo..',
+          '..............ooo...',
         ],
-        ox: 11,
+        ox: 10,
         oy: 1,
       },
     ],
@@ -280,6 +337,24 @@ export const ACCESSORIES: Record<AccessoryId, Accessory> = {
     ],
     palette: { o: O, p: '#ff6fa0', h: '#ffd1e1', x: '#9fd8ff' },
   },
+  laptop: {
+    anchor: 'front',
+    behind: true,
+    frameBy: 'tick',
+    frames: laptopFrames(),
+    palette: {
+      o: O,
+      s: '#d6dbe7',
+      S: '#9aa1b8',
+      k: '#6d7390',
+      n: '#22304a',
+      w: '#ffffff',
+      G: '#7ee08a',
+      Y: '#ffd166',
+      B: '#7cc7ff',
+      P: '#ff8fd0',
+    },
+  },
 };
 
 /** Treats are only in hand while eating. */
@@ -311,6 +386,8 @@ export function accessoriesFor(cal: PetCalendar, anim: AnimName): AccessoryId[] 
   const taken = new Set(special.map((id) => ACCESSORIES[id].anchor));
   const season = (SEASON_WEAR[cal.season] ?? []).filter((id) => !taken.has(ACCESSORIES[id].anchor));
   const out = [...season, ...special];
+  // Typing while Claude works: whatever it carries (the pumpkin) is put down for the laptop.
+  if (anim === 'busy') return [...out.filter((id) => ACCESSORIES[id].anchor !== 'hand'), 'laptop'];
   const treat = treatFor(cal.special);
   if (treat && anim === 'eat') out.push(TREAT_IDS[treat]);
   return out;
@@ -320,7 +397,7 @@ export function accessoriesFor(cal: PetCalendar, anim: AnimName): AccessoryId[] 
 export const BITE_MS = 1200;
 export function biteFrame(id: AccessoryId, elapsedMs: number): number {
   const n = ACCESSORIES[id].frames.length;
-  if (n <= 1 || !(elapsedMs > 0)) return 0;
+  if (n <= 1 || ACCESSORIES[id].frameBy === 'tick' || !(elapsedMs > 0)) return 0;
   return Math.min(n - 1, Math.floor(elapsedMs / BITE_MS));
 }
 
@@ -365,7 +442,8 @@ export function drawAccessory(
 /**
  * Draw `ids` on a pack frame drawn with its top-left at canvas px (x, y) at `scale`.
  * `layer` picks the accessories drawn before the body ('behind') or after it ('front');
- * `bite` is the treat frame. Accessories whose anchor the frame lacks are skipped.
+ * `bite` is the treat frame, `tick` the pack frame index (frameBy 'tick' accessories).
+ * Accessories whose anchor the frame lacks are skipped.
  */
 export function drawAccessories(
   ctx: FillCtx,
@@ -378,6 +456,7 @@ export function drawAccessories(
   flip: boolean,
   bite: number,
   layer: 'behind' | 'front',
+  tick = 0,
 ): void {
   for (const id of ids) {
     const acc = ACCESSORIES[id];
@@ -386,7 +465,9 @@ export function drawAccessories(
     if (!a || !Number.isFinite(a.x) || !Number.isFinite(a.y)) continue;
     const ax = x + (flip ? pack.size.w - a.x : a.x) * scale;
     const ay = y + a.y * scale;
-    drawAccessory(ctx, id, acc.frames.length > 1 ? bite : 0, { x: ax, y: ay }, scale, flip);
+    const n = acc.frames.length;
+    const fi = n <= 1 ? 0 : acc.frameBy === 'tick' ? ((Math.floor(tick) % n) + n) % n : bite;
+    drawAccessory(ctx, id, fi, { x: ax, y: ay }, scale, flip);
   }
 }
 

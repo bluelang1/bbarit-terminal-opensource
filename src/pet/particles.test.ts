@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PetCalendar } from './calendar';
 import {
   MAX_PARTICLES,
+  MAX_Z,
+  Z_EVERY_MS,
+  spawnSleepZ,
   drawIce,
   drawParticles,
   particleAlpha,
@@ -118,6 +121,57 @@ describe('dizzy stars', () => {
     expect(ps[0].phase).not.toBe(phase0);
     for (let t = 0; t < 200; t += 100) ps = stepParticles(ps, 100, W, H);
     expect(ps).toHaveLength(0);
+  });
+});
+
+describe('sleep Zzz', () => {
+  const head = { x: 90, y: 70 };
+  const area = (ctx: ReturnType<typeof spyCtx>) => ctx.fillRect.mock.calls.reduce((sum, [, , w, h]) => sum + w * h, 0);
+
+  it('starts a Z just above the head, drifting up toward the facing side', () => {
+    const z = spawnSleepZ([], head, 1)!;
+    expect(z.kind).toBe('zzz');
+    expect(z.y).toBeLessThan(head.y);
+    expect(z.x).toBeGreaterThan(head.x);
+    expect(z.vy).toBeLessThan(0);
+    expect(z.vx).toBeGreaterThan(0);
+    expect(z.front).toBe(true);
+    expect(spawnSleepZ([], head, -1)!.x).toBeLessThan(head.x);
+  });
+
+  it('waits Z_EVERY_MS after the last one and keeps at most MAX_Z alive', () => {
+    const z = spawnSleepZ([], head, 1)!;
+    expect(spawnSleepZ([{ ...z, age: Z_EVERY_MS - 1 }], head, 1)).toBeNull();
+    expect(spawnSleepZ([{ ...z, age: Z_EVERY_MS }], head, 1)?.kind).toBe('zzz');
+    const full = Array.from({ length: MAX_Z }, () => ({ ...z, age: 5 * Z_EVERY_MS }));
+    expect(spawnSleepZ(full, head, 1)).toBeNull();
+    // Other particles (snow) do not count.
+    expect(spawnSleepZ([particle({ kind: 'snow' })], head, 1)?.kind).toBe('zzz');
+  });
+
+  it('a steady sleep has 2-3 Zs alive, each rising, growing and fading out', () => {
+    let ps: Particle[] = [];
+    const counts: number[] = [];
+    let first: Particle | null = null;
+    for (let t = 0; t < 12_000; t += 100) {
+      ps = stepParticles(ps, 100, W, H);
+      const z = spawnSleepZ(ps, head, 1);
+      if (z) ps.push(z);
+      if (t >= 4000) counts.push(ps.filter((p) => p.kind === 'zzz').length);
+      if (t === 300) first = ps[0];
+    }
+    expect(Math.max(...counts)).toBeLessThanOrEqual(MAX_Z);
+    expect(Math.min(...counts)).toBeGreaterThanOrEqual(2);
+
+    const young = { ...first!, age: 100 };
+    const old = { ...first!, age: first!.life - 200 };
+    expect(stepParticles([young], 1000, W, H)[0].y).toBeLessThan(young.y);
+    const a = spyCtx();
+    const b = spyCtx();
+    drawParticles(a, [{ ...young, age: 400 }], 2);
+    drawParticles(b, [{ ...old, age: old.life - 900 }], 2);
+    expect(area(b)).toBeGreaterThan(area(a));
+    expect(particleAlpha(old)).toBeLessThan(0.5);
   });
 });
 

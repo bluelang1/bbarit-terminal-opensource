@@ -51,6 +51,7 @@ import {
   drawParticles,
   spawnDizzy,
   spawnFor,
+  spawnSleepZ,
   stepParticles,
   type BreathOrigin,
   type Particle,
@@ -148,6 +149,8 @@ type Runtime = {
   dizzy: boolean;
   /** Where winter breath puffs start (set by draw from the frame's body anchor). */
   breath: BreathOrigin | null;
+  /** Where sleep Zs start (above the head, hat included) while asleep; set by draw. */
+  zzz: BreathOrigin | null;
   /** The last paint had particles or ice, so the next one must clear them. */
   paintedLive: boolean;
   /** Character tour: time played and the spot it started on (set on its first tick). */
@@ -244,6 +247,7 @@ export default function PetPage() {
       spawnAcc: 0,
       dizzy: false,
       breath: null,
+      zzz: null,
       paintedLive: false,
       tour: null,
       tourView: null,
@@ -329,7 +333,7 @@ export default function PetPage() {
       const frame = frames[idx];
       const flip = st.dir === -1;
       const ids = accessoriesFor(cal(), anim);
-      const treat = ids.find((id) => ACCESSORIES[id].frames.length > 1);
+      const treat = ids.find((id) => ACCESSORIES[id].frames.length > 1 && ACCESSORIES[id].frameBy !== 'tick');
       const bite = treat ? biteFrame(treat, r.animElapsed) : 0;
       // The ice lies on the ground: only drawn while the body box is on it.
       const onGround = !st.pinned && anim !== 'held' && anim !== 'fall';
@@ -367,6 +371,13 @@ export default function PetPage() {
       } else {
         r.breath = null;
       }
+      const head = frame.anchors?.head;
+      if (head && anim === 'sleep') {
+        const p = at(head);
+        r.zzz = { x: p.x, y: p.y - headRise(ids) * scale, dir: flip ? -1 : 1 };
+      } else {
+        r.zzz = null;
+      }
       // Dizzy stars circle above the pet once it has landed on its back.
       if (anim === 'slip' && !r.dizzy && frames.length > 1 && r.animElapsed >= frames[0].ms) {
         r.dizzy = true;
@@ -378,9 +389,9 @@ export default function PetPage() {
       ctx.clearRect(0, 0, PET_W, PET_H);
       if (ice > 0 && st.ice) drawIce(ctx, st.ice.x - st.x, PET_H, ice);
       drawParticles(ctx, r.particles, ART_PX, false);
-      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'behind');
+      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'behind', idx);
       drawFrame(ctx, pack, frame, x0, y0, flip);
-      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'front');
+      drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'front', idx);
       drawParticles(ctx, r.particles, ART_PX, true);
     };
 
@@ -390,7 +401,14 @@ export default function PetPage() {
         r.dizzy = false;
         if (r.particles.some((p) => p.kind === 'star')) r.particles = r.particles.filter((p) => p.kind !== 'star');
       }
+      if (r.state?.anim !== 'sleep' && r.particles.some((p) => p.kind === 'zzz')) {
+        r.particles = r.particles.filter((p) => p.kind !== 'zzz');
+      }
       r.particles = stepParticles(r.particles, dt, PET_W, PET_H);
+      if (r.state?.anim === 'sleep' && r.zzz) {
+        const z = spawnSleepZ(r.particles, r.zzz, r.zzz.dir);
+        if (z) r.particles.push(z);
+      }
       r.spawnAcc = Math.min(r.spawnAcc + dt, 4 * SPAWN_EVERY_MS);
       while (r.spawnAcc >= SPAWN_EVERY_MS) {
         r.spawnAcc -= SPAWN_EVERY_MS;
@@ -564,8 +582,8 @@ export default function PetPage() {
       const anim = r.state?.anim;
       if (r.drag?.active || anim === 'held') return DRAG_TICK_MS;
       if (anim === 'fall') return FALL_TICK_MS;
-      // Falling petals / snow keep their frame rate while the pet sleeps.
-      if (anim === 'sleep' && r.particles.length === 0) return SLEEP_TICK_MS;
+      // Falling petals / snow keep their frame rate while the pet sleeps; its slow Zs do not need it.
+      if (anim === 'sleep' && r.particles.every((p) => p.kind === 'zzz')) return SLEEP_TICK_MS;
       return TICK_MS;
     };
 

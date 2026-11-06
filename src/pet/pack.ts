@@ -46,7 +46,7 @@ export const ONE_SHOT_ANIMS: ReadonlySet<AnimName> = new Set<AnimName>(['slip', 
 export const REQUIRED_ANIMS = ['idle', 'walk', 'sit', 'sleep', 'held', 'fall'] as const satisfies readonly AnimName[];
 export type RequiredAnim = (typeof REQUIRED_ANIMS)[number];
 
-export type AnchorName = 'head' | 'hand' | 'body';
+export type AnchorName = 'head' | 'hand' | 'body' | 'front';
 export type Anchor = { x: number; y: number };
 
 export type PackFrame = {
@@ -73,7 +73,7 @@ export const TRANSPARENT = '.';
 const DEFAULT_FRAME_MS = 150;
 const MAX_GRID = 128;
 const MAX_SCALE = 16;
-const ANCHOR_NAMES: AnchorName[] = ['head', 'hand', 'body'];
+const ANCHOR_NAMES: AnchorName[] = ['head', 'hand', 'body', 'front'];
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
