@@ -41,8 +41,9 @@ almost for free because Claude state drives the character's mood).
    pumpkin), 12/24–25 크리스마스 (Santa outfit). Shown all day.
 6. Seasons (Korean months): spring 3–5 (petals), summer 6–8 (sunglasses /
    fan), autumn 9–11 (falling leaves), winter 12–2 (scarf, breath puffs).
-7. Weather: if the owner sets a city, current conditions come from Open-Meteo
-   (no key). Rain: drops fall inside the pet window, the character uses an
+7. Weather: when the owner turns weather on, the Mac's current location
+   (macOS Location Services, asked once) decides where; it follows the owner
+   when they travel. Denied permission falls back to a city the owner picks. Rain: drops fall inside the pet window, the character uses an
    umbrella or raincoat, footsteps make ripples and splashes. Snow: flakes,
    footprints. Clear/cloudy/fog/thunder get lighter touches.
 8. Characters are packs. The repo ships one original character. The owner's
@@ -73,7 +74,9 @@ almost for free because Claude state drives the character's mood).
 - Noticeable CPU/battery use. Target < 1% CPU idle on Apple Silicon; the
   animation pauses when the pet is hidden.
 - Clawd art committed to the public repo.
-- Location or weather calls happening without the owner choosing a city.
+- Location or weather calls happening before the owner turns weather on.
+- Sending more than an approximate location (coordinates rounded to ~0.1°,
+  about 10 km) to the weather service; IP-based geolocation is not used.
 - An update deleting the owner's character packs.
 
 ## Constraints from the codebase
@@ -130,8 +133,10 @@ The owner picked A.
   holder keeps or ends terminals per `terminal.keepRunningOnQuit`.
 - While the main window is hidden the app keeps its Dock icon (Regular
   activation policy). Switching to Accessory is out of scope.
-- Settings (Settings panel): pet on/off (default on), character, city for
-  weather (default none = weather off), "walk around" vs "stay put".
+- Settings (Settings panel): pet on/off (default on), character, weather
+  on/off (default off; turning it on asks for location permission), manual
+  city (used only when location is denied or unavailable), "walk around" vs
+  "stay put".
 
 ### Movement and pinning
 - Default: walks along the bottom of the work area (above the Dock) of the
@@ -201,11 +206,18 @@ Weather and season are visual layers that apply on top of every state
   show/unminimize/focus and tab switching.
 
 ### Weather
-- Open-Meteo forecast API with lat/lon from a city the owner picks (Open-Meteo
-  geocoding search in Settings). Poll every 30 min while the pet is visible,
-  cache the last result; offline = no weather layer. Weather code mapped to:
-  clear, cloudy, fog, drizzle/rain, thunder, snow.
-- No IP geolocation, no OS location permission.
+- Location: macOS CoreLocation (Rust side, via objc2), requested when the
+  owner turns weather on; re-read every 30 min while the pet is visible.
+  Needs `NSLocationUsageDescription` in Info.plist; the permission prompt is
+  only reliable in a signed, installed build (the dev binary has no bundle),
+  so this part is verified on the installed app after release.
+- Coordinates are rounded to ~0.1° before leaving the machine.
+- Denied/unavailable location: use the manual city (geocoding search in
+  Settings). No IP geolocation.
+- Weather provider: chosen in phase 4 from a free, keyless-in-client option
+  (Open-Meteo is the current candidate; comparison pending). Poll every
+  30 min while visible, cache the last result; offline = no weather layer.
+  Conditions mapped to: clear, cloudy, fog, drizzle/rain, thunder, snow.
 
 ## Phases (suggested order)
 
