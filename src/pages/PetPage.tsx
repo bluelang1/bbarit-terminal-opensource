@@ -11,6 +11,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { availableMonitors, getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalPosition } from '@tauri-apps/api/dpi';
+import { exit } from '@tauri-apps/plugin-process';
 import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig } from '../config/schema';
 import { getTranslation, type Locale, type TranslationKey } from '../i18n';
 import { PET_H, PET_W, initialState, step, type PetState, type WorkArea } from '../pet/engine';
@@ -35,7 +36,7 @@ const AREA_REFRESH_MS = 30_000;
 const SAVE_EVERY_MS = 2_000;
 const DRAG_THRESHOLD_PX = 3;
 const MENU_W = 150;
-const MENU_H = 84;
+const MENU_H = 108;
 const MENU_TIMEOUT_MS = 8_000;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
 
@@ -406,6 +407,14 @@ export default function PetPage() {
     if (isTauri()) void invoke('pet_hide').catch((e) => console.warn('[pet] pet_hide failed:', e));
   };
 
+  // Same path as Cmd-Q: app.exit -> RunEvent::Exit, where the PTY holder GOODBYE follows
+  // terminal.keepRunningOnQuit (not the "quit and end all terminals" kill_all).
+  const quitApp = () => {
+    closeMenu();
+    rtRef.current?.persist();
+    if (isTauri()) void exit(0).catch((e) => console.warn('[pet] exit failed:', e));
+  };
+
   return (
     <div className="pet-root" onContextMenu={onContextMenu}>
       <canvas
@@ -432,6 +441,9 @@ export default function PetPage() {
           </button>
           <button type="button" role="menuitem" onClick={hidePet}>
             {t('pet.menu.hide')}
+          </button>
+          <button type="button" role="menuitem" onClick={quitApp}>
+            {t('pet.menu.quit')}
           </button>
         </div>
       )}

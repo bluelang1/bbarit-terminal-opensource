@@ -149,9 +149,7 @@ pub fn sync_pet(app: &AppHandle) {
     set_pet_visible(app, show);
 }
 
-/// `sync_pet` off the calling thread, once after each delay (ms). Minimize on macOS has
-/// no event of its own: the window resigns key first and `isMiniaturized` turns true a
-/// little later, so focus-loss callers pass a couple of delays.
+/// `sync_pet` off the calling thread, once after each delay (ms).
 pub fn sync_pet_soon(app: &AppHandle, delays_ms: &'static [u64]) {
     let app = app.clone();
     std::thread::spawn(move || {
@@ -162,6 +160,51 @@ pub fn sync_pet_soon(app: &AppHandle, delays_ms: &'static [u64]) {
             sync_pet(&app);
         }
     });
+}
+
+/// macOS: re-sync the pet when the main window is minimized to or restored from the Dock.
+/// tao has no minimize event there, so observe AppKit's NSWindowDidMiniaturize /
+/// NSWindowDidDeminiaturize notifications for main's NSWindow. Call once, on the main
+/// thread (app setup). The blocks run on the main thread while AppKit posts, so they only
+/// hand off to `sync_pet_soon`; the observers live as long as the app.
+#[cfg(target_os = "macos")]
+pub fn observe_main_miniaturize(app: &AppHandle) {
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_app_kit::{NSWindowDidDeminiaturizeNotification, NSWindowDidMiniaturizeNotification};
+    use objc2_foundation::{NSNotification, NSNotificationCenter};
+    use std::ptr::NonNull;
+
+    let Some(main) = app.get_webview_window(MAIN_LABEL) else {
+        return;
+    };
+    let ns_window = match main.ns_window() {
+        Ok(ptr) if !ptr.is_null() => ptr as *const AnyObject,
+        _ => {
+            crate::safe_eprintln!("[pet] main NSWindow unavailable; minimize will not show the pet");
+            return;
+        }
+    };
+    let center = NSNotificationCenter::defaultCenter();
+    // SAFETY: AppKit's exported notification-name constants are immutable NSStrings.
+    let names = unsafe { [NSWindowDidMiniaturizeNotification, NSWindowDidDeminiaturizeNotification] };
+    for name in names {
+        let app = app.clone();
+        let block = RcBlock::new(move |_: NonNull<NSNotification>| sync_pet_soon(&app, &[0]));
+        // SAFETY: `ns_window` is main's live NSWindow (the main window is hidden, never
+        // destroyed, while the app runs) and only filters by sender; the block captures
+        // only an AppHandle (Send + Sync) and does no AppKit work itself.
+        let token = unsafe {
+            center.addObserverForName_object_queue_usingBlock(
+                Some(name),
+                Some(&*ns_window),
+                None,
+                &block,
+            )
+        };
+        // Never removed: the observation lasts for the life of the app.
+        std::mem::forget(token);
+    }
 }
 
 pub fn pet_is_visible(app: &AppHandle) -> bool {

@@ -10114,11 +10114,15 @@ fn main() {
                 WindowEvent::Destroyed => {
                     safe_eprintln!("[window-event] Destroyed: '{}'", window.label());
                 }
-                // Minimize/restore of the main window toggles the desktop pet. Minimizing has
-                // no event of its own on macOS: focus goes first, isMiniaturized follows.
+                // Focus coming back to main (Cmd-Tab, Dock) re-syncs the pet at once. macOS
+                // minimize/restore arrive as AppKit notifications (pet::observe_main_miniaturize);
+                // elsewhere a focus loss may be a minimize reported late, so re-check twice.
                 WindowEvent::Focused(focused) if window.label() == "main" => {
-                    let delays: &'static [u64] = if *focused { &[0] } else { &[400, 1200] };
-                    pet::sync_pet_soon(window.app_handle(), delays);
+                    if *focused {
+                        pet::sync_pet_soon(window.app_handle(), &[0]);
+                    } else if cfg!(not(target_os = "macos")) {
+                        pet::sync_pet_soon(window.app_handle(), &[400, 1200]);
+                    }
                 }
                 // Windows/Linux report minimize as a 0x0 resize; ordinary resizes are skipped
                 // unless the pet is up (restore from minimize).
@@ -10254,6 +10258,10 @@ fn main() {
             }
 
     // (design server is started on-demand via Tauri command, not in setup)
+
+            // macOS: minimize/restore of main toggles the desktop pet (setup runs on the main thread).
+            #[cfg(target_os = "macos")]
+            pet::observe_main_miniaturize(app.handle());
 
             // macOS: 메인 윈도우의 CGWindowNumber를 저장 (메인 스레드에서 실행)
             #[cfg(target_os = "macos")]

@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pet",
-  "description": "Desktop pet window (/pet): listen for pet-visibility, read monitors, move itself. The pet_* app commands need no entry (the app defines no command ACL manifest).",
+  "description": "Desktop pet window (/pet): listen for pet-visibility, read monitors, move itself, quit the app (menu item, same path as Cmd-Q). The pet_* app commands need no entry (the app defines no command ACL manifest).",
   "windows": ["pet"],
   "permissions": [
     "core:default",
-    "core:window:allow-set-position"
+    "core:window:allow-set-position",
+    "process:allow-exit"
   ]
 }

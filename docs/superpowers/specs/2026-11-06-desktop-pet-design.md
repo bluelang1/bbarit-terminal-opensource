@@ -122,6 +122,12 @@ The owner picked A.
 - Pet shows when the main window is minimized or hidden, and the setting is
   on; hides when the main window is shown/unminimized. Owner can also
   hide the pet from its right-click menu ("숨기기 / 설정 / 빠릿 열기").
+  macOS minimize/restore is detected with AppKit's
+  NSWindowDidMiniaturize/DidDeminiaturize notifications on main's NSWindow;
+  Windows/Linux use the 0×0 resize (plus focus-loss re-checks).
+- The right-click menu ends with "빠릿 종료" (Quit BBARIT): the normal quit
+  path (`plugin:process|exit` → `RunEvent::Exit`, same as Cmd-Q), so the PTY
+  holder keeps or ends terminals per `terminal.keepRunningOnQuit`.
 - While the main window is hidden the app keeps its Dock icon (Regular
   activation policy). Switching to Accessory is out of scope.
 - Settings (Settings panel): pet on/off (default on), character, city for

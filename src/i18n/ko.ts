@@ -3396,4 +3396,5 @@ export const ko: Record<TranslationKey, string> = {
   'pet.menu.pin': '여기 고정',
   'pet.menu.unpin': '다시 걸어다니기',
   'pet.menu.hide': '숨기기',
+  'pet.menu.quit': '빠릿 종료',
 };

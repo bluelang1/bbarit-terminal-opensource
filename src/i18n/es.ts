@@ -3338,4 +3338,5 @@ export const es: Record<TranslationKey, string> = {
   'pet.menu.pin': 'Stay here',
   'pet.menu.unpin': 'Walk around again',
   'pet.menu.hide': 'Hide',
+  'pet.menu.quit': 'Quit BBARIT',
 };

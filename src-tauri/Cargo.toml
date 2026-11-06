@@ -93,6 +93,12 @@ tauri-plugin-drag = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = "0.14"
 hound = "3.5"
+# Desktop pet: AppKit miniaturize notifications for the main window (pet.rs).
+# Versions match the ones tauri already pulls in, so the lock only gains edges.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
 
 # Windows: mark the bridge listen socket non-inheritable so spawned PTY/WebView2
 # children don't inherit it and keep it alive (zombie LISTENING) after the app
