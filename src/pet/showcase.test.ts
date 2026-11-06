@@ -52,6 +52,14 @@ describe('SHOWCASE_STEPS', () => {
       'white',
       'halloween',
       'christmas',
+      'clear',
+      'night',
+      'cloudy',
+      'fog',
+      'drizzle',
+      'rain',
+      'thunder',
+      'snow',
       'busy',
       'done',
       'blocked',
@@ -91,6 +99,39 @@ describe('SHOWCASE_STEPS', () => {
     expect(step('white').cal?.special).toBe('white');
     expect(step('halloween').cal?.special).toBe('halloween');
     expect(step('christmas').cal?.special).toBe('christmas');
+  });
+
+  it('weather steps carry fake weather (no location or network needed); others none', () => {
+    const want: Record<string, string> = {
+      clear: 'clear', night: 'clear', cloudy: 'cloudy', fog: 'fog', drizzle: 'drizzle', rain: 'rain', thunder: 'thunder', snow: 'snow',
+    };
+    for (const s of SHOWCASE_STEPS) {
+      expect(s.weather?.kind ?? null, s.id).toBe(want[s.id] ?? null);
+    }
+    expect(step('night').weather?.night).toBe(true);
+    expect(step('clear').weather?.night).toBe(false);
+    expect(step('snow').cal?.season).toBe('winter');
+    // The view carries it while the step plays, and nothing outside weather steps.
+    expect(showcaseAt(startOf('rain') + 100)?.weather?.kind).toBe('rain');
+    expect(showcaseAt(startOf('walk') + 100)?.weather).toBeNull();
+  });
+
+  it('rain: walks (ripples) then stands (puddle); snow walks both ways (footprints)', () => {
+    expect(showcaseAt(startOf('rain') + 1000)?.anim).toBe('walk');
+    expect(showcaseAt(startOf('rain') + stepMs(step('rain')) - 500)?.anim).toBe('idle');
+    const there = showcaseAt(startOf('snow') + 2500)!;
+    const back = showcaseAt(startOf('snow') + stepMs(step('snow')) - 500)!;
+    expect(there.dir).toBe(1);
+    expect(back.dir).toBe(-1);
+  });
+
+  it('weather steps show the umbrella only in rain', () => {
+    for (const id of ['drizzle', 'rain', 'thunder']) {
+      const v = showcaseAt(startOf(id) + 500)!;
+      expect(accessoriesFor(v.cal!, v.anim, v.weather), id).toContain('umbrella');
+    }
+    const snow = showcaseAt(startOf('snow') + 500)!;
+    expect(accessoriesFor(snow.cal!, snow.anim, snow.weather)).not.toContain('umbrella');
   });
 
   it('eat steps eat long enough to finish the treat on a treat day', () => {

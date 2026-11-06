@@ -11,6 +11,10 @@
 // wears shared accessories by its pack anchors, eats treats on treat days, slips on ice in
 // winter, and season particles fall inside the body box (drawn on the same canvas, so they
 // never take clicks and stop with the loop).
+// Weather (pet.weather, off by default; src/pet/weatherFeed.ts): while on and visible the page
+// asks the host for the Mac's location (never the permission prompt; Settings asks) else uses
+// the owner's city, polls Open-Meteo every 30 min, and draws src/pet/weatherFx.ts effects and
+// the umbrella. Real weather wins over the season particles (weather.ts seasonGate).
 // Character tour (Help > Character Tour, pet.rs start_pet_tour -> `pet-tour-start`): plays
 // every case scripted in src/pet/showcase.ts with a caption on top, then calls
 // `pet_tour_end` and returns to normal life. Clicking the caption or double-clicking the pet
@@ -26,7 +30,7 @@ import { availableMonitors, getCurrentWindow } from '@tauri-apps/api/window';
 import { LogicalPosition, LogicalSize } from '@tauri-apps/api/dpi';
 import { Menu } from '@tauri-apps/api/menu';
 import { exit } from '@tauri-apps/plugin-process';
-import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig } from '../config/schema';
+import { DEFAULT_PET_CONFIG, normalizePetConfig, type PetConfig, type PetWeatherConfig } from '../config/schema';
 import { getTranslation, type Locale, type TranslationKey } from '../i18n';
 import {
   PET_H,
@@ -43,7 +47,18 @@ import {
 import { ONE_SHOT_ANIMS, framesFor, type CharacterPack } from '../pet/pack';
 import { drawFrame } from '../pet/render';
 import { DEBUG_DATE_KEY, calendarFor, petDate, treatFor, type PetCalendar } from '../pet/calendar';
-import { ACCESSORIES, accessoriesFor, biteFrame, drawAccessories, headRise } from '../pet/accessories';
+import { ACCESSORIES, accessoriesFor, accessoryRise, biteFrame, drawAccessories, headRise } from '../pet/accessories';
+import { seasonGate, type PetLocation, type PetWeather, type PetWeatherNow } from '../pet/weather';
+import { createWeatherFeed, type WeatherFeed } from '../pet/weatherFeed';
+import {
+  createWeatherFx,
+  drawWeatherBack,
+  drawWeatherFlash,
+  drawWeatherFront,
+  stepWeather,
+  weatherLive,
+  type WeatherFx,
+} from '../pet/weatherFx';
 import {
   MAX_PARTICLES,
   SPAWN_EVERY_MS,
@@ -161,6 +176,12 @@ type Runtime = {
   badge: number;
   /** i18n key of the tour caption on screen (translated at render, in the app language). */
   caption: TranslationKey | null;
+  /** pet.weather from config (re-read on show). */
+  weatherCfg: PetWeatherConfig;
+  feed: WeatherFeed;
+  fx: WeatherFx;
+  /** Weather drawn on the last tick (kind|heavy|night), to repaint when it changes. */
+  weatherKey: string;
   endTour: () => void;
   kick: () => void;
   persist: () => void;
@@ -253,6 +274,15 @@ export default function PetPage() {
       tourView: null,
       badge: 0,
       caption: null,
+      weatherCfg: DEFAULT_PET_CONFIG.weather,
+      feed: createWeatherFeed({
+        // ask: false: the pet never shows the permission prompt (Settings does).
+        locate: () => invoke<PetLocation>('pet_location', { ask: false }),
+        fetchNow: (lat, lon) => invoke<PetWeatherNow>('pet_weather_now', { lat, lon }),
+        storage: safeStorage(),
+      }),
+      fx: createWeatherFx(),
+      weatherKey: '',
       endTour: () => {},
       kick: () => {},
       persist: () => {},
@@ -285,6 +315,9 @@ export default function PetPage() {
 
     // The tour's calendar while it runs, else today's.
     const cal = (): PetCalendar => r.tourView?.cal ?? r.cal;
+    // The tour's fake weather while it runs (none outside its weather steps), else the real one.
+    const weather = (): PetWeather | null => (r.tour ? r.tourView?.weather ?? null : r.feed.current(Date.now(), r.weatherCfg));
+    const weatherOn = (): boolean => (r.tour ? weather() !== null : r.weatherCfg.enabled);
 
     const loadConfigAndPack = async () => {
       if (!tauri) return;
@@ -306,6 +339,7 @@ export default function PetPage() {
       if (disposed) return;
       r.pack = choosePack(pet.character, Array.isArray(userPacks) ? userPacks : []);
       r.mode = pet.mode;
+      r.weatherCfg = pet.weather;
       if (r.state) r.state = { ...r.state, mode: pet.mode };
       r.drawnKey = '';
       const loc = LOCALES.includes(language as Locale) ? (language as Locale) : 'en';
@@ -332,14 +366,15 @@ export default function PetPage() {
       const idx = frameIndexAt(frames, r.animElapsed, !ONE_SHOT_ANIMS.has(anim));
       const frame = frames[idx];
       const flip = st.dir === -1;
-      const ids = accessoriesFor(cal(), anim);
+      const wx = weather();
+      const ids = accessoriesFor(cal(), anim, wx);
       const treat = ids.find((id) => ACCESSORIES[id].frames.length > 1 && ACCESSORIES[id].frameBy !== 'tick');
       const bite = treat ? biteFrame(treat, r.animElapsed) : 0;
       // The ice lies on the ground: only drawn while the body box is on it.
       const onGround = !st.pinned && anim !== 'held' && anim !== 'fall';
       const ice = onGround ? iceAlpha(st.ice) : 0;
-      const live = r.particles.length > 0 || ice > 0;
-      const key = `${r.pack.id}|${anim}|${idx}|${flip}|${ids.join(',')}|${bite}`;
+      const live = r.particles.length > 0 || ice > 0 || weatherLive(r.fx, wx);
+      const key = `${r.pack.id}|${anim}|${idx}|${flip}|${ids.join(',')}|${bite}|${r.weatherKey}`;
       if (key === r.drawnKey && !live && !r.paintedLive) return;
       r.drawnKey = key;
       r.paintedLive = live;
@@ -351,10 +386,10 @@ export default function PetPage() {
       const pack = scale === r.pack.scale ? r.pack : { ...r.pack, scale };
       const pw = pack.size.w * scale;
       const ph = pack.size.h * scale;
-      // Today's hat sticks out above the head: keep the bubble clear of it (packs with
-      // head anchors only; others never draw it).
-      const hasHead = framesFor(r.pack, 'idle')[0]?.anchors?.head !== undefined;
-      const rise = hasHead ? headRise(accessoriesFor(cal(), 'idle')) : 0;
+      // Today's hat or the umbrella sticks out above the head: keep the bubble clear of it
+      // (packs with head anchors only; others never draw them).
+      const idleFrame = framesFor(r.pack, 'idle')[0];
+      const rise = idleFrame ? accessoryRise(idleFrame, accessoriesFor(cal(), 'idle', wx)) : 0;
       const headInset = (packHeadroomRows(r.pack) - rise) * scale;
       if (r.sprite.w !== pw || r.sprite.h !== ph || r.sprite.headInset !== headInset) {
         r.sprite = { w: pw, h: ph, headInset };
@@ -388,11 +423,14 @@ export default function PetPage() {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, PET_W, PET_H);
       if (ice > 0 && st.ice) drawIce(ctx, st.ice.x - st.x, PET_H, ice);
+      drawWeatherBack(ctx, r.fx, wx, st.x, PET_W, PET_H);
       drawParticles(ctx, r.particles, ART_PX, false);
       drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'behind', idx);
       drawFrame(ctx, pack, frame, x0, y0, flip);
       drawAccessories(ctx, pack, frame, ids, x0, y0, scale, flip, bite, 'front', idx);
       drawParticles(ctx, r.particles, ART_PX, true);
+      drawWeatherFront(ctx, r.fx, wx, st.x, PET_W, PET_H);
+      drawWeatherFlash(ctx, r.fx, PET_W, PET_H);
     };
 
     // Season particles: step every tick, maybe spawn one every SPAWN_EVERY_MS (capped).
@@ -413,9 +451,36 @@ export default function PetPage() {
       while (r.spawnAcc >= SPAWN_EVERY_MS) {
         r.spawnAcc -= SPAWN_EVERY_MS;
         if (r.particles.length >= MAX_PARTICLES) continue;
-        const p = spawnFor(cal(), Math.random, PET_W, PET_H, r.breath);
+        const p = spawnFor(cal(), Math.random, PET_W, PET_H, r.breath, seasonGate(weatherOn(), weather()));
         if (p) r.particles.push(p);
       }
+    };
+
+    // Weather: poll (never during the tour, which fakes it), then step the effects.
+    const updateWeather = (dt: number) => {
+      const st = r.state;
+      if (!st) return;
+      if (tauri && !r.tour) r.feed.tick(Date.now(), r.weatherCfg);
+      const wx = weather();
+      const key = wx ? `${wx.kind}|${wx.heavy}|${wx.night}` : '';
+      if (key !== r.weatherKey) {
+        // The tour switches weather every few seconds: start each one fresh, sun / flash soon.
+        if (r.tour) r.fx = { ...createWeatherFx(), skyInMs: 400, flashInMs: 1500 };
+        r.weatherKey = key;
+        r.drawnKey = '';
+      }
+      const grounded = !st.pinned && st.anim !== 'held' && st.anim !== 'fall';
+      stepWeather(r.fx, {
+        weather: wx,
+        dtMs: dt,
+        rand: Math.random,
+        w: PET_W,
+        h: PET_H,
+        originX: st.x,
+        feetX: PET_W / 2,
+        walking: grounded && st.anim === 'walk',
+        grounded,
+      });
     };
 
     // Place the body box, bubble, tail and badge inside the window (window px). The body
@@ -528,6 +593,7 @@ export default function PetPage() {
       if (!tour) return;
       r.tour = null;
       r.tourView = null;
+      r.fx = createWeatherFx();
       setTourCaption(null);
       if (r.state && tour.origin) {
         r.state = { ...r.state, anim: 'idle', x: tour.origin.x, y: tour.origin.y, vy: 0, actionMs: 0, ice: null };
@@ -583,7 +649,7 @@ export default function PetPage() {
       if (r.drag?.active || anim === 'held') return DRAG_TICK_MS;
       if (anim === 'fall') return FALL_TICK_MS;
       // Falling petals / snow keep their frame rate while the pet sleeps; its slow Zs do not need it.
-      if (anim === 'sleep' && r.particles.every((p) => p.kind === 'zzz')) return SLEEP_TICK_MS;
+      if (anim === 'sleep' && r.particles.every((p) => p.kind === 'zzz') && !weatherLive(r.fx, weather())) return SLEEP_TICK_MS;
       return TICK_MS;
     };
 
@@ -617,6 +683,7 @@ export default function PetPage() {
       }
       refreshBubble();
       updateParticles(dt);
+      updateWeather(dt);
       draw();
       move();
       const settled = r.state.anim !== 'held' && r.state.anim !== 'fall';

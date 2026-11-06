@@ -4,7 +4,8 @@
 // scripted tour once, then return to normal life; dev builds also play it each time the pet
 // becomes visible while localStorage['bbarit.pet.showcase'] === '1'. Each step forces a pose
 // (animation + small offsets from the spot the tour started on), and may override the
-// calendar, lay an ice patch, or fake a Claude summary for the bubble / badge.
+// calendar, lay an ice patch, fake a Claude summary for the bubble / badge, or fake the
+// weather (so the weather steps work without location permission or network).
 // The engine (engine.ts) is not stepped during the tour: its timings are random (snacks
 // every 2-5 min, ice every 3-6 min), so the tour drives the pose directly instead.
 // New cases (weather, new animations, ...): add a step to SHOWCASE_STEPS below, plus a
@@ -15,6 +16,7 @@ import type { AnimName } from './pack';
 import { calendarFor, type PetCalendar } from './calendar';
 import { petBubble, type PetBubble, type PetLastDone } from './page';
 import { moodFor, type ClaudeMood, type PetSummary, type PetTab } from './summary';
+import type { PetWeather } from './weather';
 import type { TranslationKey } from '../i18n/en';
 
 /** localStorage key that also plays the tour on every show ('1'); dev builds only. */
@@ -47,6 +49,8 @@ export type ShowcaseStep = {
   summary?: PetSummary;
   /** Fake finished turn at the step start: the "done" bubble. */
   done?: PetLastDone['event'];
+  /** Fake weather (as if weather were on and reporting this); none: no weather layer. */
+  weather?: PetWeather;
 };
 
 export type ShowcaseIce = { dx: number; ms: number; used: boolean };
@@ -70,6 +74,8 @@ export type ShowcaseView = {
   /** In step time (atMs 0 = step start). */
   lastDone: PetLastDone | null;
   mood: ClaudeMood;
+  /** The step's fake weather; null: none (the tour never shows the real weather). */
+  weather: PetWeather | null;
 };
 
 const EMPTY: PetSummary = { blocked: [], working: [], unseenDone: 0 };
@@ -90,7 +96,9 @@ const SLIP_SLIDE_PX = (SLIDE_PX_PER_S * SLIDE_MS) / 1000;
 /** Tour step ids; each has a caption `pet.tour.step.<id>` in every src/i18n locale. */
 type StepId =
   | 'walk' | 'sit' | 'sleep' | 'held' | 'spring' | 'summer' | 'autumn' | 'winter' | 'ice'
-  | 'pepero' | 'valentine' | 'white' | 'halloween' | 'christmas' | 'busy' | 'done' | 'blocked' | 'unseen';
+  | 'pepero' | 'valentine' | 'white' | 'halloween' | 'christmas'
+  | 'clear' | 'night' | 'cloudy' | 'fog' | 'drizzle' | 'rain' | 'thunder' | 'snow'
+  | 'busy' | 'done' | 'blocked' | 'unseen';
 
 const captionKey = (id: StepId): TranslationKey => `pet.tour.step.${id}` satisfies TranslationKey;
 const defineStep = (id: StepId, rest: Omit<ShowcaseStep, 'id' | 'captionKey'>): ShowcaseStep => ({
@@ -101,6 +109,12 @@ const defineStep = (id: StepId, rest: Omit<ShowcaseStep, 'id' | 'captionKey'>): 
 
 const pace = (id: StepId, c?: PetCalendar): ShowcaseStep =>
   defineStep(id, { cal: c, segments: [{ anim: 'walk', ms: STEP, motion: 'pace' }] });
+
+const wx = (kind: PetWeather['kind'], heavy = false, night = false): PetWeather => ({ kind, heavy, night });
+
+/** Weather steps pace on a plain autumn day unless they say otherwise. */
+const weatherPace = (id: StepId, weather: PetWeather, c: PetCalendar = cal(9, 20)): ShowcaseStep =>
+  defineStep(id, { cal: c, weather, segments: [{ anim: 'walk', ms: STEP, motion: 'pace' }] });
 
 const eat = (id: StepId, c: PetCalendar): ShowcaseStep =>
   defineStep(id, {
@@ -146,6 +160,30 @@ export const SHOWCASE_STEPS: ShowcaseStep[] = [
   eat('white', cal(3, 14)),
   pace('halloween', cal(10, 31)),
   pace('christmas', cal(12, 25)),
+  weatherPace('clear', wx('clear'), cal(7, 20)),
+  defineStep('night', { cal: cal(9, 20), weather: wx('clear', false, true), segments: [{ anim: 'sit', ms: STEP }] }),
+  weatherPace('cloudy', wx('cloudy')),
+  weatherPace('fog', wx('fog')),
+  weatherPace('drizzle', wx('drizzle')),
+  // Walks (ripples, splashes at the feet), then stands while a puddle forms.
+  defineStep('rain', {
+    cal: cal(9, 20),
+    weather: wx('rain', true),
+    segments: [
+      { anim: 'walk', ms: 3000, motion: 'pace' },
+      { anim: 'idle', ms: 3500 },
+    ],
+  }),
+  defineStep('thunder', { cal: cal(9, 20), weather: wx('thunder'), segments: [{ anim: 'idle', ms: STEP }] }),
+  // There and back, leaving footprints in the snow.
+  defineStep('snow', {
+    cal: cal(1, 10),
+    weather: wx('snow', true),
+    segments: [
+      { anim: 'walk', ms: 3000, motion: 'right' },
+      { anim: 'walk', ms: 3000, motion: 'left' },
+    ],
+  }),
   defineStep('busy', {
     summary: { ...EMPTY, working: [tab(1, 'bbarit', 'Claude')] },
     segments: [{ anim: 'busy', ms: STEP }],
@@ -255,6 +293,7 @@ export function showcaseAt(elapsedMs: number, steps: ShowcaseStep[] = SHOWCASE_S
       summary,
       lastDone,
       mood: moodFor(summary, t, lastDone?.atMs ?? null),
+      weather: step.weather ?? null,
     };
   }
   return null;
