@@ -214,8 +214,9 @@ Weather and season are visual layers that apply on top of every state
 - Coordinates are rounded to ~0.1° before leaving the machine.
 - Denied/unavailable location: use the manual city (geocoding search in
   Settings). No IP geolocation.
-- Weather provider: chosen in phase 4 from a free, keyless-in-client option
-  (Open-Meteo is the current candidate; comparison pending). Poll every
+- Weather provider: Open-Meteo (keyless; chosen in phase 4, requests made from
+  Rust, credit shown in Settings; plan docs/superpowers/plans/
+  2026-11-07-desktop-pet-phase4.md). Poll every
   30 min while visible, cache the last result; offline = no weather layer.
   Conditions mapped to: clear, cloudy, fog, drizzle/rain, thunder, snow.
 
