@@ -14767,7 +14767,16 @@ Office project scaffold created by BBARIT Terminal.
     let disposed = false;
     let closing = false;
     let unlisten: (() => void) | undefined;
+    const isMac = (() => {
+      try { return navigator.platform.toUpperCase().includes('MAC'); } catch { return false; }
+    })();
     void getCurrentWindow().onCloseRequested(async (event) => {
+      // macOS red button: Rust hides the main window (terminals and edits stay alive) and
+      // shows the desktop pet. preventDefault stops the JS API from destroying it; no prompt.
+      if (isMac) {
+        event.preventDefault();
+        return;
+      }
       if (closing) return;
       const dirty = openFilesRef.current.filter((f) => f.modified);
       if (dirty.length === 0) return; // nothing unsaved — let the close proceed
