@@ -6411,7 +6411,6 @@ body.ftree-dragging * {
   border: 2px solid transparent;
   border-radius: 0;
   cursor: pointer;
-  transition: all 0.05s ease;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6419,9 +6418,11 @@ body.ftree-dragging * {
   font-weight: 700;
 }
 
-/* No transform on hover: the project modal scrolls, and a scaled swatch at the edge
-   toggles the scrollbar and makes the whole popup jitter. */
-.style-option:hover { filter: brightness(1.25); }
+/* Hover must not use transform or filter: both promote the swatch to its own
+   compositing layer inside the scrolling project modal, and WebKit repaints the
+   whole popup (borders and colors flicker) on every swatch the mouse crosses.
+   An inset outline changes neither layout nor layers. */
+.style-option:hover { outline: 2px solid currentColor; outline-offset: -5px; }
 .style-option.active { border-width: 3px; }
 
 .modal-actions {
