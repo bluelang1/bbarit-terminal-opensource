@@ -52,9 +52,20 @@ const DRAG_THRESHOLD_PX = 3;
 const LOCALES: Locale[] = ['en', 'ko', 'ja', 'zh', 'fr', 'de', 'it', 'es'];
 /** Bubble box bottom above the sprite top (the 5 px tail sits in between). */
 const BUBBLE_LIFT_PX = 6;
-// Bubble tail, 1 CSS px per cell: o outline, w fill. Row 0 overlaps the bubble's bottom
-// outline so the tail opens into the bubble.
-const TAIL_ROWS = ['owwwwwwwwo', '.owwwwwwo.', '..owwwwo..', '...owwo...', '....oo....'];
+// Comic-style bubble tail, 1 CSS px per cell: o outline, w fill. The first TAIL_OVERLAP rows
+// cover the bubble's 2 px bottom border so the tail opens into the bubble; the tip slants
+// down-left onto the character's center.
+const TAIL_ROWS = [
+  'oowwwwwwwwwwoo',
+  'oowwwwwwwwwwoo',
+  'oowwwwwwwwoo..',
+  'oowwwwwwoo....',
+  'oowwwwoo......',
+  'oowwoo........',
+  'oooo..........',
+  'oo............',
+];
+const TAIL_OVERLAP = 2;
 const TAIL_W = TAIL_ROWS[0].length;
 const TAIL_PIXELS = TAIL_ROWS.flatMap((row, y) =>
   Array.from(row).flatMap((ch, x) => (ch === '.' ? [] : [{ x, y, line: ch === 'o' }])),
@@ -264,8 +275,8 @@ export default function PetPage() {
       }
       const tail = tailRef.current;
       if (tail) {
-        tail.style.left = `${Math.round(center - TAIL_W / 2)}px`;
-        tail.style.bottom = `${spriteTop + BUBBLE_LIFT_PX - TAIL_ROWS.length}px`;
+        tail.style.left = `${Math.round(center - 1)}px`;
+        tail.style.bottom = `${spriteTop + BUBBLE_LIFT_PX - TAIL_ROWS.length + TAIL_OVERLAP}px`;
       }
       const badge = badgeRef.current;
       if (badge) {

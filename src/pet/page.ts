@@ -146,7 +146,7 @@ export const BUBBLE_TEXT_MAX = 28;
 /** Pet window width while a bubble shows (the body box stays PET_W wide inside it). */
 export const BUBBLE_WIN_W = 300;
 /** Room a bubble needs above the body sprite: bubble, tail and a small gap. */
-export const BUBBLE_BAND_H = 30;
+export const BUBBLE_BAND_H = 40;
 
 export type PetBubble = { kind: 'blocked' | 'done'; terminalId: string; text: string; more: number };
 export type PetLastDone = { atMs: number; event: PetDoneEvent };
