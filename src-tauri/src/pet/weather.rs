@@ -6,8 +6,12 @@
 //! rounded before they even reach the page. No IP geolocation.
 //!
 //! - `pet_location { ask }`: macOS CoreLocation. Only Settings passes `ask: true` (the
-//!   permission prompt); the pet page only reads. The manager lives on the main thread
-//!   (CoreLocation delivers updates on the run loop of the thread that created it).
+//!   permission prompt); the pet page only reads. One CLLocationManager with a delegate is
+//!   created on the main thread and kept for the life of the app (CoreLocation calls the
+//!   delegate on the run loop of the thread that created the manager). When authorized it
+//!   asks for one fix (`requestLocation`, ~3 km accuracy); each `pet_location` call re-asks
+//!   once the fix is older than 25 min, so the page's 30-min poll keeps it current. Results
+//!   land in [`LocationTracker`] (rounded to 0.1 degree) and the command reports from there.
 //!   Status: ok / pending / denied / unavailable / notAsked / off. The unbundled dev binary
 //!   has no Info.plist, so the prompt never shows there: still no answer 60 s after asking
 //!   reports `unavailable` and the page uses the owner's city.
@@ -24,11 +28,14 @@ const FORECAST_BASE: &str = "https://api.open-meteo.com/v1/forecast";
 const GEOCODE_BASE: &str = "https://geocoding-api.open-meteo.com/v1/search";
 const CURRENT_FIELDS: &str = "weather_code,precipitation,is_day,temperature_2m";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
-/// Asked for permission (or started looking for a fix) this long ago without an answer:
-/// report `unavailable` so the page falls back to the city.
+/// Asked for permission (or for a fix) this long ago without an answer: report
+/// `unavailable` so the page falls back to the city, and allow asking again.
 const LOCATION_ANSWER_SECS: f64 = 60.0;
-/// A fix older than this is re-read (the pet follows the owner when they travel).
-const FIX_MAX_AGE_SECS: f64 = 30.0 * 60.0;
+/// A fix older than this is re-requested (the pet follows the owner when they travel). Below
+/// the page's 30-min poll so every poll refreshes it.
+const FIX_REFRESH_SECS: f64 = 25.0 * 60.0;
+/// A fix older than this is no longer reported (the refresh kept failing).
+const FIX_KEEP_SECS: f64 = 2.0 * 60.0 * 60.0;
 const CITY_RESULTS: usize = 8;
 const MAX_QUERY_CHARS: usize = 100;
 
@@ -194,26 +201,148 @@ fn weather_enabled_from_config() -> bool {
     crate::read_octo_config_json().map(|c| weather_enabled(&c)).unwrap_or(false)
 }
 
-/// What to report from CoreLocation state. `auth` is CLAuthorizationStatus (0 not determined,
-/// 1 restricted, 2 denied, 3 always / authorized, 4 when in use); `fix` a fresh location is
-/// known; `waiting_secs` how long ago we asked for permission or started looking for a fix.
-pub fn location_status(services: bool, auth: i32, fix: bool, waiting_secs: Option<f64>) -> LocationStatus {
-    if !services {
-        return LocationStatus::Unavailable;
+/// CLAuthorizationStatus values.
+const AUTH_NOT_DETERMINED: i32 = 0;
+const AUTH_RESTRICTED: i32 = 1;
+const AUTH_DENIED: i32 = 2;
+const AUTH_ALWAYS: i32 = 3;
+const AUTH_WHEN_IN_USE: i32 = 4;
+/// CLError.Code `kCLErrorDenied` (the other codes, e.g. 0 locationUnknown, are transient).
+const CL_ERROR_DENIED: i64 = 1;
+
+/// What the main thread should ask CoreLocation for next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum LocationAction {
+    Nothing,
+    /// `requestWhenInUseAuthorization` (shows the prompt; Settings only).
+    AskPermission,
+    /// `requestLocation` (one fix, answered through the delegate).
+    RequestFix,
+}
+
+/// CoreLocation state as seen through the delegate, and the decisions on it. Pure: `now` is
+/// seconds on any monotonic clock, so the transitions are unit tested.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub struct LocationTracker {
+    /// Last CLAuthorizationStatus seen; None before the manager exists.
+    auth: Option<i32>,
+    /// Rounded lat, lon and when it arrived.
+    fix: Option<(f64, f64, f64)>,
+    /// When the permission prompt was last requested.
+    asked_at: Option<f64>,
+    /// When a fix was last requested.
+    requested_at: Option<f64>,
+    /// That request has not been answered yet.
+    in_flight: bool,
+    /// The last request ended in an error.
+    failed: bool,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl LocationTracker {
+    pub const fn new() -> Self {
+        Self { auth: None, fix: None, asked_at: None, requested_at: None, in_flight: false, failed: false }
     }
-    let waiting = |s: Option<f64>| match s {
-        Some(s) if s > LOCATION_ANSWER_SECS => LocationStatus::Unavailable,
-        _ => LocationStatus::Pending,
-    };
-    match auth {
-        1 | 2 => LocationStatus::Denied,
-        3 | 4 if fix => LocationStatus::Ok,
-        3 | 4 => waiting(waiting_secs),
-        0 => match waiting_secs {
-            None => LocationStatus::NotAsked,
-            s => waiting(s),
-        },
-        _ => LocationStatus::Unavailable,
+
+    pub fn on_auth(&mut self, auth: i32) {
+        self.auth = Some(auth);
+        if !matches!(auth, AUTH_ALWAYS | AUTH_WHEN_IN_USE) {
+            // Revoked (or reset): forget the old position.
+            self.fix = None;
+            self.in_flight = false;
+        }
+    }
+
+    /// A fix from `locationManager:didUpdateLocations:`; invalid coordinates count as a failure.
+    pub fn on_fix(&mut self, lat: f64, lon: f64, now: f64) {
+        self.in_flight = false;
+        match rounded_coords(lat, lon) {
+            Some((lat, lon)) => {
+                self.fix = Some((lat, lon, now));
+                self.failed = false;
+            }
+            None => self.failed = true,
+        }
+    }
+
+    /// `locationManager:didFailWithError:` with the CLError code.
+    pub fn on_error(&mut self, code: i64) {
+        self.in_flight = false;
+        self.failed = true;
+        if code == CL_ERROR_DENIED {
+            self.fix = None;
+        }
+    }
+
+    /// What to do now. Asks permission only when `ask` (Settings) and not asked within the
+    /// answer window; requests a fix when authorized and the fix is missing or older than
+    /// [`FIX_REFRESH_SECS`], unless a request is still in flight or failed within the window.
+    pub fn next_action(&self, ask: bool, now: f64) -> LocationAction {
+        let within = |at: Option<f64>| at.is_some_and(|t| now - t <= LOCATION_ANSWER_SECS);
+        match self.auth {
+            Some(AUTH_NOT_DETERMINED) if ask && !within(self.asked_at) => LocationAction::AskPermission,
+            Some(AUTH_ALWAYS | AUTH_WHEN_IN_USE) => {
+                let fresh = self.fix.is_some_and(|(_, _, at)| now - at < FIX_REFRESH_SECS);
+                let waiting = (self.in_flight || self.failed) && within(self.requested_at);
+                if !fresh && !waiting {
+                    LocationAction::RequestFix
+                } else {
+                    LocationAction::Nothing
+                }
+            }
+            _ => LocationAction::Nothing,
+        }
+    }
+
+    /// Record that `action` was sent to CoreLocation.
+    pub fn did(&mut self, action: LocationAction, now: f64) {
+        match action {
+            LocationAction::AskPermission => self.asked_at = Some(now),
+            LocationAction::RequestFix => {
+                self.requested_at = Some(now);
+                self.in_flight = true;
+            }
+            LocationAction::Nothing => {}
+        }
+    }
+
+    /// The `pet_location` answer. `services`: location services are on for the Mac.
+    pub fn report(&self, services: bool, now: f64) -> PetLocation {
+        use LocationStatus::*;
+        let within = |at: Option<f64>| at.is_some_and(|t| now - t <= LOCATION_ANSWER_SECS);
+        if !services {
+            return PetLocation::only(Unavailable);
+        }
+        let status = match self.auth {
+            None => Pending,
+            Some(AUTH_RESTRICTED | AUTH_DENIED) => Denied,
+            Some(AUTH_ALWAYS | AUTH_WHEN_IN_USE) => {
+                if let Some((lat, lon, at)) = self.fix {
+                    if now - at <= FIX_KEEP_SECS {
+                        return PetLocation { status: Ok, lat: Some(lat), lon: Some(lon) };
+                    }
+                }
+                if self.in_flight && within(self.requested_at) {
+                    Pending
+                } else if self.failed || self.in_flight {
+                    // Failed, or no answer within the window.
+                    Unavailable
+                } else {
+                    // Authorized; the first request is about to go out.
+                    Pending
+                }
+            }
+            Some(AUTH_NOT_DETERMINED) => match self.asked_at {
+                None => NotAsked,
+                at if within(at) => Pending,
+                // No answer (the unbundled dev binary never shows the prompt).
+                _ => Unavailable,
+            },
+            Some(_) => Unavailable,
+        };
+        PetLocation::only(status)
     }
 }
 
@@ -270,34 +399,134 @@ fn platform_location(app: &tauri::AppHandle, ask: bool) -> PetLocation {
     // Apple: may block, so not on the main thread. A class method, safe from any thread.
     // SAFETY: plain class method without arguments.
     let services = unsafe { CLLocationManager::locationServicesEnabled_class() };
-    if !services {
-        return PetLocation::only(LocationStatus::Unavailable);
+    if services {
+        // Create the manager / send the next request on the main thread; the answers arrive
+        // later through the delegate, so this only waits for the step itself.
+        let (tx, rx) = std::sync::mpsc::channel();
+        if app
+            .run_on_main_thread(move || {
+                mac::step_on_main(ask);
+                let _ = tx.send(());
+            })
+            .is_ok()
+        {
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+        }
     }
-    let (tx, rx) = std::sync::mpsc::channel();
-    if app.run_on_main_thread(move || {
-        let _ = tx.send(mac::read_on_main(ask));
-    })
-    .is_err()
-    {
-        return PetLocation::only(LocationStatus::Pending);
-    }
-    rx.recv_timeout(Duration::from_secs(2))
-        .unwrap_or_else(|_| PetLocation::only(LocationStatus::Pending))
+    mac::report(services)
 }
 
 #[cfg(target_os = "macos")]
 mod mac {
-    use super::{location_status, rounded_coords, LocationStatus, PetLocation, FIX_MAX_AGE_SECS, LOCATION_ANSWER_SECS};
-    use objc2_core_location::{kCLLocationAccuracyThreeKilometers, CLLocationManager};
-    use std::cell::{Cell, RefCell};
+    use super::{LocationAction, LocationTracker, PetLocation};
+    use objc2_05::rc::Retained;
+    use objc2_05::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2_05::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
+    use objc2_core_location::{
+        kCLLocationAccuracyThreeKilometers, CLLocation, CLLocationManager, CLLocationManagerDelegate,
+    };
+    use objc2_foundation_02::{NSArray, NSError};
+    use std::cell::Cell;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::time::Instant;
 
+    /// Written by the delegate (main thread), read by `pet_location` (any thread).
+    static TRACKER: Mutex<LocationTracker> = Mutex::new(LocationTracker::new());
+
     thread_local! {
-        /// Created once on the main thread and kept for the life of the app.
+        /// Created once on the main thread and kept for the life of the app (with its delegate,
+        /// which the manager only holds weakly).
         static MANAGER: Cell<Option<&'static CLLocationManager>> = const { Cell::new(None) };
-        /// When we asked for permission or started updating without a fix yet.
-        static WAITING_SINCE: RefCell<Option<Instant>> = const { RefCell::new(None) };
-        static UPDATING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    fn tracker() -> MutexGuard<'static, LocationTracker> {
+        TRACKER.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn now() -> f64 {
+        static ORIGIN: OnceLock<Instant> = OnceLock::new();
+        ORIGIN.get_or_init(Instant::now).elapsed().as_secs_f64()
+    }
+
+    pub(super) fn report(services: bool) -> PetLocation {
+        tracker().report(services, now())
+    }
+
+    declare_class!(
+        struct PetLocationDelegate;
+
+        // SAFETY: NSObject has no subclassing requirements; no ivars, no Drop. Only used on
+        // the main thread (CoreLocation calls it on the creating thread's run loop).
+        unsafe impl ClassType for PetLocationDelegate {
+            type Super = NSObject;
+            type Mutability = mutability::InteriorMutable;
+            const NAME: &'static str = "BbaritPetLocationDelegate";
+        }
+
+        impl DeclaredClass for PetLocationDelegate {}
+
+        unsafe impl NSObjectProtocol for PetLocationDelegate {}
+
+        // SAFETY: the signatures match CLLocationManagerDelegate.
+        unsafe impl CLLocationManagerDelegate for PetLocationDelegate {
+            /// macOS 11+; also called right after the delegate is set.
+            #[method(locationManagerDidChangeAuthorization:)]
+            fn did_change_authorization(&self, manager: &CLLocationManager) {
+                step(manager, false);
+            }
+
+            /// Before macOS 11 (newer systems call only the method above when both exist).
+            #[method(locationManager:didChangeAuthorizationStatus:)]
+            fn did_change_authorization_status(
+                &self,
+                manager: &CLLocationManager,
+                _status: objc2_core_location::CLAuthorizationStatus,
+            ) {
+                step(manager, false);
+            }
+
+            #[method(locationManager:didUpdateLocations:)]
+            fn did_update_locations(&self, _manager: &CLLocationManager, locations: &NSArray<CLLocation>) {
+                // SAFETY: CLLocation getters on a delivered location.
+                let coord = unsafe { locations.lastObject() }.map(|loc| unsafe { loc.coordinate() });
+                let mut t = tracker();
+                match coord {
+                    Some(c) => t.on_fix(c.latitude, c.longitude, now()),
+                    None => t.on_fix(f64::NAN, f64::NAN, now()),
+                }
+            }
+
+            #[method(locationManager:didFailWithError:)]
+            fn did_fail_with_error(&self, _manager: &CLLocationManager, error: &NSError) {
+                tracker().on_error(error.code() as i64);
+            }
+        }
+    );
+
+    impl PetLocationDelegate {
+        fn new() -> Retained<Self> {
+            let this = Self::alloc().set_ivars(());
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send_id![super(this), init] }
+        }
+    }
+
+    fn responds(mgr: &CLLocationManager, selector: objc2_05::runtime::Sel) -> bool {
+        // SAFETY: -[NSObject respondsToSelector:] with a valid selector.
+        unsafe { msg_send![mgr, respondsToSelector: selector] }
+    }
+
+    fn authorization(mgr: &CLLocationManager) -> i32 {
+        // SAFETY: CLLocationManager getters on the main thread that created it. The instance
+        // getter is macOS 11+; older systems only have the (deprecated) class method.
+        unsafe {
+            if responds(mgr, sel!(authorizationStatus)) {
+                mgr.authorizationStatus().0
+            } else {
+                #[allow(deprecated)]
+                CLLocationManager::authorizationStatus_class().0
+            }
+        }
     }
 
     fn manager() -> &'static CLLocationManager {
@@ -305,76 +534,76 @@ mod mac {
             if let Some(existing) = m.get() {
                 return existing;
             }
-            // SAFETY: plain allocation on the main thread; the manager is leaked on purpose
-            // (one per app) so updates keep arriving on the main run loop.
+            // SAFETY: allocation and setters on the main thread. Both objects are leaked on
+            // purpose (one per app) so the delegate keeps receiving answers.
             let created: &'static CLLocationManager = unsafe {
-                let mgr = CLLocationManager::new();
-                // About 3 km is plenty (the coordinates are rounded to ~10 km anyway) and
-                // the cheapest fix CoreLocation offers.
+                let mgr: &'static CLLocationManager = Box::leak(Box::new(CLLocationManager::new()));
+                // About 3 km is plenty (the coordinates are rounded to ~10 km anyway) and the
+                // cheapest fix CoreLocation offers.
                 mgr.setDesiredAccuracy(kCLLocationAccuracyThreeKilometers);
-                &**Box::leak(Box::new(mgr))
+                let delegate: &'static PetLocationDelegate = Box::leak(Box::new(PetLocationDelegate::new()));
+                m.set(Some(mgr));
+                mgr.setDelegate(Some(ProtocolObject::from_ref(delegate)));
+                mgr
             };
-            m.set(Some(created));
             created
         })
     }
 
-    fn waiting_secs() -> Option<f64> {
-        WAITING_SINCE.with(|w| w.borrow().map(|t| t.elapsed().as_secs_f64()))
-    }
-
-    fn start_waiting(restart: bool) {
-        WAITING_SINCE.with(|w| {
-            let mut w = w.borrow_mut();
-            if restart || w.is_none() {
-                *w = Some(Instant::now());
+    /// Main thread: refresh the authorization and send the next request, if any.
+    fn step(mgr: &CLLocationManager, ask: bool) {
+        let auth = authorization(mgr);
+        let t = now();
+        let action = {
+            let mut tr = tracker();
+            tr.on_auth(auth);
+            let action = tr.next_action(ask, t);
+            tr.did(action, t);
+            action
+        };
+        // Outside the lock: CoreLocation may call the delegate back synchronously.
+        // SAFETY: CLLocationManager methods on the main thread that created it; both selectors
+        // are checked first (requestWhenInUseAuthorization is macOS 10.15+, requestLocation 10.14+).
+        unsafe {
+            match action {
+                LocationAction::AskPermission if responds(mgr, sel!(requestWhenInUseAuthorization)) => {
+                    mgr.requestWhenInUseAuthorization()
+                }
+                LocationAction::RequestFix if responds(mgr, sel!(requestLocation)) => mgr.requestLocation(),
+                _ => {}
             }
-        });
+        }
     }
 
     /// Runs on the main thread (CLLocationManager's home).
-    pub(super) fn read_on_main(ask: bool) -> PetLocation {
-        let mgr = manager();
-        // SAFETY: CLLocationManager instance methods on the main thread that created it.
-        let auth = unsafe { mgr.authorizationStatus() }.0;
-        match auth {
-            0 => {
-                // Asked long ago without an answer (no prompt in the unbundled dev build):
-                // the retry button asks again.
-                let stale = waiting_secs().is_some_and(|s| s > LOCATION_ANSWER_SECS);
-                if ask && (waiting_secs().is_none() || stale) {
-                    // SAFETY: as above.
-                    unsafe { mgr.requestWhenInUseAuthorization() };
-                    start_waiting(true);
-                }
+    pub(super) fn step_on_main(ask: bool) {
+        step(manager(), ask);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_05::ProtocolType;
+
+        /// The class registers (debug builds check each method's type encoding against the
+        /// protocol) and conforms, so CoreLocation will call it. No manager, no TCC.
+        #[test]
+        fn delegate_class_registers_and_conforms() {
+            let d = PetLocationDelegate::new();
+            let proto = <dyn CLLocationManagerDelegate>::protocol().expect("CLLocationManagerDelegate");
+            assert!(PetLocationDelegate::class().conforms_to(proto));
+            for name in [
+                "locationManagerDidChangeAuthorization:",
+                "locationManager:didChangeAuthorizationStatus:",
+                "locationManager:didUpdateLocations:",
+                "locationManager:didFailWithError:",
+            ] {
+                let sel = objc2_05::runtime::Sel::register(name);
+                // SAFETY: -[NSObject respondsToSelector:].
+                let ok: bool = unsafe { msg_send![&*d, respondsToSelector: sel] };
+                assert!(ok, "{name}");
             }
-            3 | 4 => {
-                // SAFETY: as above; `timestamp` is the fix time (age is negative seconds).
-                let fix = unsafe { mgr.location() }.and_then(|loc| unsafe {
-                    let age = -loc.timestamp().timeIntervalSinceNow();
-                    let c = loc.coordinate();
-                    (age <= FIX_MAX_AGE_SECS).then_some((c.latitude, c.longitude))
-                });
-                if let Some((lat, lon)) = fix.and_then(|(la, lo)| rounded_coords(la, lo)) {
-                    if UPDATING.with(|u| u.replace(false)) {
-                        // SAFETY: as above. One fix is enough until the next re-read.
-                        unsafe { mgr.stopUpdatingLocation() };
-                    }
-                    WAITING_SINCE.with(|w| *w.borrow_mut() = None);
-                    return PetLocation { status: LocationStatus::Ok, lat: Some(lat), lon: Some(lon) };
-                }
-                // No fresh fix: look for one; after a long fruitless wait, try again.
-                let stale = waiting_secs().is_some_and(|s| s > FIX_MAX_AGE_SECS);
-                if !UPDATING.with(|u| u.get()) || stale {
-                    // SAFETY: as above.
-                    unsafe { mgr.startUpdatingLocation() };
-                    UPDATING.with(|u| u.set(true));
-                    start_waiting(stale || waiting_secs().is_none());
-                }
-            }
-            _ => {}
         }
-        PetLocation::only(location_status(true, auth, false, waiting_secs()))
     }
 }
 
@@ -486,19 +715,115 @@ mod tests {
         assert!(weather_enabled(&json!({"pet": {"weather": {"enabled": true}}})));
     }
 
+    fn status(t: &LocationTracker, now: f64) -> LocationStatus {
+        t.report(true, now).status
+    }
+
+    fn authorized(auth: i32) -> LocationTracker {
+        let mut t = LocationTracker::new();
+        t.on_auth(auth);
+        t
+    }
+
     #[test]
-    fn location_status_table() {
+    fn tracker_maps_authorization_to_status() {
         use LocationStatus::*;
-        assert_eq!(location_status(false, 3, true, None), Unavailable);
-        assert_eq!(location_status(true, 0, false, None), NotAsked);
-        assert_eq!(location_status(true, 0, false, Some(5.0)), Pending);
-        assert_eq!(location_status(true, 0, false, Some(61.0)), Unavailable);
-        assert_eq!(location_status(true, 1, false, None), Denied);
-        assert_eq!(location_status(true, 2, false, Some(1.0)), Denied);
-        assert_eq!(location_status(true, 3, true, None), Ok);
-        assert_eq!(location_status(true, 4, true, Some(1.0)), Ok);
-        assert_eq!(location_status(true, 4, false, Some(10.0)), Pending);
-        assert_eq!(location_status(true, 4, false, Some(61.0)), Unavailable);
-        assert_eq!(location_status(true, 9, false, None), Unavailable);
+        let fresh = LocationTracker::new();
+        assert_eq!(status(&fresh, 0.0), Pending, "manager not created yet");
+        assert_eq!(fresh.report(false, 0.0).status, Unavailable, "location services off");
+        assert_eq!(status(&authorized(0), 0.0), NotAsked);
+        assert_eq!(status(&authorized(1), 0.0), Denied, "restricted");
+        assert_eq!(status(&authorized(2), 0.0), Denied);
+        assert_eq!(status(&authorized(3), 0.0), Pending, "authorized, request not sent yet");
+        assert_eq!(status(&authorized(4), 0.0), Pending);
+        assert_eq!(status(&authorized(9), 0.0), Unavailable, "unknown status");
+    }
+
+    #[test]
+    fn tracker_asks_permission_only_when_settings_asks() {
+        use LocationAction::*;
+        let mut t = authorized(0);
+        assert_eq!(t.next_action(false, 0.0), Nothing, "the pet page never prompts");
+        assert_eq!(t.next_action(true, 0.0), AskPermission);
+        t.did(AskPermission, 0.0);
+        assert_eq!(status(&t, 30.0), LocationStatus::Pending);
+        assert_eq!(t.next_action(true, 30.0), Nothing, "no second prompt while waiting");
+        // No answer (unbundled dev binary): city fallback, and the retry button may ask again.
+        assert_eq!(status(&t, 61.0), LocationStatus::Unavailable);
+        assert_eq!(t.next_action(true, 61.0), AskPermission);
+        // The owner allows: a fix is requested right away (from the delegate, ask = false).
+        t.on_auth(4);
+        assert_eq!(t.next_action(false, 62.0), RequestFix);
+    }
+
+    #[test]
+    fn tracker_requests_one_fix_and_reports_it_rounded() {
+        use LocationAction::*;
+        let mut t = authorized(4);
+        assert_eq!(t.next_action(false, 0.0), RequestFix);
+        t.did(RequestFix, 0.0);
+        assert_eq!(t.next_action(false, 5.0), Nothing, "request in flight");
+        assert_eq!(status(&t, 5.0), LocationStatus::Pending);
+        t.on_fix(37.56651234, 126.97841234, 8.0);
+        assert_eq!(
+            t.report(true, 9.0),
+            PetLocation { status: LocationStatus::Ok, lat: Some(37.6), lon: Some(127.0) }
+        );
+        assert_eq!(t.next_action(false, 9.0), Nothing, "fresh fix");
+    }
+
+    #[test]
+    fn tracker_refreshes_on_the_page_poll() {
+        use LocationAction::*;
+        let mut t = authorized(3);
+        t.did(RequestFix, 0.0);
+        t.on_fix(-33.8688, 151.2093, 1.0);
+        // The page polls every 30 min: the fix is due by then, the old one stays meanwhile.
+        let poll = 1.0 + 30.0 * 60.0;
+        assert_eq!(t.next_action(false, 1.0 + 24.0 * 60.0), Nothing);
+        assert_eq!(t.next_action(false, poll), RequestFix);
+        t.did(RequestFix, poll);
+        assert_eq!(t.report(true, poll).lat, Some(-33.9), "old fix kept while refreshing");
+        t.on_error(0);
+        assert_eq!(status(&t, poll + 5.0), LocationStatus::Ok, "a transient error keeps the fix");
+        // Refresh keeps failing for over 2 hours: the old fix is dropped.
+        assert_eq!(status(&t, 1.0 + 2.0 * 3600.0 + 1.0), LocationStatus::Unavailable);
+    }
+
+    #[test]
+    fn tracker_failures_and_timeouts_fall_back_to_the_city() {
+        use LocationAction::*;
+        let mut t = authorized(4);
+        t.did(RequestFix, 0.0);
+        t.on_error(0);
+        assert_eq!(status(&t, 1.0), LocationStatus::Unavailable);
+        assert_eq!(t.next_action(false, 30.0), Nothing, "no retry storm");
+        assert_eq!(t.next_action(false, 61.0), RequestFix);
+        t.did(RequestFix, 61.0);
+        assert_eq!(status(&t, 100.0), LocationStatus::Pending);
+        assert_eq!(status(&t, 122.0), LocationStatus::Unavailable, "no answer within 60 s");
+        t.on_fix(f64::NAN, 0.0, 123.0);
+        assert_eq!(status(&t, 124.0), LocationStatus::Unavailable, "invalid fix");
+        t.on_fix(91.0, 0.0, 125.0);
+        assert_eq!(status(&t, 126.0), LocationStatus::Unavailable, "out of range");
+    }
+
+    #[test]
+    fn tracker_forgets_the_fix_when_permission_is_revoked() {
+        let mut t = authorized(4);
+        t.did(LocationAction::RequestFix, 0.0);
+        t.on_fix(37.5, 127.0, 1.0);
+        t.on_auth(2);
+        assert_eq!(t.report(true, 2.0), PetLocation::only(LocationStatus::Denied));
+        assert_eq!(t.next_action(true, 2.0), LocationAction::Nothing);
+        // Granted again: the old fix is gone, a new one is requested.
+        t.on_auth(4);
+        assert_eq!(status(&t, 3.0), LocationStatus::Pending);
+        assert_eq!(t.next_action(false, 3.0), LocationAction::RequestFix);
+        // kCLErrorDenied also drops it.
+        let mut d = authorized(4);
+        d.on_fix(37.5, 127.0, 0.0);
+        d.on_error(1);
+        assert_eq!(status(&d, 1.0), LocationStatus::Unavailable);
     }
 }
