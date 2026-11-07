@@ -4177,6 +4177,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
       // Modified Enter → kitty-style CSI-u sequence. Shift+Enter is always on
       // (Claude Code newline); Ctrl/Alt combos are gated by the extended-keyboard setting.
+      // Cmd+Enter → CSI-u with the super bit (kitty: 1 + 8), so TUIs such as Claude Code can
+      // bind `cmd+enter`; xterm would otherwise send a plain CR, identical to Enter.
+      if (key === 'Enter' && meta && !shift && !ctrl && !e.altKey) {
+        e.preventDefault();
+        sendToPty('\x1b[13;9u');
+        return false;
+      }
       if (key === 'Enter' && !meta && (shift || ctrl || e.altKey)) {
         const mod = 1 + (shift ? 1 : 0) + (e.altKey ? 2 : 0) + (ctrl ? 4 : 0);
         if (mod === 2 || csiUKeysRef.current) {
