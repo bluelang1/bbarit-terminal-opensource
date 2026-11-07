@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.66] - 2026-11-07
+
 ### 수정
 
 - 업데이트 버튼을 누를 때 "작업이 중단됩니다" 경고가 터미널 붙잡기(PTY 홀더)가 켜져 있어도 뜨던 문제를 고쳤습니다. 홀더가 켜져 있으면 작업이 업데이트 뒤에도 이어지므로 경고 없이 바로 업데이트하고, 꺼져 있을 때만 경고합니다.
@@ -203,7 +205,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...HEAD
+[1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66
 [1.1.65]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...v1.1.65
 [1.1.64]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.63...v1.1.64
 [1.1.63]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.62...v1.1.63
