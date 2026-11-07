@@ -1,6 +1,16 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive } from 'lucide-react';
+import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive, ExternalLink } from 'lucide-react';
+import { remoteWebUrl } from './gitRemoteWeb';
+
+/** Tooltip for the header's repository-page button, named after the host. */
+function webUrlLabel(url: string): string {
+  const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+  if (host === 'github.com') return 'Open on GitHub';
+  if (host === 'gitlab.com') return 'Open on GitLab';
+  if (host === 'bitbucket.org') return 'Open on Bitbucket';
+  return `Open on ${host || 'the web'}`;
+}
 import './GitPanel.css';
 
 /* ─── Types ─── */
@@ -244,6 +254,22 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
       setRemotes(parseRemotes(raw));
     } catch (e) { console.error('[GitPanel] remotes error:', e); }
   }, [repoDir]);
+
+  const [webUrl, setWebUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setWebUrl(null);
+    if (!isOpen || !repoDir) return;
+    invoke<string>('git_remote_list', { repoDir })
+      .then(raw => { if (!cancelled) setWebUrl(remoteWebUrl(raw)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isOpen, repoDir]);
+  const openWebUrl = async () => {
+    if (!webUrl) return;
+    try { await invoke('plugin:shell|open', { path: webUrl }); return; } catch { /* dev/web fallback */ }
+    try { window.open(webUrl, '_blank', 'noopener,noreferrer'); } catch { /* ignore */ }
+  };
 
   const refreshStashes = useCallback(async () => {
     if (!repoDir) return;
@@ -567,6 +593,8 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
           </>}
           <div style={{ flex: 1 }} />
           {loading && <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+          {/* Fixed spot next to Refresh, so it does not move with the repo or branch name length. */}
+          {webUrl && <button onClick={openWebUrl} title={webUrlLabel(webUrl)} aria-label={webUrlLabel(webUrl)}><ExternalLink size={14} /></button>}
           <button onClick={() => refreshTab(activeTab)} title="Refresh"><RefreshCw size={14} /></button>
           <button className="modal-close-btn" onClick={onClose} title="Close" aria-label="Close"><X size={16} /></button>
         </div>
