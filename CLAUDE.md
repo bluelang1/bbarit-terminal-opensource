@@ -56,10 +56,16 @@ Build/test gotchas:
 - Fork auto-update: `npm run tauri:build:fork` layers src-tauri/tauri.fork.conf.json
   (fork minisign pubkey + GitHub latest.json endpoint) on the source config and
   keeps only TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) in the env; never commit the
-  private key. Releases: bump with scripts/bump-version.mjs, then run
+  private key. Every user-visible PR adds a Korean line under CHANGELOG.md
+  `## [Unreleased]` (추가/변경/제거/수정/보안). Releases: bump with
+  scripts/bump-version.mjs, which moves [Unreleased] into
+  `## [X.Y.Z] - YYYY-MM-DD` and fixes the compare links (warns if empty;
+  `--date`, `--no-changelog`), then run
   `cargo update -p octo-ui --offline` in src-tauri or `--locked` fails; then
   `gh workflow run fork-release.yml --ref main -f tag=v<version>` (draft
-  release; GitHub creates the tag when the draft is published). Never push
+  release; body = that CHANGELOG section via scripts/changelog-section.mjs +
+  .github/release/notes-header.md + generated PR list; a missing section
+  only warns; GitHub creates the tag when the draft is published). Never push
   the tag by hand: Actions caches are scoped per ref, so a tag-ref run never
   restores the Rust cache (~35 min cold); the first main run is cold too.
 - The original installed app (com.octo.terminal, author-signed) cannot receive

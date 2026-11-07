@@ -63,7 +63,7 @@
     "office:project": "node scripts/office-edit.mjs project:create",
     "office:cli-smoke": "node scripts/office-edit-cli-smoke.mjs",
     "ctl": "node scripts/bbarit-ctl.mjs",
-    "test:source-build": "node --test tests/tauri-opensource.test.mjs tests/fork-release-manifest.test.mjs tests/bbarit-ctl-agent.test.mjs"
+    "test:source-build": "node --test tests/tauri-opensource.test.mjs tests/fork-release-manifest.test.mjs tests/bbarit-ctl-agent.test.mjs tests/changelog-section.test.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.0",

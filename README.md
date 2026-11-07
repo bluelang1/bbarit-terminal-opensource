@@ -42,7 +42,7 @@ Tauri 2, Rust, React 19, TypeScript로 만든 데스크톱 AI 개발 환경입�
 - **보안 강화.** 로컬 브리지와 제어 WebSocket에 출처 검사를 넣어 일반 웹페이지가 앱을 조종하지 못하게 했고, 웹뷰 CSP 적용, Git 명령 인자 주입 차단, 취약한 의존성 교체를 했습니다.
 - **자체 자동 업데이트.** 이 포크 전용 서명 키와 GitHub Releases로 업데이트를 받으며, 업데이트 버튼을 누를 때만 설치합니다.
 
-전체 변경 내역은 [Releases](https://github.com/bluelang1/bbarit-terminal-opensource/releases)와 [커밋 기록](https://github.com/bluelang1/bbarit-terminal-opensource/commits/main)에 있습니다.
+변경 이력: [CHANGELOG.md](CHANGELOG.md) (버전별 사용자 변경 사항). 설치 파일과 같은 내용의 릴리스 노트는 [Releases](https://github.com/bluelang1/bbarit-terminal-opensource/releases)에 있습니다.
 
 ### 소스 배포본에 대해
 
@@ -127,10 +127,10 @@ node scripts/fork-release-manifest.mjs --tag v1.1.51 --repo bluelang1/bbarit-ter
 
 `tauri:build:fork`는 `--fork-release`로 업데이트 서명 산출물(`.app.tar.gz` + `.sig`)을 만들고, 래퍼는 `TAURI_SIGNING_PRIVATE_KEY`·`_PASSWORD`만 자식 프로세스에 남깁니다. 매니페스트 스크립트는 태그가 `v<앱 버전>`과 같은지 확인하고 `release-out/`에 공백 없는 이름의 번들 파일과 `latest.json`을 씁니다. DMG는 버전 없는 이름(`BBARIT-Terminal-Source_aarch64.dmg`)으로도 한 벌 더 복사해, 설치 안내의 `releases/latest/download/` 링크가 릴리스마다 고칠 필요 없이 최신 DMG를 가리키게 합니다.
 
-릴리스 절차는 다음과 같습니다.
+사용자에게 보이는 변경을 담은 PR은 [`CHANGELOG.md`](CHANGELOG.md)의 `## [Unreleased]` 아래(추가·변경·제거·수정·보안)에 한 줄을 더합니다([Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 형식). 릴리스 절차는 다음과 같습니다.
 
-1. `node scripts/bump-version.mjs 1.1.52`로 버전을 올리고, `src-tauri`에서 `cargo update -p octo-ui --offline`으로 Cargo.lock도 맞춘 뒤 머지합니다(아니면 CI의 `--locked` 검사가 실패합니다). 업데이터는 현재 버전보다 큰 버전만 설치합니다.
-2. `gh workflow run fork-release.yml --ref main -f tag=v1.1.52`. [`fork-release.yml`](.github/workflows/fork-release.yml) 워크플로가 macOS(Apple Silicon)에서 빌드해 **초안(draft) 릴리스**에 산출물과 `latest.json`을 올립니다. 태그는 직접 만들지 않습니다. 초안을 **게시하는 순간** GitHub가 빌드한 커밋에 태그를 만듭니다. 저장소 시크릿 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다. main에서 실행하는 이유는 Rust 캐시가 `main`에 남아 두 번째 릴리스부터 빌드가 짧아지기 때문입니다(캐시는 ref 단위로 격리되므로 첫 실행은 콜드).
+1. 릴리스할 때는 `[Unreleased]` 항목을 새 `## [X.Y.Z] - YYYY-MM-DD` 섹션으로 옮깁니다. `node scripts/bump-version.mjs 1.1.52`가 이 이동과 맨 아래 비교 링크 갱신을 함께 하며(날짜는 오늘, `--date YYYY-MM-DD`로 지정, `--no-changelog`로 생략), `[Unreleased]`가 비어 있으면 경고만 하니 직접 채웁니다. 버전을 올린 뒤 `src-tauri`에서 `cargo update -p octo-ui --offline`으로 Cargo.lock도 맞춘 뒤 머지합니다(아니면 CI의 `--locked` 검사가 실패합니다). 업데이터는 현재 버전보다 큰 버전만 설치합니다.
+2. `gh workflow run fork-release.yml --ref main -f tag=v1.1.52`. [`fork-release.yml`](.github/workflows/fork-release.yml) 워크플로가 macOS(Apple Silicon)에서 빌드해 **초안(draft) 릴리스**에 산출물과 `latest.json`을 올립니다. 릴리스 본문은 그 버전의 CHANGELOG 섹션(`node scripts/changelog-section.mjs 1.1.52`), [설치 안내](.github/release/notes-header.md), GitHub가 만든 PR 목록 순서이며, 섹션이 없으면 경고를 남기고 설치 안내와 PR 목록만 씁니다. 태그는 직접 만들지 않습니다. 초안을 **게시하는 순간** GitHub가 빌드한 커밋에 태그를 만듭니다. 저장소 시크릿 `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다. main에서 실행하는 이유는 Rust 캐시가 `main`에 남아 두 번째 릴리스부터 빌드가 짧아지기 때문입니다(캐시는 ref 단위로 격리되므로 첫 실행은 콜드).
 3. GitHub에서 초안을 검토하고 게시(publish)합니다. 게시된 최신 릴리스만 `releases/latest/download/latest.json`으로 제공되므로, 게시 전에는 설치된 앱이 업데이트를 보지 못합니다.
 4. 포크 빌드를 설치한 앱은 버전 배지에서 새 버전을 감지하고, 업데이트 버튼을 눌렀을 때만 내려받아 설치·재시작합니다.
 
