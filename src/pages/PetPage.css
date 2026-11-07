@@ -1,0 +1,184 @@
+/* Desktop pet window (/pet). Page-level transparency lives in src/index.css (html.pet-page)
+   so it applies before this lazy chunk loads. */
+
+.pet-root {
+  --pet-ink: #3b1f47; /* OCTO outline, ART_PALETTE.o */
+  --pet-paper: #fff8ec; /* ART_PALETTE.w */
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* The body box (PET_W x PET_H); PetPage places it inside the window (wider while a bubble shows). */
+.pet-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  width: 160px;
+  height: 160px;
+  image-rendering: pixelated;
+  cursor: grab;
+  touch-action: none;
+}
+
+.pet-canvas.dragging {
+  cursor: grabbing;
+}
+
+/* Speech bubble. PetPage sets pixel-art images (src/pet/bubbleArt.ts) as CSS variables on
+   .pet-root and adds .pet-art; the box is then a stretchable 9-slice border-image around the
+   HTML text. Without them (no canvas) it falls back to a plain outlined box. Fixed colors:
+   the desktop behind the pet decides light or dark, not the app theme. */
+.pet-bubble {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 64px;
+  max-width: 292px;
+  margin: 0;
+  padding: 5px 10px;
+  border: 2px solid var(--pet-ink);
+  background: var(--pet-paper);
+  color: var(--pet-ink);
+  font: 700 12px/16px -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pet-art .pet-bubble {
+  /* border-width = the 9-slice edges (8 / 10 / 10 / 8 px); the image paints fill and edges. */
+  padding: 0 6px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-bubble-bw);
+  border-image: var(--pet-bubble-bi);
+  background: none;
+  image-rendering: pixelated;
+}
+
+.pet-bubble:focus {
+  outline: none;
+}
+
+.pet-bubble-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pet-bubble-more {
+  flex: none;
+  padding: 0 3px;
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+.pet-art .pet-bubble-more {
+  padding: 0 2px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-dark-bi);
+  background: none;
+  image-rendering: pixelated;
+}
+
+.pet-bubble.blocked .pet-bubble-text::before {
+  content: '!';
+  display: inline-block;
+  margin-right: 5px;
+  padding: 0 4px;
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font-size: 10px;
+  line-height: 12px;
+}
+
+/* Pixel "!" badge: one text line tall, drawn by the image (the '!' char is hidden). */
+.pet-art .pet-bubble.blocked .pet-bubble-text::before {
+  content: '';
+  width: 14px;
+  height: 16px;
+  margin-right: 4px;
+  padding: 0;
+  vertical-align: top;
+  background: var(--pet-bang-img) 0 0 / 100% 100% no-repeat;
+  image-rendering: pixelated;
+}
+
+/* Sized by PetPage from TAIL_ART; joins the bubble's bottom edge. */
+.pet-bubble-tail {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  pointer-events: none;
+  background: var(--pet-tail-img) 0 0 / 100% 100% no-repeat;
+  image-rendering: pixelated;
+}
+
+/* Unseen finished turns: small pixel count badge at the sprite's top-right. */
+.pet-badge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  min-width: 6px;
+  padding: 0 2px;
+  border: 1px solid var(--pet-ink);
+  background: var(--pet-paper);
+  color: var(--pet-ink);
+  font: 700 9px/10px ui-monospace, Menlo, monospace;
+  text-align: center;
+  pointer-events: none;
+}
+
+.pet-art .pet-badge {
+  padding: 0 1px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-light-bi);
+  background: none;
+  image-rendering: pixelated;
+}
+
+/* Character tour caption (src/pet/showcase.ts): a small dark pixel chip at the top of the
+   window, in the band PetPage adds above everything while the tour runs. Click ends it. */
+.pet-caption {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 4px);
+  margin: 0;
+  padding: 0 4px;
+  border: 1px solid var(--pet-ink);
+  background: var(--pet-ink);
+  color: var(--pet-paper);
+  font: 700 10px/12px -apple-system, BlinkMacSystemFont, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  -webkit-font-smoothing: antialiased;
+}
+
+.pet-caption:focus {
+  outline: none;
+}
+
+.pet-art .pet-caption {
+  padding: 0 2px;
+  border-style: solid;
+  border-color: transparent;
+  border-width: var(--pet-chip-bw);
+  border-image: var(--pet-chip-dark-bi);
+  background: none;
+  image-rendering: pixelated;
+}

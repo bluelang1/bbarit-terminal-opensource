@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "pet",
+  "description": "Desktop pet window (/pet): listen for pet-visibility / pet-summary / pet-tour-start, ask main for a summary (emit), read monitors, move and resize itself (wider and taller while a speech bubble shows), show its native right-click menu (core:menu, via core:default), quit the app (menu item, same path as Cmd-Q). The pet_* app commands need no entry (the app defines no command ACL manifest).",
+  "windows": ["pet"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-position",
+    "core:window:allow-set-size",
+    "process:allow-exit"
+  ]
+}

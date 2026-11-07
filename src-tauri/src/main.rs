@@ -31,6 +31,7 @@ mod integrations;
 mod lan_discovery;
 mod learning_db;
 mod note_ops;
+mod pet;
 mod pty_backend;
 #[cfg(unix)]
 mod pty_holder;
@@ -10016,9 +10017,9 @@ fn main() {
     {
         if std::env::var_os("BBARIT_DISABLE_SINGLE_INSTANCE").is_none() {
             builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.set_focus();
-                }
+                // A hidden (red-button) or minimized main window comes back too.
+                pet::show_main(app);
+                pet::sync_pet_soon(app, &[0]);
             }));
         }
     }
@@ -10071,16 +10072,20 @@ fn main() {
         .on_window_event(|window, event| {
             use tauri::WindowEvent;
             match event {
-                WindowEvent::CloseRequested { .. } => {
+                WindowEvent::CloseRequested { api, .. } => {
                     safe_eprintln!("[window-event] CloseRequested on '{}'", window.label());
                     // When the MAIN window closes the app is quitting: reap every PTY's whole
                     // process subtree so agent-spawned dev servers / wranglers / build watchers
                     // don't orphan and keep eating memory after the app is gone.
                     if window.label() == "main" {
                         if cfg!(target_os = "macos") {
-                            // macOS closes a window without quitting the application. Do not
-                            // suppress the request here: the frontend is responsible only for
-                            // warning about unsaved files, then lets this window close normally.
+                            // macOS: the red button hides the main window instead of
+                            // destroying it, so its terminals keep running, the Dock icon
+                            // (RunEvent::Reopen) brings it back and the desktop pet shows.
+                            // Cmd-Q never comes here (RunEvent::Exit handles quitting).
+                            api.prevent_close();
+                            let _ = window.hide();
+                            pet::sync_pet_soon(window.app_handle(), &[0]);
                             return;
                         }
 
@@ -10108,6 +10113,26 @@ fn main() {
                 }
                 WindowEvent::Destroyed => {
                     safe_eprintln!("[window-event] Destroyed: '{}'", window.label());
+                }
+                // Focus coming back to main (Cmd-Tab, Dock) re-syncs the pet at once. macOS
+                // minimize/restore arrive as AppKit notifications (pet::observe_main_miniaturize);
+                // elsewhere a focus loss may be a minimize reported late, so re-check twice.
+                WindowEvent::Focused(focused) if window.label() == "main" => {
+                    if *focused {
+                        pet::sync_pet_soon(window.app_handle(), &[0]);
+                    } else if cfg!(not(target_os = "macos")) {
+                        pet::sync_pet_soon(window.app_handle(), &[400, 1200]);
+                    }
+                }
+                // Windows/Linux report minimize as a 0x0 resize; ordinary resizes are skipped
+                // unless the pet is up (restore from minimize).
+                WindowEvent::Resized(size)
+                    if window.label() == "main"
+                        && (size.width == 0
+                            || size.height == 0
+                            || pet::pet_is_visible(window.app_handle())) =>
+                {
+                    pet::sync_pet_soon(window.app_handle(), &[0]);
                 }
                 _ => {}
             }
@@ -10159,8 +10184,17 @@ fn main() {
                     .paste()
                     .item(&select_all)
                     .build()?;
+                // Desktop pet character tour (pet::start_pet_tour, src/pet/showcase.ts).
+                let pet_tour = MenuItemBuilder::with_id(
+                    "pet-tour",
+                    if ko { "캐릭터 둘러보기" } else { "Character Tour" },
+                )
+                .build(app)?;
+                let help_menu = SubmenuBuilder::new(app, if ko { "도움말" } else { "Help" })
+                    .item(&pet_tour)
+                    .build()?;
                 let menu = MenuBuilder::new(app)
-                    .items(&[&app_menu, &edit_menu])
+                    .items(&[&app_menu, &edit_menu, &help_menu])
                     .build()?;
                 app.set_menu(menu)?;
                 app.on_menu_event(|app, event| {
@@ -10168,6 +10202,8 @@ fn main() {
                         let _ = app.emit("menu-select-all", ());
                     } else if event.id().as_ref() == "quit-kill-terminals" {
                         request_quit_kill_terminals(app);
+                    } else if event.id().as_ref() == "pet-tour" {
+                        pet::start_pet_tour(app);
                     }
                 });
             }
@@ -10233,6 +10269,10 @@ fn main() {
             }
 
     // (design server is started on-demand via Tauri command, not in setup)
+
+            // macOS: minimize/restore of main toggles the desktop pet (setup runs on the main thread).
+            #[cfg(target_os = "macos")]
+            pet::observe_main_miniaturize(app.handle());
 
             // macOS: 메인 윈도우의 CGWindowNumber를 저장 (메인 스레드에서 실행)
             #[cfg(target_os = "macos")]
@@ -10543,10 +10583,26 @@ fn main() {
             lan_discovery::lan_list_peers,
             lan_discovery::lan_set_ssh,
             lan_discovery::lan_stop_discovery,
+            // Desktop pet
+            pet::pet_list_characters,
+            pet::pet_open_main,
+            pet::pet_open_terminal,
+            pet::pet_hide,
+            pet::pet_tour_active,
+            pet::pet_tour_end,
+            pet::weather::pet_location,
+            pet::weather::pet_weather_now,
+            pet::weather::pet_weather_city_search,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|_app_handle, event| {
+            // macOS Dock icon click: bring back the main window hidden by the red button.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                pet::show_main(_app_handle);
+                pet::sync_pet_soon(_app_handle, &[0]);
+            }
             // RunEvent::Exit fires on EVERY app exit path — including macOS Cmd+Q,
             // which never goes through CloseRequested (prevent_close) above. Reap
             // the RPC agent children here so no `--mode rpc` process outlives the app.

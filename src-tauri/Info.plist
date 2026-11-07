@@ -16,5 +16,9 @@
   <string>BBARIT can access your photo library when selecting images.</string>
   <key>NSPhotoLibraryAddUsageDescription</key>
   <string>BBARIT can save generated images to your photo library.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>데스크톱 펫이 지금 있는 곳의 날씨를 보여 주려고 대략적인 위치를 사용합니다. The desktop pet uses your approximate location to show the local weather.</string>
+  <key>NSLocationWhenInUseUsageDescription</key>
+  <string>데스크톱 펫이 지금 있는 곳의 날씨를 보여 주려고 대략적인 위치를 사용합니다. The desktop pet uses your approximate location to show the local weather.</string>
 </dict>
 </plist>

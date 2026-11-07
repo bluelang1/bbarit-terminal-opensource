@@ -14,7 +14,7 @@ default = []
 
 [dependencies]
 # "unstable": Window::add_child(child webview) for the internal browser.
-tauri = { version = "2", features = ["protocol-asset", "unstable"] }
+tauri = { version = "2", features = ["protocol-asset", "unstable", "macos-private-api"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -93,6 +93,19 @@ tauri-plugin-drag = "2"
 [target.'cfg(target_os = "macos")'.dependencies]
 whisper-rs = "0.14"
 hound = "3.5"
+# Desktop pet: AppKit miniaturize notifications for the main window (pet.rs).
+# Versions match the ones tauri already pulls in, so the lock only gains edges.
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "NSNotification", "NSOperation", "NSString", "NSObject"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
+# Desktop pet weather: CoreLocation (pet/weather.rs). 0.2.2 is the version already in the
+# lock (via objc2-ui-kit), so only the octo-ui dependency list changes. It is built on
+# objc2 0.5 / objc2-foundation 0.2 (also already locked), which the location delegate class
+# needs directly; renamed so they do not clash with the 0.6 / 0.3 used for AppKit above.
+objc2-core-location = { version = "0.2", default-features = false, features = ["std", "CLLocationManager", "CLLocation", "CLLocationManagerDelegate"] }
+objc2-05 = { package = "objc2", version = "0.5", default-features = false, features = ["std"] }
+objc2-foundation-02 = { package = "objc2-foundation", version = "0.2", default-features = false, features = ["std", "NSArray", "NSError", "NSDate"] }
 
 # Windows: mark the bridge listen socket non-inheritable so spawned PTY/WebView2
 # children don't inherit it and keep it alive (zombie LISTENING) after the app

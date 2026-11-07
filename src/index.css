@@ -13,6 +13,22 @@ body {
   height: 100%;
 }
 
+/* Desktop pet window (/pet). The window itself is transparent (pet.rs), so the page must
+   not paint anything but the character. `pet-page` is set on <html> by main.tsx before the first render. */
+html.pet-page,
+html.pet-page body,
+html.pet-page #root {
+  background: transparent !important;
+  color-scheme: normal;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 :root {
   color-scheme: dark;
   text-rendering: optimizeLegibility;

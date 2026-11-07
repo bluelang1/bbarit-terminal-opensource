@@ -142,6 +142,73 @@ export interface OllamaConfig {
   model: string;
 }
 
+/** Desktop pet (top-level `pet` in config.json). Rust reads `enabled` too (pet.rs pet_enabled). */
+export interface PetConfig {
+  /** Only an explicit `false` turns the pet off. */
+  enabled: boolean;
+  /** Bundled pack id (`octo`) or a user pack folder under ~/.config/octo/characters. */
+  character: string;
+  mode: 'walk' | 'stay';
+  weather: PetWeatherConfig;
+}
+
+/** A city from the Open-Meteo geocoding search (Settings), used when location is unavailable. */
+export interface PetWeatherCity {
+  name: string;
+  admin1?: string;
+  country?: string;
+  lat: number;
+  lon: number;
+}
+
+/** `pet.weather`. Off by default; pet/weather.rs `weather_enabled` also needs an explicit true. */
+export interface PetWeatherConfig {
+  enabled: boolean;
+  city: PetWeatherCity | null;
+}
+
+export const DEFAULT_PET_CONFIG: PetConfig = {
+  enabled: true,
+  character: 'octo',
+  mode: 'walk',
+  weather: { enabled: false, city: null },
+};
+
+function plainObject(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+}
+
+function cleanLabel(v: unknown, max: number): string | undefined {
+  return typeof v === 'string' && v.trim() && v.trim().length <= max ? v.trim() : undefined;
+}
+
+function normalizeCity(raw: unknown): PetWeatherCity | null {
+  const c = plainObject(raw);
+  const name = cleanLabel(c.name, 200);
+  const lat = c.lat;
+  const lon = c.lon;
+  if (!name || typeof lat !== 'number' || typeof lon !== 'number') return null;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  const city: PetWeatherCity = { name, lat, lon };
+  const admin1 = cleanLabel(c.admin1, 200);
+  const country = cleanLabel(c.country, 200);
+  if (admin1) city.admin1 = admin1;
+  if (country) city.country = country;
+  return city;
+}
+
+/** Fill and sanitize `pet` from untrusted config JSON. Mirrors pet.rs `pet_enabled`. */
+export function normalizePetConfig(raw: unknown): PetConfig {
+  const r = plainObject(raw);
+  const w = plainObject(r.weather);
+  return {
+    enabled: r.enabled !== false,
+    character: typeof r.character === 'string' && r.character.trim() ? r.character.trim() : DEFAULT_PET_CONFIG.character,
+    mode: r.mode === 'stay' ? 'stay' : 'walk',
+    weather: { enabled: w.enabled === true, city: normalizeCity(w.city) },
+  };
+}
+
 export interface NoteTemplate {
   id: string;
   name: string;
@@ -298,6 +365,7 @@ export interface OctoConfig {
   dbConnections: DatabaseConnection[];
   projectConfigs: Record<string, ProjectConfig>;
   easterEggMedia: EasterEggMedia;
+  pet: PetConfig;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -442,6 +510,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   dbConnections: [],
   projectConfigs: {},
   easterEggMedia: { type: 'default', path: '' },
+  pet: { ...DEFAULT_PET_CONFIG },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -528,6 +597,7 @@ export function validateConfig(raw: unknown): OctoConfig {
     easterEggMedia: input.easterEggMedia && typeof input.easterEggMedia === 'object'
       ? { type: input.easterEggMedia.type || 'default', path: input.easterEggMedia.path || '' }
       : { type: 'default', path: '' },
+    pet: normalizePetConfig(input.pet),
   };
 }
 

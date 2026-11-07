@@ -39,6 +39,7 @@ import { GATEWAY_UI_COMMAND_DOCS } from '../gatewayUiCommands';
 import BBARIT_CLI_DOC from '../../docs/BBARIT_CLI.md?raw';
 import BBARIT_CTL_SOURCE from '../../scripts/bbarit-ctl.mjs?raw';
 import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from '../dashboard/dashboardUrl';
+import { PetSettings } from './PetSettings';
 import './SettingsPanel.css';
 
 // Control CLI 탭에서 버스 명령 → 복사용 CLI 예시 매핑 (bbarit-ctl 서브커맨드).
@@ -2290,6 +2291,8 @@ export function SettingsPanel({
                   >{t('settings.common.reset')}</button>
                 </div>
               </div>
+
+              <PetSettings />
             </div>
           )}
 
