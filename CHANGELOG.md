@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.67] - 2026-11-08
+
 ### 추가
 
 - 처음 설치하면 시작하기 가이드 창이 열려 프로젝트 열기·AI 터미널·상태 표시·계속 실행·Git·데스크톱 펫을 직접 해 보며 익힐 수 있습니다. 업데이트 후 처음 켤 때는 새로 생긴 기능을 보여 주고, 도움말 메뉴에서 언제든 다시 열 수 있습니다.
@@ -213,7 +215,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...HEAD
+[1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
 [1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66
 [1.1.65]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...v1.1.65
 [1.1.64]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.63...v1.1.64
