@@ -10184,6 +10184,17 @@ fn main() {
                     .paste()
                     .item(&select_all)
                     .build()?;
+                // Getting-started guide and What's new (src/guide): the main window opens them.
+                let guide_open = MenuItemBuilder::with_id(
+                    "guide-open",
+                    if ko { "시작하기" } else { "Getting Started" },
+                )
+                .build(app)?;
+                let whatsnew_open = MenuItemBuilder::with_id(
+                    "whatsnew-open",
+                    if ko { "새로운 기능" } else { "What's New" },
+                )
+                .build(app)?;
                 // Desktop pet character tour (pet::start_pet_tour, src/pet/showcase.ts).
                 let pet_tour = MenuItemBuilder::with_id(
                     "pet-tour",
@@ -10191,6 +10202,9 @@ fn main() {
                 )
                 .build(app)?;
                 let help_menu = SubmenuBuilder::new(app, if ko { "도움말" } else { "Help" })
+                    .item(&guide_open)
+                    .item(&whatsnew_open)
+                    .separator()
                     .item(&pet_tour)
                     .build()?;
                 let menu = MenuBuilder::new(app)
@@ -10204,6 +10218,10 @@ fn main() {
                         request_quit_kill_terminals(app);
                     } else if event.id().as_ref() == "pet-tour" {
                         pet::start_pet_tour(app);
+                    } else if event.id().as_ref() == "guide-open" {
+                        let _ = app.emit("menu-guide-open", ());
+                    } else if event.id().as_ref() == "whatsnew-open" {
+                        let _ = app.emit("menu-whatsnew-open", ());
                     }
                 });
             }
@@ -10590,6 +10608,7 @@ fn main() {
             pet::pet_hide,
             pet::pet_tour_active,
             pet::pet_tour_end,
+            pet::pet_start_tour,
             pet::weather::pet_location,
             pet::weather::pet_weather_now,
             pet::weather::pet_weather_city_search,

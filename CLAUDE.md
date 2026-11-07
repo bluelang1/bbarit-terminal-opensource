@@ -158,6 +158,11 @@ Build/test gotchas:
   `<bbarit from=… state=…>` line through the input gate (never into plain shells).
   `agent.*` stays off the remote secretary allowlist. Dev builds resolve BBARIT_CTL from
   CARGO_MANIFEST_DIR, so a shared CARGO_TARGET_DIR still points at the right checkout.
+- Getting-started guide: steps live in src/guide/steps.ts (ko/en `guide.step.*` keys,
+  `data-guide` targets). A PR adding a user-facing feature worth teaching adds or
+  updates a step; What's new reads CHANGELOG.md at build time. Window `tool-guide`
+  (/guide, src/pages/GuidePage.tsx); the main window owns progress, spotlight and the
+  one-time startup opening (src/guide/useGuideHost.ts; never in debug builds).
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
