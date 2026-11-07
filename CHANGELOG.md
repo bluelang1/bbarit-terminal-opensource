@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.65] - 2026-11-07
+
 ### 추가
 
 - 이 변경 이력(CHANGELOG.md)을 두고, 릴리스 페이지에도 해당 버전의 변경 내용을 설치 안내 위에 보여 줍니다.
@@ -197,7 +199,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...HEAD
+[1.1.65]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...v1.1.65
 [1.1.64]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.63...v1.1.64
 [1.1.63]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.62...v1.1.63
 [1.1.62]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.61...v1.1.62
