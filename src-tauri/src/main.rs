@@ -3924,6 +3924,61 @@ static KILL_TERMINALS_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic
 /// One-shot: the next exit is an update relaunch (GOODBYE handover).
 static HANDOVER_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// macOS app menu (app / Edit / Help) in the app language. Built at startup and again by
+/// `set_menu_language` when the user switches languages in settings.
+/// Edit menu: without the standard accelerators WKWebView drops Cmd+C/V/X/A before the DOM.
+/// Select All is a custom item (frontend re-dispatches Cmd+A, src/menuSelectAllBridge.ts)
+/// because the predefined selectAll: cannot change Monaco/xterm selections.
+#[cfg(target_os = "macos")]
+fn build_app_menu<R: tauri::Runtime>(app: &tauri::AppHandle<R>, ko: bool) -> tauri::Result<tauri::menu::Menu<R>> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+    let tr = |k: &'static str, e: &'static str| if ko { k } else { e };
+    let quit_kill = MenuItemBuilder::with_id("quit-kill-terminals", tr("종료하고 모든 터미널 끝내기", "Quit and End All Terminals")).build(app)?;
+    let app_menu = SubmenuBuilder::new(app, "BBARIT Terminal")
+        .item(&quit_kill)
+        .separator()
+        .quit_with_text(tr("BBARIT Terminal 종료", "Quit BBARIT Terminal"))
+        .build()?;
+    let select_all = MenuItemBuilder::with_id("edit-select-all", tr("전체 선택", "Select All"))
+        .accelerator("Cmd+A")
+        .build(app)?;
+    let edit_menu = SubmenuBuilder::new(app, tr("편집", "Edit"))
+        .undo_with_text(tr("실행 취소", "Undo"))
+        .redo_with_text(tr("실행 복귀", "Redo"))
+        .separator()
+        .cut_with_text(tr("오려두기", "Cut"))
+        .copy_with_text(tr("복사하기", "Copy"))
+        .paste_with_text(tr("붙여넣기", "Paste"))
+        .item(&select_all)
+        .build()?;
+    // Getting-started guide and What's new (src/guide): the main window opens them.
+    let guide_open = MenuItemBuilder::with_id("guide-open", tr("시작하기", "Getting Started")).build(app)?;
+    let whatsnew_open = MenuItemBuilder::with_id("whatsnew-open", tr("새로운 기능", "What's New")).build(app)?;
+    // Desktop pet character tour (pet::start_pet_tour, src/pet/showcase.ts).
+    let pet_tour = MenuItemBuilder::with_id("pet-tour", tr("캐릭터 둘러보기", "Character Tour")).build(app)?;
+    let help_menu = SubmenuBuilder::new(app, tr("도움말", "Help"))
+        .item(&guide_open)
+        .item(&whatsnew_open)
+        .separator()
+        .item(&pet_tour)
+        .build()?;
+    MenuBuilder::new(app).items(&[&app_menu, &edit_menu, &help_menu]).build()
+}
+
+/// Rebuild the macOS menu after the user changed `language` in settings (no-op elsewhere).
+/// Menu calls are cheap and must happen on the main thread, so this stays a sync command.
+#[tauri::command]
+fn set_menu_language(app: tauri::AppHandle, language: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = build_app_menu(&app, language == "ko").map_err(|e| e.to_string())?;
+        app.set_menu(menu).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, language);
+    Ok(())
+}
+
 /// Called by handleUpdate right before `relaunch()`.
 #[tauri::command]
 fn pty_prepare_handover() {
@@ -10153,63 +10208,10 @@ fn main() {
             // 단축키를 받아 웹뷰 표준 편집 동작(copy/paste 이벤트)으로 넘겨준다.
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
                 let ko = read_octo_config_json()
                     .and_then(|c| c.get("language").and_then(|l| l.as_str()).map(|l| l == "ko"))
                     .unwrap_or(false);
-                let quit_kill = MenuItemBuilder::with_id(
-                    "quit-kill-terminals",
-                    if ko { "종료하고 모든 터미널 끝내기" } else { "Quit and End All Terminals" },
-                )
-                .build(app)?;
-                let app_menu = SubmenuBuilder::new(app, "BBARIT Terminal")
-                    .item(&quit_kill)
-                    .separator()
-                    .quit()
-                    .build()?;
-                // Select All은 predefined 항목을 쓰면 안 된다: 메뉴가 Cmd+A를 받아
-                // 네이티브 selectAll: 액션을 실행하는데, 이건 Monaco/xterm처럼 숨은
-                // textarea로 입력받는 에디터의 보이는 선택을 못 바꾼다. 커스텀 항목으로
-                // 받아 프론트에 이벤트를 보내고, 프론트가 포커스된 표면에 keydown을
-                // 재전송해 각 에디터의 기존 Cmd+A 핸들러가 처리하게 한다.
-                let select_all = MenuItemBuilder::with_id("edit-select-all", "Select All")
-                    .accelerator("Cmd+A")
-                    .build(app)?;
-                let edit_menu = SubmenuBuilder::new(app, "Edit")
-                    .undo()
-                    .redo()
-                    .separator()
-                    .cut()
-                    .copy()
-                    .paste()
-                    .item(&select_all)
-                    .build()?;
-                // Getting-started guide and What's new (src/guide): the main window opens them.
-                let guide_open = MenuItemBuilder::with_id(
-                    "guide-open",
-                    if ko { "시작하기" } else { "Getting Started" },
-                )
-                .build(app)?;
-                let whatsnew_open = MenuItemBuilder::with_id(
-                    "whatsnew-open",
-                    if ko { "새로운 기능" } else { "What's New" },
-                )
-                .build(app)?;
-                // Desktop pet character tour (pet::start_pet_tour, src/pet/showcase.ts).
-                let pet_tour = MenuItemBuilder::with_id(
-                    "pet-tour",
-                    if ko { "캐릭터 둘러보기" } else { "Character Tour" },
-                )
-                .build(app)?;
-                let help_menu = SubmenuBuilder::new(app, if ko { "도움말" } else { "Help" })
-                    .item(&guide_open)
-                    .item(&whatsnew_open)
-                    .separator()
-                    .item(&pet_tour)
-                    .build()?;
-                let menu = MenuBuilder::new(app)
-                    .items(&[&app_menu, &edit_menu, &help_menu])
-                    .build()?;
+                let menu = build_app_menu(app.handle(), ko)?;
                 app.set_menu(menu)?;
                 app.on_menu_event(|app, event| {
                     if event.id().as_ref() == "edit-select-all" {
@@ -10608,6 +10610,7 @@ fn main() {
             pet::pet_hide,
             pet::pet_tour_active,
             pet::pet_tour_end,
+            set_menu_language,
             pet::pet_start_tour,
             pet::weather::pet_location,
             pet::weather::pet_weather_now,

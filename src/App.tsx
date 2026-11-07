@@ -6483,6 +6483,12 @@ Office project scaffold created by BBARIT Terminal.
     };
   }, [openTaskCompleteTarget]);
 
+  // macOS menu bar follows the app language (built once at startup in Rust; rebuilt here on change).
+  useEffect(() => {
+    if (!isTauriApp()) return;
+    invoke('set_menu_language', { language: locale }).catch(() => {});
+  }, [locale]);
+
   // ── Getting-started guide host (src/guide, docs/superpowers/specs/2026-11-08-onboarding-guide-design.md) ──
   const guideCounts = useMemo(() => {
     let agentTabs = 0;

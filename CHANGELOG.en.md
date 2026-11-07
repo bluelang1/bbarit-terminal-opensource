@@ -13,6 +13,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 - On a fresh install a getting-started guide opens so you can learn by doing: opening a project, AI terminals, status dots, keep running, Git and the desktop pet. The first launch after an update shows what is new, and both can be reopened from the Help menu at any time.
 
+### Changed
+
+- The macOS menu bar (app, Edit, Help) follows the language chosen in settings (Korean/English).
+
 ## [1.1.66] - 2026-11-07
 
 ### Fixed
