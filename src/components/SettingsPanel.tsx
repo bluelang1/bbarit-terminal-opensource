@@ -118,6 +118,8 @@ interface SettingsPanelProps {
   isOpen: boolean;
   /** Tab to show each time the panel opens with it set (getting-started guide). */
   initialTab?: SettingsTabId;
+  /** Bump to re-apply `initialTab` while the panel is already open. */
+  initialTabNonce?: number;
   onClose: () => void;
   currentStyle: { bg: string; text: string; accent: string };
   currentStyleIndex?: number;
@@ -328,6 +330,7 @@ const openFolderPath = async (path: string) => {
 export function SettingsPanel({
   isOpen,
   initialTab,
+  initialTabNonce,
   onClose,
   currentStyle,
   currentStyleIndex = 0,
@@ -359,7 +362,7 @@ export function SettingsPanel({
   const [activeTab, setActiveTab] = useState<SettingsTabId>('terminal');
   useEffect(() => {
     if (isOpen && initialTab) setActiveTab(initialTab);
-  }, [isOpen, initialTab]);
+  }, [isOpen, initialTab, initialTabNonce]);
   const [themeSubTab, setThemeSubTab] = useState<'dark' | 'light' | 'wacky'>('dark');
   const [aiTagProvider, setAiTagProviderState] = useState<AiTagProvider>('ollama');
   useEffect(() => { getAiTagProvider().then(p => setAiTagProviderState(p)).catch(() => {}); }, []);

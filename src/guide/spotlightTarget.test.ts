@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { GUIDE_STEPS, type GuideStep } from './steps';
-import { placeCaption, resolveTarget } from './spotlightTarget';
+import { boxesOverlap, placeCaption, resolveTarget, screenBoxOf, shouldPinGuide } from './spotlightTarget';
 
 const project = GUIDE_STEPS.find(s => s.id === 'project')!;
 const git = GUIDE_STEPS.find(s => s.id === 'git-keys')!;
@@ -69,5 +69,29 @@ describe('placeCaption', () => {
   it('stays inside the viewport horizontally', () => {
     expect(placeCaption(r(1180, 50, 20), 1200, 800, 280, 100).left).toBeLessThanOrEqual(1200 - 280 - 12);
     expect(placeCaption(r(0, 50, 10), 1200, 800, 280, 100).left).toBeGreaterThanOrEqual(12);
+  });
+});
+
+describe('shouldPinGuide', () => {
+  const target = { x: 1000, y: 100, w: 40, h: 30 };
+
+  it('pins the guide when it sits beside the target', () => {
+    expect(shouldPinGuide({ x: 1300, y: 0, w: 900, h: 620 }, target)).toBe(true);
+  });
+
+  it('does not pin a guide that covers the target', () => {
+    expect(shouldPinGuide({ x: 800, y: 50, w: 900, h: 620 }, target)).toBe(false);
+  });
+
+  it('touching edges is not an overlap', () => {
+    expect(boxesOverlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 10, y: 0, w: 10, h: 10 })).toBe(false);
+  });
+
+  it('does not pin when the guide rect is unknown', () => {
+    expect(shouldPinGuide(null, target)).toBe(false);
+  });
+
+  it('screenBoxOf maps a viewport rect to screen coordinates', () => {
+    expect(screenBoxOf({ x: 200, y: 50 }, { left: 10, top: 20, width: 30, height: 40 })).toEqual({ x: 210, y: 70, w: 30, h: 40 });
   });
 });

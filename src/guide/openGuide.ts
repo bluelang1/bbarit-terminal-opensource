@@ -57,25 +57,25 @@ async function computePosition(): Promise<{ x: number; y: number } | null> {
   }
 }
 
-export async function openGuideWindow(opts: GuideOpenOptions): Promise<void> {
+const CREATE_TIMEOUT_MS = 15000;
+
+/** Resolves true once the guide window exists (reused or created), false when
+ *  creation failed — callers only record "shown" state on true. */
+export async function openGuideWindow(opts: GuideOpenOptions): Promise<boolean> {
   const nav = { mode: opts.mode, step: opts.step, from: opts.from ?? null };
-  // Reuse a live window: focus it and tell it where to go. A closed window can
-  // leave a stale handle (see openToolWindow in App.tsx), so probe it first.
-  try {
-    const existing = await WebviewWindow.getByLabel(GUIDE_WINDOW_LABEL);
-    if (existing) {
-      try {
-        await existing.isVisible();
-        await existing.show();
-        await existing.unminimize().catch(() => {});
-        await existing.setFocus();
-        await emitTo(GUIDE_WINDOW_LABEL, 'guide-navigate', nav);
-        return;
-      } catch {
-        try { await existing.close(); } catch { /* already gone */ }
-      }
-    }
-  } catch { /* not found */ }
+  let existing: WebviewWindow | null = null;
+  try { existing = await WebviewWindow.getByLabel(GUIDE_WINDOW_LABEL); } catch { /* not found */ }
+  if (existing) {
+    // Reuse: every step is best effort and a failure (e.g. a missing permission)
+    // never closes the window — closing and recreating the same label can race
+    // and leave no window at all.
+    const w = existing;
+    await w.show().catch(() => {});
+    await w.unminimize().catch(() => {});
+    await w.setFocus().catch(() => {});
+    await emitTo(GUIDE_WINDOW_LABEL, 'guide-navigate', nav).catch(() => {});
+    return true;
+  }
 
   const pos = await computePosition();
   const w = new WebviewWindow(GUIDE_WINDOW_LABEL, {
@@ -91,5 +91,13 @@ export async function openGuideWindow(opts: GuideOpenOptions): Promise<void> {
     maximized: false,
     focus: true,
   });
-  w.once('tauri://error', (e) => { console.error('[guide] window error:', e); });
+  return new Promise<boolean>((resolve) => {
+    const timer = window.setTimeout(() => resolve(false), CREATE_TIMEOUT_MS);
+    void w.once('tauri://created', () => { window.clearTimeout(timer); resolve(true); });
+    void w.once('tauri://error', (e) => {
+      console.error('[guide] window error:', e);
+      window.clearTimeout(timer);
+      resolve(false);
+    });
+  });
 }

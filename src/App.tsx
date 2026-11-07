@@ -2566,7 +2566,7 @@ function App() {
 
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   // Set by the guide's keep-running step; cleared when settings closes.
-  const [settingsInitialTab, setSettingsInitialTab] = useState<'terminal' | undefined>(undefined);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<{ tab: 'terminal'; nonce: number } | undefined>(undefined);
   const [themePickerTerminalId, setThemePickerTerminalId] = useState<string | null>(null);
   const [projectThemePickerPosition, setProjectThemePickerPosition] = useState<{ top: number; left: number } | null>(null);
   // Poll for BBARIT instances on the same LAN while the SSH project form is open.
@@ -6494,7 +6494,7 @@ Office project scaffold created by BBARIT Terminal.
     debugBuild: () => hostDebugBuild(getPtyRecovery(), import.meta.env.DEV),
     t: (key) => tLatestRef.current(key as any),
     openSettingsTerminal: () => {
-      setSettingsInitialTab('terminal');
+      setSettingsInitialTab({ tab: 'terminal', nonce: Date.now() });
       setShowGlobalSettings(true);
       // Bring the PTY holder switch into view once the terminal tab has rendered.
       window.setTimeout(() => {
@@ -12449,8 +12449,8 @@ Office project scaffold created by BBARIT Terminal.
     { id: 'cp.view.toggleToolbar', label: 'Toggle Top Toolbar', category: 'view', run: () => { toggleToolbarCollapsed(); } },
     { id: 'cp.view.lounge', label: 'Open Chat (Community Lounge)', category: 'view', run: () => { void openToolWindow('chat'); } },
     { id: 'cp.view.thread', label: 'Open BBARIT Thread', category: 'view', run: () => { void openToolWindow('thread'); } },
-    { id: 'guide.open', label: t('guide.menu.start'), category: 'view', run: () => { guide.open({ mode: 'start' }); } },
-    { id: 'guide.whatsnew', label: t('guide.menu.whatsnew'), category: 'view', run: () => { guide.open({ mode: 'whatsnew' }); } },
+    { id: 'guide.open', label: t('guide.menu.start'), category: 'view', run: () => { void guide.open({ mode: 'start' }); } },
+    { id: 'guide.whatsnew', label: t('guide.menu.whatsnew'), category: 'view', run: () => { void guide.open({ mode: 'whatsnew' }); } },
     { id: 'cp.note.graph', label: t('cp.noteGraph' as any), category: 'tools', run: () => setShowNoteGraph(true) },
     // AI Debate disabled from command palette for now.
     // { id: 'cp.tools.debate', label: t('cp.debate' as any), category: 'tools', run: () => { setShowDebatePanel(v => !v); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } },
@@ -17870,7 +17870,7 @@ Office project scaffold created by BBARIT Terminal.
                   <div
                     className="tool-dropdown-item"
                     data-toolbar-visible="true"
-                    onClick={() => { guide.open({ mode: 'start' }); setShowToolDropdown(false); }}
+                    onClick={() => { void guide.open({ mode: 'start' }); setShowToolDropdown(false); }}
                   >
                     <LucideIcons.BookOpen size={12} />
                     <span>{t('guide.menu.start')}</span>
@@ -17878,7 +17878,7 @@ Office project scaffold created by BBARIT Terminal.
                   <div
                     className="tool-dropdown-item"
                     data-toolbar-visible="true"
-                    onClick={() => { guide.open({ mode: 'whatsnew' }); setShowToolDropdown(false); }}
+                    onClick={() => { void guide.open({ mode: 'whatsnew' }); setShowToolDropdown(false); }}
                   >
                     <LucideIcons.Gift size={12} />
                     <span>{t('guide.menu.whatsnew')}</span>
@@ -23565,7 +23565,8 @@ Office project scaffold created by BBARIT Terminal.
       )}
       <SettingsPanel
         isOpen={showGlobalSettings}
-        initialTab={settingsInitialTab}
+        initialTab={settingsInitialTab?.tab}
+        initialTabNonce={settingsInitialTab?.nonce}
         onClose={() => { setShowGlobalSettings(false); setSettingsInitialTab(undefined); }}
         currentStyle={activeStyle}
         currentStyleIndex={activeProject?.styleIndex || 0}

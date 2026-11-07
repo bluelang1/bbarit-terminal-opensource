@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { emitTo, listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { kvGet, kvGetJSON, kvSet, kvSetJSON } from '../hooks/useKV';
 import { parseChangelog, sectionsToShow } from './changelog';
 import { decideStartup } from './decide';
@@ -40,7 +41,8 @@ export interface GuideHostInput {
 export interface GuideHost {
   spotlight: { step: GuideStep; nonce: number } | null;
   closeSpotlight: () => void;
-  open: (opts: Omit<GuideOpenOptions, 'title'>) => void;
+  /** Resolves true once the guide window exists. */
+  open: (opts: Omit<GuideOpenOptions, 'title'>) => Promise<boolean>;
   mark: (id: GuideStepId) => void;
   /** Call once project restore has settled. */
   runStartup: (projectCount: number) => void;
@@ -76,12 +78,18 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
   const progressRef = useRef<GuideProgress>({});
   const loadedRef = useRef(false);
   const pendingRef = useRef<GuideStepId[]>([]);
+  // 처음부터 다시 pressed before stored progress arrived: drop what was stored.
+  const resetBeforeLoadRef = useRef(false);
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
   const startupRanRef = useRef(false);
   const [spotlight, setSpotlight] = useState<GuideHost['spotlight']>(null);
 
   const publish = useCallback((p: GuideProgress) => {
     progressRef.current = p;
-    void kvSetJSON(GUIDE_PROGRESS_KEY, p);
+    // One write at a time, in order: a slow earlier write must not land last.
+    writeChainRef.current = writeChainRef.current
+      .then(() => kvSetJSON(GUIDE_PROGRESS_KEY, p))
+      .catch((err) => console.warn('[guide] progress write failed:', err));
     if (isTauri()) void emitTo(GUIDE_WINDOW_LABEL, 'guide-progress', { progress: p }).catch(() => {});
   }, []);
 
@@ -98,22 +106,29 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
     let alive = true;
     void kvGetJSON<unknown>(GUIDE_PROGRESS_KEY, {}).then((raw) => {
       if (!alive) return;
-      const stored = normalizeProgress(raw);
+      const stored = resetBeforeLoadRef.current ? {} : normalizeProgress(raw);
+      const forceWrite = resetBeforeLoadRef.current;
+      resetBeforeLoadRef.current = false;
       let next = stored;
       const now = Date.now();
       for (const id of pendingRef.current) next = markDone(next, id, now);
       pendingRef.current = [];
       loadedRef.current = true;
-      if (next !== stored) publish(next);
+      if (next !== stored || forceWrite) publish(next);
       else progressRef.current = stored;
     });
     return () => { alive = false; };
   }, [enabled, publish]);
 
-  const open = useCallback((opts: Omit<GuideOpenOptions, 'title'>) => {
-    if (!isTauri()) return;
+  const open = useCallback(async (opts: Omit<GuideOpenOptions, 'title'>): Promise<boolean> => {
+    if (!isTauri()) return false;
     const title = opts.mode === 'whatsnew' ? latest.current.t('guide.menu.whatsnew') : latest.current.t('guide.title');
-    void openGuideWindow({ ...opts, title }).catch((e) => console.warn('[guide] open failed:', e));
+    try {
+      return await openGuideWindow({ ...opts, title });
+    } catch (e) {
+      console.warn('[guide] open failed:', e);
+      return false;
+    }
   }, []);
 
   const closeSpotlight = useCallback(() => setSpotlight(null), []);
@@ -136,6 +151,9 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
           void invoke('pet_start_tour').catch((err) => console.warn('[guide] pet tour failed:', err));
           mark('pet');
         } else if (step.action === 'open-settings-terminal') {
+          // The click came from the guide window: bring the main window forward.
+          const main = getCurrentWindow();
+          void main.unminimize().catch(() => {}).then(() => main.setFocus()).catch(() => {});
           latest.current.openSettingsTerminal();
           mark('keep-running');
         }
@@ -147,9 +165,10 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
       listen('guide-reset', () => {
         pendingRef.current = [];
         if (loadedRef.current) publish({});
+        else resetBeforeLoadRef.current = true;
       }),
-      listen('menu-guide-open', () => open({ mode: 'start' })),
-      listen('menu-whatsnew-open', () => open({ mode: 'whatsnew' })),
+      listen('menu-guide-open', () => { void open({ mode: 'start' }); }),
+      listen('menu-whatsnew-open', () => { void open({ mode: 'whatsnew' }); }),
       // The pet window reports when it shows (pet.rs → pet-visibility); seeing it once counts.
       listen<{ visible?: boolean }>('pet-visibility', (e) => { if (e.payload?.visible) mark('pet'); }),
     ];
@@ -177,15 +196,18 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
         ]);
         const whatsNewCount = sectionsToShow(parseChangelog(md), lastSeen, current).length;
         const d = decideStartup({ debugBuild, projectCount, firstRunDone: firstRun === '1', lastSeen, current, whatsNewCount });
-        if (d.writeFirstRun) await kvSet(GUIDE_FIRSTRUN_KEY, '1');
-        if (d.writeLastSeen) await kvSet(LAST_SEEN_VERSION_KEY, d.writeLastSeen);
+        // Record "seen" only once the window really exists, so a failed open retries next start.
+        let shown = true;
         if (d.openGuide) {
           // Fresh install: let the new-project modal come up first; step 1 points at its folder field.
           await waitForSelector('[data-guide="new-project-folder"]', MODAL_WAIT_MS);
-          open({ mode: 'start', step: 'project' });
+          shown = await open({ mode: 'start', step: 'project' });
         } else if (d.openWhatsNew) {
-          open({ mode: 'whatsnew', from: lastSeen });
+          shown = await open({ mode: 'whatsnew', from: lastSeen });
         }
+        if (!shown) return;
+        if (d.writeFirstRun) await kvSet(GUIDE_FIRSTRUN_KEY, '1');
+        if (d.writeLastSeen) await kvSet(LAST_SEEN_VERSION_KEY, d.writeLastSeen);
       } catch (err) {
         console.warn('[guide] startup check failed:', err);
       }

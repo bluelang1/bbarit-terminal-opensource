@@ -51,3 +51,22 @@ export function placeCaption(
   const left = Math.max(EDGE, Math.min(centre - bw / 2, vw - EDGE - bw));
   return { left, top: Math.max(EDGE, top), side };
 }
+
+/** A rectangle in logical screen coordinates. */
+export interface ScreenBox { x: number; y: number; w: number; h: number }
+
+export function boxesOverlap(a: ScreenBox, b: ScreenBox): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/** Viewport rect inside a window whose content starts at `inner` → screen box. */
+export function screenBoxOf(inner: { x: number; y: number }, rect: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>): ScreenBox {
+  return { x: inner.x + rect.left, y: inner.y + rect.top, w: rect.width, h: rect.height };
+}
+
+/** Keep the guide window on top during a spotlight only when it does not cover
+ *  what the spotlight shows. Unknown guide rect → do not pin (it is brought back
+ *  to the front when the spotlight closes anyway). */
+export function shouldPinGuide(guide: ScreenBox | null, target: ScreenBox): boolean {
+  return guide != null && !boxesOverlap(guide, target);
+}
