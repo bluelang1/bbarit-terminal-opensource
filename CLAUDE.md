@@ -57,8 +57,10 @@ Build/test gotchas:
   (fork minisign pubkey + GitHub latest.json endpoint) on the source config and
   keeps only TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) in the env; never commit the
   private key. Every user-visible PR adds a Korean line under CHANGELOG.md
-  `## [Unreleased]` (추가/변경/제거/수정/보안). Releases: bump with
-  scripts/bump-version.mjs, which moves [Unreleased] into
+  `## [Unreleased]` (추가/변경/제거/수정/보안) and the same line in English under
+  CHANGELOG.en.md (Added/Changed/Removed/Fixed/Security); a vitest keeps both files'
+  versions and per-kind item counts equal. Releases: bump with
+  scripts/bump-version.mjs, which moves [Unreleased] (in both files) into
   `## [X.Y.Z] - YYYY-MM-DD` and fixes the compare links (warns if empty;
   `--date`, `--no-changelog`), then run
   `cargo update -p octo-ui --offline` in src-tauri or `--locked` fails; then
@@ -158,6 +160,12 @@ Build/test gotchas:
   `<bbarit from=… state=…>` line through the input gate (never into plain shells).
   `agent.*` stays off the remote secretary allowlist. Dev builds resolve BBARIT_CTL from
   CARGO_MANIFEST_DIR, so a shared CARGO_TARGET_DIR still points at the right checkout.
+- Getting-started guide: steps live in src/guide/steps.ts (ko/en `guide.step.*` keys,
+  `data-guide` targets). A PR adding a user-facing feature worth teaching adds or
+  updates a step; What's new reads CHANGELOG.md (ko) or CHANGELOG.en.md (other
+  locales, Korean fallback per version) at build time. Window `tool-guide`
+  (/guide, src/pages/GuidePage.tsx); the main window owns progress, spotlight and the
+  one-time startup opening (src/guide/useGuideHost.ts; never in debug builds).
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.

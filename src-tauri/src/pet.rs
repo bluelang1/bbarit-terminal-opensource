@@ -375,6 +375,18 @@ pub fn pet_tour_end(app: AppHandle) {
     sync_pet(&app);
 }
 
+/// Getting-started guide, pet step "Try it" (src/guide/useGuideHost.ts): same as
+/// Help > Character Tour. `start_pet_tour` already does its work on its own thread.
+/// The pet is macOS-only (the guide hides that step elsewhere), so other platforms
+/// keep the command but ignore the call.
+#[tauri::command(async)]
+pub fn pet_start_tour(app: AppHandle) {
+    #[cfg(target_os = "macos")]
+    start_pet_tour(&app);
+    #[cfg(not(target_os = "macos"))]
+    let _ = app;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

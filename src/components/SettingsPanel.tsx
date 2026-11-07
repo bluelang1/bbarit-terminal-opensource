@@ -112,8 +112,14 @@ export interface ProjectInfo {
   githubRepo?: string;
 }
 
+type SettingsTabId = 'terminal' | 'editor' | 'theme' | 'language' | 'projects' | 'agent' | 'telegram' | 'keys' | 'shortcuts' | 'notes' | 'web-terminal' | 'integrations' | 'data' | 'licenses' | 'broker' | 'channels' | 'cli';
+
 interface SettingsPanelProps {
   isOpen: boolean;
+  /** Tab to show each time the panel opens with it set (getting-started guide). */
+  initialTab?: SettingsTabId;
+  /** Bump to re-apply `initialTab` while the panel is already open. */
+  initialTabNonce?: number;
   onClose: () => void;
   currentStyle: { bg: string; text: string; accent: string };
   currentStyleIndex?: number;
@@ -323,6 +329,8 @@ const openFolderPath = async (path: string) => {
 
 export function SettingsPanel({
   isOpen,
+  initialTab,
+  initialTabNonce,
   onClose,
   currentStyle,
   currentStyleIndex = 0,
@@ -351,7 +359,10 @@ export function SettingsPanel({
 
 
   // settingsCategory removed — all tabs merged into one bar
-  const [activeTab, setActiveTab] = useState<'terminal' | 'editor' | 'theme' | 'language' | 'projects' | 'agent' | 'telegram' | 'keys' | 'shortcuts' | 'notes' | 'web-terminal' | 'integrations' | 'data' | 'licenses' | 'broker' | 'channels' | 'cli'>('terminal');
+  const [activeTab, setActiveTab] = useState<SettingsTabId>('terminal');
+  useEffect(() => {
+    if (isOpen && initialTab) setActiveTab(initialTab);
+  }, [isOpen, initialTab, initialTabNonce]);
   const [themeSubTab, setThemeSubTab] = useState<'dark' | 'light' | 'wacky'>('dark');
   const [aiTagProvider, setAiTagProviderState] = useState<AiTagProvider>('ollama');
   useEffect(() => { getAiTagProvider().then(p => setAiTagProviderState(p)).catch(() => {}); }, []);
@@ -2166,7 +2177,7 @@ export function SettingsPanel({
                     {t('settings.terminal.confirmOnClose.desc')}
                   </span>
                 </div>
-                <div className="setting-item">
+                <div className="setting-item" data-guide="pty-holder">
                   <label>{t('settings.terminal.ptyHolder')}</label>
                   <input
                     type="checkbox"

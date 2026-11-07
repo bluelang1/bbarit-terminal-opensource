@@ -20,7 +20,8 @@
     "tsconfig.app.json",
     "tsconfig.node.json",
     ".gitleaks.toml",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "CHANGELOG.en.md"
   ],
   "allowed_names": [
     "LICENSE",
