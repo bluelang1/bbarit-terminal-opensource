@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import CHANGELOG from '../../CHANGELOG.md?raw';
-import { compareVersions, parseChangelog, sectionsToShow } from './changelog';
+import { compareVersions, inlineTokens, olderSections, parseChangelog, sectionsToShow } from './changelog';
 
 const MD = `# 변경 이력\n\n## [Unreleased]\n\n## [1.1.67] - 2026-11-09\n\n### 추가\n\n- A **굵게** \`code\`\n\n### 수정\n\n- B\n\n## [1.1.66] - 2026-11-07\n\n### 수정\n\n- C\n\n## [1.1.65] - 2026-11-07\n\n## [1.1.64] - 2026-11-06\n\n### 변경\n\n- D\n\n[Unreleased]: https://x\n[1.1.67]: https://y\n`;
 
@@ -63,5 +63,42 @@ describe('sectionsToShow', () => {
   it('current version without a section shows nothing', () => {
     expect(sectionsToShow(parseChangelog(MD), null, '1.1.65')).toEqual([]);
     expect(sectionsToShow(parseChangelog(MD), null, '9.9.9')).toEqual([]);
+  });
+});
+
+describe('inlineTokens', () => {
+  it('splits bold and code, leaves the rest as text', () => {
+    expect(inlineTokens('A **굵게** `code` end')).toEqual([
+      { kind: 'text', text: 'A ' },
+      { kind: 'bold', text: '굵게' },
+      { kind: 'text', text: ' ' },
+      { kind: 'code', text: 'code' },
+      { kind: 'text', text: ' end' },
+    ]);
+  });
+
+  it('keeps markup-looking text inert (no HTML)', () => {
+    expect(inlineTokens('<img src=x onerror=alert(1)>')).toEqual([{ kind: 'text', text: '<img src=x onerror=alert(1)>' }]);
+  });
+
+  it('leaves unmatched markers as text', () => {
+    expect(inlineTokens('a ** b ` c')).toEqual([{ kind: 'text', text: 'a ** b ` c' }]);
+  });
+
+  it('does not parse bold inside code', () => {
+    expect(inlineTokens('`**x**`')).toEqual([{ kind: 'code', text: '**x**' }]);
+  });
+});
+
+describe('olderSections', () => {
+  it('returns sections older than the shown ones, newest first, with items only', () => {
+    const all = parseChangelog(MD);
+    const shown = sectionsToShow(all, null, '1.1.67');
+    expect(olderSections(all, shown, 5).map(s => s.version)).toEqual(['1.1.66', '1.1.64']);
+    expect(olderSections(all, shown, 1).map(s => s.version)).toEqual(['1.1.66']);
+  });
+
+  it('with nothing shown, starts at current or below', () => {
+    expect(olderSections(parseChangelog(MD), [], 5, '1.1.65').map(s => s.version)).toEqual(['1.1.64']);
   });
 });

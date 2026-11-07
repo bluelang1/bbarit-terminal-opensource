@@ -97,3 +97,52 @@ export function sectionsToShow(all: ChangelogSection[], lastSeen: string | null,
   });
   return picked.sort((a, b) => compareVersions(b.version, a.version));
 }
+
+/** Released sections older than everything in `shown` (or at/below `current`
+ *  when nothing is shown), newest first, at most `limit`. For the collapsed
+ *  "earlier versions" list. */
+export function olderSections(all: ChangelogSection[], shown: ChangelogSection[], limit: number, current?: string): ChangelogSection[] {
+  const hasItems = (s: ChangelogSection) => s.groups.some(g => g.items.length > 0);
+  const oldestShown = shown.reduce<string | null>((min, s) => (min == null || compareVersions(s.version, min) < 0 ? s.version : min), null);
+  return all
+    .filter(s => {
+      if (!hasItems(s)) return false;
+      if (oldestShown != null) return compareVersions(s.version, oldestShown) < 0;
+      return current == null || compareVersions(s.version, current) <= 0;
+    })
+    .sort((a, b) => compareVersions(b.version, a.version))
+    .slice(0, Math.max(0, limit));
+}
+
+export interface InlineToken {
+  kind: 'text' | 'bold' | 'code';
+  text: string;
+}
+
+/** Split a CHANGELOG item into plain text, **bold** and `code` runs. The page
+ *  renders these as React nodes, so nothing in the text is ever parsed as HTML. */
+export function inlineTokens(src: string): InlineToken[] {
+  const out: InlineToken[] = [];
+  const push = (kind: InlineToken['kind'], text: string) => {
+    if (!text) return;
+    const last = out[out.length - 1];
+    if (kind === 'text' && last?.kind === 'text') last.text += text;
+    else out.push({ kind, text });
+  };
+  let i = 0;
+  while (i < src.length) {
+    if (src[i] === '`') {
+      const end = src.indexOf('`', i + 1);
+      if (end > i + 1) { push('code', src.slice(i + 1, end)); i = end + 1; continue; }
+    } else if (src.startsWith('**', i)) {
+      const end = src.indexOf('**', i + 2);
+      if (end > i + 2) { push('bold', src.slice(i + 2, end)); i = end + 2; continue; }
+    }
+    // plain run up to the next marker candidate
+    let j = i + 1;
+    while (j < src.length && src[j] !== '`' && !src.startsWith('**', j)) j++;
+    push('text', src.slice(i, j));
+    i = j;
+  }
+  return out;
+}
