@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive } from 'lucide-react';
+import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive, ExternalLink } from 'lucide-react';
+import { remoteWebUrl } from './gitRemoteWeb';
 import './GitPanel.css';
 
 /* ─── Types ─── */
@@ -244,6 +245,22 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
       setRemotes(parseRemotes(raw));
     } catch (e) { console.error('[GitPanel] remotes error:', e); }
   }, [repoDir]);
+
+  const [webUrl, setWebUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setWebUrl(null);
+    if (!isOpen || !repoDir) return;
+    invoke<string>('git_remote_list', { repoDir })
+      .then(raw => { if (!cancelled) setWebUrl(remoteWebUrl(raw)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [isOpen, repoDir]);
+  const openWebUrl = async () => {
+    if (!webUrl) return;
+    try { await invoke('plugin:shell|open', { path: webUrl }); return; } catch { /* dev/web fallback */ }
+    try { window.open(webUrl, '_blank', 'noopener,noreferrer'); } catch { /* ignore */ }
+  };
 
   const refreshStashes = useCallback(async () => {
     if (!repoDir) return;
@@ -563,6 +580,7 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
           )}
           {isRepo && <>
             <span className="git-branch-badge">{branch || 'HEAD'}</span>
+            {webUrl && <button onClick={openWebUrl} title="Open on GitHub" aria-label="Open on GitHub"><ExternalLink size={12} /></button>}
             {(ahead > 0 || behind > 0) && <span className="git-ahead-behind">↑{ahead} ↓{behind}</span>}
           </>}
           <div style={{ flex: 1 }} />
