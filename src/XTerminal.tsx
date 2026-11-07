@@ -59,6 +59,15 @@ import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
 
+// Enter variants a terminal must keep apart: Shift+Enter and Cmd+Enter go out as kitty CSI-u
+// (Cmd = super bit, 1 + 8) so TUIs such as Claude Code can bind them; plain Enter is CR.
+type EnterKind = 'enter' | 'shift-enter' | 'cmd-enter';
+const ENTER_BYTES: Record<EnterKind, string> = { enter: '\x0d', 'shift-enter': '\x1b[13;2u', 'cmd-enter': '\x1b[13;9u' };
+function enterKind(e: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean; altKey: boolean }): EnterKind {
+  if (e.metaKey && !e.shiftKey && !e.ctrlKey && !e.altKey) return 'cmd-enter';
+  return e.shiftKey ? 'shift-enter' : 'enter';
+}
+
 
 interface QuickCommand {
   id: string;
@@ -1322,7 +1331,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // commit so the half-typed syllable doesn't get typed into the PTY.
   const imeBridgeDiscardCompositionEndRef = useRef(false);
   const imeBridgeCompositionTextRef = useRef('');
-  const imeBridgePendingEnterRef = useRef<'enter' | 'shift-enter' | false>(false);
+  const imeBridgePendingEnterRef = useRef<'enter' | 'shift-enter' | 'cmd-enter' | false>(false);
   const imeBridgeLastCommittedRef = useRef('');
   const imeBridgeLastCommittedAtRef = useRef(0);
   // 재동기화 게이트용 타임스탬프 — imeBridgeLastCommittedAtRef는 compositionstart가
@@ -4875,7 +4884,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const current = (e.currentTarget.value || '').toString();
       if (imeBridgeComposingRef.current || nativeIsComposing || current.length > 0) {
         e.preventDefault();
-        imeBridgePendingEnterRef.current = e.shiftKey ? 'shift-enter' : 'enter';
+        imeBridgePendingEnterRef.current = enterKind(e);
         return;
       }
     }
@@ -4905,12 +4914,18 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     }
 
     if (imeBridgeComposingRef.current || nativeIsComposing) {
-      if (e.key === 'Enter') imeBridgePendingEnterRef.current = e.shiftKey ? 'shift-enter' : 'enter';
+      if (e.key === 'Enter') imeBridgePendingEnterRef.current = enterKind(e);
       return;
     }
 
     // Cmd-based shortcuts (macOS) in bridge mode.
     if (e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        // Cmd+Enter is a key for the TUI (CSI-u), not an OS shortcut.
+        e.preventDefault();
+        sendToPty(ENTER_BYTES['cmd-enter']);
+        return;
+      }
       const k = getShortcutKey(e);
       console.log('[ClipDebug] handleImeBridgeKeyDown Cmd+' + k, { composing: imeBridgeComposingRef.current, defaultPrevented: e.nativeEvent?.defaultPrevented });
       if (k === 'c') {
@@ -4990,7 +5005,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       e.preventDefault();
       // Modified Enter: send kitty-style CSI-u sequence (Shift always; Ctrl/Alt when
       // extended keyboard is enabled). Plain Enter stays a carriage return.
-      if (shift || ((ctrl || alt) && csiUKeysRef.current)) {
+      if (meta && !shift && !ctrl && !alt) {
+        sendToPty(ENTER_BYTES['cmd-enter']);
+      } else if (shift || ((ctrl || alt) && csiUKeysRef.current)) {
         const mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0);
         sendToPty(`\x1b[13;${mod}u`);
       } else {
@@ -5284,7 +5301,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     if (imeBridgePendingEnterRef.current) {
       const pending = imeBridgePendingEnterRef.current;
       imeBridgePendingEnterRef.current = false;
-      sendToPty(pending === 'shift-enter' ? '\x1b[13;2u' : '\x0d');
+      sendToPty(ENTER_BYTES[pending]);
     }
   }, [commitImeBridgeText, resolveImeCommitText, sendToPty]);
 
@@ -5974,15 +5991,16 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       e.preventDefault();
       e.stopPropagation();
 
-      // Shift+Enter: send CSI u sequence for newline (used by Claude Code, etc.)
-      if (shift) {
+      // Shift+Enter / Cmd+Enter: send CSI u so Claude Code etc. can tell them from Enter.
+      const kind = enterKind(e);
+      if (kind !== 'enter') {
         const pending = e.currentTarget.value;
         if (pending) {
           maybeMirrorCommandToTelegram(pending);
           writeToPty?.(pending);
           setInputValue('');
         }
-        writeToPty?.('\x1b[13;2u');
+        writeToPty?.(ENTER_BYTES[kind]);
         return;
       }
 
