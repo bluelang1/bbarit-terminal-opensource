@@ -85,7 +85,7 @@ function firstOpenStep(steps: GuideStep[], progress: GuideProgress): GuideStepId
 export default function GuidePage() {
   const { t } = useTranslation();
   const steps = useMemo(() => visibleSteps(IS_MAC), []);
-  const initial = useMemo(readQuery, []);
+  const initial = useMemo(() => readQuery(), []);
   const [mode, setMode] = useState<Mode>(initial.mode);
   const [from, setFrom] = useState<string | null>(initial.from ?? null);
   const [current, setCurrent] = useState<GuideStepId | null>(initial.step ?? null);

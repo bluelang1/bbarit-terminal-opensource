@@ -183,6 +183,8 @@ import { aggregateProjectAgentState, type AgentTabState } from './terminal/progr
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './terminal/busyAgentTabs';
 import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
+import { useGuideHost } from './guide/useGuideHost';
+import { Spotlight } from './guide/Spotlight';
 import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
@@ -2215,6 +2217,8 @@ function App() {
     selected: Set<string>;
   }>(null);
 
+  // Getting-started guide / What's new: decided once project restore settles (src/guide/useGuideHost.ts).
+  const guideStartupRef = useRef<((projectCount: number) => void) | null>(null);
   const applyRestoredProjects = useCallback(async (
     projectsToOpen: Project[],
     preferredActiveId: string | null,
@@ -2308,6 +2312,7 @@ function App() {
     setProjectDocsExpanded(new Set(projectsToOpen.map(p => p.id)));
     setFileTreeError(startupSshError);
     projectsLoadedRef.current = true;
+    guideStartupRef.current?.(projectsToOpen.length);
   }, []);
 
   // '열기' 확정: 체크된 프로젝트만 연다. 체크 해제분은 저장 목록에서도
@@ -2560,6 +2565,8 @@ function App() {
   const sshLegacyBaseMigrationRef = useRef<Set<string>>(new Set());
 
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
+  // Set by the guide's keep-running step; cleared when settings closes.
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'terminal' | undefined>(undefined);
   const [themePickerTerminalId, setThemePickerTerminalId] = useState<string | null>(null);
   const [projectThemePickerPosition, setProjectThemePickerPosition] = useState<{ top: number; left: number } | null>(null);
   // Poll for BBARIT instances on the same LAN while the SSH project form is open.
@@ -6475,6 +6482,31 @@ Office project scaffold created by BBARIT Terminal.
       for (const un of [unVisibility, unRequest, unFocus]) void un.then((fn) => fn()).catch(() => {});
     };
   }, [openTaskCompleteTarget]);
+
+  // ── Getting-started guide host (src/guide, docs/superpowers/specs/2026-11-08-onboarding-guide-design.md) ──
+  const guideCounts = useMemo(() => {
+    let agentTabs = 0;
+    for (const p of projects) for (const tm of p.terminals) if (tm.cliType && tm.cliType !== 'shell') agentTabs++;
+    return { projects: projects.length, agentTabs };
+  }, [projects]);
+  const guide = useGuideHost({
+    enabled: isPetFeedWindow,
+    debugBuild: () => hostDebugBuild(getPtyRecovery(), import.meta.env.DEV),
+    t: (key) => tLatestRef.current(key as any),
+    openSettingsTerminal: () => {
+      setSettingsInitialTab('terminal');
+      setShowGlobalSettings(true);
+      // Bring the PTY holder switch into view once the terminal tab has rendered.
+      window.setTimeout(() => {
+        document.querySelector('[data-guide="pty-holder"]')?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }, 250);
+    },
+    projectCount: guideCounts.projects,
+    agentTabCount: guideCounts.agentTabs,
+    statusTabCount: agentStatus.size,
+    gitPanelOpen: showGitPanel,
+  });
+  guideStartupRef.current = guide.runStartup;
 
   const isPhysicalPositionOverEditor = useCallback((pos: { x: number; y: number }) => {
     const el = editorAreaRef.current;
@@ -12417,6 +12449,8 @@ Office project scaffold created by BBARIT Terminal.
     { id: 'cp.view.toggleToolbar', label: 'Toggle Top Toolbar', category: 'view', run: () => { toggleToolbarCollapsed(); } },
     { id: 'cp.view.lounge', label: 'Open Chat (Community Lounge)', category: 'view', run: () => { void openToolWindow('chat'); } },
     { id: 'cp.view.thread', label: 'Open BBARIT Thread', category: 'view', run: () => { void openToolWindow('thread'); } },
+    { id: 'guide.open', label: t('guide.menu.start'), category: 'view', run: () => { guide.open({ mode: 'start' }); } },
+    { id: 'guide.whatsnew', label: t('guide.menu.whatsnew'), category: 'view', run: () => { guide.open({ mode: 'whatsnew' }); } },
     { id: 'cp.note.graph', label: t('cp.noteGraph' as any), category: 'tools', run: () => setShowNoteGraph(true) },
     // AI Debate disabled from command palette for now.
     // { id: 'cp.tools.debate', label: t('cp.debate' as any), category: 'tools', run: () => { setShowDebatePanel(v => !v); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } },
@@ -15859,7 +15893,7 @@ Office project scaffold created by BBARIT Terminal.
 
               {newProjectMode === 'local' ? (
                 <div style={{ display: 'grid', gap: 8 }}>
-                  <div className="path-input-group">
+                  <div className="path-input-group" data-guide={isEditingProject ? undefined : 'new-project-folder'}>
                     <input type="text" value={newProjectPath} onChange={(e) => setNewProjectPath(e.target.value)} placeholder="/path/to/project" title={t('app.project.folderPathTitle' as any)} />
                     <button type="button" className="btn-folder" onClick={openFolderDialog} title={t('app.project.openFolderDialog' as any)}><FolderOpen size={18} /></button>
                   </div>
@@ -17165,7 +17199,7 @@ Office project scaffold created by BBARIT Terminal.
         >
           <LucideIcons.FolderPlus size={16} />
         </button>
-        <button className="project-tab-add" onClick={() => setShowNewProjectModal(true)} title={t('app.openProject')}>
+        <button className="project-tab-add" data-guide="project-open" onClick={() => setShowNewProjectModal(true)} title={t('app.openProject')}>
           <OctoPlus size={18} />
         </button>
         {/* 빠릿 하네스(에이전트 패널) 전용 실행 버튼 — 프로젝트 + 버튼 옆, 같은 규격. */}
@@ -17558,7 +17592,7 @@ Office project scaffold created by BBARIT Terminal.
             <span className="toolbar-group-divider" style={{ order: 15 }} aria-hidden="true" />
             <span className="toolbar-group-divider" style={{ order: 21 }} aria-hidden="true" />
             <span className="toolbar-group-divider" style={{ order: 33 }} aria-hidden="true" />
-            {isToolbarVisible('git') && <button type="button" className="btn-top-small toolbar-tool tool-git" onClick={() => setShowGitPanel(true)} title="Git">
+            {isToolbarVisible('git') && <button type="button" className="btn-top-small toolbar-tool tool-git" data-guide="git" onClick={() => setShowGitPanel(true)} title="Git">
               <LucideIcons.GitPullRequestArrow size={14} />
             </button>}
             <button
@@ -17831,6 +17865,24 @@ Office project scaffold created by BBARIT Terminal.
                       </button>
                     </div>
                   ))}
+                  {/* Getting-started guide / What's new — same as Help menu on macOS, reachable everywhere. */}
+                  <div className="tool-dropdown-divider" />
+                  <div
+                    className="tool-dropdown-item"
+                    data-toolbar-visible="true"
+                    onClick={() => { guide.open({ mode: 'start' }); setShowToolDropdown(false); }}
+                  >
+                    <LucideIcons.BookOpen size={12} />
+                    <span>{t('guide.menu.start')}</span>
+                  </div>
+                  <div
+                    className="tool-dropdown-item"
+                    data-toolbar-visible="true"
+                    onClick={() => { guide.open({ mode: 'whatsnew' }); setShowToolDropdown(false); }}
+                  >
+                    <LucideIcons.Gift size={12} />
+                    <span>{t('guide.menu.whatsnew')}</span>
+                  </div>
                 </div>
               )}
             </div>
@@ -20994,6 +21046,7 @@ Office project scaffold created by BBARIT Terminal.
                       <button
                         type="button"
                         className="btn-tab-action terminal-create-trigger"
+                        data-guide="ai-terminal"
                         onClick={() => {
                           closeFloatingMenus('terminalCreate');
                           setShowTerminalCreateMenu((value) => !value);
@@ -23502,9 +23555,18 @@ Office project scaffold created by BBARIT Terminal.
       {/* Native BBARIT Video Editor — OpenCut engine migration target */}
       {/* Global Settings Panel */}
       {harnessManager}
+      {guide.spotlight && (
+        <Spotlight
+          key={guide.spotlight.nonce}
+          step={guide.spotlight.step}
+          t={(key) => t(key as any)}
+          onClose={guide.closeSpotlight}
+        />
+      )}
       <SettingsPanel
         isOpen={showGlobalSettings}
-        onClose={() => setShowGlobalSettings(false)}
+        initialTab={settingsInitialTab}
+        onClose={() => { setShowGlobalSettings(false); setSettingsInitialTab(undefined); }}
         currentStyle={activeStyle}
         currentStyleIndex={activeProject?.styleIndex || 0}
         onStyleChange={(styleIndex) => {
