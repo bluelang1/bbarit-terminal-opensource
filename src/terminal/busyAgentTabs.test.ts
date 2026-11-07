@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectBusyAgentTabs, formatBusyAgentWarning } from './busyAgentTabs';
+import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './busyAgentTabs';
 
 const projects = [
   { id: 'p1', name: 'Proj', terminals: [
@@ -13,6 +13,10 @@ const projects = [
 const states: Record<string, 'working' | 'blocked' | 'done' | 'idle'> = { a: 'working', b: 'working', c: 'blocked', d: 'idle', e: 'done' };
 
 describe('busyAgentTabs', () => {
+  it('update interrupts terminals only without the PTY holder', () => {
+    expect(updateInterruptsTerminals('holder')).toBe(false);
+    expect(updateInterruptsTerminals('in-process')).toBe(true);
+  });
   it('collects working/blocked agent tabs only', () => {
     expect(collectBusyAgentTabs(projects, (id) => states[id])).toEqual([
       { projectName: 'Proj', terminalName: 'Claude', state: 'working' },

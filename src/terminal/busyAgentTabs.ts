@@ -7,6 +7,15 @@ export interface BusyAgentTab {
 
 const MAX_LINES = 5;
 
+/**
+ * Whether an update restart stops running terminals. With the PTY holder the update
+ * hands terminals over (GOODBYE handover) and the new app reattaches, so agents keep
+ * working; only the in-process backend loses them.
+ */
+export function updateInterruptsTerminals(backendKind: 'holder' | 'in-process'): boolean {
+  return backendKind !== 'holder';
+}
+
 /** Agent tabs (not plain shells) that are working or waiting for input. */
 export function collectBusyAgentTabs(
   projects: Array<{ id: string; name: string; terminals: Array<{ id: string; name: string; cliType?: string }> }>,

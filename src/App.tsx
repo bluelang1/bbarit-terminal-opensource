@@ -142,7 +142,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, getPtyRecovery, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -181,7 +181,7 @@ import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, 
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
 import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
-import { collectBusyAgentTabs, formatBusyAgentWarning } from './terminal/busyAgentTabs';
+import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './terminal/busyAgentTabs';
 import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
 import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
@@ -10519,7 +10519,11 @@ Office project scaffold created by BBARIT Terminal.
     setIsUpdating(true);
     try {
       if (updateAvailable.native && pendingNativeUpdateRef.current) {
-        const busy = collectBusyAgentTabs(projects, agentStateOf);
+        // The PTY holder carries terminals across the update restart, so only warn
+        // when this run uses the in-process backend (agents would really stop).
+        const busy = updateInterruptsTerminals(getPtyRecovery().kind)
+          ? collectBusyAgentTabs(projects, agentStateOf)
+          : [];
         if (busy.length > 0) {
           const ko = locale === 'ko';
           const { title, message } = formatBusyAgentWarning(busy, ko ? 'ko' : 'en');
