@@ -1,10 +1,16 @@
-// CHANGELOG.md → What's new sections. Pure: no React, no Tauri.
-// Format: Keep a Changelog with Korean group headings (### 추가/변경/제거/수정/보안),
-// see CHANGELOG.md and scripts/bump-version.mjs.
+// CHANGELOG.md / CHANGELOG.en.md → What's new sections. Pure: no React, no Tauri.
+// Format: Keep a Changelog with Korean (### 추가/변경/제거/수정/보안) or English
+// (### Added/Changed/Removed/Fixed/Security) group headings; see scripts/bump-version.mjs.
 
-export type ChangeKind = '추가' | '변경' | '제거' | '수정' | '보안';
+/** Normalized group id; display labels come from t('guide.kind.<id>'). */
+export type ChangeKind = 'added' | 'changed' | 'removed' | 'fixed' | 'security';
 
-export const CHANGE_KINDS: readonly ChangeKind[] = ['추가', '변경', '제거', '수정', '보안'];
+export const CHANGE_KINDS: readonly ChangeKind[] = ['added', 'changed', 'removed', 'fixed', 'security'];
+
+const HEADING_KIND: Record<string, ChangeKind> = {
+  추가: 'added', 변경: 'changed', 제거: 'removed', 수정: 'fixed', 보안: 'security',
+  added: 'added', changed: 'changed', removed: 'removed', fixed: 'fixed', security: 'security',
+};
 
 export interface ChangelogGroup {
   kind: ChangeKind;
@@ -22,8 +28,8 @@ const GROUP_RE = /^###\s+(.+?)\s*$/;
 const LINK_REF_RE = /^\[[^\]]+\]:\s*\S+/;
 const VERSION_RE = /^\d+\.\d+\.\d+$/;
 
-function isKind(s: string): s is ChangeKind {
-  return (CHANGE_KINDS as readonly string[]).includes(s);
+function headingKind(s: string): ChangeKind | null {
+  return HEADING_KIND[s.trim().toLowerCase()] ?? null;
 }
 
 /** Parse released sections in file order. `[Unreleased]`, link references and
@@ -52,8 +58,8 @@ export function parseChangelog(md: string): ChangelogSection[] {
 
     const grp = GROUP_RE.exec(line);
     if (grp) {
-      const kind = grp[1];
-      if (isKind(kind)) {
+      const kind = headingKind(grp[1]);
+      if (kind) {
         group = section.groups.find(g => g.kind === kind) ?? null;
         if (!group) { group = { kind, items: [] }; section.groups.push(group); }
       } else {
@@ -145,4 +151,15 @@ export function inlineTokens(src: string): InlineToken[] {
     i = j;
   }
   return out;
+}
+
+/** Sections in the reader's language: every version of `fallback` (the Korean
+ *  CHANGELOG.md, the source of truth), taking the translated section when it
+ *  exists and has items, else the fallback section. */
+export function localizedSections(translated: ChangelogSection[], fallback: ChangelogSection[]): ChangelogSection[] {
+  const byVersion = new Map(translated.map(s => [s.version, s]));
+  return fallback.map((s) => {
+    const t = byVersion.get(s.version);
+    return t && t.groups.some(g => g.items.length > 0) ? t : s;
+  });
 }

@@ -8,9 +8,10 @@
  *   node scripts/bump-version.mjs --win 0.1.70        # bump Windows only
  *   node scripts/bump-version.mjs --mac 0.1.70 --win 0.1.71
  *
- * A both-platform bump also moves CHANGELOG.md's [Unreleased] entries into a
- * new "## [X.Y.Z] - YYYY-MM-DD" section (today, or --date YYYY-MM-DD) and
- * updates the compare links. --no-changelog skips that step.
+ * A both-platform bump also moves the [Unreleased] entries of CHANGELOG.md and
+ * its English mirror CHANGELOG.en.md into a new "## [X.Y.Z] - YYYY-MM-DD"
+ * section (today, or --date YYYY-MM-DD) and updates the compare links.
+ * --no-changelog skips that step.
  */
 
 import fs from "node:fs";
@@ -77,7 +78,7 @@ const files = {
   tauriWin: path.join(ROOT, "src-tauri", "tauri.windows.conf.json"),
   cargo: path.join(ROOT, "src-tauri", "Cargo.toml"),
   readme: path.join(ROOT, "README.md"),
-  changelog: path.join(ROOT, "CHANGELOG.md"),
+  changelogs: [path.join(ROOT, "CHANGELOG.md"), path.join(ROOT, "CHANGELOG.en.md")],
 };
 
 function localDate(d = new Date()) {
@@ -128,13 +129,18 @@ if (args.both) {
     }
   }
 
-  if (args.changelog && fs.existsSync(files.changelog)) {
-    const result = releaseUnreleased(readText(files.changelog), args.both, args.date || localDate());
-    if (result.changed) {
-      writeText(files.changelog, result.text);
-      console.log(`CHANGELOG.md: [Unreleased] -> [${args.both}]`);
-    } else {
-      console.warn(`CHANGELOG.md: not changed (${result.reason}); add the release notes by hand.`);
+  if (args.changelog) {
+    const date = args.date || localDate();
+    for (const file of files.changelogs) {
+      if (!fs.existsSync(file)) continue;
+      const name = path.basename(file);
+      const result = releaseUnreleased(readText(file), args.both, date);
+      if (result.changed) {
+        writeText(file, result.text);
+        console.log(`${name}: [Unreleased] -> [${args.both}]`);
+      } else {
+        console.warn(`${name}: not changed (${result.reason}); add the release notes by hand.`);
+      }
     }
   }
 }

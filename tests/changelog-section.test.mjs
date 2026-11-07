@@ -133,7 +133,7 @@ test('releaseUnreleased keeps CRLF line endings', () => {
   assert.ok(!/[^\r]\n/.test(r.text), 'found a bare LF');
 });
 
-function fakeRepo(changelog) {
+function fakeRepo(changelog, changelogEn) {
   const root = mkdtempSync(path.join(tmpdir(), 'bump-'));
   mkdirSync(path.join(root, 'src-tauri'), { recursive: true });
   const json = (p, v) => writeFileSync(path.join(root, p), JSON.stringify({ version: v }, null, 2) + '\n');
@@ -143,6 +143,7 @@ function fakeRepo(changelog) {
   json('src-tauri/tauri.windows.conf.json', '1.2.0');
   writeFileSync(path.join(root, 'src-tauri', 'Cargo.toml'), '[package]\nname = "x"\nversion = "1.2.0"\n');
   if (changelog !== undefined) writeFileSync(path.join(root, 'CHANGELOG.md'), changelog);
+  if (changelogEn !== undefined) writeFileSync(path.join(root, 'CHANGELOG.en.md'), changelogEn);
   return root;
 }
 
@@ -192,4 +193,36 @@ test('bump-version works without a CHANGELOG.md', () => {
   const root = fakeRepo();
   const r = bump(root, ['1.3.0']);
   assert.equal(r.status, 0, r.stderr);
+});
+
+const SAMPLE_EN = SAMPLE.replace('### 추가', '### Added').replace('- 새 기능.', '- New feature.');
+
+test('bump-version moves [Unreleased] in CHANGELOG.md and CHANGELOG.en.md', () => {
+  const root = fakeRepo(SAMPLE, SAMPLE_EN);
+  const r = bump(root, ['1.3.0', '--date', '2026-12-01']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /CHANGELOG\.md: \[Unreleased\] -> \[1\.3\.0\]/);
+  assert.match(r.stdout, /CHANGELOG\.en\.md: \[Unreleased\] -> \[1\.3\.0\]/);
+  const ko = readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+  const en = readFileSync(path.join(root, 'CHANGELOG.en.md'), 'utf8');
+  assert.equal(extractSection(ko, '1.3.0'), '### 추가\n\n- 새 기능.');
+  assert.equal(extractSection(en, '1.3.0'), '### Added\n\n- New feature.');
+  for (const text of [ko, en]) {
+    assert.match(text, /^## \[1\.3\.0\] - 2026-12-01$/m);
+    assert.match(text, new RegExp(`^\\[Unreleased\\]: ${REPO}/compare/v1\\.3\\.0\\.\\.\\.HEAD$`, 'm'));
+  }
+});
+
+test('bump-version warns about an English changelog left without entries', () => {
+  const emptiedEn = releaseUnreleased(SAMPLE_EN, '1.3.0', '2026-12-01').text;
+  const root = fakeRepo(SAMPLE, emptiedEn);
+  const r = bump(root, ['1.4.0', '--date', '2026-12-02']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /CHANGELOG\.md: \[Unreleased\] -> \[1\.4\.0\]/);
+  assert.match(r.stderr, /CHANGELOG\.en\.md: not changed \(\[Unreleased\] is empty\)/);
+});
+
+test('the repo CHANGELOG.en.md lists the same versions as CHANGELOG.md', () => {
+  const versions = (file) => [...readFileSync(path.join(repoRoot, file), 'utf8').matchAll(/^## \[([^\]]+)\]/gm)].map((m) => m[1]);
+  assert.deepEqual(versions('CHANGELOG.en.md'), versions('CHANGELOG.md'));
 });

@@ -7,12 +7,14 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { emitTo, listen } from '@tauri-apps/api/event';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { ArrowRight, Check, ExternalLink, Minus, MousePointerClick, RefreshCw, RotateCcw, Shield, Sparkles, Wrench, BookOpen, Gift } from 'lucide-react';
-import CHANGELOG from '../../CHANGELOG.md?raw';
+import CHANGELOG_KO from '../../CHANGELOG.md?raw';
+import CHANGELOG_EN from '../../CHANGELOG.en.md?raw';
 import { useTranslation, type TranslationKey } from '../i18n';
 import { kvGetJSON } from '../hooks/useKV';
 import { RELEASE_REPO_MAC } from '../config/endpoints';
 import {
   inlineTokens,
+  localizedSections,
   olderSections,
   parseChangelog,
   sectionsToShow,
@@ -42,17 +44,25 @@ export interface GuideNavigate {
 
 const IS_MAC = typeof navigator !== 'undefined' && navigator.userAgent.includes('Mac');
 const RELEASES_URL = `https://github.com/${RELEASE_REPO_MAC}/releases`;
-const ALL_SECTIONS = parseChangelog(CHANGELOG);
+// Korean is the source of truth; other languages read the English mirror and
+// fall back to the Korean section for a version it lacks.
+const KO_SECTIONS = parseChangelog(CHANGELOG_KO);
+let enSections: ChangelogSection[] | null = null;
+function sectionsFor(locale: string): ChangelogSection[] {
+  if (locale === 'ko') return KO_SECTIONS;
+  enSections ??= localizedSections(parseChangelog(CHANGELOG_EN), KO_SECTIONS);
+  return enSections;
+}
 const OLDER_LIMIT = 8;
 
-const KIND_META: Record<ChangeKind, { key: TranslationKey; cls: string; Icon: typeof Sparkles }> = {
-  추가: { key: 'guide.kind.added', cls: 'added', Icon: Sparkles },
-  변경: { key: 'guide.kind.changed', cls: 'changed', Icon: RefreshCw },
-  수정: { key: 'guide.kind.fixed', cls: 'fixed', Icon: Wrench },
-  제거: { key: 'guide.kind.removed', cls: 'removed', Icon: Minus },
-  보안: { key: 'guide.kind.security', cls: 'security', Icon: Shield },
+const KIND_META: Record<ChangeKind, { key: TranslationKey; Icon: typeof Sparkles }> = {
+  added: { key: 'guide.kind.added', Icon: Sparkles },
+  changed: { key: 'guide.kind.changed', Icon: RefreshCw },
+  fixed: { key: 'guide.kind.fixed', Icon: Wrench },
+  removed: { key: 'guide.kind.removed', Icon: Minus },
+  security: { key: 'guide.kind.security', Icon: Shield },
 };
-const KIND_ORDER: ChangeKind[] = ['추가', '변경', '수정', '제거', '보안'];
+const KIND_ORDER: ChangeKind[] = ['added', 'changed', 'fixed', 'removed', 'security'];
 
 function readQuery(): GuideNavigate {
   const q = new URLSearchParams(window.location.search);
@@ -83,7 +93,7 @@ function firstOpenStep(steps: GuideStep[], progress: GuideProgress): GuideStepId
 }
 
 export default function GuidePage() {
-  const { t } = useTranslation();
+  const { t, locale } = useTranslation();
   const steps = useMemo(() => visibleSteps(IS_MAC), []);
   const initial = useMemo(() => readQuery(), []);
   const [mode, setMode] = useState<Mode>(initial.mode);
@@ -169,6 +179,7 @@ export default function GuidePage() {
         />
       )) : (
         <WhatsNewView
+          locale={locale}
           version={version}
           from={from}
           onOpenGuide={() => setMode('start')}
@@ -315,7 +326,7 @@ function SectionCards({ section, t, showHeading }: { section: ChangelogSection; 
         const meta = KIND_META[g.kind];
         const Icon = meta.Icon;
         return (
-          <div key={g.kind} className={`wn-card wn-${meta.cls}`}>
+          <div key={g.kind} className={`wn-card wn-${g.kind}`}>
             <div className="wn-card-head">
               <span className="wn-kind-icon"><Icon size={14} /></span>
               <span className="wn-kind-label">{t(meta.key)}</span>
@@ -330,16 +341,18 @@ function SectionCards({ section, t, showHeading }: { section: ChangelogSection; 
   );
 }
 
-function WhatsNewView({ version, from, onOpenGuide, t }: {
+function WhatsNewView({ locale, version, from, onOpenGuide, t }: {
+  locale: string;
   version: string | null;
   from: string | null;
   onOpenGuide: () => void;
   t: TFn;
 }) {
   // Outside Tauri (or before getVersion answers) treat the newest release as current.
-  const current = version ?? ALL_SECTIONS[0]?.version ?? '0.0.0';
-  const shown = useMemo(() => sectionsToShow(ALL_SECTIONS, from, current), [from, current]);
-  const older = useMemo(() => olderSections(ALL_SECTIONS, shown, OLDER_LIMIT, current), [shown, current]);
+  const all = useMemo(() => sectionsFor(locale), [locale]);
+  const current = version ?? all[0]?.version ?? '0.0.0';
+  const shown = useMemo(() => sectionsToShow(all, from, current), [all, from, current]);
+  const older = useMemo(() => olderSections(all, shown, OLDER_LIMIT, current), [all, shown, current]);
   const headVersion = shown[0]?.version ?? current;
 
   return (

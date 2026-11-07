@@ -1,11 +1,14 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import CHANGELOG from '../../CHANGELOG.md?raw';
+import CHANGELOG_EN from '../../CHANGELOG.en.md?raw';
 import { parseChangelog } from '../guide/changelog';
+
+const h = vi.hoisted(() => ({ locale: 'ko' as 'ko' | 'en' | 'de' }));
 
 vi.mock('../i18n', async () => {
   const { getTranslation } = await vi.importActual<typeof import('../i18n')>('../i18n');
-  return { useTranslation: () => ({ t: (k: string) => getTranslation('ko', k as never), locale: 'ko' }) };
+  return { useTranslation: () => ({ t: (k: string) => getTranslation(h.locale, k as never), locale: h.locale }) };
 });
 
 import GuidePage from './GuidePage';
@@ -18,7 +21,7 @@ async function renderAt(search: string) {
 }
 
 describe('GuidePage', () => {
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => { localStorage.clear(); h.locale = 'ko'; });
   afterEach(() => window.history.replaceState(null, '', '/'));
 
   it('start mode lists the steps and walks with 다음', async () => {
@@ -53,5 +56,14 @@ describe('GuidePage', () => {
     expect(screen.getByText('이전 버전')).toBeTruthy();
     fireEvent.click(screen.getByText('시작하기 가이드 보기'));
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('BBARIT 시작하기');
+  });
+
+  it('whatsnew follows a non-Korean locale with the English changelog', async () => {
+    h.locale = 'de';
+    const newest = parseChangelog(CHANGELOG_EN).find(s => s.groups.length > 0)!;
+    await renderAt('?mode=whatsnew');
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(`New in ${newest.version}`);
+    const firstItem = document.querySelector('.wn-card li')?.textContent ?? '';
+    expect(firstItem).toBe(newest.groups[0].items[0].replace(/\*\*|`/g, ''));
   });
 });

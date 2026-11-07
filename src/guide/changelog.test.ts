@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import CHANGELOG from '../../CHANGELOG.md?raw';
-import { compareVersions, inlineTokens, olderSections, parseChangelog, sectionsToShow } from './changelog';
+import CHANGELOG_EN from '../../CHANGELOG.en.md?raw';
+import { compareVersions, inlineTokens, localizedSections, olderSections, parseChangelog, sectionsToShow } from './changelog';
 
 const MD = `# 변경 이력\n\n## [Unreleased]\n\n## [1.1.67] - 2026-11-09\n\n### 추가\n\n- A **굵게** \`code\`\n\n### 수정\n\n- B\n\n## [1.1.66] - 2026-11-07\n\n### 수정\n\n- C\n\n## [1.1.65] - 2026-11-07\n\n## [1.1.64] - 2026-11-06\n\n### 변경\n\n- D\n\n[Unreleased]: https://x\n[1.1.67]: https://y\n`;
 
@@ -9,19 +10,44 @@ describe('parseChangelog', () => {
     const s = parseChangelog(MD);
     expect(s.map(x => x.version)).toEqual(['1.1.67', '1.1.66', '1.1.65', '1.1.64']);
     expect(s[0].date).toBe('2026-11-09');
-    expect(s[0].groups).toEqual([{ kind: '추가', items: ['A **굵게** `code`'] }, { kind: '수정', items: ['B'] }]);
+    expect(s[0].groups).toEqual([{ kind: 'added', items: ['A **굵게** `code`'] }, { kind: 'fixed', items: ['B'] }]);
     expect(s[2].groups).toEqual([]);
   });
 
   it('ignores Unreleased items and link references', () => {
     const md = `## [Unreleased]\n\n### 추가\n\n- not yet\n\n## [1.0.0] - 2026-01-01\n\n### 추가\n\n- shipped\n\n[1.0.0]: https://example.com\n`;
     const s = parseChangelog(md);
-    expect(s).toEqual([{ version: '1.0.0', date: '2026-01-01', groups: [{ kind: '추가', items: ['shipped'] }] }]);
+    expect(s).toEqual([{ version: '1.0.0', date: '2026-01-01', groups: [{ kind: 'added', items: ['shipped'] }] }]);
   });
 
   it('joins wrapped continuation lines into the item', () => {
     const md = `## [1.0.0] - 2026-01-01\n\n### 수정\n\n- first line\n  continues here\n- second\n`;
     expect(parseChangelog(md)[0].groups[0].items).toEqual(['first line continues here', 'second']);
+  });
+
+  it('accepts English headings with the same kind ids', () => {
+    const md = `## [1.0.0] - 2026-01-01\n\n### Added\n\n- a\n\n### Changed\n\n- b\n\n### Removed\n\n- c\n\n### Fixed\n\n- d\n\n### Security\n\n- e\n`;
+    expect(parseChangelog(md)[0].groups.map(g => g.kind)).toEqual(['added', 'changed', 'removed', 'fixed', 'security']);
+  });
+
+  it('parses the real CHANGELOG.en.md', () => {
+    const s = parseChangelog(CHANGELOG_EN);
+    expect(s.length).toBeGreaterThanOrEqual(10);
+    for (const sec of s) expect(sec.version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('CHANGELOG.en.md mirrors every CHANGELOG.md version with the same item count per kind', () => {
+    const shape = (md: string) => parseChangelog(md).map(s => ({
+      version: s.version,
+      date: s.date,
+      kinds: s.groups.map(g => [g.kind, g.items.length]),
+    }));
+    expect(shape(CHANGELOG_EN)).toEqual(shape(CHANGELOG));
+    // [Unreleased] is skipped by the parser; keep it in step too.
+    const unreleased = (md: string) => (md.split(/^## \[Unreleased\]\s*$/m)[1] ?? '').split(/^## \[/m)[0].match(/^- /gm)?.length ?? 0;
+    expect(unreleased(CHANGELOG_EN)).toBe(unreleased(CHANGELOG));
+    const links = (md: string) => md.split('\n').filter(l => /^\[[^\]]+\]:/.test(l));
+    expect(links(CHANGELOG_EN)).toEqual(links(CHANGELOG));
   });
 
   it('parses the real CHANGELOG.md', () => {
@@ -100,5 +126,24 @@ describe('olderSections', () => {
 
   it('with nothing shown, starts at current or below', () => {
     expect(olderSections(parseChangelog(MD), [], 5, '1.1.65').map(s => s.version)).toEqual(['1.1.64']);
+  });
+});
+
+describe('localizedSections', () => {
+  const KO = `## [1.0.2] - 2026-01-03\n\n### 추가\n\n- 새 것\n\n## [1.0.1] - 2026-01-02\n\n### 수정\n\n- 고침\n`;
+  const EN = `## [1.0.2] - 2026-01-03\n\n### Added\n\n- new thing\n`;
+
+  it('uses the translated section and falls back to Korean for missing versions', () => {
+    const merged = localizedSections(parseChangelog(EN), parseChangelog(KO));
+    expect(merged.map(s => s.version)).toEqual(['1.0.2', '1.0.1']);
+    expect(merged[0].groups[0].items).toEqual(['new thing']);
+    expect(merged[1].groups[0].items).toEqual(['고침']);
+  });
+
+  it('falls back when the translated section is empty', () => {
+    const emptyEn = `## [1.0.2] - 2026-01-03\n\n## [1.0.1] - 2026-01-02\n\n### Fixed\n\n- fix\n`;
+    const merged = localizedSections(parseChangelog(emptyEn), parseChangelog(KO));
+    expect(merged[0].groups[0].items).toEqual(['새 것']);
+    expect(merged[1].groups[0].items).toEqual(['fix']);
   });
 });
