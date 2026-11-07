@@ -589,11 +589,12 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
           )}
           {isRepo && <>
             <span className="git-branch-badge">{branch || 'HEAD'}</span>
-            {webUrl && <button onClick={openWebUrl} title={webUrlLabel(webUrl)} aria-label={webUrlLabel(webUrl)}><ExternalLink size={12} /></button>}
             {(ahead > 0 || behind > 0) && <span className="git-ahead-behind">↑{ahead} ↓{behind}</span>}
           </>}
           <div style={{ flex: 1 }} />
           {loading && <RefreshCw size={12} style={{ animation: 'spin 1s linear infinite' }} />}
+          {/* Fixed spot next to Refresh, so it does not move with the repo or branch name length. */}
+          {webUrl && <button onClick={openWebUrl} title={webUrlLabel(webUrl)} aria-label={webUrlLabel(webUrl)}><ExternalLink size={14} /></button>}
           <button onClick={() => refreshTab(activeTab)} title="Refresh"><RefreshCw size={14} /></button>
           <button className="modal-close-btn" onClick={onClose} title="Close" aria-label="Close"><X size={16} /></button>
         </div>
