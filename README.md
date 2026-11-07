@@ -8,7 +8,9 @@ Tauri 2, Rust, React 19, TypeScript로 만든 데스크톱 AI 개발 환경입�
 
 현재 **macOS Apple Silicon(M1 이상)**용 설치 파일만 제공합니다. Intel Mac과 Windows는 아래 [네이티브 앱 개발과 로컬 빌드](#네이티브-앱-개발과-로컬-빌드)로 직접 빌드해야 합니다.
 
-1. [Releases 최신 버전](https://github.com/bluelang1/bbarit-terminal-opensource/releases/latest)의 **Assets**에서 `BBARIT-Terminal-Source_<버전>_aarch64.dmg`를 받습니다.
+**[⬇ 최신 버전 내려받기 (macOS Apple Silicon, .dmg)](https://github.com/bluelang1/bbarit-terminal-opensource/releases/latest/download/BBARIT-Terminal-Source_aarch64.dmg)**
+
+1. 위 링크로 최신 DMG(`BBARIT-Terminal-Source_aarch64.dmg`)를 받습니다. 링크가 열리지 않거나 다른 버전이 필요하면 [Releases 최신 버전](https://github.com/bluelang1/bbarit-terminal-opensource/releases/latest)의 **Assets**에서 `BBARIT-Terminal-Source_<버전>_aarch64.dmg`를 받습니다(같은 파일입니다).
 2. DMG를 열고 `BBARIT Terminal Source`를 `Applications` 폴더로 끌어 넣습니다.
 3. 처음 열 때 "확인되지 않은 개발자" 경고가 뜨면 Finder에서 앱을 **우클릭 → 열기**를 누릅니다. 또는 터미널에서 다음을 실행합니다.
 
@@ -28,11 +30,17 @@ Tauri 2, Rust, React 19, TypeScript로 만든 데스크톱 AI 개발 환경입�
 
 ### 원작자 버전과 다른 점
 
-- 로컬 브리지(19980/19985)와 제어 WebSocket에 출처 검사를 넣어, 일반 웹페이지가 앱을 조종하지 못하게 했습니다. 웹뷰에 CSP를 적용하고 Git 명령 인자 주입도 막았습니다.
-- 자체 서명 키와 GitHub Releases로 자동 업데이트를 제공합니다.
-- 같은 프로젝트에서 대화가 섞이지 않는 "Claude 새 대화" 탭을 추가하고, 처음 여는 프로젝트에서 `claude --continue`가 실패하던 문제를 고쳤습니다.
-- Finder 파일 드롭을 고쳤습니다. 이제 드롭하면 경로만 입력되고 Enter는 누르지 않습니다. 여러 줄 입력을 한 번에 지우는 버튼도 추가했습니다.
-- 툴바에 내 로컬 대시보드를 띄우는 Dashboard 버튼을 추가했습니다(주소는 설정 > Hub). 프로젝트 목록 드래그도 개선했습니다.
+- **앱을 꺼도 터미널이 살아 있습니다.** 앱을 종료하거나 업데이트해도 실행 중인 셸과 Claude 작업이 계속 돌고, 다시 열면 그대로 이어 붙습니다. 모두 끝내려면 메뉴의 "종료하고 모든 터미널 끝내기"를 씁니다. 작업 중인 에이전트 탭이 있으면 업데이트 전에 한 번 더 묻습니다.
+- **Claude 탭 상태 표시와 알림.** 탭·사이드바에 Claude가 작업 중인지, 끝났는지, 승인·답변을 기다리는지 표시하고, 승인이 필요하거나 다른 화면을 보는 사이 작업이 끝나면 알려 줍니다.
+- **탭마다 자기 Claude 대화를 기억합니다.** 설정에서 "마지막 세션 이어서 시작"을 켜면 탭을 다시 열 때 그 탭의 대화로 돌아가고, 대화가 섞이지 않는 "Claude 새 대화" 탭은 항상 자기 대화를 이어 갑니다. 처음 여는 프로젝트에서 `claude --continue`가 실패하던 문제도 고쳤습니다.
+- **탭끼리 일을 나눠 맡깁니다(에이전트 릴레이).** 한 탭의 Claude가 같은 프로젝트에 다른 에이전트 탭을 띄워 일을 맡기고, 끝나거나 막히면 결과를 돌려받습니다.
+- **입력이 엉키지 않습니다.** 앱이 자동으로 보내는 입력은 내가 타이핑을 멈춘 뒤에 들어가고, Claude가 승인을 기다리는 동안에는 보내지 않습니다. 탭을 닫으면 그 탭에서 띄운 백그라운드 프로세스도 함께 정리합니다.
+- **프로젝트별 GitHub 계정.** 저장소 주인에 맞는 `gh` 계정으로 탭이 열려, 회사·개인 저장소를 계정 전환 없이 함께 씁니다. 사이드바의 연필 버튼으로 경로·이름·테마·글꼴·계정을 수정합니다.
+- **터미널 글꼴 선택.** 설치된 글꼴 중 원하는 것을 고를 수 있고(사용자 지정 글꼴이 적용되지 않던 문제 수정), 기본 글꼴은 FiraCode Nerd Font Mono입니다(없으면 내장 Fira Code).
+- **데스크톱 펫.** 앱을 최소화하거나 창을 닫으면 작은 캐릭터가 바탕화면을 돌아다니며 Claude 작업 중·완료·승인 대기를 말풍선으로 알려 줍니다. 계절과 기념일에 맞춰 옷차림이 바뀌고, 설정에서 켜면 실제 날씨도 보여 줍니다. 도움말 → 캐릭터 둘러보기로 모든 모습을 볼 수 있고, 직접 만든 캐릭터는 `~/.config/octo/characters`에 둡니다.
+- **편의 기능.** Finder에서 파일을 끌어 놓으면 경로만 입력되고 Enter는 누르지 않습니다. 여러 줄 입력을 한 번에 지우는 버튼, 내 로컬 대시보드를 띄우는 Dashboard 버튼(주소는 설정 > Hub), 부드러운 프로젝트 목록 드래그, 전체 화면 TUI의 트랙패드 스크롤 개선이 들어갔습니다. GitHub 별점 요청 팝업은 없앴습니다.
+- **보안 강화.** 로컬 브리지와 제어 WebSocket에 출처 검사를 넣어 일반 웹페이지가 앱을 조종하지 못하게 했고, 웹뷰 CSP 적용, Git 명령 인자 주입 차단, 취약한 의존성 교체를 했습니다.
+- **자체 자동 업데이트.** 이 포크 전용 서명 키와 GitHub Releases로 업데이트를 받으며, 업데이트 버튼을 누를 때만 설치합니다.
 
 전체 변경 내역은 [Releases](https://github.com/bluelang1/bbarit-terminal-opensource/releases)와 [커밋 기록](https://github.com/bluelang1/bbarit-terminal-opensource/commits/main)에 있습니다.
 
@@ -117,7 +125,7 @@ TAURI_SIGNING_PRIVATE_KEY_PASSWORD='…' npm run tauri:build:fork
 node scripts/fork-release-manifest.mjs --tag v1.1.51 --repo bluelang1/bbarit-terminal-opensource --out release-out
 ```
 
-`tauri:build:fork`는 `--fork-release`로 업데이트 서명 산출물(`.app.tar.gz` + `.sig`)을 만들고, 래퍼는 `TAURI_SIGNING_PRIVATE_KEY`·`_PASSWORD`만 자식 프로세스에 남깁니다. 매니페스트 스크립트는 태그가 `v<앱 버전>`과 같은지 확인하고 `release-out/`에 공백 없는 이름의 번들 파일과 `latest.json`을 씁니다.
+`tauri:build:fork`는 `--fork-release`로 업데이트 서명 산출물(`.app.tar.gz` + `.sig`)을 만들고, 래퍼는 `TAURI_SIGNING_PRIVATE_KEY`·`_PASSWORD`만 자식 프로세스에 남깁니다. 매니페스트 스크립트는 태그가 `v<앱 버전>`과 같은지 확인하고 `release-out/`에 공백 없는 이름의 번들 파일과 `latest.json`을 씁니다. DMG는 버전 없는 이름(`BBARIT-Terminal-Source_aarch64.dmg`)으로도 한 벌 더 복사해, 설치 안내의 `releases/latest/download/` 링크가 릴리스마다 고칠 필요 없이 최신 DMG를 가리키게 합니다.
 
 릴리스 절차는 다음과 같습니다.
 

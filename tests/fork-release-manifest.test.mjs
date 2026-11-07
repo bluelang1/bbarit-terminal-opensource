@@ -11,6 +11,7 @@ import {
   platformKey,
   prepareRelease,
   releaseAssetUrl,
+  stableAssetName,
   tagMatchesVersion,
 } from '../scripts/fork-release-manifest.mjs';
 
@@ -34,6 +35,14 @@ test('asset names and URLs never contain spaces', () => {
     releaseAssetUrl('bluelang1/bbarit-terminal-opensource', 'v1.1.51', 'BBARIT Terminal Source.app.tar.gz'),
     'https://github.com/bluelang1/bbarit-terminal-opensource/releases/download/v1.1.51/BBARIT-Terminal-Source.app.tar.gz',
   );
+});
+
+test('installer files get a version-free name for releases/latest/download', () => {
+  assert.equal(stableAssetName('BBARIT-Terminal-Source_1.1.51_aarch64.dmg', '1.1.51'), 'BBARIT-Terminal-Source_aarch64.dmg');
+  assert.equal(stableAssetName('BBARIT Terminal Source_1.1.51_aarch64.dmg', '1.1.51'), 'BBARIT-Terminal-Source_aarch64.dmg');
+  // No version segment (or another version): nothing to add.
+  assert.equal(stableAssetName('BBARIT-Terminal-Source.app.tar.gz', '1.1.51'), null);
+  assert.equal(stableAssetName('BBARIT-Terminal-Source_1.1.50_aarch64.dmg', '1.1.51'), null);
 });
 
 test('platform keys follow the Tauri updater naming', () => {
@@ -78,8 +87,12 @@ test('prepareRelease copies renamed assets and writes latest.json', () => {
     'BBARIT-Terminal-Source.app.tar.gz',
     'BBARIT-Terminal-Source.app.tar.gz.sig',
     'BBARIT-Terminal-Source_1.1.51_aarch64.dmg',
+    'BBARIT-Terminal-Source_aarch64.dmg',
     'latest.json',
   ]);
+  const outDir = path.join(root, 'release-out');
+  assert.equal(readFileSync(path.join(outDir, 'BBARIT-Terminal-Source_aarch64.dmg'), 'utf8'), 'dmg');
+  assert.equal(readFileSync(path.join(outDir, 'BBARIT-Terminal-Source_1.1.51_aarch64.dmg'), 'utf8'), 'dmg');
   const manifest = JSON.parse(readFileSync(path.join(root, 'release-out', 'latest.json'), 'utf8'));
   assert.deepEqual(manifest, {
     version: '1.1.51',

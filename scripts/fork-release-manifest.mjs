@@ -6,7 +6,9 @@
 //
 // The output directory then holds the renamed bundle files (no spaces, so the
 // GitHub asset names are predictable) and latest.json; upload all of them as
-// assets of the GitHub release named by --tag.
+// assets of the GitHub release named by --tag. Each installer (the dmg) is also
+// copied under a version-free name, so the README can link to
+// releases/latest/download/BBARIT-Terminal-Source_aarch64.dmg without edits.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +31,19 @@ export function assetFileName(name) {
   // GitHub rewrites spaces in asset names; do it ourselves so the URL in
   // latest.json matches the uploaded file exactly.
   return name.replace(/\s+/g, '-');
+}
+
+// `BBARIT-Terminal-Source_1.1.51_aarch64.dmg` -> `BBARIT-Terminal-Source_aarch64.dmg`
+// (null when the name carries no `_<version>` segment). The updater never uses
+// this name; it reads the versioned URL from latest.json.
+export function stableAssetName(name, version) {
+  const assetName = assetFileName(name);
+  const marker = `_${version}`;
+  const at = assetName.indexOf(marker);
+  if (at < 0) return null;
+  const rest = assetName.slice(at + marker.length);
+  if (rest && !/^[_.]/.test(rest)) return null;
+  return assetName.slice(0, at) + rest;
 }
 
 export function releaseAssetUrl(repo, tag, name) {
@@ -144,15 +159,19 @@ export function prepareRelease(options, { root = repoRoot, platform = process.pl
 
   const updater = findUpdaterArtifact(bundleDir, platform);
   const copied = [];
-  const copy = (file) => {
-    const target = path.join(outDir, assetFileName(path.basename(file)));
+  const copy = (file, name = assetFileName(path.basename(file))) => {
+    const target = path.join(outDir, name);
     copyFileSync(file, target);
     copied.push(target);
     return target;
   };
   const updaterAsset = copy(updater.file);
   copy(updater.signature);
-  for (const file of findInstallerArtifacts(bundleDir, platform)) copy(file);
+  for (const file of findInstallerArtifacts(bundleDir, platform)) {
+    copy(file);
+    const stable = stableAssetName(path.basename(file), version);
+    if (stable) copy(file, stable);
+  }
 
   const manifest = buildUpdaterManifest({
     version,

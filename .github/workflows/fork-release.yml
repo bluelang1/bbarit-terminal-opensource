@@ -128,6 +128,9 @@ jobs:
         # committed Cargo.lock like the source checks workflow.
         run: npm run tauri:build:fork -- -- --locked
       - name: Prepare release assets and latest.json
+        # Besides the versioned dmg, release-out/ gets a version-free copy
+        # (BBARIT-Terminal-Source_aarch64.dmg) that the README links through
+        # releases/latest/download/; the updater files keep their names.
         run: node scripts/fork-release-manifest.mjs --tag "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --out release-out
       - name: Upload to a draft GitHub release
         env:
