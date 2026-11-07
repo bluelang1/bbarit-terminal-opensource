@@ -2,6 +2,15 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive, ExternalLink } from 'lucide-react';
 import { remoteWebUrl } from './gitRemoteWeb';
+
+/** Tooltip for the header's repository-page button, named after the host. */
+function webUrlLabel(url: string): string {
+  const host = (() => { try { return new URL(url).hostname; } catch { return ''; } })();
+  if (host === 'github.com') return 'Open on GitHub';
+  if (host === 'gitlab.com') return 'Open on GitLab';
+  if (host === 'bitbucket.org') return 'Open on Bitbucket';
+  return `Open on ${host || 'the web'}`;
+}
 import './GitPanel.css';
 
 /* ─── Types ─── */
@@ -580,7 +589,7 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
           )}
           {isRepo && <>
             <span className="git-branch-badge">{branch || 'HEAD'}</span>
-            {webUrl && <button onClick={openWebUrl} title="Open on GitHub" aria-label="Open on GitHub"><ExternalLink size={12} /></button>}
+            {webUrl && <button onClick={openWebUrl} title={webUrlLabel(webUrl)} aria-label={webUrlLabel(webUrl)}><ExternalLink size={12} /></button>}
             {(ahead > 0 || behind > 0) && <span className="git-ahead-behind">↑{ahead} ↓{behind}</span>}
           </>}
           <div style={{ flex: 1 }} />
