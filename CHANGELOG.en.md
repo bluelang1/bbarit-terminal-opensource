@@ -9,6 +9,8 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+## [1.1.67] - 2026-11-08
+
 ### Added
 
 - On a fresh install a getting-started guide opens so you can learn by doing: opening a project, AI terminals, status dots, keep running, Git and the desktop pet. The first launch after an update shows what is new, and both can be reopened from the Help menu at any time.
@@ -214,7 +216,8 @@ The first release of this fork, based on the original author's `v1.1.50`.
 - The built-in agent reads `.mcp.json` and `.bbarit/models.json` only in trusted projects, and `/trust no` takes precedence over the app's auto-approve run option.
 - Updated or replaced dependencies with known vulnerabilities and removed unused ones.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...HEAD
+[1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
 [1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66
 [1.1.65]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...v1.1.65
 [1.1.64]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.63...v1.1.64
