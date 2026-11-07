@@ -147,9 +147,18 @@ jobs:
           else
             # --target records the commit; GitHub creates the git tag there when
             # the draft is published.
-            # The install guide goes first; GitHub appends the generated PR list.
+            # Body: this version's CHANGELOG.md section, then the install
+            # guide; GitHub appends the generated PR list (--generate-notes).
+            # A missing section only warns, so the release still goes out.
+            notes="$RUNNER_TEMP/release-notes.md"
+            if node scripts/changelog-section.mjs "$RELEASE_TAG" > "$RUNNER_TEMP/changelog-section.md"; then
+              { cat "$RUNNER_TEMP/changelog-section.md"; printf '\n'; cat .github/release/notes-header.md; } > "$notes"
+            else
+              echo "::warning::CHANGELOG.md has no section for $RELEASE_TAG; the release body has only the install guide and the generated PR list."
+              cp .github/release/notes-header.md "$notes"
+            fi
             gh release create "$RELEASE_TAG" release-out/* \
-              --draft --title "$RELEASE_TAG" --notes-file .github/release/notes-header.md --generate-notes \
+              --draft --title "$RELEASE_TAG" --notes-file "$notes" --generate-notes \
               --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
           echo "Draft release $RELEASE_TAG is ready; publish it to make it the updater's latest."
