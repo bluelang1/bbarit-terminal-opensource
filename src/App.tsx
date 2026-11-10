@@ -3490,6 +3490,7 @@ function App() {
   // 왼쪽 프로젝트 패널 너비 (오른쪽 가장자리 드래그로 조절, octo-project-panel-width 에 저장)
   const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_WIDTH);
   const [isProjectPanelResizing, setIsProjectPanelResizing] = useState(false);
+  const projectPanelRef = useRef<HTMLDivElement>(null);
   // 터미널 리사이즈
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const [isTerminalResizing, setIsTerminalResizing] = useState(false);
@@ -3732,7 +3733,8 @@ function App() {
       const sw = kv['octo-sidebar-width'];
       if (sw) { const n = parseInt(sw, 10); if (Number.isFinite(n)) setSidebarWidth(n); }
       // projectPanelWidth — 저장값이 없거나 깨졌으면 기본 260px, 범위 밖이면 잘라낸다.
-      setProjectPanelWidth(parseProjectPanelWidth(kv[KV_KEY_PROJECT_PANEL_WIDTH], window.innerWidth));
+      // 창 크기 기준 상한(50%)은 CSS 표시에만 쓰고 저장값은 줄이지 않는다.
+      setProjectPanelWidth(parseProjectPanelWidth(kv[KV_KEY_PROJECT_PANEL_WIDTH]));
       // panel collapse states
       if (kv['octo-sidebar-hidden'] === '1') setSidebarHidden(true);
       if (kv['octo-editor-collapsed'] === '1') setEditorCollapsed(true);
@@ -10871,15 +10873,29 @@ Office project scaffold created by BBARIT Terminal.
   // 왼쪽 프로젝트 패널 리사이즈 핸들러 (사이드바와 같은 방식). 드래그 동안에는
   // 전체 화면 오버레이가 마우스를 받아 터미널/iframe 이 이벤트를 가져가지 않고,
   // 터미널 맞춤은 XTerminal 의 ResizeObserver 가 너비 변화를 보고 처리한다.
+  // 더블클릭(두 번째 mousedown, e.detail >= 2)은 여기서 기본 너비로 되돌린다:
+  // 오버레이가 mouseup 을 받으면 dblclick 이 핸들에 오지 않기 때문. 오버레이는
+  // 첫 mousemove 때만 띄워 단순 클릭에는 마운트되지 않는다.
   const handleProjectPanelResizeStart = useCallback((e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    setIsProjectPanelResizing(true);
+    if (e.detail >= 2) {
+      setProjectPanelWidth(PROJECT_PANEL_DEFAULT_WIDTH);
+      return;
+    }
     const startX = e.clientX;
-    const startWidth = projectPanelWidth;
+    // 창이 줄어 CSS(50vw)가 패널을 좁게 그리고 있으면 저장값이 아니라 실제
+    // 그려진 너비에서 시작해야 가장자리가 마우스를 바로 따라온다.
+    const measured = projectPanelRef.current?.getBoundingClientRect().width;
+    const startWidth = measured && measured > 0 ? measured : projectPanelWidth;
+    let moved = false;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!moved) {
+        moved = true;
+        setIsProjectPanelResizing(true);
+      }
       setProjectPanelWidth(clampProjectPanelWidth(startWidth + moveEvent.clientX - startX, window.innerWidth));
     };
 
@@ -18069,7 +18085,7 @@ Office project scaffold created by BBARIT Terminal.
       <div className="main-content">
         {/* 맨 왼쪽 프로젝트 패널 (Group 1 = Left 선택 시) */}
         {projectsLeftPanel && !isMonitorMode && (
-          <div className="project-selector-panel" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
+          <div ref={projectPanelRef} className="project-selector-panel" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
 	            <div className="project-selector-panel-header">
 	              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
 	                <span>{t('app.project.title' as any, 'Projects')}</span>
@@ -18187,10 +18203,6 @@ Office project scaffold created by BBARIT Terminal.
             aria-label={locale === 'ko' ? '프로젝트 패널 너비 조절 (더블클릭: 기본값)' : 'Resize project panel (double-click: reset)'}
             title={locale === 'ko' ? '드래그해서 너비 조절, 더블클릭하면 기본값' : 'Drag to resize, double-click to reset'}
             onMouseDown={handleProjectPanelResizeStart}
-            onDoubleClick={(e) => {
-              e.stopPropagation();
-              setProjectPanelWidth(clampProjectPanelWidth(PROJECT_PANEL_DEFAULT_WIDTH, window.innerWidth));
-            }}
           />
         )}
         {isProjectPanelResizing && createPortal(<div className="project-panel-resize-overlay" aria-hidden="true" />, document.body)}

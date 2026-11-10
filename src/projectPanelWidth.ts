@@ -20,9 +20,14 @@ export function clampProjectPanelWidth(width: number, viewportWidth?: number): n
   return Math.max(PROJECT_PANEL_MIN_WIDTH, Math.min(max, Math.round(base)));
 }
 
-/** Restore a saved width string; nothing saved or garbage -> default (clamped). */
-export function parseProjectPanelWidth(raw: string | null | undefined, viewportWidth?: number): number {
+/**
+ * Restore a saved width string to the absolute limits (180-520 px); nothing
+ * saved or garbage -> default. The half-window cap is deliberately not applied
+ * here: it is display-only (CSS max-width: 50vw) and used while dragging, so
+ * opening the app once in a small window never overwrites the saved width.
+ */
+export function parseProjectPanelWidth(raw: string | null | undefined): number {
   const text = typeof raw === 'string' ? raw.trim() : '';
   const n = text ? Number(text) : Number.NaN;
-  return clampProjectPanelWidth(Number.isFinite(n) ? n : PROJECT_PANEL_DEFAULT_WIDTH, viewportWidth);
+  return clampProjectPanelWidth(Number.isFinite(n) ? n : PROJECT_PANEL_DEFAULT_WIDTH);
 }

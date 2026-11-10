@@ -50,17 +50,23 @@ describe('project panel width', () => {
     expect(clampProjectPanelWidth(Number.POSITIVE_INFINITY, WIDE)).toBe(260);
   });
 
-  it('restores a saved value and clamps it', () => {
-    expect(parseProjectPanelWidth('340', WIDE)).toBe(340);
-    expect(parseProjectPanelWidth(' 340 ', WIDE)).toBe(340);
-    expect(parseProjectPanelWidth('9999', WIDE)).toBe(520);
-    expect(parseProjectPanelWidth('20', WIDE)).toBe(180);
-    expect(parseProjectPanelWidth('600', 1000)).toBe(500);
+  it('restores a saved value and clamps it to the absolute limits', () => {
+    expect(parseProjectPanelWidth('340')).toBe(340);
+    expect(parseProjectPanelWidth(' 340 ')).toBe(340);
+    expect(parseProjectPanelWidth('9999')).toBe(520);
+    expect(parseProjectPanelWidth('20')).toBe(180);
+  });
+
+  it('does not shrink a saved width to fit a small window at startup', () => {
+    // The half-window cap is display-only (CSS max-width: 50vw) and applies
+    // while dragging; restoring must keep the user's width for a wider window.
+    expect(parseProjectPanelWidth('500')).toBe(500);
+    expect(parseProjectPanelWidth.length).toBe(1);
   });
 
   it('uses the default for nothing saved or garbage', () => {
     for (const raw of [undefined, null, '', '   ', 'NaN', 'abc', '260px', '{}', 'Infinity']) {
-      expect(parseProjectPanelWidth(raw, WIDE)).toBe(260);
+      expect(parseProjectPanelWidth(raw)).toBe(260);
     }
   });
 });
