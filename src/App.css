@@ -3590,15 +3590,32 @@ body.ftree-dragging * {
   font-weight: 800;
 }
 
-/* 마지막 실행 명령(앞 10자) — 터미널 상단 오버레이와 하단 pill 공용 배지.
-   top-right의 프로젝트명 칩(top:12, right:14, 높이 ~34px) 바로 아래에 앉힌다. */
-.terminal-last-cmd-overlay {
-  position: absolute;
-  top: 50px;
-  right: 14px;
-  z-index: 12;
-  pointer-events: none;
+/* 하단 상태 막대 왼쪽: 활성 터미널의 마지막 명령. 줄어들 수 있고(min-width 0) 막대의 절반을
+   넘지 않아 CPU/MEM/DISK를 밀어내지 않는다. 막대 글꼴·크기를 그대로 쓰고 색만 조금 진하게. */
+.status-bar-last-cmd {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: color-mix(in srgb, var(--text-color) 72%, transparent);
+  white-space: nowrap;
 }
+
+.status-bar-last-cmd > svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.status-bar-last-cmd-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 마지막 실행 명령(앞 10자) — 터미널 탭과 하단 pill 공용 배지.
+   하단 상태 막대 왼쪽의 전체 명령은 .status-bar-last-cmd. */
 
 .terminal-last-cmd {
   text-transform: none;
@@ -4228,84 +4245,6 @@ body.ftree-dragging * {
   animation: terminal-click-flash-text 560ms cubic-bezier(0.2, 0.72, 0.12, 1);
 }
 
-.project-name-overlay {
-  /* Last-command badge: pinned to the terminal's top-left corner. */
-  position: absolute;
-  top: 6px;
-  left: 10px;
-  transform: none;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0;
-  opacity: 0.95;
-  pointer-events: none;
-  z-index: 18;
-  white-space: nowrap;
-  user-select: none;
-  text-transform: none;
-  max-width: 70%;
-  overflow: hidden;
-  padding: 0;
-  isolation: isolate;
-}
-
-.project-name-overlay::before {
-  content: '';
-  display: none;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: min(82cqw, 500px);
-  height: min(30cqw, 180px);
-  transform: translate(-50%, -50%);
-  z-index: -1;
-  border-radius: var(--brutal-radius);
-  background: radial-gradient(
-    ellipse at center,
-    color-mix(in srgb, var(--bg-color) 62%, transparent) 0%,
-    color-mix(in srgb, var(--bg-color) 22%, transparent) 46%,
-    transparent 78%
-  );
-  filter: blur(18px);
-  opacity: 0.9;
-}
-
-.project-name-overlay::after {
-  content: '';
-  display: none;
-  position: absolute;
-  left: 50%;
-  top: calc(100% + 2px);
-  width: min(24cqw, 140px);
-  height: 1px;
-  transform: translateX(-50%);
-  background: color-mix(in srgb, currentColor 40%, transparent);
-  box-shadow: 0 0 12px color-mix(in srgb, currentColor 18%, transparent);
-  opacity: 0.75;
-}
-
-.light-theme .project-name-overlay {
-  opacity: 0.22;
-}
-
-.light-theme .project-name-overlay::before {
-  background: radial-gradient(
-    ellipse at center,
-    color-mix(in srgb, white 78%, transparent) 0%,
-    color-mix(in srgb, white 22%, transparent) 44%,
-    transparent 78%
-  );
-  opacity: 0.7;
-}
-
-.terminal-app:not(.light-theme) .project-name-overlay {
-  opacity: 0.38;
-  text-shadow:
-    0 2px 18px rgba(0, 0, 0, 0.44),
-    0 0 20px rgba(0, 0, 0, 0.18);
-}
-
 .terminal-name-overlay {
   position: absolute;
   top: 50%;
@@ -4415,26 +4354,6 @@ body.ftree-dragging * {
     width: 26px;
     height: 26px;
   }
-}
-
-.project-name-overlay-main {
-  font-size: clamp(18px, 10cqw, 58px);
-  font-weight: 900;
-  letter-spacing: 0.18em;
-  line-height: 1;
-  text-shadow:
-    0 1px 10px rgba(0, 0, 0, 0.24),
-    0 0 1px rgba(255, 255, 255, 0.08);
-}
-
-.project-name-overlay-sub {
-  font-size: clamp(11px, 4.8cqw, 26px);
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  opacity: 0.72;
-  margin-top: 10px;
-  text-shadow:
-    0 1px 8px rgba(0, 0, 0, 0.18);
 }
 
 .terminals-grid {
@@ -10689,72 +10608,6 @@ input[type="range"]::-webkit-slider-thumb {
     0 0 10px color-mix(in srgb, #22c55e 55%, transparent) !important;
 }
 
-.project-name-overlay {
-  top: 12px !important;
-  left: 14px !important;
-  right: auto !important;
-  transform: none !important;
-  max-width: min(420px, calc(100% - 28px)) !important;
-  min-height: 0 !important;
-  display: inline-flex !important;
-  flex-direction: row !important;
-  align-items: center !important;
-  justify-content: flex-start !important;
-  gap: 6px !important;
-  padding: 2px 7px !important;
-  opacity: 0.92 !important;
-  text-transform: none !important;
-  border-radius: var(--brutal-radius) !important;
-  border: 1px solid color-mix(in srgb, var(--accent-color) 22%, transparent) !important;
-  background:
-    linear-gradient(180deg,
-      color-mix(in srgb, var(--bg-color) 84%, transparent),
-      color-mix(in srgb, var(--bg-color) 94%, transparent)) !important;
-  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.12) !important;
-  backdrop-filter: blur(8px) !important;
-  -webkit-backdrop-filter: blur(8px) !important;
-}
-
-.project-name-overlay::before,
-.project-name-overlay::after {
-  content: none !important;
-}
-
-.project-name-overlay-main {
-  max-width: 210px !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
-  font-size: 12px !important;
-  font-weight: 800 !important;
-  letter-spacing: 0 !important;
-  line-height: 1.2 !important;
-  text-shadow: none !important;
-}
-
-.project-name-overlay-sub {
-  max-width: 120px !important;
-  overflow: hidden !important;
-  text-overflow: ellipsis !important;
-  white-space: nowrap !important;
-  margin-top: 0 !important;
-  font-size: 10px !important;
-  font-weight: 700 !important;
-  letter-spacing: 0.04em !important;
-  line-height: 1.2 !important;
-  opacity: 0.62 !important;
-  text-shadow: none !important;
-}
-
-.light-theme .project-name-overlay {
-  opacity: 0.9 !important;
-}
-
-.terminal-app:not(.light-theme) .project-name-overlay {
-  opacity: 0.92 !important;
-  text-shadow: none !important;
-}
-
 .xterm-viewport {
   scrollbar-color: color-mix(in srgb, var(--accent-color) 42%, var(--text-color) 16%) transparent;
 }
@@ -12364,29 +12217,6 @@ textarea,
   color: inherit; cursor: pointer; font-size: 12px; padding: 4px 8px;
 }
 .scheduler-item-actions button:hover { background: rgba(255, 255, 255, 0.08); }
-
-/* 우측 터미널 이름 오버레이의 마지막 명령 — 색상 강조, 큰 글씨 */
-.terminal-last-cmd-big {
-  display: block;
-  font-family: 'SF Mono', ui-monospace, Menlo, monospace;
-  /* 터미널 패널 폭에 반응: 좁은 분할에서도 12px 아래로는 내려가지 않게 */
-  font-size: clamp(12px, 2.2cqw, 17px);
-  font-weight: 800;
-  letter-spacing: 0.01em;
-  color: #ffb020;
-  max-width: min(58cqw, 400px);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.light-theme .terminal-last-cmd-big {
-  color: #b45309;
-}
-
-/* 우측 오버레이는 마지막 명령어만 표시 — 명령이 없으면 통째로 숨김 */
-.project-name-overlay:empty {
-  display: none;
-}
 
 /* 프로젝트 탭 브랜치 배지 (win#7) — 프로젝트별 현재 브랜치를 탭에서 바로 확인.
    이름이 항상 우선: 공간이 모자라면 배지가 먼저 줄어들고, 이름은 절대 깨지지 않는다. */

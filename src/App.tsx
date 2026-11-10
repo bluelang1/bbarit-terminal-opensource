@@ -998,19 +998,25 @@ function createTerminal(
   };
 }
 
-// 터미널에서 마지막으로 실행한 명령의 앞 10자 배지 — 터미널 상단 오버레이와
-// 하단 pill 공용. 새 명령 커밋 시 배지만 자체 재렌더(useSyncExternalStore).
-function TerminalLastCmd({ terminalId, overlay, big }: { terminalId: string; overlay?: boolean; big?: boolean }) {
+// 터미널에서 마지막으로 실행한 명령 배지 — 터미널 탭·하단 pill(앞 10자)과 하단 상태 막대
+// 왼쪽(`bar`, 전체 명령을 말줄임). 새 명령 커밋 시 배지만 자체 재렌더(useSyncExternalStore).
+function TerminalLastCmd({ terminalId, bar }: { terminalId?: string; bar?: boolean }) {
   useSyncExternalStore(subscribeLastCommands, lastCommandsVersion);
-  const cmd = lastCommandOf(terminalId);
+  const cmd = terminalId ? lastCommandOf(terminalId) : '';
   if (!cmd) return null;
-  const max = big ? 26 : 10;
-  const badge = (
-    <span className={big ? 'terminal-last-cmd-big' : 'terminal-last-cmd'} title={cmd}>
-      {cmd.length > max ? `${cmd.slice(0, max)}…` : cmd}
+  if (bar) {
+    return (
+      <span className="status-bar-last-cmd" title={cmd}>
+        <LucideIcons.ChevronRight size={10} aria-hidden="true" />
+        <span className="status-bar-last-cmd-text">{cmd}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="terminal-last-cmd" title={cmd}>
+      {cmd.length > 10 ? `${cmd.slice(0, 10)}…` : cmd}
     </span>
   );
-  return overlay ? <div className="terminal-last-cmd-overlay">{badge}</div> : badge;
 }
 
 // Main-grid terminal slot. While the terminal is popped out into its own OS
@@ -21909,11 +21915,6 @@ Office project scaffold created by BBARIT Terminal.
 	                          </div>
 	                        </div>
                         <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-                                                    {(
-                            <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-                                                            <TerminalLastCmd terminalId={terminal.id} big />
-                            </div>
-                          )}
                           {renderTerminalNameOverlay(proj, terminal, isActiveTerminal)}
                           <MainGridTerminal
                             detached={detachedTerminalIds.has(terminal.id)}
@@ -22501,11 +22502,6 @@ Office project scaffold created by BBARIT Terminal.
 			                            </div>
 			                          </div>
 			                          <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: paneView === 'terminal' ? 'flex' : 'none', flexDirection: 'column', position: 'relative' }}>
-			                            			                            {(
-			                              <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-			                                			                                <TerminalLastCmd terminalId={terminal.id} big />
-			                              </div>
-			                            )}
                               {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
 			                            <MainGridTerminal
 			                              detached={detachedTerminalIds.has(terminal.id)}
@@ -22844,11 +22840,6 @@ Office project scaffold created by BBARIT Terminal.
 		                                </div>
 		                              </div>
 		                              <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-		                                		                                {(
-		                                  <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-		                                    		                                    <TerminalLastCmd terminalId={terminal.id} big />
-		                                  </div>
-		                                )}
                                   {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
 		                                <MainGridTerminal
 		                                  detached={detachedTerminalIds.has(terminal.id)}
@@ -23158,11 +23149,6 @@ Office project scaffold created by BBARIT Terminal.
 	                        </div>
 	                      )}
                       <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-                                                {(
-                          <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-                                                        <TerminalLastCmd terminalId={terminal.id} big />
-                          </div>
-                        )}
                         {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
                         <MainGridTerminal
                           detached={detachedTerminalIds.has(terminal.id)}
@@ -23743,6 +23729,7 @@ Office project scaffold created by BBARIT Terminal.
         flexShrink: 0,
         userSelect: 'none',
       }}>
+        <TerminalLastCmd terminalId={projects.find((p) => p.id === activeProjectId)?.activeTerminalId} bar />
         {showTerminalStrip && <div className="terminal-git-footer-strip" style={isMonitorMode ? { display: 'none' } : undefined}>
           {terminalGitFooterItems.map(({ project, terminal, workDir, isActive }) => {
             const status = terminalGitStatuses[terminal.id];
