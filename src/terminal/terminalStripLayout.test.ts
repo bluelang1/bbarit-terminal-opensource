@@ -24,6 +24,30 @@ describe('terminal area width beside the button strip', () => {
     expect(1506 - 28 - width).toBe(15); // left inset = 8 px padding + 7 px leftover
   });
 
+  it('alternate buffer (lane 0): the text uses the scrollbar lane', () => {
+    const normal = terminalAreaWidth({ ...base, wrapWidth: 1506, cellWidth: 8.625 })!;
+    const alt = terminalAreaWidth({ ...base, lane: 0, wrapWidth: 1506, cellWidth: 8.625 })!;
+    expect(fitAddonCols(normal, 14, 8.625)).toBe(168);
+    expect(fitAddonCols(alt, 0, 8.625)).toBe(170); // floor(1470 / 8.625)
+    expect(alt).toBe(1467); // 170 * 8.625 = 1466.25, rounded up
+    expect(1506 - 28 - alt).toBe(11); // left inset = 8 + 3 px leftover
+    // Same wrapper: the extra columns are what the 14 px lane plus the leftover hold.
+    expect(170 - 168).toBe(Math.floor((14 + (1470 - 14 - 168 * 8.625)) / 8.625));
+  });
+
+  it('lane 0 never loses a column to rounding either', () => {
+    for (const cell of [7, 7.2, 8.4296875, 8.625, 9.6, 12.0000001]) {
+      for (let wrapWidth = 120; wrapWidth <= 2600; wrapWidth += 11) {
+        const available = wrapWidth - 36;
+        const width = terminalAreaWidth({ ...base, lane: 0, wrapWidth, cellWidth: cell });
+        if (width === null) continue;
+        expect(width).toBeLessThanOrEqual(available);
+        expect(fitAddonCols(width, 0, cell)).toBe(fitAddonCols(available, 0, cell));
+        expect(width - fitAddonCols(width, 0, cell) * cell).toBeLessThan(1);
+      }
+    }
+  });
+
   it('keeps an exact multiple exact', () => {
     // available = 1000 - 36 = 964 -> (964 - 14) / 10 = 95 cols, no leftover
     expect(terminalAreaWidth({ ...base, wrapWidth: 1000, cellWidth: 10 })).toBe(964);

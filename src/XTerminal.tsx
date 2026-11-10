@@ -53,7 +53,7 @@ import { Delete, Eraser, ListX } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCommandColumn';
-import { FIT_SCROLLBAR_LANE, terminalAreaWidth } from './terminal/terminalStripLayout';
+import { FIT_SCROLLBAR_LANE, fitAddonCols, terminalAreaWidth } from './terminal/terminalStripLayout';
 import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
@@ -172,15 +172,23 @@ const TERMINAL_AREA_PAD = 8;
 const TERMINAL_AREA_WIDTH_VAR = '--octo-terminal-area-width';
 const TERMINAL_AREA_WIDTH = `var(${TERMINAL_AREA_WIDTH_VAR}, calc(100% - ${TERMINAL_AREA_PAD + TERMINAL_GUTTER_WIDTH}px))`;
 
+// The alternate buffer (full-screen TUIs) has no scrollback, so xterm never draws a scrollbar
+// there: its text gets the lane addon-fit would otherwise keep empty.
+const isAltBuffer = (term: Terminal | null | undefined): boolean => {
+  try { return term?.buffer?.active?.type === 'alternate'; } catch { return false; }
+};
+const scrollbarLaneFor = (term: Terminal | null | undefined): number => (isAltBuffer(term) ? 0 : FIT_SCROLLBAR_LANE);
+const cellWidthOf = (term: Terminal | null | undefined): number =>
+  (term as any)?._core?._renderService?.dimensions?.css?.cell?.width || 0;
+
 const applyTerminalAreaWidth = (term: Terminal | null | undefined, wrap: HTMLElement | null | undefined): number | null => {
   if (!wrap) return null;
-  const cellWidth = (term as any)?._core?._renderService?.dimensions?.css?.cell?.width || 0;
   const width = terminalAreaWidth({
     wrapWidth: Math.floor(wrap.getBoundingClientRect().width),
     padLeft: TERMINAL_AREA_PAD,
     minStrip: TERMINAL_GUTTER_WIDTH,
-    lane: FIT_SCROLLBAR_LANE,
-    cellWidth,
+    lane: scrollbarLaneFor(term),
+    cellWidth: cellWidthOf(term),
   });
   if (width === null) wrap.style.removeProperty(TERMINAL_AREA_WIDTH_VAR);
   else wrap.style.setProperty(TERMINAL_AREA_WIDTH_VAR, `${width}px`);
@@ -192,9 +200,29 @@ const applyTerminalAreaWidth = (term: Terminal | null | undefined, wrap: HTMLEle
 // changed during fit (font change). Bounded to two fits, so it cannot loop.
 const fitTerminalArea = (fit: FitAddon | null | undefined, term: Terminal | null | undefined, wrap: HTMLElement | null | undefined) => {
   if (!fit) return;
+  const run = () => {
+    if (term && scrollbarLaneFor(term) === 0) fitWithoutLane(fit, term);
+    else fit.fit();
+  };
   const before = applyTerminalAreaWidth(term, wrap);
-  fit.fit();
-  if (applyTerminalAreaWidth(term, wrap) !== before) fit.fit();
+  run();
+  if (applyTerminalAreaWidth(term, wrap) !== before) run();
+};
+
+// addon-fit's fit() with lane 0: rows from proposeDimensions (they do not depend on the lane),
+// cols from the same formula over the parent width. Same resize step as fit() itself.
+const fitWithoutLane = (fit: FitAddon, term: Terminal) => {
+  const dims = fit.proposeDimensions();
+  const parent = term.element?.parentElement;
+  const cellWidth = cellWidthOf(term);
+  if (!dims || !parent || !term.element || !(cellWidth > 0) || Number.isNaN(dims.rows)) { fit.fit(); return; }
+  const el = window.getComputedStyle(term.element);
+  const padding = (parseInt(el.getPropertyValue('padding-left')) || 0) + (parseInt(el.getPropertyValue('padding-right')) || 0);
+  const parentWidth = Math.max(0, parseInt(window.getComputedStyle(parent).getPropertyValue('width')) || 0);
+  const cols = fitAddonCols(parentWidth - padding, 0, cellWidth);
+  if (term.cols === cols && term.rows === dims.rows) return;
+  (term as any)._core?._renderService?.clear?.();
+  term.resize(cols, dims.rows);
 };
 const TELEGRAM_SCREEN_SNAPSHOT_MAX_CHARS = 16000;
 const TELEGRAM_LAST_SENT_MAX_CHARS = 4096;
@@ -3124,6 +3152,31 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     }
 
     let disposed = false;
+    // Entering/leaving the alternate buffer changes the scrollbar lane (scrollbarLaneFor), so
+    // re-size once the switch settles: quick toggles coalesce into one PTY resize, and saved
+    // output replays (which may flip buffers repeatedly) are sized once after they finish.
+    let bufferResizeTimer: number | null = null;
+    const resizeForBuffer = () => {
+      bufferResizeTimer = null;
+      if (disposed) return;
+      const st = terminalStates.get(terminalId);
+      if (st?.replayingOutput) { bufferResizeTimer = window.setTimeout(resizeForBuffer, 100); return; }
+      const t = termRef.current;
+      const f = fitRef.current;
+      const w = terminalWrapRef.current;
+      if (!t || !f || !w || w.offsetWidth <= 0 || w.offsetHeight <= 0) return;
+      const { cols, rows } = t;
+      try {
+        preserveTerminalViewport(t, st, () => fitTerminalArea(f, t, w), true, true);
+      } catch { /* ignore */ }
+      if (t.cols !== cols || t.rows !== rows) {
+        invoke('resize_pty', { terminalId, rows: t.rows, cols: t.cols }).catch(() => {});
+      }
+    };
+    const bufferChangeSub = term.buffer.onBufferChange(() => {
+      if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
+      bufferResizeTimer = window.setTimeout(resizeForBuffer, 50);
+    });
     // Startup once-gate rollback: autoStartedCliType is pre-set synchronously so a
     // remount within the startup delay can't double-inject. But if THIS mount disposes
     // before the delayed write fires (StrictMode double-mount, harness-window remount,
@@ -4131,6 +4184,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     return () => {
       disposed = true;
       isDisposedRef.current = true;
+      bufferChangeSub.dispose();
+      if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
 
       // If we pre-set the startup once-gate but disposed before the delayed write
       // fired, roll the gate back so the next mount actually injects the CLI start
