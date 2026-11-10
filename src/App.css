@@ -732,9 +732,10 @@ body.project-dragging * {
 
 
 .project-selector-panel {
+  /* Left-panel layout sets an inline width (projectPanelWidth, 180-520 px). */
   width: 260px;
-  min-width: 220px;
-  max-width: 320px;
+  min-width: 180px;
+  max-width: 50vw;
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -8406,6 +8407,45 @@ body.ftree-dragging * {
 .sidebar-resize-handle:hover,
 .sidebar-resize-handle.resizing {
   background: var(--accent-color);
+}
+
+/* Left project panel resize handle: zero-width flex item right after the
+   panel (order -9) whose ::after is a 6 px hit strip centred on the panel's
+   right border, so it never shifts layout or covers the rows. */
+.project-panel-resize-handle {
+  order: -9;
+  flex: 0 0 0;
+  width: 0;
+  position: relative;
+  z-index: 20;
+  align-self: stretch;
+}
+
+.project-panel-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.05s;
+}
+
+.project-panel-resize-handle:hover::after,
+.project-panel-resize-handle.resizing::after {
+  background: color-mix(in srgb, var(--accent-color) 70%, transparent);
+}
+
+/* While the panel is dragged, this sheet takes every mouse event so
+   terminals and iframes underneath do not see the drag. */
+.project-panel-resize-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9998;
+  cursor: col-resize;
+  background: transparent;
 }
 
 /* Agent Panel Resize Handle */

@@ -161,6 +161,7 @@ import { copyFileTreePathToClipboard, shouldHandoffFileTreeDragToNative } from '
 import { nativeDropPositionToCss } from './utils/nativeDropPosition';
 import { measureProjectDragShift, projectReorderShifts, projectShiftTransform, type ProjectDragShift } from './projectReorderPreview';
 import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from './projectDragGhost';
+import { KV_KEY_PROJECT_PANEL_WIDTH, PROJECT_PANEL_DEFAULT_WIDTH, clampProjectPanelWidth, parseProjectPanelWidth } from './projectPanelWidth';
 import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } from './projectDropTargets';
 import { isClaudeSessionId, newClaudeSessionId, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { applyReportedClaudeSessionToProjects, CLAUDE_SESSION_REPORTED_EVENT, isDedicatedClaudeTab, type ClaudeSessionReport } from './terminal/claudeSessionReport';
@@ -3486,6 +3487,9 @@ function App() {
 
   // 리사이즈 상태
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  // 왼쪽 프로젝트 패널 너비 (오른쪽 가장자리 드래그로 조절, octo-project-panel-width 에 저장)
+  const [projectPanelWidth, setProjectPanelWidth] = useState(PROJECT_PANEL_DEFAULT_WIDTH);
+  const [isProjectPanelResizing, setIsProjectPanelResizing] = useState(false);
   // 터미널 리사이즈
   const terminalContainerRef = useRef<HTMLDivElement>(null);
   const [isTerminalResizing, setIsTerminalResizing] = useState(false);
@@ -3707,7 +3711,7 @@ function App() {
   useEffect(() => {
     // Batch-fetch all simple KV keys in a single call
     kvGetMany([
-      'octo-view-mode', 'octo-terminal-height', 'octo-memo', 'octo-sidebar-width',
+      'octo-view-mode', 'octo-terminal-height', 'octo-memo', 'octo-sidebar-width', KV_KEY_PROJECT_PANEL_WIDTH,
       'octo-sidebar-hidden', 'octo-editor-collapsed', 'octo-terminal-collapsed',
       KV_KEY_PROJECTS_LEFT_PANEL, KEYBINDING_PRESET_KEY, 'octo-dashboard-layouts',
       'octo-telegram-bot-token', 'octo-discord-bot-token', 'octo-slack-bot-token',
@@ -3727,6 +3731,8 @@ function App() {
       // sidebarWidth
       const sw = kv['octo-sidebar-width'];
       if (sw) { const n = parseInt(sw, 10); if (Number.isFinite(n)) setSidebarWidth(n); }
+      // projectPanelWidth — 저장값이 없거나 깨졌으면 기본 260px, 범위 밖이면 잘라낸다.
+      setProjectPanelWidth(parseProjectPanelWidth(kv[KV_KEY_PROJECT_PANEL_WIDTH], window.innerWidth));
       // panel collapse states
       if (kv['octo-sidebar-hidden'] === '1') setSidebarHidden(true);
       if (kv['octo-editor-collapsed'] === '1') setEditorCollapsed(true);
@@ -10657,6 +10663,7 @@ Office project scaffold created by BBARIT Terminal.
       void kvSetMany({
         'octo-terminal-height': terminalHeight.toString(),
         'octo-sidebar-width': sidebarWidth.toString(),
+        [KV_KEY_PROJECT_PANEL_WIDTH]: projectPanelWidth.toString(),
         'octo-view-mode': viewMode,
         [KV_KEY_PROJECTS_LEFT_PANEL]: projectsLeftPanel ? '1' : '0',
 
@@ -10666,7 +10673,7 @@ Office project scaffold created by BBARIT Terminal.
       });
     }, 500);
     return () => { if (uiSaveTimerRef.current) clearTimeout(uiSaveTimerRef.current); };
-  }, [terminalHeight, sidebarWidth, viewMode, projectsLeftPanel, sidebarHidden, editorCollapsed, terminalCollapsed]);
+  }, [terminalHeight, sidebarWidth, projectPanelWidth, viewMode, projectsLeftPanel, sidebarHidden, editorCollapsed, terminalCollapsed]);
   const fileTreeStateSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!projectFileTreeStatesLoadedRef.current) return;
@@ -10861,6 +10868,35 @@ Office project scaffold created by BBARIT Terminal.
     document.addEventListener('mouseup', handleMouseUp);
   }, [sidebarWidth]);
 
+  // 왼쪽 프로젝트 패널 리사이즈 핸들러 (사이드바와 같은 방식). 드래그 동안에는
+  // 전체 화면 오버레이가 마우스를 받아 터미널/iframe 이 이벤트를 가져가지 않고,
+  // 터미널 맞춤은 XTerminal 의 ResizeObserver 가 너비 변화를 보고 처리한다.
+  const handleProjectPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setIsProjectPanelResizing(true);
+    const startX = e.clientX;
+    const startWidth = projectPanelWidth;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      setProjectPanelWidth(clampProjectPanelWidth(startWidth + moveEvent.clientX - startX, window.innerWidth));
+    };
+
+    const handleMouseUp = () => {
+      setIsProjectPanelResizing(false);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [projectPanelWidth]);
+
   const updateActiveSplitSizes = useCallback((patch: { linear?: number[]; grid?: number[] }) => {
     if (!activeProjectId) return;
     setPerProjectSplitSizes((prev) => {
@@ -10913,6 +10949,7 @@ Office project scaffold created by BBARIT Terminal.
     style.textContent = `
       .project-tabs { display: none !important; }
       .project-selector-panel { display: none !important; }
+.project-panel-resize-handle { display: none !important; }
       .file-tree-sidebar { display: none !important; width: 0 !important; min-width: 0 !important; }
       .sidebar-resize-handle { display: none !important; }
       .sidebar-collapsed-strip { display: none !important; }
@@ -18032,7 +18069,7 @@ Office project scaffold created by BBARIT Terminal.
       <div className="main-content">
         {/* 맨 왼쪽 프로젝트 패널 (Group 1 = Left 선택 시) */}
         {projectsLeftPanel && !isMonitorMode && (
-          <div className="project-selector-panel" style={{ order: -10, flexShrink: 0 }}>
+          <div className="project-selector-panel" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
 	            <div className="project-selector-panel-header">
 	              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
 	                <span>{t('app.project.title' as any, 'Projects')}</span>
@@ -18142,6 +18179,21 @@ Office project scaffold created by BBARIT Terminal.
             </div>
           </div>
         )}
+        {projectsLeftPanel && !isMonitorMode && (
+          <div
+            className={`project-panel-resize-handle ${isProjectPanelResizing ? 'resizing' : ''}`}
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={locale === 'ko' ? '프로젝트 패널 너비 조절 (더블클릭: 기본값)' : 'Resize project panel (double-click: reset)'}
+            title={locale === 'ko' ? '드래그해서 너비 조절, 더블클릭하면 기본값' : 'Drag to resize, double-click to reset'}
+            onMouseDown={handleProjectPanelResizeStart}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setProjectPanelWidth(clampProjectPanelWidth(PROJECT_PANEL_DEFAULT_WIDTH, window.innerWidth));
+            }}
+          />
+        )}
+        {isProjectPanelResizing && createPortal(<div className="project-panel-resize-overlay" aria-hidden="true" />, document.body)}
 
         {/* Sidebar Toggle — show thin strip when hidden */}
         {sidebarHidden && viewMode !== 'terminal' && viewMode !== 'project-terminal' && viewMode !== 'pm2' && viewMode !== 'hub' && !isMonitorMode && (
