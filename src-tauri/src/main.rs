@@ -25,6 +25,7 @@ mod collab;
 mod common;
 mod database;
 mod design_http;
+mod disk_usage;
 mod file_watcher;
 mod fs_ops;
 mod integrations;
@@ -7081,6 +7082,22 @@ fn get_process_stats() -> ProcessStats {
     }
 }
 
+/// On-disk size of a project folder for the status bar. Walks every file, so
+/// the frontend calls it only when the project changes or the user clicks; the
+/// walk runs on a blocking thread, never on the main thread.
+#[tauri::command]
+async fn project_disk_usage(path: String) -> Result<disk_usage::DiskUsage, String> {
+    tauri::async_runtime::spawn_blocking(move || disk_usage::measure_shared(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Stop the running disk-size walk of `path` (all walks when omitted).
+#[tauri::command]
+fn project_disk_usage_cancel(path: Option<String>) -> usize {
+    disk_usage::cancel(path.as_deref())
+}
+
 // ─── PM2 Commands ────────────────────────────────────────────────────
 
 /// Run `pm2 jlist` on remote (SSH) or local host, return raw JSON string.
@@ -10494,6 +10511,8 @@ fn main() {
             save_clipboard_image,
             save_clipboard_image_from_system_clipboard,
             get_process_stats,
+            project_disk_usage,
+            project_disk_usage_cancel,
             pm2_list,
             server_stats,
             server_analysis,

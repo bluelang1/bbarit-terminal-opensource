@@ -3500,4 +3500,13 @@ export const ko: Record<TranslationKey, string> = {
   'guide.kind.security': '보안',
   'guide.menu.start': '시작하기',
   'guide.menu.whatsnew': '새로운 기능',
+  'statusBar.disk.size': '디스크 사용량: {size} ({bytes}바이트)',
+  'statusBar.disk.files': '파일 {n}개',
+  'statusBar.disk.skipped': '읽을 수 없는 항목 {n}개 제외',
+  'statusBar.disk.measuredNow': '방금 측정 ({secs}초 걸림)',
+  'statusBar.disk.measuredMin': '{n}분 전 측정 ({secs}초 걸림)',
+  'statusBar.disk.measuredHour': '{n}시간 전 측정 ({secs}초 걸림)',
+  'statusBar.disk.measuring': '폴더 크기 측정 중...',
+  'statusBar.disk.error': '측정 실패: {error}',
+  'statusBar.disk.clickToRemeasure': '클릭하면 다시 측정',
 };

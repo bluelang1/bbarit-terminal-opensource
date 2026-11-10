@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Added
+
+- The bottom status bar shows the selected project folder's disk size (DISK). It is measured once when you select the project; click it to measure again. The order is now CPU, MEM, DISK.
+
 ### Changed
 
 - The bottom terminal strip (branch and change count per terminal) is now hidden by default. Turn on "Show bottom terminal strip" under Settings > Terminal > Display to bring it back; while it is off, git status is not read for it.

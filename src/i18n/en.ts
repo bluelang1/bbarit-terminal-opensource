@@ -3498,6 +3498,15 @@ export const en = {
   'guide.kind.security': 'Security',
   'guide.menu.start': 'Getting Started',
   'guide.menu.whatsnew': "What's New",
+  'statusBar.disk.size': 'Size on disk: {size} ({bytes} bytes)',
+  'statusBar.disk.files': '{n} files',
+  'statusBar.disk.skipped': '{n} unreadable entries left out',
+  'statusBar.disk.measuredNow': 'Measured just now (took {secs} s)',
+  'statusBar.disk.measuredMin': 'Measured {n} min ago (took {secs} s)',
+  'statusBar.disk.measuredHour': 'Measured {n} h ago (took {secs} s)',
+  'statusBar.disk.measuring': 'Measuring folder size...',
+  'statusBar.disk.error': 'Could not measure: {error}',
+  'statusBar.disk.clickToRemeasure': 'Click to re-measure',
 };
 
 export type TranslationKey = keyof typeof en;

@@ -4760,10 +4760,12 @@ function App() {
     };
   }, [micBusy, micRecording, startMic, stopMic, sttShortcutEnabled]);
 
-  // MEM/CPU 표시는 StatusBarStats가 자체 폴링한다: 상태를 App에 두면 CPU%가
+  // CPU/MEM 표시는 StatusBarStats가 자체 폴링한다: 상태를 App에 두면 CPU%가
   // 매초 바뀌어 App 트리 전체가 매초 리렌더된다 (장시간 사용 랙의 주범이었음).
 
   const activeProject = useMemo(() => projects.find((p) => p.id === activeProjectId), [projects, activeProjectId]);
+  // A plain string (or null) so the memoized StatusBarStats only re-renders when the folder changes.
+  const statusDiskWorkDir = activeProject?.workDir && !isSshVirtualPath(activeProject.workDir) ? activeProject.workDir : null;
   const activeTerminal = useMemo(() => {
     if (!activeProject?.activeTerminalId) return null;
     return activeProject.terminals.find((terminal) => terminal.id === activeProject.activeTerminalId) || null;
@@ -23835,7 +23837,7 @@ Office project scaffold created by BBARIT Terminal.
         </div>}
         {/* The strip was the bar's only stretching child; keep the stats on the right without it. */}
         {!showTerminalStrip && <div style={{ flex: '1 1 auto' }} />}
-        <StatusBarStats />
+        <StatusBarStats workDir={statusDiskWorkDir} />
       </div>
 
       {tabLimitNotice && (
