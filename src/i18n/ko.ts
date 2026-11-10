@@ -3509,4 +3509,7 @@ export const ko: Record<TranslationKey, string> = {
   'statusBar.disk.measuring': '폴더 크기 측정 중...',
   'statusBar.disk.error': '측정 실패: {error}',
   'statusBar.disk.clickToRemeasure': '클릭하면 다시 측정',
+  'statusBar.disk.notAuto': '홈 폴더나 디스크 최상위 폴더는 자동으로 재지 않습니다',
+  'statusBar.disk.interrupted': '지난 측정이 끝나기 전에 멈췄습니다',
+  'statusBar.disk.clickToMeasure': '클릭하면 측정',
 };

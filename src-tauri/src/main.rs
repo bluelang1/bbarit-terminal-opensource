@@ -7086,8 +7086,12 @@ fn get_process_stats() -> ProcessStats {
 /// the frontend calls it only when the project changes or the user clicks; the
 /// walk runs on a blocking thread, never on the main thread.
 #[tauri::command]
-async fn project_disk_usage(path: String) -> Result<disk_usage::DiskUsage, String> {
-    tauri::async_runtime::spawn_blocking(move || disk_usage::measure_shared(&path))
+async fn project_disk_usage(
+    path: String,
+    auto: Option<bool>,
+) -> Result<disk_usage::DiskUsage, String> {
+    let auto = auto.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || disk_usage::measure_shared(&path, auto))
         .await
         .map_err(|e| e.to_string())?
 }

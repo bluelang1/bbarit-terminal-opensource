@@ -10,6 +10,7 @@
 //! length elsewhere; symlinks are not followed (their own entry is counted);
 //! other filesystems mounted inside the folder are skipped; a file with several
 //! hard links inside the folder is counted once; unreadable entries are skipped.
+//! The home folder and filesystem roots are only measured on an explicit click.
 
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -31,6 +32,9 @@ pub struct DiskUsage {
     pub skipped: u64,
     /// True when the walk stopped early because it was cancelled.
     pub cancelled: bool,
+    /// True when an automatic request was declined because the folder is the
+    /// home folder or a filesystem root (measure those only on an explicit click).
+    pub not_auto: bool,
     pub elapsed_ms: u64,
 }
 
@@ -148,6 +152,23 @@ pub fn measure(root: &Path, cancel: &AtomicBool) -> Result<DiskUsage, String> {
     Ok(usage)
 }
 
+/// True for folders that are not measured automatically: a filesystem root
+/// (`/`, `C:\`) or the user's home folder. Walking those reads everything the
+/// user owns and, on macOS, can raise privacy prompts (Desktop, Documents,
+/// other apps' containers) without any user action. Paths are compared after
+/// canonicalizing, so `~/.`, trailing slashes and symlinks to home all match.
+pub fn is_broad_folder(path: &Path, home: Option<&Path>) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(path);
+    if target.parent().is_none() {
+        return true;
+    }
+    match home {
+        Some(h) => canon(h) == target,
+        None => false,
+    }
+}
+
 // ─── One walk per folder ─────────────────────────────────────────────
 
 struct Job {
@@ -189,36 +210,79 @@ fn validate(path: &str) -> Result<PathBuf, String> {
 }
 
 /// Measure `path`, joining a walk of the same folder that is already running
-/// (unless that one was cancelled). Blocking.
-pub fn measure_shared(path: &str) -> Result<DiskUsage, String> {
+/// (unless that one was cancelled). With `auto` set, the home folder and
+/// filesystem roots are not walked (`not_auto` in the result). Blocking.
+pub fn measure_shared(path: &str, auto: bool) -> Result<DiskUsage, String> {
     let root = validate(path)?;
-    let (job, owner) = {
-        let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
-        match map.get(&root) {
-            Some(job) if !job.cancel.load(Ordering::Relaxed) => (job.clone(), false),
-            _ => {
-                let job = Arc::new(Job {
-                    cancel: AtomicBool::new(false),
-                    result: Mutex::new(None),
-                    done: Condvar::new(),
-                });
-                map.insert(root.clone(), job.clone());
-                (job, true)
-            }
-        }
-    };
+    if auto && is_broad_folder(&root, dirs::home_dir().as_deref()) {
+        return Ok(DiskUsage {
+            not_auto: true,
+            ..DiskUsage::default()
+        });
+    }
+    let (job, owner) = start_or_join(&root);
     if !owner {
         return job.wait();
     }
-    let res = measure(&root, &job.cancel);
-    {
-        let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
-        if map.get(&root).is_some_and(|j| Arc::ptr_eq(j, &job)) {
-            map.remove(&root);
+    run_owned(root.clone(), job, |cancel| measure(&root, cancel))
+}
+
+/// Register a walk of `root`, or join the one already running.
+/// Returns the job and whether the caller owns (must run) it.
+fn start_or_join(root: &Path) -> (Arc<Job>, bool) {
+    let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+    match map.get(root) {
+        Some(job) if !job.cancel.load(Ordering::Relaxed) => (job.clone(), false),
+        _ => {
+            let job = Arc::new(Job {
+                cancel: AtomicBool::new(false),
+                result: Mutex::new(None),
+                done: Condvar::new(),
+            });
+            map.insert(root.to_path_buf(), job.clone());
+            (job, true)
         }
     }
-    *job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(res.clone());
-    job.done.notify_all();
+}
+
+/// Removes the job from the map and wakes its waiters when the owner finishes,
+/// including when the walk panics (waiters then get an error instead of
+/// waiting forever, and the folder can be measured again).
+struct JobGuard {
+    root: PathBuf,
+    job: Arc<Job>,
+    result: Option<Result<DiskUsage, String>>,
+}
+
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        {
+            let mut map = jobs().lock().unwrap_or_else(|e| e.into_inner());
+            if map.get(&self.root).is_some_and(|j| Arc::ptr_eq(j, &self.job)) {
+                map.remove(&self.root);
+            }
+        }
+        let res = self
+            .result
+            .take()
+            .unwrap_or_else(|| Err("disk size measurement failed".into()));
+        *self.job.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(res);
+        self.job.done.notify_all();
+    }
+}
+
+fn run_owned(
+    root: PathBuf,
+    job: Arc<Job>,
+    walk: impl FnOnce(&AtomicBool) -> Result<DiskUsage, String>,
+) -> Result<DiskUsage, String> {
+    let mut guard = JobGuard {
+        root,
+        job: job.clone(),
+        result: None,
+    };
+    let res = walk(&job.cancel);
+    guard.result = Some(res.clone());
     res
 }
 
@@ -325,13 +389,13 @@ mod tests {
     fn missing_path_is_an_error() {
         let missing = std::env::temp_dir().join("bbarit-disk-usage-does-not-exist-xyz");
         assert!(measure(&missing, &AtomicBool::new(false)).is_err());
-        assert!(measure_shared(missing.to_str().unwrap()).is_err());
+        assert!(measure_shared(missing.to_str().unwrap(), false).is_err());
     }
 
     #[test]
     fn rejects_ssh_and_empty_paths() {
-        assert!(measure_shared("ssh://host/home/me/project").is_err());
-        assert!(measure_shared("   ").is_err());
+        assert!(measure_shared("ssh://host/home/me/project", false).is_err());
+        assert!(measure_shared("   ", false).is_err());
     }
 
     #[test]
@@ -339,11 +403,63 @@ mod tests {
         let dir = temp_dir("shared");
         write(&dir.join("a.bin"), 5_000);
         let direct = measure(&dir, &AtomicBool::new(false)).unwrap();
-        let shared = measure_shared(dir.to_str().unwrap()).unwrap();
+        let shared = measure_shared(dir.to_str().unwrap(), true).unwrap();
+        assert!(!shared.not_auto);
         assert_eq!(shared.bytes, direct.bytes);
         assert_eq!(shared.files, 1);
         assert!(!jobs().lock().unwrap().contains_key(&dir));
         assert_eq!(cancel(Some(dir.to_str().unwrap())), 0);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn home_and_roots_are_broad_folders() {
+        let home = temp_dir("home");
+        fs::create_dir_all(home.join("project")).unwrap();
+        assert!(is_broad_folder(&home, Some(&home)));
+        assert!(is_broad_folder(&home.join("."), Some(&home)));
+        assert!(!is_broad_folder(&home.join("project"), Some(&home)));
+        assert!(!is_broad_folder(&home.join("project"), None));
+        #[cfg(unix)]
+        {
+            assert!(is_broad_folder(Path::new("/"), None));
+            assert!(is_broad_folder(Path::new("/."), None));
+            let link = temp_dir("home-link-parent").join("to-home");
+            std::os::unix::fs::symlink(&home, &link).unwrap();
+            assert!(is_broad_folder(&link, Some(&home)));
+            fs::remove_dir_all(link.parent().unwrap()).unwrap();
+        }
+        #[cfg(windows)]
+        assert!(is_broad_folder(Path::new("C:\\"), None));
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_request_skips_filesystem_root() {
+        let auto = measure_shared("/", true).unwrap();
+        assert!(auto.not_auto);
+        assert_eq!(auto.files, 0);
+    }
+
+    #[test]
+    fn panicking_walk_releases_job_and_wakes_waiters() {
+        let dir = temp_dir("panic");
+        let (job, owner) = start_or_join(&dir);
+        assert!(owner);
+        let (joined, second_owner) = start_or_join(&dir);
+        assert!(!second_owner);
+        let waiter = std::thread::spawn(move || joined.wait());
+        let root = dir.clone();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_owned(root, job, |_| panic!("walk blew up"))
+        }));
+        assert!(caught.is_err());
+        assert!(waiter.join().unwrap().is_err());
+        assert!(!jobs().lock().unwrap().contains_key(&dir));
+        let (_, owner_again) = start_or_join(&dir);
+        assert!(owner_again);
+        jobs().lock().unwrap().remove(&dir);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

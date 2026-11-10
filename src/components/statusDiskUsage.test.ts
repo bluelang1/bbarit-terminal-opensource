@@ -46,7 +46,7 @@ type Deferred = {
 
 function makeStore(now = () => 1000) {
   const pending = new Map<string, Deferred[]>();
-  const measure = vi.fn((path: string) => new Promise<DiskUsageResult>((resolve, reject) => {
+  const measure = vi.fn((path: string, _auto: boolean) => new Promise<DiskUsageResult>((resolve, reject) => {
     const list = pending.get(path) ?? [];
     list.push({ resolve, reject });
     pending.set(path, list);
@@ -116,11 +116,45 @@ describe('DiskUsageStore', () => {
     expect(store.view('/a').entry?.bytes).toBe(111);
   });
 
-  it('a cancelled walk from the backend is not cached', async () => {
+  it('a cancelled walk the store did not ask for is not cached and shows as interrupted', async () => {
     const { store, settle } = makeStore();
     store.request('/a');
     await settle('/a', { bytes: 5, files: 1, cancelled: true, elapsedMs: 1 });
-    expect(store.view('/a')).toMatchObject({ entry: null, measuring: false, error: null });
+    expect(store.view('/a')).toMatchObject({ entry: null, measuring: false, error: null, interrupted: true });
+    store.request('/a');
+    await settle('/a', result(7), 1);
+    expect(store.view('/a')).toMatchObject({ entry: { bytes: 7 }, interrupted: false });
+  });
+
+  it('an interrupted re-measure keeps the cached value and is not flagged', async () => {
+    const { store, settle } = makeStore();
+    store.request('/a');
+    await settle('/a', result(42));
+    store.request('/a', { force: true });
+    await settle('/a', { bytes: 1, files: 1, cancelled: true }, 1);
+    expect(store.view('/a')).toMatchObject({ entry: { bytes: 42 }, interrupted: false });
+  });
+
+  it('asks the backend for an automatic measurement only when not forced', async () => {
+    const { store, measure, settle } = makeStore();
+    store.request('/a');
+    expect(measure).toHaveBeenLastCalledWith('/a', true);
+    await settle('/a', result(1));
+    store.request('/a', { force: true });
+    expect(measure).toHaveBeenLastCalledWith('/a', false);
+  });
+
+  it('home/root folders declined for auto measurement wait for a click', async () => {
+    const { store, measure, settle } = makeStore();
+    store.request('/Users/me');
+    await settle('/Users/me', { bytes: 0, files: 0, notAuto: true });
+    expect(store.view('/Users/me')).toMatchObject({ entry: null, measuring: false, error: null, manualOnly: true });
+    store.request('/Users/me');
+    expect(measure).toHaveBeenCalledTimes(1);
+    store.request('/Users/me', { force: true });
+    expect(measure).toHaveBeenLastCalledWith('/Users/me', false);
+    await settle('/Users/me', result(5 * 1024 ** 3), 1);
+    expect(store.view('/Users/me')).toMatchObject({ entry: { bytes: 5 * 1024 ** 3 }, manualOnly: false });
   });
 
   it('keeps the error for the tooltip and clears it on the next success', async () => {

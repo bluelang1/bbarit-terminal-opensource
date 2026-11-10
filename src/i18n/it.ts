@@ -3451,4 +3451,7 @@ export const it: Record<TranslationKey, string> = {
   'statusBar.disk.measuring': 'Measuring folder size...',
   'statusBar.disk.error': 'Could not measure: {error}',
   'statusBar.disk.clickToRemeasure': 'Click to re-measure',
+  'statusBar.disk.notAuto': 'Not measured automatically for the home folder or a disk root',
+  'statusBar.disk.interrupted': 'The last measurement stopped before it finished',
+  'statusBar.disk.clickToMeasure': 'Click to measure',
 };

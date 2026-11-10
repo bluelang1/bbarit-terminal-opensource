@@ -11,7 +11,7 @@ import {
 
 // One store for the session: per-folder cache and at most one walk per folder.
 const diskStore = new DiskUsageStore(
-  (path) => invoke<DiskUsageResult>('project_disk_usage', { path }),
+  (path, auto) => invoke<DiskUsageResult>('project_disk_usage', { path, auto }),
   (path) => {
     invoke('project_disk_usage_cancel', { path }).catch(() => {});
   },
@@ -24,6 +24,7 @@ const diskStore = new DiskUsageStore(
 //
 // DISK is the active project's folder size. It is NEVER polled (walking a large
 // repo touches every file): measured once per folder per session, re-measured on click.
+// The home folder and filesystem roots are never measured automatically, only on click.
 const StatusBarStats = memo(function StatusBarStats({ workDir }: { workDir: string | null }) {
   const { t } = useTranslation();
   const [stats, setStats] = useState<{ memory_mb: number; cpu_percent: number } | null>(null);
@@ -95,12 +96,18 @@ const StatusBarStats = memo(function StatusBarStats({ workDir }: { workDir: stri
       lines.push(fill(agoKey, { n: ago.n, secs }));
     } else if (disk.measuring) {
       diskText = '…';
-    } else if (disk.error) {
+    } else if (disk.error || disk.interrupted) {
       diskText = '?';
+    } else if (disk.manualOnly) {
+      diskText = '–';
     }
     if (disk.measuring) lines.push(t('statusBar.disk.measuring'));
-    if (disk.error && !disk.measuring) lines.push(fill('statusBar.disk.error', { error: disk.error }));
-    lines.push(t('statusBar.disk.clickToRemeasure'));
+    if (!disk.measuring) {
+      if (disk.error) lines.push(fill('statusBar.disk.error', { error: disk.error }));
+      else if (!disk.entry && disk.interrupted) lines.push(t('statusBar.disk.interrupted'));
+      else if (!disk.entry && disk.manualOnly) lines.push(t('statusBar.disk.notAuto'));
+    }
+    lines.push(t(disk.entry ? 'statusBar.disk.clickToRemeasure' : 'statusBar.disk.clickToMeasure'));
     diskTitle = lines.join('\n');
   }
 
@@ -135,7 +142,7 @@ const StatusBarStats = memo(function StatusBarStats({ workDir }: { workDir: stri
             cursor: 'pointer',
             fontVariantNumeric: 'tabular-nums',
             display: 'inline-block',
-            minWidth: '9ch',
+            minWidth: '10ch',
             opacity: disk?.measuring && disk.entry ? 0.55 : undefined,
           }}
         >

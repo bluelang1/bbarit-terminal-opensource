@@ -9,6 +9,8 @@ export type DiskUsageResult = {
   bytes: number;
   files: number;
   cancelled?: boolean;
+  /** The backend declined an automatic walk (home folder or filesystem root). */
+  notAuto?: boolean;
   skipped?: number;
   elapsedMs?: number;
 };
@@ -25,6 +27,10 @@ export type DiskView = {
   entry: DiskEntry | null;
   measuring: boolean;
   error: string | null;
+  /** Home folder or filesystem root: measured only when the user clicks. */
+  manualOnly: boolean;
+  /** The last walk stopped early (cancelled elsewhere) and nothing is cached. */
+  interrupted: boolean;
 };
 
 const UNITS = ['B', 'K', 'M', 'G', 'T'];
@@ -69,15 +75,18 @@ const errorText = (err: unknown): string => {
 export class DiskUsageStore {
   private cache = new Map<string, DiskEntry>();
   private errors = new Map<string, string>();
+  private manualOnly = new Set<string>();
+  private interrupted = new Set<string>();
   private inflight = new Map<string, Promise<unknown>>();
   private listeners = new Set<() => void>();
 
-  private readonly measureFn: (path: string) => Promise<DiskUsageResult>;
+  private readonly measureFn: (path: string, auto: boolean) => Promise<DiskUsageResult>;
   private readonly cancelFn: (path: string) => void;
   private readonly now: () => number;
 
   constructor(
-    measureFn: (path: string) => Promise<DiskUsageResult>,
+    /** `auto` is false only for an explicit click, which may walk home or a root. */
+    measureFn: (path: string, auto: boolean) => Promise<DiskUsageResult>,
     cancelFn: (path: string) => void,
     now: () => number = Date.now,
   ) {
@@ -91,6 +100,8 @@ export class DiskUsageStore {
       entry: this.cache.get(path) ?? null,
       measuring: this.inflight.has(path),
       error: this.errors.get(path) ?? null,
+      manualOnly: this.manualOnly.has(path),
+      interrupted: this.interrupted.has(path),
     };
   }
 
@@ -103,18 +114,25 @@ export class DiskUsageStore {
 
   /**
    * Measure `path` unless it is cached (pass force to re-measure). A request
-   * while the same folder is already being measured does nothing.
+   * while the same folder is already being measured does nothing. Unforced
+   * requests are automatic: the backend may decline them for the home folder or
+   * a filesystem root, which then wait for a forced (clicked) request.
    */
   request(path: string, opts: { force?: boolean } = {}): void {
     if (!isMeasurableDiskPath(path)) return;
     if (this.inflight.has(path)) return;
-    if (!opts.force && this.cache.has(path)) return;
+    if (!opts.force && (this.cache.has(path) || this.manualOnly.has(path))) return;
 
-    const run: Promise<unknown> = this.measureFn(path).then(
+    const run: Promise<unknown> = this.measureFn(path, !opts.force).then(
       (res) => {
         if (this.inflight.get(path) !== run) return; // cancelled or superseded
         this.inflight.delete(path);
-        if (!res.cancelled) {
+        if (res.notAuto) {
+          this.manualOnly.add(path);
+        } else if (res.cancelled) {
+          // Stopped by someone else: keep any cached value, otherwise say so.
+          if (!this.cache.has(path)) this.interrupted.add(path);
+        } else {
           this.cache.set(path, {
             bytes: res.bytes,
             files: res.files,
@@ -123,6 +141,8 @@ export class DiskUsageStore {
             measuredAt: this.now(),
           });
           this.errors.delete(path);
+          this.manualOnly.delete(path);
+          this.interrupted.delete(path);
         }
         this.emit();
       },
@@ -130,6 +150,7 @@ export class DiskUsageStore {
         if (this.inflight.get(path) !== run) return;
         this.inflight.delete(path);
         this.errors.set(path, errorText(err));
+        this.interrupted.delete(path);
         this.emit();
       },
     );
