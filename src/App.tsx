@@ -8849,6 +8849,11 @@ Office project scaffold created by BBARIT Terminal.
         <span className="project-selector-icon">{project.icon}</span>
         <span className="project-selector-main">
           <span className="project-selector-name-row">
+            {project.favorite && (
+              <span className="project-selector-fav-mark" role="img" aria-label={locale === 'ko' ? '즐겨찾기' : 'Favorite'}>
+                <LucideIcons.Star size={10} fill="currentColor" />
+              </span>
+            )}
             <span className="project-selector-name">{project.displayName}</span>
             {projectBranches[project.id] && (
               <span className="project-tab-branch" title={`branch: ${projectBranches[project.id]}`}>
@@ -8868,7 +8873,6 @@ Office project scaffold created by BBARIT Terminal.
               </span>
             )}
           </span>
-          <span className="project-selector-path">{project.workDir}</span>
         </span>
         <span className="project-selector-actions" data-project-tab-ignore-drag="true" onMouseDown={(e) => e.stopPropagation()}>
           <button
@@ -20588,6 +20592,11 @@ Office project scaffold created by BBARIT Terminal.
 	                      <span className="project-selector-icon">{project.icon}</span>
 	                      <span className="project-selector-main">
 	                        <span className="project-selector-name-row">
+                            {project.favorite && (
+                              <span className="project-selector-fav-mark" role="img" aria-label={locale === 'ko' ? '즐겨찾기' : 'Favorite'}>
+                                <LucideIcons.Star size={10} fill="currentColor" />
+                              </span>
+                            )}
                             <span className="project-selector-name">{project.displayName}</span>
                             {project.terminals.length > 0 && (
                               <span className={`project-selector-terminal-dots agent-${projectAgentStateOf(project.terminals)}`}>
@@ -20601,7 +20610,6 @@ Office project scaffold created by BBARIT Terminal.
                               </span>
                             )}
                           </span>
-		                        <span className="project-selector-path">{project.workDir}</span>
 		                      </span>
                       <span className="project-selector-actions" data-project-tab-ignore-drag="true" onMouseDown={(e) => e.stopPropagation()}>
                         <button

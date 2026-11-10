@@ -12,6 +12,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 ### Changed
 
 - The bottom terminal strip (branch and change count per terminal) is now hidden by default. Turn on "Show bottom terminal strip" under Settings > Terminal > Display to bring it back; while it is off, git status is not read for it.
+- The left project list now uses compact single-line rows so more projects fit on screen. The folder path moved to the row's hover tooltip, and the favorite, edit and close buttons appear on hover (favorite projects always show a star before the name).
 
 ### Fixed
 

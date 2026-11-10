@@ -796,14 +796,14 @@ body.project-dragging * {
   padding: 8px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 /* ── Left project tree: user-defined groups ── */
 .project-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 .project-group-header {
   display: flex;
@@ -867,7 +867,7 @@ body.project-dragging * {
 .project-group-children {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   padding-left: 12px;
   margin-left: 8px;
   border-left: 2px solid color-mix(in srgb, var(--group-color, var(--text-color)) 30%, transparent);
@@ -883,49 +883,53 @@ body.project-dragging * {
 .project-root-zone {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
   min-height: 14px;
 }
 
+/* Left project list: compact single-line rows (icon · name · branch · dots).
+   The folder path lives in the row tooltip; favorite/edit/close sit in a
+   hover group that overlays the right edge, so showing it never moves or
+   resizes anything. --row-bg is the row's current fill; the hover group
+   paints the same colour so text underneath never shows through. */
 .project-selector-item {
+  --row-bg: color-mix(in srgb, var(--bg-color) 93%, var(--text-color) 7%);
   position: relative;
   width: 100%;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  min-height: 84px;
-  padding: 10px 36px 10px 11px;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 10px;
   border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent);
   border-radius: var(--brutal-radius);
-  background: color-mix(in srgb, var(--bg-color) 90%, white 10%);
+  background: var(--row-bg);
   color: var(--text-color);
   cursor: pointer;
   text-align: left;
-  transition: border-color 0.05s ease, background 0.05s ease, box-shadow 0.05s ease;
+  transition: border-color 0.05s ease, background 0.05s ease;
   outline: none;
 }
 
 .project-selector-item:hover {
-  border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 44%, transparent);
-  background: color-mix(in srgb, var(--bg-color) 84%, white 16%);
-  box-shadow: 0 6px 16px color-mix(in srgb, black 14%, transparent);
+  --row-bg: color-mix(in srgb, var(--bg-color) 88%, var(--text-color) 12%);
+  border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 40%, transparent);
 }
 
-.project-selector-item.active {
+.project-selector-item:focus-visible {
   border-color: var(--selector-accent, var(--accent-color));
-  background: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 14%, var(--bg-color));
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.2);
 }
 
+.project-selector-item.active,
 .project-selector-item.context-active {
-  border-color: var(--selector-accent, var(--accent-color));
-  background:
-    linear-gradient(135deg,
-      color-mix(in srgb, var(--selector-accent, var(--accent-color)) 16%, var(--bg-color)) 0%,
-      color-mix(in srgb, var(--selector-accent, var(--accent-color)) 8%, var(--bg-color)) 100%);
-  box-shadow:
-    0 10px 24px rgba(0, 0, 0, 0.14),
-    0 0 0 1px color-mix(in srgb, var(--selector-accent, var(--accent-color)) 26%, transparent);
+  --row-bg: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 14%, var(--bg-color) 86%);
+  border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 62%, transparent);
+  box-shadow: inset 3px 0 0 var(--selector-accent, var(--accent-color));
+}
+
+.project-selector-item.active:hover,
+.project-selector-item.context-active:hover {
+  --row-bg: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 19%, var(--bg-color) 81%);
 }
 
 .project-selector-item.dragging {
@@ -977,86 +981,69 @@ body.project-dragging * {
   background: transparent;
   color: color-mix(in srgb, var(--text-color) 60%, transparent);
   cursor: pointer;
-  opacity: 0.58;
-  transform: translateZ(0);
-  transition: opacity 0.05s ease, background 0.05s ease, border-color 0.05s ease, color 0.05s ease;
-  z-index: 2;
+  transition: background 0.05s ease, border-color 0.05s ease, color 0.05s ease;
 }
 
 .project-selector-fav.active {
   color: #f5c518 !important;
-  opacity: 1 !important;
 }
 
+/* Hover group: one horizontal row pinned to the right edge, vertically
+   centred by stretching top→bottom (no transform, so no sub-pixel jitter).
+   Hidden with opacity + pointer-events only — it is always laid out, so
+   showing it never shifts the row. Buttons inherit pointer-events. */
 .project-selector-actions {
   position: absolute;
-  top: 50%;
-  right: 2px;
-  transform: translateY(-50%);
+  top: 0;
+  bottom: 0;
+  right: 0;
   display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  /* segmented control: rounded rectangle, 3 SQUARE buttons stacked vertically with
-     NO margin (gap 0); thin border lines separate them */
-  gap: 0;
-  border: 1px solid color-mix(in srgb, var(--text-color) 22%, transparent);
-  border-radius: 0;
-  overflow: hidden;
-  background: color-mix(in srgb, var(--text-color) 22%, transparent);
+  flex-direction: row;
+  align-items: center;
+  gap: 2px;
+  padding: 0 5px 0 2px;
+  background: var(--row-bg);
   z-index: 3;
+  opacity: 0;
   pointer-events: none;
 }
 
-/* hairline dividers between the stacked square buttons (no margin) */
-.project-selector-actions .project-theme-wrap,
-.project-selector-actions .project-selector-edit,
-.project-selector-actions .project-selector-close {
-  border-top: 1px solid color-mix(in srgb, var(--text-color) 18%, transparent) !important;
+/* Short fade so the name/badge underneath dissolves into the group. */
+.project-selector-actions::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -14px;
+  width: 14px;
+  background: linear-gradient(to right, transparent, var(--row-bg));
+  pointer-events: none;
 }
 
-/* All three action buttons (favorite · theme · close) share one uniform size. */
-.project-selector-actions .project-selector-close,
-.project-selector-actions .project-selector-fav,
-.project-selector-actions .project-selector-edit,
-.project-selector-actions .project-theme-wrap,
-.project-selector-actions .project-theme-btn {
-  position: static;
-  inset: auto;
+.project-selector-item:hover .project-selector-actions,
+.project-selector-item:focus-visible .project-selector-actions,
+.project-selector-actions:focus-within {
+  opacity: 1;
   pointer-events: auto;
-  transform: none;
-  width: 20px !important;
-  height: 20px !important;
-  flex: 0 0 20px;
-  border-radius: 0;
-  border: none;
-  opacity: 1 !important;
-  background: color-mix(in srgb, var(--bg-color) 88%, var(--text-color) 8%);
 }
 
-.project-selector-item:hover .project-selector-close,
-.project-selector-item.active .project-selector-close,
-.project-selector-item:hover .project-selector-edit,
-.project-selector-item.active .project-selector-edit,
-.project-selector-item:hover .project-theme-btn,
-.project-selector-item.active .project-theme-btn,
-.project-selector-item:focus-within .project-selector-close,
-.project-selector-item:focus-within .project-selector-edit,
-.project-selector-item:focus-within .project-theme-btn {
-  opacity: 0.82;
+/* While a row is being dragged every row carries .project-shift; keep the
+   group out of the way so it does not flicker under the moving pointer. */
+.project-selector-item.project-shift .project-selector-actions {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .project-selector-edit:hover {
   background: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 22%, transparent);
   border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 34%, transparent);
   color: var(--selector-accent, var(--accent-color));
-  opacity: 1;
 }
 
 .project-selector-close:hover {
   background: #ef4444;
   border-color: #ef4444;
   color: white;
-  opacity: 1;
 }
 
 .project-selector-item.tool {
@@ -1064,9 +1051,9 @@ body.project-dragging * {
 }
 
 .project-selector-item.tool-open {
+  --row-bg: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 10%, var(--bg-color));
   border-style: dashed;
   border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 56%, transparent);
-  background: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 10%, var(--bg-color));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--selector-accent, var(--accent-color)) 20%, transparent);
 }
 
@@ -1076,22 +1063,22 @@ body.project-dragging * {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  height: 18px;
   font-size: 15px;
   line-height: 1;
-  margin-top: 1px;
 }
 
 .project-selector-main {
   min-width: 0;
   flex: 1 1 auto;
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-right: 0;
+  align-items: center;
 }
 
 .project-selector-name {
-  min-width: 0;
+  /* Name has priority: the branch badge shrinks first (flex-shrink 1000). */
+  flex: 0 1 auto;
+  min-width: 3em;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1124,6 +1111,16 @@ body.project-dragging * {
   gap: 6px;
   min-width: 0;
   width: 100%;
+}
+
+/* Favorite marker: always visible, not interactive (the toggle is in the
+   hover group). */
+.project-selector-fav-mark {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-right: -2px;
+  color: #f5c518;
 }
 
 .project-selector-terminal-dots {
@@ -1181,13 +1178,6 @@ body.project-dragging * {
   font-weight: 800;
   letter-spacing: 0.06em;
   flex-shrink: 0;
-}
-
-.project-selector-path {
-  font-size: 10px;
-  line-height: 1.35;
-  opacity: 0.6;
-  word-break: break-all;
 }
 
 .project-terminal-harness-area {
@@ -9745,12 +9735,6 @@ input[type="range"]::-webkit-slider-thumb {
   opacity: 1 !important;
 }
 
-.project-selector-item {
-  min-height: 66px;
-}
-
-.project-selector-item.active::before,
-.project-selector-item.context-active::before,
 .terminal-tab.active::after {
   content: '';
   position: absolute;
@@ -9758,14 +9742,6 @@ input[type="range"]::-webkit-slider-thumb {
   border: 2px solid var(--brutal-line);
   box-shadow: 2px 2px 0 color-mix(in srgb, #000 72%, transparent);
   pointer-events: none;
-}
-
-.project-selector-item.active::before,
-.project-selector-item.context-active::before {
-  top: 8px;
-  bottom: 8px;
-  left: -5px;
-  width: 8px;
 }
 
 .terminal-tab {
@@ -11347,22 +11323,14 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: none !important;
 }
 
-.project-selector-item.active {
+.project-selector-item.active,
+.project-selector-item.context-active {
   box-shadow: inset 3px 0 0 var(--selector-accent, var(--accent-color)) !important;
-}
-
-.project-selector-actions {
-  width: 24px !important;
-  right: 6px !important;
-  border-radius: var(--brutal-radius) !important;
-  background: color-mix(in srgb, var(--bg-color) 74%, var(--text-color) 10%) !important;
 }
 
 .project-selector-actions .project-selector-close,
 .project-selector-actions .project-selector-fav,
-.project-selector-actions .project-selector-edit,
-.project-selector-actions .project-theme-wrap,
-.project-selector-actions .project-theme-btn {
+.project-selector-actions .project-selector-edit {
   width: var(--chrome-btn-sm) !important;
   height: var(--chrome-btn-sm) !important;
   min-width: var(--chrome-btn-sm) !important;
@@ -11504,8 +11472,6 @@ input[type="range"]::-webkit-slider-thumb {
 .project-selector-actions .project-selector-close,
 .project-selector-actions .project-selector-fav,
 .project-selector-actions .project-selector-edit,
-.project-selector-actions .project-theme-wrap,
-.project-selector-actions .project-theme-btn,
 .btn-filetree,
 .btn-filetree.project-open-filetree-btn,
 .btn-top-small,
@@ -11556,37 +11522,36 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text-color) !important;
 }
 
+/* Row fill comes from --row-bg (set per state in the base rules) so the hover
+   action group can paint the exact same colour. */
 .project-selector-item {
   border-width: 1px !important;
   border-color: color-mix(in srgb, var(--text-color) 18%, transparent) !important;
-  background: color-mix(in srgb, var(--bg-color) 92%, var(--text-color) 5%) !important;
+  background: var(--row-bg) !important;
 }
 
-.project-selector-item.active {
+.project-selector-item:hover {
+  border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 40%, transparent) !important;
+}
+
+.project-selector-item:focus-visible {
+  border-color: var(--selector-accent, var(--accent-color)) !important;
+}
+
+.project-selector-item.active,
+.project-selector-item.context-active {
   border-color: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 62%, transparent) !important;
-  background: color-mix(in srgb, var(--selector-accent, var(--accent-color)) 12%, var(--bg-color) 88%) !important;
-}
-
-.project-selector-actions {
-  right: 8px !important;
-  width: 24px !important;
-  border: 1px solid color-mix(in srgb, var(--text-color) 12%, transparent) !important;
-  border-radius: var(--brutal-radius) !important;
-  overflow: hidden !important;
-  background: color-mix(in srgb, var(--bg-color) 80%, var(--text-color) 8%) !important;
 }
 
 .project-selector-actions .project-selector-close,
 .project-selector-actions .project-selector-fav,
-.project-selector-actions .project-selector-edit,
-.project-selector-actions .project-theme-btn {
+.project-selector-actions .project-selector-edit {
   color: color-mix(in srgb, var(--text-color) 58%, transparent) !important;
 }
 
 .project-selector-actions .project-selector-close:hover,
 .project-selector-actions .project-selector-fav:hover,
-.project-selector-actions .project-selector-edit:hover,
-.project-selector-actions .project-theme-btn:hover {
+.project-selector-actions .project-selector-edit:hover {
   background: color-mix(in srgb, var(--accent-color) 16%, transparent) !important;
   color: var(--text-color) !important;
 }
@@ -11636,19 +11601,12 @@ input[type="range"]::-webkit-slider-thumb {
   background: transparent !important;
 }
 
-/* Project cards: keep the utility buttons inside each card in every theme. */
+/* Project rows: compact single line in every theme. overflow stays hidden as
+   before (the hover group and its fade live inside the row). */
 .project-selector-item {
-  min-height: 74px !important;
-  padding: 9px 28px 9px 11px !important;
+  min-height: 32px !important;
+  padding: 6px 10px !important;
   overflow: hidden !important;
-}
-
-.project-selector-main {
-  padding-right: 2px !important;
-}
-
-.project-selector-name-row {
-  padding-right: 2px !important;
 }
 
 .project-selector-terminal-dots {
@@ -11656,37 +11614,25 @@ input[type="range"]::-webkit-slider-thumb {
   margin-left: auto !important;
 }
 
-.project-selector-actions {
-  top: 0 !important;
-  right: 0 !important;
-  bottom: 0 !important;
-  transform: none !important;
-  width: 22px !important;
-  height: auto !important;
-  border-radius: 0 !important;
-  border-width: 0 0 0 1px !important;
-  border-style: solid !important;
-  border-color: color-mix(in srgb, var(--text-color) 16%, transparent) !important;
-  background: color-mix(in srgb, var(--bg-color) 86%, var(--text-color) 7%) !important;
-  box-shadow: none !important;
+/* Cap the branch badge so a long branch never squeezes the name. */
+.project-selector-item .project-tab-branch {
+  max-width: 40%;
 }
 
 .project-selector-actions .project-selector-close,
 .project-selector-actions .project-selector-fav,
-.project-selector-actions .project-selector-edit,
-.project-selector-actions .project-theme-wrap,
-.project-selector-actions .project-theme-btn {
-  width: 20px !important;
-  height: auto !important;
-  min-width: 20px !important;
-  min-height: 0 !important;
-  flex: 1 1 0 !important;
-  border-radius: 0 !important;
-  color: color-mix(in srgb, var(--text-color) 64%, transparent) !important;
+.project-selector-actions .project-selector-edit {
+  /* Size (22px) comes from --chrome-btn-sm above; visibility is the group's. */
+  opacity: 1 !important;
+}
+
+.project-selector-actions .project-selector-close:hover {
+  background: color-mix(in srgb, #ef4444 14%, transparent) !important;
+  color: #ef4444 !important;
 }
 
 .project-selector-actions .project-selector-fav.active {
-  color: #f59e0b !important;
+  color: #f5c518 !important;
 }
 
 /* Terminal header actions: keep the right-side button group inside the header. */
