@@ -65,6 +65,8 @@ export const it: Record<TranslationKey, string> = {
   'settings.terminal.autoSaveSession': 'Salvataggio automatico sessione',
   'settings.terminal.tmuxAutoStart': 'Avvio automatico tmux',
   'settings.terminal.tmuxAutoStart.desc': 'Avvia automaticamente una sessione tmux all\'apertura di una nuova scheda shell',
+  'settings.terminal.showTerminalStrip': 'Mostra la barra dei terminali in basso',
+  'settings.terminal.showTerminalStrip.desc': 'Mostra il branch e il numero di modifiche di ogni terminale nella barra in basso. Legge git status in background, il che può essere lento su repository molto grandi.',
   'settings.terminal.confirmOnClose': 'Conferma chiusura',
   'settings.terminal.confirmOnClose.desc': 'Mostra conferma alla chiusura di un terminale con processi in esecuzione',
   'settings.terminal.ptyHolder': 'Use the PTY holder',

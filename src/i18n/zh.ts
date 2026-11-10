@@ -65,6 +65,8 @@ export const zh: Record<TranslationKey, string> = {
   'settings.terminal.autoSaveSession': '自动保存会话',
   'settings.terminal.tmuxAutoStart': '自动启动 tmux',
   'settings.terminal.tmuxAutoStart.desc': '打开新的Shell标签时自动启动tmux会话',
+  'settings.terminal.showTerminalStrip': '显示底部终端栏',
+  'settings.terminal.showTerminalStrip.desc': '在底部栏显示每个终端的分支和更改数量。会在后台读取 git status，在非常大的仓库中可能较慢。',
   'settings.terminal.confirmOnClose': '关闭确认',
   'settings.terminal.confirmOnClose.desc': '关闭有运行进程的终端时显示确认消息',
   'settings.terminal.ptyHolder': 'Use the PTY holder',

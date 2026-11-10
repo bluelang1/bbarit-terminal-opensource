@@ -361,6 +361,8 @@ export const ko: Record<TranslationKey, string> = {
   // Terminal close / tmux
   'settings.terminal.tmuxAutoStart': 'tmux 자동 시작',
   'settings.terminal.tmuxAutoStart.desc': '새 셸 탭을 열 때 자동으로 tmux 세션을 시작합니다',
+  'settings.terminal.showTerminalStrip': '하단 터미널 줄 표시',
+  'settings.terminal.showTerminalStrip.desc': '아래 막대에 터미널마다 브랜치와 바뀐 파일 수를 보여 줍니다. 뒤에서 git status를 읽으므로 아주 큰 저장소에서는 느릴 수 있습니다.',
   'settings.terminal.confirmOnClose': '닫기 확인',
   'settings.terminal.confirmOnClose.desc': '실행 중인 프로세스가 있는 터미널을 닫을 때 확인 메시지를 표시합니다',
   'settings.terminal.ptyHolder': 'PTY 홀더 사용',

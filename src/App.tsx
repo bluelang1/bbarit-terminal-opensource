@@ -5308,7 +5308,14 @@ Office project scaffold created by BBARIT Terminal.
       }
     });
   }
+  // Off by default (terminal.showTerminalStrip): no strip, no git status polling.
+  const showTerminalStrip = terminalSettings.showTerminalStrip ?? false;
   useEffect(() => {
+    if (!showTerminalStrip) {
+      // Drop old results so turning the strip back on never shows stale counts.
+      setTerminalGitStatuses((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
     let cancelled = false;
 
     const refreshTerminalGitStatuses = async () => {
@@ -5343,7 +5350,7 @@ Office project scaffold created by BBARIT Terminal.
       cancelled = true;
       poller.stop();
     };
-  }, [terminalGitFooterKey]);
+  }, [terminalGitFooterKey, showTerminalStrip]);
 
   // 프로젝트 탭 브랜치 배지(win#7): 프로젝트별 현재 브랜치를 주기 폴링해 탭에 표시
   const [projectBranches, setProjectBranches] = useState<Record<string, string>>({});
@@ -23715,7 +23722,7 @@ Office project scaffold created by BBARIT Terminal.
             );
           });
         })()}
-        <div className="terminal-git-footer-strip" style={isMonitorMode ? { display: 'none' } : undefined}>
+        {showTerminalStrip && <div className="terminal-git-footer-strip" style={isMonitorMode ? { display: 'none' } : undefined}>
           {terminalGitFooterItems.map(({ project, terminal, workDir, isActive }) => {
             const status = terminalGitStatuses[terminal.id];
             const dirtyCount = status?.repo
@@ -23753,7 +23760,7 @@ Office project scaffold created by BBARIT Terminal.
               </button>
             );
           })}
-        </div>
+        </div>}
         <StatusBarStats />
       </div>
 
