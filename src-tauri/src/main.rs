@@ -8724,7 +8724,7 @@ Rate each finding: Critical / High / Medium / Low / Informational\n",
 #[tauri::command(async)]
 fn git_status_full(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
-        .args(["status", "--porcelain=v2", "--branch"])
+        .args(["--no-optional-locks", "status", "--porcelain=v2", "--branch"])
         .current_dir(&repo_dir)
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;

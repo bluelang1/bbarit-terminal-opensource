@@ -12,15 +12,15 @@ export const STATUS_POLL_MAX_MS = 60000;
 /** Wait this many times the last status duration before polling again. */
 export const STATUS_POLL_DURATION_FACTOR = 3;
 
-/** Delay before the next poll: max(5 s, 3 x last duration), capped at 60 s. */
-export function nextStatusPollDelay(lastDurationMs: number): number {
+/** Delay before the next poll: max(base, 3 x last duration), capped at 60 s. */
+export function nextStatusPollDelay(lastDurationMs: number, baseMs: number = STATUS_POLL_BASE_MS): number {
   const d = Number.isNaN(lastDurationMs) || lastDurationMs < 0 ? 0 : lastDurationMs;
-  return Math.min(STATUS_POLL_MAX_MS, Math.max(STATUS_POLL_BASE_MS, d * STATUS_POLL_DURATION_FACTOR));
+  return Math.max(baseMs, Math.min(STATUS_POLL_MAX_MS, d * STATUS_POLL_DURATION_FACTOR));
 }
 
 export interface StatusPoller {
-  /** Schedule polls; the first one runs after the base delay. */
-  start(): void;
+  /** Schedule polls; the first one runs after `firstDelayMs` (default: the base delay). */
+  start(opts?: { firstDelayMs?: number }): void;
   /**
    * Run the status now. While a call is in flight this never starts a second
    * one: it shares the in-flight call, or with `fresh` (after a change the
@@ -31,9 +31,15 @@ export interface StatusPoller {
   stop(): void;
 }
 
+export interface StatusPollerOptions {
+  /** Shortest wait between polls (default 5 s). */
+  baseMs?: number;
+  now?: () => number;
+}
+
 export function createStatusPoller(
   run: () => Promise<void>,
-  now: () => number = () => Date.now(),
+  { baseMs = STATUS_POLL_BASE_MS, now = () => Date.now() }: StatusPollerOptions = {},
 ): StatusPoller {
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -66,21 +72,21 @@ export function createStatusPoller(
     return queued;
   };
 
-  const schedule = () => {
+  const schedule = (delayMs: number = nextStatusPollDelay(lastDurationMs, baseMs)) => {
     if (stopped) return;
-    timer = setTimeout(tick, nextStatusPollDelay(lastDurationMs));
+    timer = setTimeout(tick, delayMs);
   };
 
   const tick = () => {
     timer = null;
     if (stopped) return;
-    void refresh().then(schedule);
+    void refresh().then(() => schedule());
   };
 
   return {
-    start() {
+    start(opts) {
       if (timer || stopped) return;
-      schedule();
+      schedule(opts?.firstDelayMs);
     },
     refresh,
     stop() {

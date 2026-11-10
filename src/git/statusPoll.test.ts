@@ -19,6 +19,13 @@ describe('nextStatusPollDelay', () => {
     expect(nextStatusPollDelay(Number.POSITIVE_INFINITY)).toBe(60000);
   });
 
+  it('should_use_a_configurable_base_delay', () => {
+    expect(nextStatusPollDelay(0, 10000)).toBe(10000);
+    expect(nextStatusPollDelay(2000, 10000)).toBe(10000);
+    expect(nextStatusPollDelay(5000, 10000)).toBe(15000);
+    expect(nextStatusPollDelay(62000, 10000)).toBe(60000);
+  });
+
   it('should_treat_invalid_durations_as_fast', () => {
     expect(nextStatusPollDelay(-5)).toBe(5000);
     expect(nextStatusPollDelay(Number.NaN)).toBe(5000);
@@ -167,6 +174,37 @@ describe('createStatusPoller', () => {
     await poller.refresh();
     await poller.refresh({ fresh: true });
     expect(run).toHaveBeenCalledTimes(0);
+  });
+
+  it('should_poll_on_a_configurable_base_with_a_quick_first_run', async () => {
+    const run = vi.fn(async () => {});
+    const poller = createStatusPoller(run, { baseMs: 10000 });
+    poller.start({ firstDelayMs: 250 });
+    await vi.advanceTimersByTimeAsync(249);
+    expect(run).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run).toHaveBeenCalledTimes(2);
+    poller.stop();
+  });
+
+  it('should_back_off_from_a_configurable_base_without_overlap', async () => {
+    const c = controllableRun();
+    const poller = createStatusPoller(c.run, { baseMs: 10000 });
+    poller.start({ firstDelayMs: 250 });
+    await vi.advanceTimersByTimeAsync(250);
+    await vi.advanceTimersByTimeAsync(30000); // status still running: no second call
+    expect(c.calls).toBe(1);
+    await c.finishNext(); // took 30 s -> next in 60 s (cap)
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(c.calls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(c.calls).toBe(2);
+    expect(c.maxActive).toBe(1);
+    poller.stop();
   });
 
   it('should_keep_polling_after_a_failed_status', async () => {

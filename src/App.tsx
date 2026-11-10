@@ -188,6 +188,8 @@ import { Spotlight } from './guide/Spotlight';
 import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
+import { createStatusPoller } from './git/statusPoll';
+import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
 
 
@@ -5278,32 +5280,45 @@ Office project scaffold created by BBARIT Terminal.
     () => terminalGitFooterItems.map(({ terminal, workDir }) => `${terminal.id}:${workDir}`).join('|'),
     [terminalGitFooterItems]
   );
+  // terminalGitFooterItems gets a new identity on unrelated state changes
+  // (busy dots, agent status, any project edit), so the poll below is keyed on
+  // terminalGitFooterKey (terminal ids + workDirs) and reads items via a ref.
+  const terminalGitFooterItemsRef = useRef(terminalGitFooterItems);
+  terminalGitFooterItemsRef.current = terminalGitFooterItems;
+  // One git_status_full per repo at a time, shared even across poll restarts.
+  const terminalGitStatusFetchRef = useRef<((repoDir: string) => Promise<TerminalGitStatus>) | null>(null);
+  if (!terminalGitStatusFetchRef.current) {
+    terminalGitStatusFetchRef.current = shareInFlight(async (repoDir: string) => {
+      try {
+        const raw = await invoke<string>('git_status_full', { repoDir });
+        return parseTerminalGitStatus(raw, repoDir);
+      } catch {
+        return {
+          branch: '',
+          ahead: 0,
+          behind: 0,
+          staged: 0,
+          unstaged: 0,
+          untracked: 0,
+          conflicted: 0,
+          repo: false,
+          workDir: repoDir,
+          updatedAt: Date.now(),
+        } satisfies TerminalGitStatus;
+      }
+    });
+  }
   useEffect(() => {
     let cancelled = false;
 
     const refreshTerminalGitStatuses = async () => {
-      const items = terminalGitFooterItems.slice(0, 24);
-      const entries = await Promise.all(items.map(async ({ terminal, workDir }) => {
-        const repoDir = (workDir || '').trim();
-        if (!repoDir || isSshVirtualPath(repoDir)) return [terminal.id, null] as const;
-        try {
-          const raw = await invoke<string>('git_status_full', { repoDir });
-          return [terminal.id, parseTerminalGitStatus(raw, repoDir)] as const;
-        } catch {
-          return [terminal.id, {
-            branch: '',
-            ahead: 0,
-            behind: 0,
-            staged: 0,
-            unstaged: 0,
-            untracked: 0,
-            conflicted: 0,
-            repo: false,
-            workDir: repoDir,
-            updatedAt: Date.now(),
-          } satisfies TerminalGitStatus] as const;
-        }
-      }));
+      const items = terminalGitFooterItemsRef.current.slice(0, 24);
+      // One status per distinct repo, fanned out to every terminal in it.
+      const entries = await fetchStatusesByRepo(
+        items.map(({ terminal, workDir }) => ({ terminalId: terminal.id, workDir })),
+        terminalGitStatusFetchRef.current!,
+        isSshVirtualPath,
+      );
 
       if (cancelled) return;
       const liveTerminalIds = new Set(items.map(({ terminal }) => terminal.id));
@@ -5320,19 +5335,15 @@ Office project scaffold created by BBARIT Terminal.
       });
     };
 
-    const firstRefreshTimer = window.setTimeout(() => {
-      void refreshTerminalGitStatuses();
-    }, 250);
-    const timer = window.setInterval(() => {
-      void refreshTerminalGitStatuses();
-    }, 10000);
+    // Next refresh only after the previous one ends; slow repos wait longer (max 60 s).
+    const poller = createStatusPoller(refreshTerminalGitStatuses, { baseMs: 10000 });
+    poller.start({ firstDelayMs: 250 });
 
     return () => {
       cancelled = true;
-      window.clearTimeout(firstRefreshTimer);
-      window.clearInterval(timer);
+      poller.stop();
     };
-  }, [terminalGitFooterItems, terminalGitFooterKey]);
+  }, [terminalGitFooterKey]);
 
   // 프로젝트 탭 브랜치 배지(win#7): 프로젝트별 현재 브랜치를 주기 폴링해 탭에 표시
   const [projectBranches, setProjectBranches] = useState<Record<string, string>>({});
