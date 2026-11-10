@@ -53,6 +53,7 @@ import { Delete, Eraser, ListX } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCommandColumn';
+import { FIT_SCROLLBAR_LANE, terminalAreaWidth } from './terminal/terminalStripLayout';
 import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
@@ -163,6 +164,36 @@ const RESIZE_DEBOUNCE_MS = 250;
 // Button strip on the right of every terminal (clear/rerun/quick commands). The xterm mount
 // stops this far from the right edge, so fit computes cols without it and nothing overlaps text.
 const TERMINAL_GUTTER_WIDTH = 28;
+const TERMINAL_AREA_PAD = 8;
+// Set on the wrap element (never by React): the xterm area's px width from terminalAreaWidth, so
+// the cols rounding leftover goes to the strip. Unset = plain layout (wrap - pad - strip).
+const TERMINAL_AREA_WIDTH_VAR = '--octo-terminal-area-width';
+const TERMINAL_AREA_WIDTH = `var(${TERMINAL_AREA_WIDTH_VAR}, calc(100% - ${TERMINAL_AREA_PAD + TERMINAL_GUTTER_WIDTH}px))`;
+
+const applyTerminalAreaWidth = (term: Terminal | null | undefined, wrap: HTMLElement | null | undefined): number | null => {
+  if (!wrap) return null;
+  const cellWidth = (term as any)?._core?._renderService?.dimensions?.css?.cell?.width || 0;
+  const width = terminalAreaWidth({
+    wrapWidth: Math.floor(wrap.getBoundingClientRect().width),
+    padLeft: TERMINAL_AREA_PAD,
+    minStrip: TERMINAL_GUTTER_WIDTH,
+    lane: FIT_SCROLLBAR_LANE,
+    cellWidth,
+  });
+  if (width === null) wrap.style.removeProperty(TERMINAL_AREA_WIDTH_VAR);
+  else wrap.style.setProperty(TERMINAL_AREA_WIDTH_VAR, `${width}px`);
+  return width;
+};
+
+// Every fit goes through here: size the area for the current wrap width and cell, then fit. The
+// width never changes cols versus the plain layout; a second pass only covers a cell width that
+// changed during fit (font change). Bounded to two fits, so it cannot loop.
+const fitTerminalArea = (fit: FitAddon | null | undefined, term: Terminal | null | undefined, wrap: HTMLElement | null | undefined) => {
+  if (!fit) return;
+  const before = applyTerminalAreaWidth(term, wrap);
+  fit.fit();
+  if (applyTerminalAreaWidth(term, wrap) !== before) fit.fit();
+};
 const TELEGRAM_SCREEN_SNAPSHOT_MAX_CHARS = 16000;
 const TELEGRAM_LAST_SENT_MAX_CHARS = 4096;
 const TELEGRAM_COMMAND_BUFFER_MAX_CHARS = 2000;
@@ -2939,7 +2970,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       requestAnimationFrame(() => {
         try {
           preserveTerminalViewport(term, existingState, () => {
-            fitAddon.fit();
+            fitTerminalArea(fitAddon, term, wrap);
             term.refresh(0, term.rows - 1);
           }, true, true);
         } catch {
@@ -3132,7 +3163,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try {
         const state = terminalStates.get(terminalId);
         preserveTerminalViewport(termRef.current, state, () => {
-          fitRef.current?.fit();
+          fitTerminalArea(fitRef.current, termRef.current, wrap);
           termRef.current?.refresh(0, termRef.current.rows - 1);
           fixTerminalStyle();
         }, true, true);
@@ -5317,7 +5348,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // ResizeObserver로 컨테이너 크기 변경 감지
   useEffect(() => {
     const wrap = terminalWrapRef.current;
-    const mount = terminalMountRef.current;
     if (!wrap) return;
 
     let resizeTimeout: number | null = null;
@@ -5339,7 +5369,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try {
           const state = terminalStates.get(terminalId);
           const refit = () => {
-            fitRef.current?.fit();
+            fitTerminalArea(fitRef.current, termRef.current, wrap);
           };
           if (returningPin) {
             restorePinAfterReveal(termRef.current, state, returningPin, refit);
@@ -5358,8 +5388,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     };
 
     const ro = new ResizeObserver(handleResize);
+    // Only the wrap: the mount's width is set from the wrap's (fitTerminalArea), and observing
+    // it would refit on our own writes.
     ro.observe(wrap);
-    if (mount) ro.observe(mount);
 
     return () => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
@@ -5408,7 +5439,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (fitRef.current) {
         const state = terminalStates.get(terminalId);
         preserveTerminalViewport(termRef.current, state, () => {
-          fitRef.current?.fit();
+          fitTerminalArea(fitRef.current, termRef.current, wrap);
           termRef.current?.refresh(0, termRef.current.rows - 1);
         }, true, true);
       }
@@ -5450,7 +5481,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try {
           const state = terminalStates.get(terminalId);
           preserveTerminalViewport(term, state, () => {
-            fit.fit();
+            fitTerminalArea(fit, term, wrap);
             term.refresh(0, term.rows - 1);
           }, true, true);
           invoke('resize_pty', {
@@ -6599,11 +6630,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           data-terminal-mount
           style={{
             position: 'absolute',
-            top: 8,
-            left: 8,
-            bottom: 8,
-            // No gap before the strip: FitAddon already keeps a 14 px scrollbar lane on the right.
-            right: TERMINAL_GUTTER_WIDTH,
+            top: TERMINAL_AREA_PAD,
+            left: TERMINAL_AREA_PAD,
+            bottom: TERMINAL_AREA_PAD,
+            // Ends right after the last column + FitAddon's 14 px scrollbar lane; the strip
+            // takes the rest (see fitTerminalArea).
+            width: TERMINAL_AREA_WIDTH,
           }}
         />
 
@@ -6761,7 +6793,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             style={{
               position: 'absolute',
               left: 12,
-              right: TERMINAL_GUTTER_WIDTH + 12,
+              // Ends 8 px before the strip, which is TERMINAL_GUTTER_WIDTH or a little wider.
+              width: `calc(${TERMINAL_AREA_WIDTH} - 12px)`,
+              boxSizing: 'border-box',
               bottom: 12,
               zIndex: 190,
               padding: '10px 12px',
@@ -6860,7 +6894,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             }}
             style={{
               position: 'absolute',
-              left: `calc(50% - ${TERMINAL_GUTTER_WIDTH / 2}px)`,
+              left: `calc(${TERMINAL_AREA_PAD}px + ${TERMINAL_AREA_WIDTH} / 2)`, // centre of the xterm area
               bottom: 12,
               transform: 'translateX(-50%)',
               zIndex: 180,
@@ -6895,13 +6929,15 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             top: 0,
             right: 0,
             bottom: 0,
-            width: TERMINAL_GUTTER_WIDTH,
+            // Starts where the xterm area ends (TERMINAL_AREA_WIDTH); at least TERMINAL_GUTTER_WIDTH.
+            left: `calc(${TERMINAL_AREA_PAD}px + ${TERMINAL_AREA_WIDTH})`,
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
-            alignItems: 'center',
+            // Buttons stay in a 28 px column at the right edge; extra width is plain strip.
+            alignItems: 'flex-end',
             gap: 8,
-            padding: '8px 0',
+            padding: `8px ${(TERMINAL_GUTTER_WIDTH - 20) / 2}px`,
             overflowX: 'hidden',
             overflowY: 'auto',
             overscrollBehavior: 'contain',
