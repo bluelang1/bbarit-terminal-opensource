@@ -2,6 +2,7 @@
 // 터미널 PTY 에 쓰는 글자는 모두 여기를 거친다. 터미널마다 하나의 직렬 큐, 사람이 조용할
 // 때까지 대기, bracketed paste, Enter 는 따로, OSC 7501 blocked 면 거부.
 // 설계: docs/AGENT_INPUT_GATE.md
+import { feedTerminalInput } from './lastCommand';
 import type { AgentTabState } from './programStatus';
 import { terminalSubmitDelayMs } from './terminalSubmit';
 import { stripBracketedPasteEnd, writePasteChunked } from './pasteChunks';
@@ -180,8 +181,10 @@ export function flushHeld(terminalId: string): void {
  * 기록도 보류도 하지 않는다. Ctrl-C 는 바로 보내고, 보류한 키를 버리며, 남은 자동 Enter 를
  * 취소한다(사용자가 멈추려는 것이다).
  */
-export function writeHumanInput(terminalId: string, data: string, write: PtyWriter): void {
+export function writeHumanInput(terminalId: string, data: string, writeRaw: PtyWriter): void {
   if (!data) return;
+  // 사람 입력은 쓰이는 순서대로(보류 후 flush 포함) 마지막 명령 추적에도 넣는다.
+  const write = trackedWriter(terminalId, writeRaw);
   if (isNonTypingInput(data)) { write(data); return; }
   noteHumanInput(terminalId);
   const g = gates.get(terminalId);
@@ -198,11 +201,21 @@ export function writeHumanInput(terminalId: string, data: string, write: PtyWrit
   write(data);
 }
 
+function trackedWriter(terminalId: string, write: PtyWriter): PtyWriter {
+  return (data) => {
+    feedTerminalInput(terminalId, data);
+    write(data);
+  };
+}
+
 function resolveWriter(terminalId: string, opts: AutoInputOptions): PtyWriter | null {
-  return host?.getWriter?.(terminalId)
+  const write = host?.getWriter?.(terminalId)
     || fallbackWriterResolver?.(terminalId)
     || opts.fallbackWrite
     || null;
+  // 자동 입력 중 사용자가 그 자리에서 누른 버튼(빠른 명령·스킬·저장된 명령 등)만 명령으로 센다.
+  // 릴레이 알림·스케줄러·원격 메시지 같은 자동 입력은 마지막 명령이 아니다.
+  return write && opts.source === 'button' ? trackedWriter(terminalId, write) : write;
 }
 
 function isBlocked(terminalId: string): boolean {

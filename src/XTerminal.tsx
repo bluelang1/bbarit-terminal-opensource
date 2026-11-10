@@ -59,7 +59,8 @@ import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll'
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
-import { feedTerminalInput } from './terminal/lastCommand';
+import { clearPendingCommand, noteAgentStatus, setLastCommandMode } from './terminal/lastCommand';
+import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
@@ -372,6 +373,8 @@ const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extr
     replaying: !!terminalStates.get(terminalId)?.replayingOutput,
     ...extra,
   };
+  // Last-command tracking in agent tabs commits on the working transition (terminal/lastCommand.ts).
+  if (!detail.replaying) noteAgentStatus(terminalId, detail.state, { cleared: detail.cleared });
   window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
 };
 
@@ -2300,10 +2303,16 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     imeBridgeComposingRef.current = false;
     imeBridgeCompositionTextRef.current = '';
     setImePreeditText('');
+    clearPendingCommand(terminalId);
     const st = terminalStates.get(terminalId);
     st?.writeToPty?.('\x05\x15');
     focusActiveInput();
   }, [focusActiveInput, terminalId]);
+
+  // Agent TUIs submit with whatever Enter the user bound; their last command follows OSC 7501.
+  useEffect(() => {
+    setLastCommandMode(terminalId, isInteractiveAgentTerminal(cliType) ? 'agent' : 'shell');
+  }, [terminalId, cliType]);
 
   // Multi-line variant for agent TUIs (see clearInputAll.ts); clearTerminalInput
   // resets local buffers and clears the current line, the loop takes the rest.
@@ -3292,7 +3301,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         return;
       }
       _terminalLastActivity.set(terminalId, Date.now());
-      feedTerminalInput(terminalId, data);
       // Always works as long as PTY exists
       invoke('write_to_pty', { terminalId, data }).catch((err) => {
         console.error('[PTY] write_to_pty failed for', terminalId, ':', err);

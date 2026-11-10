@@ -24,6 +24,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ### Fixed
 
+- The last-command display (bottom bar, terminal tabs) no longer joins several inputs or shows startup commands and automated input. Shells show the line run with Enter; agent tabs (Claude and others) show the prompt actually submitted, whichever Enter key submits it, and text cleared without sending is dropped.
 - The whole app no longer freezes when a very large repository (hundreds of thousands of files) is the selected project: the git status shown under the terminals kept running `git status` without pause. Git commands no longer block the thread that draws the window, terminal tabs in the same repository share one status read, and refreshes (terminal git status and the Git panel) only run again after the previous one finishes, waiting longer on slow repositories (up to 60 seconds). Reading the status no longer takes Git's lock file, so staging or committing does not fail with "index.lock" errors.
 
 ## [1.1.67] - 2026-11-08
