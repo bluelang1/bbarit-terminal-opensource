@@ -1021,9 +1021,12 @@ body.project-dragging * {
   pointer-events: none;
 }
 
+/* Keyboard focus only (:focus-visible), never :focus/:focus-within: a mouse
+   click focuses the clicked button or the tabIndex=0 row in WebKit, which
+   kept the group on screen after the pointer left. */
 .project-selector-item:hover .project-selector-actions,
 .project-selector-item:focus-visible .project-selector-actions,
-.project-selector-actions:focus-within {
+.project-selector-actions:has(:focus-visible) {
   opacity: 1;
   pointer-events: auto;
 }
