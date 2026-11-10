@@ -6256,7 +6256,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   };
   // Acts on this pane's terminal, not the active one; goes through the button input gate.
   const renderColumnQuickCommand = (cmd: QuickCommand) => {
-    const LIcon = (LucideIcons as any)[cmd.icon];
+    // The icon name comes from user config: only accept real icon components
+    // (capitalized exports), never helpers such as `icons` / `createLucideIcon`.
+    const iconExport = /^[A-Z]/.test(cmd.icon || '') ? (LucideIcons as any)[cmd.icon] : null;
+    const LIcon = iconExport && (typeof iconExport === 'function' || (typeof iconExport === 'object' && '$$typeof' in iconExport))
+      ? iconExport
+      : null;
     const commandName = quickCommandDisplayName(cmd.name, t);
     return (
       <button
