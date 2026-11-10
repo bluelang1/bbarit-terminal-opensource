@@ -23761,6 +23761,8 @@ Office project scaffold created by BBARIT Terminal.
             );
           })}
         </div>}
+        {/* The strip was the bar's only stretching child; keep the stats on the right without it. */}
+        {!showTerminalStrip && <div style={{ flex: '1 1 auto' }} />}
         <StatusBarStats />
       </div>
 
