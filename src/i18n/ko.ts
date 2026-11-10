@@ -2773,7 +2773,7 @@ export const ko: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "터미널 커서 모양 선택",
   'settings.terminal.inputMode.tooltip': "터미널 입력 모드 선택",
   'settings.terminal.shellType.tooltip': "기본 Windows 셸 선택",
-  'settings.terminal.quickCommands.desc': "터미널 아래에 아이콘 버튼으로 표시되는 자주 쓰는 명령어입니다. 클릭하면 즉시 실행됩니다.",
+  'settings.terminal.quickCommands.desc': "각 터미널 오른쪽 아래 버튼 열에 아이콘 버튼으로 표시되는 자주 쓰는 명령어입니다. 클릭하면 그 터미널에서 바로 실행됩니다. 명령이 비어 있는 항목은 표시되지 않고, `!!` 항목은 다시 실행 버튼으로 표시됩니다.",
   'settings.terminal.quickCommands.pickIcon': "아이콘 선택",
   'settings.terminal.quickCommands.placeholder': "명령어...",
   'settings.theme.projectTheme.desc': "현재 프로젝트의 색상 테마를 변경합니다.",

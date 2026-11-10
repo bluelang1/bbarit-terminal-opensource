@@ -43,14 +43,8 @@ import { CustomFontPicker } from './components/CustomFontPicker';
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { MIN_SUBMIT_DELAY_MS, autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
-import { queueButtonInput } from './terminal/buttonInput';
-import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
-
-// Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
-const gateSubmitDelayFor = (cliType?: string): number | undefined => (
-  isInteractiveAgentTerminal(cliType) ? undefined : MIN_SUBMIT_DELAY_MS
-);
+import { autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
@@ -23734,7 +23728,7 @@ Office project scaffold created by BBARIT Terminal.
         </div>
       )}
 
-      {/* Process Stats Status Bar + Quick Commands */}
+      {/* Process Stats Status Bar */}
       <div className="process-stats-bar" style={{
         display: 'flex',
         alignItems: 'center',
@@ -23749,53 +23743,6 @@ Office project scaffold created by BBARIT Terminal.
         flexShrink: 0,
         userSelect: 'none',
       }}>
-        {/* Quick Commands */}
-        {(() => {
-          const qc = getConfigSnapshot().quickCommands;
-          if (!qc || qc.length === 0) return null;
-          return qc.map((cmd) => {
-            const LIcon = (LucideIcons as any)[cmd.icon];
-            const commandName = cmd.name === '다시실행해'
-              ? t('settings.terminal.quickCommands.rerun' as any, 'Run again')
-              : cmd.name === '컴파일해'
-                ? t('settings.terminal.quickCommands.compile' as any, 'Compile')
-                : cmd.name === '해줘'
-                  ? t('settings.terminal.quickCommands.doIt' as any, 'Do it')
-                  : cmd.name;
-            return (
-              <button
-                key={cmd.id}
-                type="button"
-                onClick={() => {
-                  const proj = projects.find((p) => p.id === activeProjectId);
-                  const tid = proj?.activeTerminalId;
-                  if (tid && cmd.command) {
-                    const quickTerm = proj?.terminals.find((tt) => tt.id === tid);
-                    void queueButtonInput(tid, cmd.command, { submit: true, submitDelayMs: gateSubmitDelayFor(quickTerm?.cliType) });
-                  }
-                }}
-                title={`${commandName}\n${cmd.command}`}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  width: 22, height: 20, padding: '0 2px', borderRadius: 'var(--brutal-radius)',
-                  border: 'none', background: 'transparent',
-                  color: `color-mix(in srgb, ${activeStyle.text} 60%, transparent)`,
-                  cursor: 'pointer', transition: 'all 0.05s',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = activeStyle.accent;
-                  e.currentTarget.style.background = `color-mix(in srgb, ${activeStyle.accent} 15%, transparent)`;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = `color-mix(in srgb, ${activeStyle.text} 55%, transparent)`;
-                  e.currentTarget.style.background = 'transparent';
-                }}
-              >
-                {LIcon ? <LIcon size={14} /> : <span style={{ fontSize: 13 }}>{cmd.icon || '⚡'}</span>}
-              </button>
-            );
-          });
-        })()}
         {showTerminalStrip && <div className="terminal-git-footer-strip" style={isMonitorMode ? { display: 'none' } : undefined}>
           {terminalGitFooterItems.map(({ project, terminal, workDir, isActive }) => {
             const status = terminalGitStatuses[terminal.id];

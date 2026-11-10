@@ -2715,7 +2715,7 @@ export const de: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "Cursorform des Terminals wählen",
   'settings.terminal.inputMode.tooltip': "Eingabemodus des Terminals wählen",
   'settings.terminal.shellType.tooltip': "Standard-Windows-Shell wählen",
-  'settings.terminal.quickCommands.desc': "Häufig genutzte Befehle, die als Symbolschaltflächen unter dem Terminal angezeigt werden. Klicken zum sofortigen Ausführen.",
+  'settings.terminal.quickCommands.desc': "Häufig genutzte Befehle, die als Symbolschaltflächen in der Schaltflächenspalte unten rechts in jedem Terminal angezeigt werden; ein Klick führt den Befehl in diesem Terminal aus. Einträge mit leerem Befehl werden ausgeblendet, der `!!`-Eintrag erscheint als Schaltfläche zum erneuten Ausführen.",
   'settings.terminal.quickCommands.pickIcon': "Symbol wählen",
   'settings.terminal.quickCommands.placeholder': "Befehl...",
   'settings.theme.projectTheme.desc': "Farbschema des aktuellen Projekts ändern.",

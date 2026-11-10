@@ -2715,7 +2715,7 @@ export const fr: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "Choisir la forme du curseur du terminal",
   'settings.terminal.inputMode.tooltip': "Choisir le mode de saisie du terminal",
   'settings.terminal.shellType.tooltip': "Choisir le shell Windows par défaut",
-  'settings.terminal.quickCommands.desc': "Commandes fréquentes affichées sous le terminal sous forme de boutons à icône. Cliquez pour exécuter immédiatement.",
+  'settings.terminal.quickCommands.desc': "Commandes fréquentes affichées sous forme de boutons à icône dans la colonne de boutons en bas à droite de chaque terminal ; un clic exécute la commande dans ce terminal. Les entrées dont la commande est vide sont masquées, et l'entrée `!!` apparaît comme bouton de réexécution.",
   'settings.terminal.quickCommands.pickIcon': "Choisir une icône",
   'settings.terminal.quickCommands.placeholder': "commande...",
   'settings.theme.projectTheme.desc': "Modifier le thème de couleurs du projet actuel.",

@@ -3,7 +3,13 @@
 // blocked 검사(force)와 사람 입력 3 초 대기(quietMs: 0)는 건너뛰고, 직렬 큐·bracketed paste·
 // Enter 분리·사람 키 보류는 자동 입력 게이트를 그대로 탄다. 설계: docs/TERMINAL_SCOPE_SWEEP.md
 import { invoke } from '@tauri-apps/api/core';
-import { queueAutoInput, type AutoInputResult } from './inputGate';
+import { MIN_SUBMIT_DELAY_MS, queueAutoInput, type AutoInputResult } from './inputGate';
+import { isInteractiveAgentTerminal } from './terminalSubmit';
+
+// Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
+export const gateSubmitDelayFor = (cliType?: string): number | undefined => (
+  isInteractiveAgentTerminal(cliType) ? undefined : MIN_SUBMIT_DELAY_MS
+);
 
 export interface ButtonInputOptions {
   /** 본문 뒤에 Enter 를 따로 보낸다(예전에 `\n`/`\r` 을 붙이던 호출). */

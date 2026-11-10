@@ -49,7 +49,11 @@ import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
 import { AGENT_INSTALL_COMMAND } from './config/endpoints';
-import { Eraser, ListX, RotateCcw } from 'lucide-react';
+import { Delete, Eraser, ListX } from 'lucide-react';
+import * as LucideIcons from 'lucide-react';
+import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
+import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCommandColumn';
+import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
@@ -6220,6 +6224,50 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
   const ctxQuickCommands = (quickCommands || []).filter((c) => c.command.trim()).slice(0, 6);
 
+  // Floating button column (bottom-right). Quick commands come from the live config: this
+  // component already re-renders on config changes through useTranslation's useConfig.
+  const { config: liveConfig } = useConfig();
+  const columnQuickCommands = quickCommandColumn(liveConfig.quickCommands);
+  const columnButtonStyle: React.CSSProperties = {
+    height: 20,
+    minWidth: 20,
+    padding: 0,
+    flexShrink: 0,
+    borderRadius: 'var(--brutal-radius)',
+    border: `1px solid ${style?.accent || '#89b4fa'}66`,
+    background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
+    color: style?.text || '#cdd6f4',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: 1,
+  };
+  const keepTerminalFocus = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  // Acts on this pane's terminal, not the active one; goes through the button input gate.
+  const renderColumnQuickCommand = (cmd: QuickCommand) => {
+    const LIcon = (LucideIcons as any)[cmd.icon];
+    const commandName = quickCommandDisplayName(cmd.name, t);
+    return (
+      <button
+        key={`quick-${cmd.id}`}
+        type="button"
+        title={`${commandName}\n${cmd.command}`}
+        onMouseDown={keepTerminalFocus}
+        onClick={(e) => {
+          keepTerminalFocus(e);
+          void queueButtonInput(terminalId, cmd.command, { submit: true, submitDelayMs: gateSubmitDelayFor(cliType) });
+        }}
+        style={columnButtonStyle}
+      >
+        {LIcon ? <LIcon size={10} /> : <span style={{ fontSize: 10 }}>{cmd.icon || '⚡'}</span>}
+      </button>
+    );
+  };
+
   // Search options shared by every find call. Decorations are required for
   // onDidChangeResults (match counter) to fire.
   const searchAccent = style?.accent || '#89b4fa';
@@ -6831,95 +6879,57 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             gap: 8,
             zIndex: 180,
             pointerEvents: 'auto',
+            // Quick commands make the column taller; clip the lowest buttons in short panes.
+            maxHeight: 'calc(100% - 24px)',
+            overflow: 'hidden',
           }}
         >
           <button
             type="button"
-            title={t('terminal.clear')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              clearTerminalView();
-            }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
-          >
-            <Eraser size={10} />
-          </button>
-          <button
-            type="button"
             title={t('terminal.clearInput')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
+            onMouseDown={keepTerminalFocus}
             onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
+              keepTerminalFocus(e);
               clearTerminalInput();
             }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
+            style={columnButtonStyle}
           >
-            <RotateCcw size={10} />
+            <Delete size={10} />
           </button>
           <button
             type="button"
             title={t('terminal.clearInputAll')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
+            onMouseDown={keepTerminalFocus}
             onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
+              keepTerminalFocus(e);
               clearTerminalInputAll();
             }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
+            style={columnButtonStyle}
           >
             <ListX size={10} />
           </button>
+          {columnQuickCommands.rerun && renderColumnQuickCommand(columnQuickCommands.rerun)}
+          <button
+            type="button"
+            title={t('terminal.clear')}
+            onMouseDown={keepTerminalFocus}
+            onClick={(e) => {
+              keepTerminalFocus(e);
+              clearTerminalView();
+            }}
+            style={columnButtonStyle}
+          >
+            <Eraser size={10} />
+          </button>
+          {columnQuickCommands.custom.length > 0 && (
+            <>
+              <div
+                aria-hidden="true"
+                style={{ height: 1, flexShrink: 0, margin: '0 3px', background: `${style?.accent || '#89b4fa'}66` }}
+              />
+              {columnQuickCommands.custom.map(renderColumnQuickCommand)}
+            </>
+          )}
         </div>
       </div>
 
