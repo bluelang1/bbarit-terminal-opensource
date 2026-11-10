@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { RefreshCw, X, Plus, ChevronDown, ChevronRight, Upload, Download, Tag, Archive, ExternalLink } from 'lucide-react';
 import { remoteWebUrl } from './gitRemoteWeb';
+import { createStatusPoller, type StatusPoller } from '../git/statusPoll';
 
 /** Tooltip for the header's repository-page button, named after the host. */
 function webUrlLabel(url: string): string {
@@ -208,18 +209,36 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
   }, [isOpen, projects, activeProjectId, selectedProjectId]);
 
   // ── Refresh functions ──
-  const refreshStatus = useCallback(async () => {
+  // isCurrent() turns false once the panel closes or the repo changes, so a
+  // slow status that finishes late does not overwrite the new repo's state.
+  const loadStatus = useCallback(async (isCurrent: () => boolean = () => true) => {
     if (!repoDir) return;
     try {
       const isGit = await invoke<boolean>('git_is_repo', { repoDir });
+      if (!isCurrent()) return;
       setIsRepo(isGit);
       if (!isGit) return;
       const raw = await invoke<string>('git_status_full', { repoDir });
+      if (!isCurrent()) return;
       const s = parseStatus(raw);
       setStaged(s.staged); setUnstaged(s.unstaged); setUntracked(s.untracked); setConflicted(s.conflicted);
       setBranch(s.branch); setAhead(s.ahead); setBehind(s.behind);
     } catch (e) { console.error('[GitPanel] status error:', e); }
   }, [repoDir]);
+
+  // One poller per open repo: status calls never overlap (see src/git/statusPoll.ts).
+  const statusPollerRef = useRef<{ repoDir: string; poller: StatusPoller } | null>(null);
+  const pollerFor = (dir: string) => (statusPollerRef.current?.repoDir === dir ? statusPollerRef.current.poller : null);
+  /** After a change: reruns once the in-flight status (if any) ends. */
+  const refreshStatus = useCallback(async () => {
+    const poller = pollerFor(repoDir);
+    await (poller ? poller.refresh({ fresh: true }) : loadStatus());
+  }, [repoDir, loadStatus]);
+  /** Tab switch / focus: shares an in-flight status instead of starting another. */
+  const pollStatus = useCallback(async () => {
+    const poller = pollerFor(repoDir);
+    await (poller ? poller.refresh() : loadStatus());
+  }, [repoDir, loadStatus]);
 
   const loadDiff = useCallback(async (path: string, isStagedFile: boolean) => {
     if (!repoDir) return;
@@ -290,24 +309,38 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
   const refreshTab = useCallback(async (tab: TabId) => {
     setLoading(true);
     try {
-      await refreshStatus();
+      await pollStatus();
       if (tab === 'history') await refreshHistory();
       else if (tab === 'branches') await refreshBranches();
       else if (tab === 'remotes') await refreshRemotes();
       else if (tab === 'stashes') await refreshStashes();
       else if (tab === 'tags') await refreshTags();
     } finally { setLoading(false); }
-  }, [refreshStatus, refreshHistory, refreshBranches, refreshRemotes, refreshStashes, refreshTags]);
+  }, [pollStatus, refreshHistory, refreshBranches, refreshRemotes, refreshStashes, refreshTags]);
 
   // ── Mount & Auto-refresh ──
+  // Status polling: the next poll starts only after the previous one ends and
+  // waits longer on slow repos, so a huge repo cannot pile up `git status` calls.
+  useEffect(() => {
+    if (!isOpen || !repoDir) return;
+    let alive = true;
+    const poller = createStatusPoller(() => loadStatus(() => alive));
+    statusPollerRef.current = { repoDir, poller };
+    poller.start();
+    return () => {
+      alive = false;
+      poller.stop();
+      if (statusPollerRef.current?.poller === poller) statusPollerRef.current = null;
+    };
+  }, [isOpen, repoDir, loadStatus]);
+
   useEffect(() => {
     if (!isOpen || !repoDir) return;
     refreshTab(activeTab);
-    const iv = setInterval(() => refreshStatus(), 5000);
     const onFocus = () => { if (document.visibilityState === 'visible') refreshTab(activeTab); };
     document.addEventListener('visibilitychange', onFocus);
-    return () => { clearInterval(iv); document.removeEventListener('visibilitychange', onFocus); };
-  }, [isOpen, repoDir, activeTab, refreshTab, refreshStatus]);
+    return () => { document.removeEventListener('visibilitychange', onFocus); };
+  }, [isOpen, repoDir, activeTab, refreshTab]);
 
   // ── Actions ──
   const handleStage = useCallback(async (paths: string[]) => {

@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- The whole app no longer freezes when a very large repository (hundreds of thousands of files) is open with the Git panel showing. Git commands no longer block the thread that draws the window, and status refresh only runs again after the previous one finishes, waiting longer on slow repositories (up to 60 seconds).
+
 ## [1.1.67] - 2026-11-08
 
 ### Added
