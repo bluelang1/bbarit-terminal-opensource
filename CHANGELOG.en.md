@@ -19,6 +19,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 - The left project list now uses compact single-line rows so more projects fit on screen. The folder path moved to the row's hover tooltip, and the favorite, edit and close buttons appear on hover (favorite projects always show a star before the name).
 - The left project list can be resized between 180 and 520 px by dragging its right edge, and the width is remembered across restarts. Double-click the edge to return to the default 260 px.
 - Quick command buttons moved from the bottom bar into each terminal's button column at the bottom right. The order is clear input, clear all input, rerun, clear terminal, then your own buttons, and they run in that terminal. Buttons with an empty command are hidden, and clear input has a new backspace icon.
+- Quick command buttons moved from the bottom bar into a button strip on the right side of each terminal, which never covers terminal text. The order is clear input, clear all input, rerun, clear terminal, then your own buttons, and they run in that terminal. Buttons with an empty command are hidden, and clear input has a new backspace icon.
 
 ### Fixed
 

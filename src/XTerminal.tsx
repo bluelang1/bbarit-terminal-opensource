@@ -160,6 +160,9 @@ function shellQuotePath(p: string): string {
 // Constants
 const PTY_READ_INTERVAL = 33; // ~30fps (memory/CPU optimized)
 const RESIZE_DEBOUNCE_MS = 250;
+// Button strip on the right of every terminal (clear/rerun/quick commands). The xterm mount
+// stops this far from the right edge, so fit computes cols without it and nothing overlaps text.
+const TERMINAL_GUTTER_WIDTH = 28;
 const TELEGRAM_SCREEN_SNAPSHOT_MAX_CHARS = 16000;
 const TELEGRAM_LAST_SENT_MAX_CHARS = 4096;
 const TELEGRAM_COMMAND_BUFFER_MAX_CHARS = 2000;
@@ -4853,7 +4856,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // tracking effect; the advance only clamps at the right edge.
       setCursorOverlay((prev) => {
         if (!prev) return prev;
-        const wrapWidth = terminalWrapRef.current?.clientWidth ?? Infinity;
+        // Clamp at the terminal area's right edge, left of the button strip.
+        const mount = terminalMountRef.current;
+        const wrapWidth = mount ? mount.offsetLeft + mount.clientWidth : (terminalWrapRef.current?.clientWidth ?? Infinity);
         return advanceImeAnchor(prev, finalText, wrapWidth);
       });
     }
@@ -5489,6 +5494,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     const wrap = terminalWrapRef.current;
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return;
+      // Wheel over the button strip scrolls the strip (if it overflows), never the terminal.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       const state = terminalStates.get(terminalId);
       if (!state) return;
       const term = state.term as any;
@@ -6224,7 +6231,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
   const ctxQuickCommands = (quickCommands || []).filter((c) => c.command.trim()).slice(0, 6);
 
-  // Floating button column (bottom-right). Quick commands come from the live config: this
+  // Button strip on the right (TERMINAL_GUTTER_WIDTH). Quick commands come from the live config: this
   // component already re-renders on config changes through useTranslation's useConfig.
   const { config: liveConfig } = useConfig();
   const columnQuickCommands = quickCommandColumn(liveConfig.quickCommands);
@@ -6587,7 +6594,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           data-terminal-mount
           style={{
             position: 'absolute',
-            inset: 8,
+            top: 8,
+            left: 8,
+            bottom: 8,
+            right: TERMINAL_GUTTER_WIDTH + 8,
           }}
         />
 
@@ -6745,7 +6755,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             style={{
               position: 'absolute',
               left: 12,
-              right: 12,
+              right: TERMINAL_GUTTER_WIDTH + 12,
               bottom: 12,
               zIndex: 190,
               padding: '10px 12px',
@@ -6844,7 +6854,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             }}
             style={{
               position: 'absolute',
-              left: '50%',
+              left: `calc(50% - ${TERMINAL_GUTTER_WIDTH / 2}px)`,
               bottom: 12,
               transform: 'translateX(-50%)',
               zIndex: 180,
@@ -6869,19 +6879,31 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             ↓ {t('terminal.scrollToBottom')}
           </button>
         )}
+        {/* Button strip: outside the xterm mount (see TERMINAL_GUTTER_WIDTH). Bottom-aligned via the
+            first button's auto margin, which still lets an overflowing strip scroll to its top. */}
         <div
+          data-terminal-gutter
+          onMouseDown={keepTerminalFocus}
           style={{
             position: 'absolute',
-            right: 12,
-            bottom: 12,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: TERMINAL_GUTTER_WIDTH,
+            boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
+            alignItems: 'center',
             gap: 8,
+            padding: '8px 0',
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            overscrollBehavior: 'contain',
+            scrollbarWidth: 'none',
+            background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 94%, ${style?.text || '#cdd6f4'})`,
+            borderLeft: `1px solid color-mix(in srgb, ${style?.text || '#cdd6f4'} 12%, transparent)`,
             zIndex: 180,
             pointerEvents: 'auto',
-            // Quick commands make the column taller; clip the lowest buttons in short panes.
-            maxHeight: 'calc(100% - 24px)',
-            overflow: 'hidden',
           }}
         >
           <button
@@ -6892,7 +6914,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               keepTerminalFocus(e);
               clearTerminalInput();
             }}
-            style={columnButtonStyle}
+            style={{ ...columnButtonStyle, marginTop: 'auto' }}
           >
             <Delete size={10} />
           </button>
@@ -6925,7 +6947,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             <>
               <div
                 aria-hidden="true"
-                style={{ height: 1, flexShrink: 0, margin: '0 3px', background: `${style?.accent || '#89b4fa'}66` }}
+                style={{ height: 1, width: 20, flexShrink: 0, background: `${style?.accent || '#89b4fa'}66` }}
               />
               {columnQuickCommands.custom.map(renderColumnQuickCommand)}
             </>

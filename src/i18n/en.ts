@@ -2771,7 +2771,7 @@ export const en = {
   'settings.terminal.cursorShape.tooltip': "Select terminal cursor shape",
   'settings.terminal.inputMode.tooltip': "Select terminal input mode",
   'settings.terminal.shellType.tooltip': "Select default Windows shell",
-  'settings.terminal.quickCommands.desc': "Frequently used commands shown as icon buttons in the button column at the bottom-right of each terminal; a click runs the command in that terminal. Entries with an empty command are hidden, and the `!!` entry appears as the rerun button.",
+  'settings.terminal.quickCommands.desc': "Frequently used commands shown as icon buttons in the button strip on the right side of each terminal; a click runs the command in that terminal. Entries with an empty command are hidden, and the `!!` entry appears as the rerun button.",
   'settings.terminal.quickCommands.pickIcon': "Pick icon",
   'settings.terminal.quickCommands.placeholder': "command...",
   'settings.theme.projectTheme.desc': "Change the color theme for the current project.",

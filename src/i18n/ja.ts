@@ -2715,7 +2715,7 @@ export const ja: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "ターミナルカーソルの形状を選択",
   'settings.terminal.inputMode.tooltip': "ターミナル入力モードを選択",
   'settings.terminal.shellType.tooltip': "既定の Windows シェルを選択",
-  'settings.terminal.quickCommands.desc': "各ターミナル右下のボタン列にアイコンボタンとして表示されるよく使うコマンドです。クリックするとそのターミナルで即実行されます。コマンドが空の項目は表示されず、`!!` の項目は再実行ボタンとして表示されます。",
+  'settings.terminal.quickCommands.desc': "各ターミナル右側のボタン列にアイコンボタンとして表示されるよく使うコマンドです。クリックするとそのターミナルで即実行されます。コマンドが空の項目は表示されず、`!!` の項目は再実行ボタンとして表示されます。",
   'settings.terminal.quickCommands.pickIcon': "アイコンを選択",
   'settings.terminal.quickCommands.placeholder': "コマンド...",
   'settings.theme.projectTheme.desc': "現在のプロジェクトのカラーテーマを変更します。",
