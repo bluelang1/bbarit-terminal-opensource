@@ -166,8 +166,9 @@ const RESIZE_DEBOUNCE_MS = 250;
 // stops this far from the right edge, so fit computes cols without it and nothing overlaps text.
 const TERMINAL_GUTTER_WIDTH = 28;
 const TERMINAL_AREA_PAD = 8;
-// Set on the wrap element (never by React): the xterm area's px width from terminalAreaWidth, so
-// the cols rounding leftover goes to the strip. Unset = plain layout (wrap - pad - strip).
+// Set on the wrap element (never by React): the xterm area's px width from terminalAreaWidth. The
+// area is right-aligned against the fixed strip, so the cols rounding leftover becomes extra left
+// inset (same background as the terminal). Unset = plain layout (wrap - pad - strip).
 const TERMINAL_AREA_WIDTH_VAR = '--octo-terminal-area-width';
 const TERMINAL_AREA_WIDTH = `var(${TERMINAL_AREA_WIDTH_VAR}, calc(100% - ${TERMINAL_AREA_PAD + TERMINAL_GUTTER_WIDTH}px))`;
 
@@ -6639,10 +6640,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           style={{
             position: 'absolute',
             top: TERMINAL_AREA_PAD,
-            left: TERMINAL_AREA_PAD,
             bottom: TERMINAL_AREA_PAD,
-            // Ends right after the last column + FitAddon's 14 px scrollbar lane; the strip
-            // takes the rest (see fitTerminalArea).
+            // Right-aligned against the strip: last column + FitAddon's 14 px scrollbar lane end at
+            // the hairline; the cols rounding leftover sits on the left (see fitTerminalArea).
+            right: TERMINAL_GUTTER_WIDTH,
             width: TERMINAL_AREA_WIDTH,
           }}
         />
@@ -6801,9 +6802,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             style={{
               position: 'absolute',
               left: 12,
-              // Ends 8 px before the strip, which is TERMINAL_GUTTER_WIDTH or a little wider.
-              width: `calc(${TERMINAL_AREA_WIDTH} - 12px)`,
-              boxSizing: 'border-box',
+              right: TERMINAL_GUTTER_WIDTH + 12,
               bottom: 12,
               zIndex: 190,
               padding: '10px 12px',
@@ -6902,7 +6901,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             }}
             style={{
               position: 'absolute',
-              left: `calc(${TERMINAL_AREA_PAD}px + ${TERMINAL_AREA_WIDTH} / 2)`, // centre of the xterm area
+              left: `calc(100% - ${TERMINAL_GUTTER_WIDTH}px - ${TERMINAL_AREA_WIDTH} / 2)`, // centre of the xterm area
               bottom: 12,
               transform: 'translateX(-50%)',
               zIndex: 180,
@@ -6937,15 +6936,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             top: 0,
             right: 0,
             bottom: 0,
-            // Starts where the xterm area ends (TERMINAL_AREA_WIDTH); at least TERMINAL_GUTTER_WIDTH.
-            left: `calc(${TERMINAL_AREA_PAD}px + ${TERMINAL_AREA_WIDTH})`,
+            width: TERMINAL_GUTTER_WIDTH,
             boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
-            // Buttons stay in a 28 px column at the right edge; extra width is plain strip.
-            alignItems: 'flex-end',
+            alignItems: 'center',
             gap: 8,
-            padding: `8px ${(TERMINAL_GUTTER_WIDTH - 20) / 2}px`,
+            padding: '8px 0',
             overflowX: 'hidden',
             overflowY: 'auto',
             overscrollBehavior: 'contain',

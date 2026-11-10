@@ -3,7 +3,8 @@
 // @xterm/addon-fit computes cols = floor((parentWidth - lane) / cellWidth), so whatever is left
 // after the last column (< one cell) used to show up as empty space before the strip. This picks
 // the narrowest integer width that still gives fit the same cols as the full available width;
-// the strip grows by the leftover instead. The result depends only on the wrapper width and the
+// XTerminal right-aligns that area against the fixed 28 px strip, so the leftover becomes extra
+// left inset instead. The result depends only on the wrapper width and the
 // cell width, never on the area's own width, so applying it cannot feed back into a resize loop.
 
 /**
@@ -27,7 +28,7 @@ export interface TerminalAreaInput {
   wrapWidth: number;
   /** Space left of the xterm area inside the wrapper. */
   padLeft: number;
-  /** Strip width when there is no leftover to absorb. */
+  /** Fixed strip width at the right edge. */
   minStrip: number;
   /** Scrollbar lane fit reserves (FIT_SCROLLBAR_LANE). */
   lane: number;

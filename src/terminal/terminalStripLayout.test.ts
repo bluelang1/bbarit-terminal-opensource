@@ -8,12 +8,20 @@ describe('terminal area width beside the button strip', () => {
     expect(FIT_SCROLLBAR_LANE).toBe(14);
   });
 
-  it('absorbs the cols rounding leftover into the strip (8.625 px cells)', () => {
+  it('leaves the cols rounding leftover outside the area (8.625 px cells)', () => {
     // available = 1498 - 8 - 28 = 1462 -> cols = floor(1448 / 8.625) = 167
     const width = terminalAreaWidth({ ...base, wrapWidth: 1498, cellWidth: 8.625 });
     expect(width).toBe(Math.ceil(167 * 8.625 + 14)); // 1455 (1454.375 rounded up)
     expect(fitAddonCols(width!, 14, 8.625)).toBe(167);
-    expect(1498 - 8 - width!).toBe(35); // strip = 28 + 7 px leftover
+    // The strip stays 28 px; the area is right-aligned to it, so the left inset is 8 + 7.
+    expect(1498 - 28 - width!).toBe(15);
+  });
+
+  it('measured pane: 1506 px wrapper, 8.625 px cells', () => {
+    const width = terminalAreaWidth({ ...base, wrapWidth: 1506, cellWidth: 8.625 })!;
+    expect(fitAddonCols(width, 14, 8.625)).toBe(168);
+    expect(width).toBe(1463); // 168 * 8.625 = 1449 + 14 lane
+    expect(1506 - 28 - width).toBe(15); // left inset = 8 px padding + 7 px leftover
   });
 
   it('keeps an exact multiple exact', () => {
