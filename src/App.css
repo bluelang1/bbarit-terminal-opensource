@@ -4336,6 +4336,13 @@ body.ftree-dragging * {
   mix-blend-mode: screen;
 }
 
+/* The overlay carries a title, and the later global `[title] { position: relative }` tooltip
+   rule has the same specificity: it put the watermark in the pane's flex flow, pushing the
+   active terminal (and its button strip) about 80 px down. Keep it out of the flow. */
+.terminal-name-overlay[title] {
+  position: absolute;
+}
+
 .terminal-name-overlay-main {
   display: inline-flex;
   align-items: center;

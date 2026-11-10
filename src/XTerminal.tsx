@@ -6602,7 +6602,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             top: 8,
             left: 8,
             bottom: 8,
-            right: TERMINAL_GUTTER_WIDTH + 8,
+            // No gap before the strip: FitAddon already keeps a 14 px scrollbar lane on the right.
+            right: TERMINAL_GUTTER_WIDTH,
           }}
         />
 
