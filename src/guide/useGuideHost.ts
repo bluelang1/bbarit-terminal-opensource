@@ -36,6 +36,8 @@ export interface GuideHostInput {
   agentTabCount: number;
   statusTabCount: number;
   gitPanelOpen: boolean;
+  /** Hint mode (src/hints) is showing its labels. */
+  hintModeOpen?: boolean;
 }
 
 export interface GuideHost {
@@ -180,6 +182,7 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
   useIncrease(enabled ? input.agentTabCount : 0, () => mark('ai-terminal'));
   useIncrease(enabled ? input.statusTabCount : 0, () => mark('status'));
   useIncrease(enabled && input.gitPanelOpen ? 1 : 0, () => mark('git-keys'));
+  useIncrease(enabled && input.hintModeOpen ? 1 : 0, () => mark('hints'));
 
   const runStartup = useCallback((projectCount: number) => {
     if (!latest.current.enabled || !isTauri() || startupRanRef.current) return;

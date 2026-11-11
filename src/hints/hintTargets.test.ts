@@ -47,9 +47,10 @@ describe('kinds', () => {
       <div id="t" data-hint="tab"></div>
       <div id="t2" data-terminal-tab-id="y"></div>
       <div id="w" data-terminal-wrap></div>
-      <button id="b" data-hint="nav"></button>`);
-    expect(['p', 'p2', 't', 't2', 'w', 'b'].map((id) => hintKindOf(document.getElementById(id)!)))
-      .toEqual(['project', 'project', 'tab', 'tab', 'terminal', 'nav']);
+      <button id="b" data-hint="nav"></button>
+      <button id="tl" data-hint="tool"></button>`);
+    expect(['p', 'p2', 't', 't2', 'w', 'b', 'tl'].map((id) => hintKindOf(document.getElementById(id)!)))
+      .toEqual(['project', 'project', 'tab', 'tab', 'terminal', 'nav', 'tool']);
   });
 
   it('maps to data-kind', () => {
@@ -113,10 +114,15 @@ describe('filters', () => {
 });
 
 describe('dialogs', () => {
+  it('ignores non-modal role=dialog panels', () => {
+    mount('<div role="dialog" style="z-index:50" data-box="0,0,400,300"></div>');
+    expect(findTopHintDialog(document, window)).toBeNull();
+  });
+
   it('finds the top-most open modal layer', () => {
     mount(`
       <div id="low" class="modal-overlay" style="z-index:10" data-box="0,0,800,600"></div>
-      <div id="high" role="dialog" style="z-index:50" data-box="0,0,400,300"></div>
+      <div id="high" aria-modal="true" style="z-index:50" data-box="0,0,400,300"></div>
       <div id="hidden" class="confirm-overlay" style="z-index:99;display:none" data-box="0,0,800,600"></div>`);
     expect(findTopHintDialog(document, window)?.id).toBe('high');
   });
@@ -133,6 +139,15 @@ describe('order', () => {
     element.id = id;
     return { element, kind, rect: { left, top, width: 10, height: 10 } };
   };
+
+  it('puts toolbar tools after nav controls', () => {
+    const ordered = orderHintTargets([
+      t('tool-top', 'tool', 0, 0),
+      t('nav-low', 'nav', 0, 500),
+      t('proj', 'project', 0, 50),
+    ]);
+    expect(ids(ordered)).toEqual(['proj', 'nav-low', 'tool-top']);
+  });
 
   it('puts projects, then tabs, then panes, then nav controls in reading order', () => {
     const ordered = orderHintTargets([

@@ -136,15 +136,13 @@ describe('useHintMode', () => {
     expect(api.current!.active).toBe(false);
   });
 
-  it('closes on mouse down, resize and page scroll but not on terminal scroll', () => {
+  it('closes on mouse down, wheel and resize but ignores programmatic scrolls', () => {
     render(<Harness />);
     act(() => api.current!.open());
-    const xterm = document.createElement('div');
-    xterm.className = 'xterm';
-    fixture.appendChild(xterm);
-    act(() => { xterm.dispatchEvent(new Event('scroll')); });
-    expect(api.current!.active).toBe(true);
     act(() => { fixture.dispatchEvent(new Event('scroll')); });
+    act(() => { document.dispatchEvent(new Event('scroll')); });
+    expect(api.current!.active).toBe(true);
+    act(() => { fixture.dispatchEvent(new WheelEvent('wheel', { bubbles: true })); });
     expect(api.current!.active).toBe(false);
 
     act(() => api.current!.open());
@@ -154,6 +152,52 @@ describe('useHintMode', () => {
     act(() => api.current!.open());
     act(() => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); });
     expect(api.current!.active).toBe(false);
+  });
+
+  it('does not give focus back to the old terminal after a project pick', () => {
+    render(<Harness />);
+    act(() => api.current!.open());
+    press('Digit2', '2');
+    expect(clicks).toEqual(['proj-b']);
+    expect(document.activeElement).not.toBe(input);
+  });
+
+  it('after a nav pick that takes no focus, returns focus to the terminal on the next frame', () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return frames.length; });
+    render(<Harness />);
+    act(() => api.current!.open());
+    press('Digit4', '4');
+    expect(clicks).toEqual(['nav']);
+    expect(document.activeElement).not.toBe(input);
+    frames.forEach((cb) => cb(0));
+    expect(document.activeElement).toBe(input);
+    vi.restoreAllMocks();
+  });
+
+  it('swallows auto-repeat keydowns and the keyup of the key that closed hint mode', () => {
+    render(<Harness />);
+    act(() => api.current!.open());
+    const repeat = press('KeyZ', 'z', { repeat: true });
+    expect(repeat.defaultPrevented).toBe(true);
+    expect(api.current!.active).toBe(true);
+
+    press('Digit1', '1');
+    expect(api.current!.active).toBe(false);
+    const later = vi.fn();
+    window.addEventListener('keydown', later, true);
+    window.addEventListener('keyup', later, true);
+    const held = press('Digit1', '1', { repeat: true });
+    const up = new KeyboardEvent('keyup', { code: 'Digit1', key: '1', bubbles: true, cancelable: true });
+    act(() => { window.dispatchEvent(up); });
+    const next = press('Digit1', '1');
+    window.removeEventListener('keydown', later, true);
+    window.removeEventListener('keyup', later, true);
+    expect(held.defaultPrevented).toBe(true);
+    expect(up.defaultPrevented).toBe(true);
+    // Only the fresh press after the release gets through.
+    expect(later).toHaveBeenCalledTimes(1);
+    expect(next.defaultPrevented).toBe(false);
   });
 
   it('narrows two-character labels and backspace widens again', () => {

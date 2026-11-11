@@ -1,7 +1,7 @@
 // Getting-started steps. Adding a step = one entry here + guide.step.<id>.* keys
 // in src/i18n/en.ts and ko.ts (+ an illustration in illustrations.tsx).
 
-export type GuideStepId = 'project' | 'ai-terminal' | 'status' | 'keep-running' | 'git-keys' | 'pet';
+export type GuideStepId = 'project' | 'ai-terminal' | 'status' | 'keep-running' | 'git-keys' | 'hints' | 'pet';
 
 export interface GuideTarget {
   /** `[data-guide="…"]` on the real control — never a shared class. */
@@ -39,6 +39,8 @@ export const GUIDE_STEPS: GuideStep[] = [
   { id: 'status', ...keys('status') },
   { id: 'keep-running', ...keys('keep-running'), action: 'open-settings-terminal' },
   { id: 'git-keys', ...keys('git-keys'), target: target('git-keys', 'git') },
+  // Hint mode has no button of its own: the step only explains the shortcut.
+  { id: 'hints', ...keys('hints') },
   { id: 'pet', ...keys('pet'), action: 'pet-tour', macOnly: true },
 ];
 

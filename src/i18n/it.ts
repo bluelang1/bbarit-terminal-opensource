@@ -3434,6 +3434,8 @@ export const it: Record<TranslationKey, string> = {
   'guide.step.git-keys.body': 'The Git button shows your changes and opens the repository page in one click. Search finds any file (Cmd/Ctrl+P). In terminals Enter sends, Shift+Enter adds a line, and Cmd+Enter can be Claude Code\'s send key.',
   'guide.step.git-keys.caption': 'Your Git changes live here',
   'guide.step.git-keys.missing': 'The toolbar is folded. Click the « button at the top right to unfold it and the Git button appears.',
+  'guide.step.hints.title': "Jump with keyboard hints",
+  'guide.step.hints.body': "Press Cmd+J (Alt+J on Windows/Linux) and a small yellow label appears on each project, terminal tab, terminal pane and panel switch. Type the label to go there; Esc closes. Style and size are under Settings > Shortcuts.",
   'guide.step.pet.title': 'Desktop pet',
   'guide.step.pet.body': 'Minimise or close the window and a little octopus wanders your desktop, showing what your AI tabs are up to. Double-click it to bring the app back. "Try it" shows every look it has.',
   'guide.step.pet.caption': 'Help → Character tour',

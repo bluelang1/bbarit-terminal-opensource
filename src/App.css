@@ -10050,7 +10050,7 @@ input[type="range"]::-webkit-slider-thumb {
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2147483647;
+  z-index: 2147483600;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -12419,6 +12419,7 @@ textarea,
   --hint-tab-bg: #7fd0ff;
   --hint-terminal-bg: #9be56a;
   --hint-nav-bg: #e8ebef;
+  --hint-tool-bg: #d3d7dd;
 }
 
 .hint-theme[data-hint-size='normal'] {
@@ -12466,6 +12467,7 @@ textarea,
 .hint-badge[data-kind='tab'] { background: var(--hint-tab-bg, var(--hint-bg)); color: var(--hint-tab-fg, var(--hint-fg)); }
 .hint-badge[data-kind='terminal'] { background: var(--hint-terminal-bg, var(--hint-bg)); color: var(--hint-terminal-fg, var(--hint-fg)); }
 .hint-badge[data-kind='nav'] { background: var(--hint-nav-bg, var(--hint-bg)); color: var(--hint-nav-fg, var(--hint-fg)); }
+.hint-badge[data-kind='tool'] { background: var(--hint-tool-bg, var(--hint-bg)); color: var(--hint-tool-fg, var(--hint-fg)); }
 
 .hint-badge[data-hidden='true'] {
   display: none;

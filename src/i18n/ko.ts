@@ -3492,6 +3492,8 @@ export const ko: Record<TranslationKey, string> = {
   'guide.step.git-keys.body': 'Git 버튼으로 바뀐 내용을 보고, 저장소 페이지도 바로 열 수 있어요. 검색(Cmd/Ctrl+P)으로 파일을 찾고, 터미널에서는 Enter로 보내고 Shift+Enter로 줄을 바꿔요. Cmd+Enter는 Claude Code의 보내기 키로 쓸 수 있습니다.',
   'guide.step.git-keys.caption': 'Git 변경 사항은 여기서 봐요',
   'guide.step.git-keys.missing': '툴바가 접혀 있어요. 오른쪽 위 « 버튼을 눌러 펼치면 Git 버튼이 보여요.',
+  'guide.step.hints.title': "키보드 힌트로 이동",
+  'guide.step.hints.body': "Cmd+J(Windows/Linux는 Alt+J)를 누르면 프로젝트, 터미널 탭, 터미널 창, 패널 전환 버튼마다 작은 노란 글자가 떠요. 그 글자를 치면 그곳으로 이동하고 Esc로 닫아요. 모양과 크기는 설정 > 단축키에서 바꿀 수 있어요.",
   'guide.step.pet.title': '데스크톱 펫',
   'guide.step.pet.body': '창을 최소화하거나 닫으면 작은 문어가 바탕화면을 돌아다니며 AI 탭 상태를 알려 줘요. 두 번 누르면 앱이 다시 열립니다. ‘직접 해보기’로 펫의 모든 모습을 둘러보세요.',
   'guide.step.pet.caption': '도움말 → 캐릭터 둘러보기',

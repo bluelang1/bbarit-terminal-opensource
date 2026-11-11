@@ -1,7 +1,12 @@
 // Which on-screen elements get a hint, in what order, where the badge goes,
 // and how a picked element is activated. DOM-only; no React.
 
-export type HintKind = 'project' | 'tab' | 'terminal' | 'nav';
+/**
+ * nav = panel/view show-hide and switches (edges, group headers, layout switches);
+ * tool = the top toolbar's feature buttons, ordered last so they are the ones that
+ * get two-character labels when there are many targets.
+ */
+export type HintKind = 'project' | 'tab' | 'terminal' | 'nav' | 'tool';
 
 /** `data-kind` on each hint box; per-kind colours are CSS-only (App.css `.hint-badge[data-kind=…]`). */
 export type HintDataKind = HintKind;
@@ -23,7 +28,7 @@ export interface HintTarget {
  * Hints are opt-in and only for navigation: things that move you somewhere or
  * show/hide a part of the screen. Project rows/tabs (`data-hint="project"`,
  * data-project-tab-id), terminal tabs (`data-hint="tab"`), terminal panes (the
- * XTerminal `[data-terminal-wrap]`) and controls tagged `data-hint="nav"` in the JSX.
+ * XTerminal `[data-terminal-wrap]`) and controls tagged `data-hint="nav"` / `"tool"` in the JSX.
  * Ordinary action buttons and close/delete buttons are never hinted.
  */
 export const HINT_TERMINAL_SELECTOR = '[data-terminal-wrap]';
@@ -32,16 +37,19 @@ export const HINT_TARGET_SELECTOR = [
   '[data-hint="project"]',
   '[data-hint="tab"]',
   '[data-hint="nav"]',
+  '[data-hint="tool"]',
   '[data-project-tab-id]',
 ].join(', ');
 
 /** Never hinted: the xterm text surface and the hint layer itself. `data-hint="off"` opts out. */
 export const HINT_EXCLUDED_SELECTOR = '.xterm, [data-hint-overlay], [data-hint="off"]';
 
-/** Open modal layers; when one is open only elements inside the top-most one get hints. */
+/**
+ * Real modal layers (they block the rest of the window); when one is open only tagged
+ * elements inside the top-most one get hints. Plain `[role="dialog"]` panels are not
+ * modal and do not narrow the scope.
+ */
 export const HINT_DIALOG_SELECTOR = [
-  '[role="dialog"]',
-  '[role="alertdialog"]',
   '[aria-modal="true"]',
   '[class*="modal-overlay"]',
   '[class*="modal-backdrop"]',
@@ -51,7 +59,7 @@ export const HINT_DIALOG_SELECTOR = [
 
 export function hintKindOf(element: Element): HintKind {
   const declared = element.getAttribute('data-hint');
-  if (declared === 'project' || declared === 'tab' || declared === 'terminal') return declared;
+  if (declared === 'project' || declared === 'tab' || declared === 'terminal' || declared === 'tool') return declared;
   if (element.hasAttribute('data-project-tab-id')) return 'project';
   if (element.hasAttribute('data-terminal-tab-id')) return 'tab';
   if (element.matches(HINT_TERMINAL_SELECTOR)) return 'terminal';
@@ -142,16 +150,16 @@ const READING_ROW_PX = 8;
 
 /**
  * Projects first (DOM = on-screen list order), then terminal tabs, then terminal
- * panes, then nav controls top→bottom, left→right.
+ * panes, then nav controls, then toolbar tools (each top→bottom, left→right).
  */
 export function orderHintTargets(targets: readonly HintTarget[]): HintTarget[] {
-  const rank: Record<HintKind, number> = { project: 0, tab: 1, terminal: 2, nav: 3 };
+  const rank: Record<HintKind, number> = { project: 0, tab: 1, terminal: 2, nav: 3, tool: 4 };
   return targets
     .map((target, index) => ({ target, index }))
     .sort((a, b) => {
       const kind = rank[a.target.kind] - rank[b.target.kind];
       if (kind !== 0) return kind;
-      if (a.target.kind !== 'nav') return a.index - b.index;
+      if (a.target.kind !== 'nav' && a.target.kind !== 'tool') return a.index - b.index;
       const rowA = Math.round(a.target.rect.top / READING_ROW_PX);
       const rowB = Math.round(b.target.rect.top / READING_ROW_PX);
       if (rowA !== rowB) return rowA - rowB;
@@ -238,7 +246,7 @@ export function activateHintTarget(element: HTMLElement, kind: HintKind): void {
   const r = element.getBoundingClientRect();
   const clientX = r.left + r.width / 2;
   const clientY = r.top + r.height / 2;
-  if (kind === 'nav' && isFocusableOther(element)) {
+  if ((kind === 'nav' || kind === 'tool') && isFocusableOther(element)) {
     try { element.focus({ preventScroll: true }); } catch { /* ignore */ }
   }
   const base: MouseEventInit = {

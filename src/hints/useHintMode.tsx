@@ -52,6 +52,41 @@ export function buildHintEntries(
   });
 }
 
+/** How long a key that closed hint mode stays swallowed if its keyup never arrives. */
+const KEY_RELEASE_GUARD_MS = 1500;
+
+/**
+ * After a key closes hint mode, keep its auto-repeat keydowns and its keyup from
+ * reaching the terminal (a held label key would otherwise type into the PTY).
+ */
+function swallowUntilKeyUp(code: string): void {
+  if (!code) return;
+  let timer = 0;
+  const stop = () => {
+    window.clearTimeout(timer);
+    window.removeEventListener('keydown', onDown, true);
+    window.removeEventListener('keyup', onUp, true);
+  };
+  const swallow = (event: KeyboardEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+  };
+  const onDown = (event: KeyboardEvent) => {
+    if (event.code !== code) return;
+    if (event.repeat) swallow(event);
+    else stop();
+  };
+  const onUp = (event: KeyboardEvent) => {
+    if (event.code !== code) return;
+    swallow(event);
+    stop();
+  };
+  window.addEventListener('keydown', onDown, true);
+  window.addEventListener('keyup', onUp, true);
+  timer = window.setTimeout(stop, KEY_RELEASE_GUARD_MS);
+}
+
 export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } = {}): HintModeApi {
   const [session, setSession] = useState<HintSession | null>(null);
   const sessionRef = useRef<HintSession | null>(null);
@@ -63,16 +98,25 @@ export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } =
     setSession(next);
   };
 
-  const close = useCallback(() => {
-    if (!sessionRef.current) return;
+  /**
+   * Leave hint mode. Returns the element that had focus before it opened. Focus is
+   * given back only when `restoreFocus` is set (cancel paths); after a pick the
+   * picked target decides where focus goes.
+   */
+  const shut = useCallback((restoreFocus: boolean): HTMLElement | null => {
+    if (!sessionRef.current) return null;
     update(null);
     document.documentElement.removeAttribute(HINT_MODE_ATTR);
     const previous = previousFocusRef.current;
     previousFocusRef.current = null;
-    if (previous?.isConnected) {
+    if (restoreFocus && previous?.isConnected) {
       try { previous.focus({ preventScroll: true }); } catch { /* ignore */ }
     }
+    return previous;
   }, []);
+
+  /** Cancel: close and give focus back to what had it (usually the terminal). */
+  const close = useCallback(() => { shut(true); }, [shut]);
 
   const open = useCallback(() => {
     if (sessionRef.current) return;
@@ -82,7 +126,7 @@ export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } =
     );
     if (entries.length === 0) return;
     // Park keyboard focus so no input (an xterm textarea, an IME composition) sees
-    // the typed label; it comes back on close.
+    // the typed label.
     const active = document.activeElement;
     previousFocusRef.current = active instanceof HTMLElement && active !== document.body ? active : null;
     try { previousFocusRef.current?.blur(); } catch { /* ignore */ }
@@ -106,41 +150,55 @@ export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } =
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
+      if (event.repeat) return;
       const result = hintKeyStep(current.entries.map((entry) => entry.label), current.typed, event);
       if (result.type === 'ignore') return;
       if (result.type === 'narrow') {
         update({ ...current, typed: result.buffer });
         return;
       }
+      swallowUntilKeyUp(event.code);
       if (result.type === 'cancel') {
         close();
         return;
       }
       const entry = current.entries.find((candidate) => candidate.label === result.label);
-      close();
-      if (entry) activateHintTarget(entry.target.element, entry.target.kind);
+      const previous = shut(false);
+      if (!entry) return;
+      const { element, kind } = entry.target;
+      activateHintTarget(element, kind);
+      // A panel/view toggle does not take focus: hand it back to the terminal on the
+      // next frame unless the click moved focus somewhere itself. Project, tab and
+      // pane picks leave focus to the terminal they activate.
+      if ((kind === 'nav' || kind === 'tool') && previous) {
+        window.requestAnimationFrame(() => {
+          const now = document.activeElement;
+          if ((!now || now === document.body) && previous.isConnected) {
+            try { previous.focus({ preventScroll: true }); } catch { /* ignore */ }
+          }
+        });
+      }
     };
     const dismiss = () => close();
-    const onScroll = (event: Event) => {
-      // xterm scrolls its own viewport as output arrives; that does not move any hint.
-      const target = event.target;
-      if (target instanceof Element && target.closest('.xterm')) return;
-      close();
-    };
 
+    // Positions are computed once, so only things that move the layout close hint
+    // mode: a mouse press, a user wheel/touch scroll, a resize or leaving the window.
+    // Programmatic scrolls (auto-scrolling panels, terminal output) are ignored.
     window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('mousedown', dismiss, true);
+    window.addEventListener('wheel', dismiss, { capture: true, passive: true });
+    window.addEventListener('touchmove', dismiss, { capture: true, passive: true });
     window.addEventListener('blur', dismiss);
     window.addEventListener('resize', dismiss);
-    document.addEventListener('scroll', onScroll, true);
     return () => {
       window.removeEventListener('keydown', onKeyDown, true);
       window.removeEventListener('mousedown', dismiss, true);
+      window.removeEventListener('wheel', dismiss, true);
+      window.removeEventListener('touchmove', dismiss, true);
       window.removeEventListener('blur', dismiss);
       window.removeEventListener('resize', dismiss);
-      document.removeEventListener('scroll', onScroll, true);
     };
-  }, [isActive, close]);
+  }, [isActive, close, shut]);
 
   useEffect(() => () => {
     document.documentElement.removeAttribute(HINT_MODE_ATTR);
