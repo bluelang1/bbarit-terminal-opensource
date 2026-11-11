@@ -3245,7 +3245,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (!t || !f || !w || w.offsetWidth <= 0 || w.offsetHeight <= 0) return;
       // Leaving the alternate buffer gives the scrollbar lane back (fewer cols): the shell then
       // redraws its prompt for the narrower width before xterm reflows (resizeSequencer).
-      resizeSeqRef.current?.request({ refit: () => preserveTerminalViewport(t, terminalStates.get(terminalId), () => fitTerminalArea(f, t, w), true, true) });
+      resizeSeqRef.current?.request();
     };
     const bufferChangeSub = term.buffer.onBufferChange(() => {
       if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
@@ -3481,7 +3481,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     const fitTerminal = () => {
       if (disposed) return;
       if (cliType !== 'ollama' && resizeSeqRef.current) {
-        resizeSeqRef.current.request({ refit: () => safeFit(), alwaysSyncPty: true });
+        resizeSeqRef.current.request({ refit: () => safeFit(true), alwaysSyncPty: true });
         return;
       }
       safeFit();
@@ -5498,16 +5498,34 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       return !!wrap && !!host && host.offsetWidth > 0 && host.offsetHeight > 0;
     };
     const seq = createResizeSequencer({
-      current: () => ({ cols: termRef.current?.cols ?? 0, rows: termRef.current?.rows ?? 0 }),
+      // The live terminal from the shared map: termRef is already null during unmount cleanup,
+      // when the PTY may still have to be put back to xterm's size.
+      current: () => {
+        const term = terminalStates.get(terminalId)?.term;
+        return { cols: term?.cols ?? 0, rows: term?.rows ?? 0 };
+      },
       propose: () => proposeTerminalSize(fitRef.current, termRef.current, terminalWrapRef.current),
       visible: () => !isDisposedRef.current && !!termRef.current && !!fitRef.current && wrapVisible(),
       altBuffer: () => isAltBuffer(termRef.current),
       replaying: () => !!terminalStates.get(terminalId)?.replayingOutput,
-      defaultRefit: () => {
+      // Nothing can redraw without a running PTY: Ollama chat, deferStart before the first
+      // activation, or a program that exited. Those resize xterm first with no wait.
+      ptyLive: () => {
+        const st = terminalStates.get(terminalId);
+        return cliType !== 'ollama' && !!st?.ptyCreated && !st?._ptyExitDispatched;
+      },
+      defaultRefit: (job) => {
         const term = termRef.current;
         if (!term) return;
-        preserveTerminalViewport(term, terminalStates.get(terminalId), () => {
-          fitTerminalArea(fitRef.current, term, terminalWrapRef.current);
+        const state = terminalStates.get(terminalId);
+        const wrap = terminalWrapRef.current;
+        if (job.revealPin) {
+          // Back from hidden: restore the pin taken when it was hidden (captureHiddenPin).
+          restorePinAfterReveal(term, state, job.revealPin as HiddenPinSnapshot, () => fitTerminalArea(fitRef.current, term, wrap));
+          return;
+        }
+        preserveTerminalViewport(term, state, () => {
+          fitTerminalArea(fitRef.current, term, wrap);
           term.refresh(0, term.rows - 1);
         }, true, true);
       },
@@ -5527,7 +5545,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       seq.dispose();
       if (resizeSeqRef.current === seq) resizeSeqRef.current = null;
     };
-  }, [terminalId]);
+  }, [terminalId, cliType]);
 
   // ResizeObserver로 컨테이너 크기 변경 감지
   useEffect(() => {
@@ -5550,22 +5568,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         }
         const returningPin = hiddenPin;
         hiddenPin = null;
-        requestResize({
-          alwaysSyncPty: true,
-          refit: () => {
-            const term = termRef.current;
-            if (!term) return;
-            const state = terminalStates.get(terminalId);
-            const refit = () => {
-              fitTerminalArea(fitRef.current, term, wrap);
-            };
-            if (returningPin) {
-              restorePinAfterReveal(term, state, returningPin, refit);
-            } else {
-              preserveTerminalViewport(term, state, refit, true, true);
-            }
-          },
-        });
+        requestResize({ alwaysSyncPty: true, revealPin: returningPin ?? undefined });
       }, RESIZE_DEBOUNCE_MS);
     };
 
@@ -5619,9 +5622,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       }
 
       // A new font size changes how many cells fit: refit and tell the PTY, or the program keeps
-      // drawing for the old size until some other resize happens. Quick font steps coalesce
-      // into one resize; hidden tabs are resized when they become active.
-      if (fitRef.current) requestResize({}, FONT_RESIZE_COALESCE_MS);
+      // drawing for the old size until some other resize happens. A smaller font (more columns)
+      // refits at once; a bigger one coalesces quick steps into one PTY-first resize. Hidden
+      // tabs are resized when they become active.
+      if (fitRef.current) {
+        const proposed = proposeTerminalSize(fitRef.current, termRef.current, wrap);
+        const widening = !!proposed && proposed.cols > termRef.current.cols;
+        requestResize({}, widening ? 0 : FONT_RESIZE_COALESCE_MS);
+      }
     };
 
     try {

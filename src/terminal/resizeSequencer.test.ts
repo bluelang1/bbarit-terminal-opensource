@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MAX_PTY_FIRST_ROUNDS, createResizeSequencer, resizeOrder, waitForQuietWrites, type ResizeSequencerDeps } from './resizeSequencer';
+import { MAX_PTY_FIRST_ROUNDS, createResizeSequencer, mergeJobs, resizeOrder, waitForQuietWrites, type ResizeJob, type ResizeSequencerDeps } from './resizeSequencer';
 import type { GridSize } from './ptySize';
 
 const normal = { altBuffer: false, replaying: false };
@@ -17,6 +17,10 @@ describe('resizeOrder', () => {
   it('keeps xterm first for full-screen TUIs and during output replay', () => {
     expect(resizeOrder({ cols: 168, rows: 51 }, { cols: 157, rows: 46 }, { altBuffer: true, replaying: false })).toBe('xterm-first');
     expect(resizeOrder({ cols: 168, rows: 51 }, { cols: 157, rows: 46 }, { altBuffer: false, replaying: true })).toBe('xterm-first');
+  });
+  it('keeps xterm first when no program can redraw (no PTY yet, exited, Ollama)', () => {
+    expect(resizeOrder({ cols: 168, rows: 51 }, { cols: 157, rows: 46 }, { ...normal, ptyLive: false })).toBe('xterm-first');
+    expect(resizeOrder({ cols: 168, rows: 51 }, { cols: 157, rows: 46 }, { ...normal, ptyLive: true })).toBe('pty-first');
   });
   it('is none for the same grid and xterm-first when the target cannot be measured', () => {
     expect(resizeOrder({ cols: 168, rows: 51 }, { cols: 168, rows: 51 }, normal)).toBe('none');
@@ -72,38 +76,71 @@ describe('waitForQuietWrites', () => {
 });
 
 // A fake terminal: refit applies `layout` to xterm; pty records every resize_pty call.
+// `gone` makes current() report 0x0 like a disposed terminal; `refitThrows` makes the default refit fail.
 function harness(start: GridSize, layout: GridSize, opts: { alt?: boolean } = {}) {
-  const state = { xterm: { ...start }, layout: { ...layout }, visible: true, alt: !!opts.alt, replaying: false };
+  const state = { xterm: { ...start }, layout: { ...layout }, visible: true, alt: !!opts.alt, replaying: false, ptyLive: true, gone: false, refitThrows: false };
   const pty: GridSize[] = [];
   const events: string[] = [];
+  const refitJobs: ResizeJob[] = [];
   let release: (() => void) | null = null;
   const deps: ResizeSequencerDeps = {
-    current: () => ({ ...state.xterm }),
+    current: () => (state.gone ? { cols: 0, rows: 0 } : { ...state.xterm }),
     propose: () => (state.visible ? { ...state.layout } : null),
     visible: () => state.visible,
     altBuffer: () => state.alt,
     replaying: () => state.replaying,
-    defaultRefit: () => { state.xterm = { ...state.layout }; events.push(`xterm ${state.xterm.cols}x${state.xterm.rows}`); },
+    ptyLive: () => state.ptyLive,
+    defaultRefit: (job) => {
+      refitJobs.push(job);
+      if (state.refitThrows) throw new Error('fit failed');
+      state.xterm = { ...state.layout };
+      events.push(`xterm ${state.xterm.cols}x${state.xterm.rows}`);
+    },
     resizePty: (s) => { pty.push({ ...s }); events.push(`pty ${s.cols}x${s.rows}`); },
     waitForRedraw: () => new Promise<void>((r) => { events.push('wait'); release = r; }),
     timers,
   };
   const seq = createResizeSequencer(deps);
   const finishWait = async () => { const r = release; release = null; r?.(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
-  return { state, pty, events, seq, finishWait, waiting: () => release != null };
+  return { state, pty, events, refitJobs, seq, finishWait, waiting: () => release != null };
 }
 
 describe('createResizeSequencer', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  it('narrowing a shell: PTY first, waits for the redraw, then xterm, with no second PTY call', async () => {
+  it('narrowing a shell: PTY first, waits for the redraw, then xterm, then the PTY at xterm size', async () => {
     const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
     h.seq.request();
     expect(h.events).toEqual(['pty 157x46', 'wait']);
     await h.finishWait();
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'xterm 157x46']);
+    // The final sync is always sent after a PTY-first run: another resize_pty (e.g. an attach
+    // nudge) may have landed during the wait.
+    expect(h.events).toEqual(['pty 157x46', 'wait', 'xterm 157x46', 'pty 157x46']);
     expect(h.state.xterm).toEqual({ cols: 157, rows: 46 });
+  });
+
+  it('with no live PTY narrowing resizes xterm first and does not wait', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
+    h.state.ptyLive = false;
+    h.seq.request();
+    await Promise.resolve();
+    expect(h.events).toEqual(['xterm 157x46', 'pty 157x46']);
+  });
+
+  it('a refit that throws after a PTY-first resize still syncs the PTY to xterm', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
+    h.state.refitThrows = true;
+    h.seq.request();
+    await h.finishWait();
+    expect(h.state.xterm).toEqual({ cols: 168, rows: 51 });
+    expect(h.pty).toEqual([{ cols: 157, rows: 46 }, { cols: 168, rows: 51 }]);
+    // Later requests still run.
+    h.state.refitThrows = false;
+    h.seq.request();
+    await h.finishWait();
+    expect(h.state.xterm).toEqual({ cols: 157, rows: 46 });
+    expect(h.pty.at(-1)).toEqual({ cols: 157, rows: 46 });
   });
 
   it('widening keeps xterm first and then tells the PTY', async () => {
@@ -140,7 +177,7 @@ describe('createResizeSequencer', () => {
     await vi.advanceTimersByTimeAsync(50);
     expect(h.events).toEqual(['pty 140x45', 'wait']);
     await h.finishWait();
-    expect(h.events).toEqual(['pty 140x45', 'wait', 'xterm 140x45']);
+    expect(h.events).toEqual(['pty 140x45', 'wait', 'xterm 140x45', 'pty 140x45']);
   });
 
   it('a request during the wait runs afterwards against the new layout', async () => {
@@ -163,7 +200,7 @@ describe('createResizeSequencer', () => {
     await h.finishWait();
     expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 147x43', 'wait']);
     await h.finishWait();
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 147x43', 'wait', 'xterm 147x43']);
+    expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 147x43', 'wait', 'xterm 147x43', 'pty 147x43']);
   });
 
   it('stops re-sending after a bounded number of rounds', async () => {
@@ -201,6 +238,39 @@ describe('createResizeSequencer', () => {
     expect(h.events).toHaveLength(3);
   });
 
+  it('disposing during the wait never sends a 0x0 size when the terminal is already gone', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
+    h.seq.request();
+    h.seq.dispose();
+    h.state.gone = true;
+    await h.finishWait();
+    expect(h.pty).toEqual([{ cols: 157, rows: 46 }]);
+  });
+
+  it('a job without a custom refit makes the merged run use the default refit', async () => {
+    const h = harness({ cols: 157, rows: 46 }, { cols: 168, rows: 51 });
+    const custom = vi.fn();
+    h.seq.request({}, 150);
+    h.seq.request({ refit: custom }, 150);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(custom).not.toHaveBeenCalled();
+    expect(h.refitJobs).toHaveLength(1);
+    expect(h.state.xterm).toEqual({ cols: 168, rows: 51 });
+  });
+
+  it('a reveal pin survives merging with a later job and forces the default refit', async () => {
+    const h = harness({ cols: 157, rows: 46 }, { cols: 168, rows: 51 });
+    const custom = vi.fn();
+    h.seq.request({ revealPin: 'pin', alwaysSyncPty: true }, 100);
+    h.seq.request({}, 100);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(h.refitJobs[0]).toMatchObject({ revealPin: 'pin', alwaysSyncPty: true });
+    h.seq.request({ refit: custom, revealPin: 'pin2' });
+    await Promise.resolve();
+    expect(custom).not.toHaveBeenCalled();
+    expect(h.refitJobs[1]).toMatchObject({ revealPin: 'pin2' });
+  });
+
   it('does nothing for a hidden tab', async () => {
     const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
     h.state.visible = false;
@@ -216,5 +286,20 @@ describe('createResizeSequencer', () => {
     await h.finishWait();
     expect(refit).toHaveBeenCalledTimes(1);
     expect(h.pty).toEqual([{ cols: 157, rows: 46 }, { cols: 150, rows: 46 }]);
+  });
+});
+
+describe('mergeJobs', () => {
+  const a = () => {};
+  const b = () => {};
+  it('keeps a custom refit only when both jobs have one', () => {
+    expect(mergeJobs({ refit: a }, { refit: b }).refit).toBe(b);
+    expect(mergeJobs({ refit: a }, {}).refit).toBeUndefined();
+    expect(mergeJobs({}, { refit: b }).refit).toBeUndefined();
+    expect(mergeJobs(null, { refit: b }).refit).toBe(b);
+  });
+  it('ORs the PTY sync flag and keeps the latest reveal pin', () => {
+    expect(mergeJobs({ alwaysSyncPty: true, revealPin: 1 }, {})).toMatchObject({ alwaysSyncPty: true, revealPin: 1 });
+    expect(mergeJobs({ revealPin: 1 }, { revealPin: 2 }).revealPin).toBe(2);
   });
 });

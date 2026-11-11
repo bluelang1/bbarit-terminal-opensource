@@ -17,6 +17,9 @@ export interface ResizeOrderContext {
   altBuffer: boolean;
   /** Saved PTY output is being replayed: shell output is not live, so nothing to wait for. */
   replaying: boolean;
+  /** A running program can redraw: false with no PTY (Ollama chat), before it starts
+   *  (deferStart) or after it exited. Defaults to true. */
+  ptyLive?: boolean;
 }
 
 const validSize = (s: GridSize | null | undefined): s is GridSize =>
@@ -25,7 +28,7 @@ const validSize = (s: GridSize | null | undefined): s is GridSize =>
 export function resizeOrder(current: GridSize, target: GridSize | null, ctx: ResizeOrderContext): ResizeOrder {
   if (!validSize(target) || !validSize(current)) return 'xterm-first';
   if (current.cols === target.cols && current.rows === target.rows) return 'none';
-  if (ctx.altBuffer || ctx.replaying) return 'xterm-first';
+  if (ctx.altBuffer || ctx.replaying || ctx.ptyLive === false) return 'xterm-first';
   return target.cols < current.cols ? 'pty-first' : 'xterm-first';
 }
 
@@ -70,14 +73,18 @@ export function waitForQuietWrites(
 }
 
 export interface ResizeJob {
-  /** Fits xterm to its area; the sequencer's default refit when omitted. */
+  /** Fits xterm to its area. Used only when every job merged into this run has one (the latest
+   *  wins); otherwise, and whenever revealPin is set, the default refit runs. */
   refit?: () => void;
   /** Send the PTY xterm's size even when the grid did not change. */
   alwaysSyncPty?: boolean;
+  /** Opaque scroll pin to restore after the tab was hidden (handled by defaultRefit). Kept
+   *  across merges, so a later job cannot drop it. */
+  revealPin?: unknown;
 }
 
 export interface ResizeSequencerDeps {
-  /** xterm's current grid. */
+  /** xterm's current grid; 0x0 when the terminal is gone. */
   current(): GridSize;
   /** The grid a refit would produce now, or null when it cannot be measured. */
   propose(): GridSize | null;
@@ -85,7 +92,10 @@ export interface ResizeSequencerDeps {
   visible(): boolean;
   altBuffer(): boolean;
   replaying(): boolean;
-  defaultRefit(): void;
+  /** See ResizeOrderContext.ptyLive; treated as live when omitted. */
+  ptyLive?(): boolean;
+  /** Fits xterm to its area for the (merged) job, restoring job.revealPin when set. */
+  defaultRefit(job: ResizeJob): void;
   resizePty(size: GridSize): void;
   /** Waits for the program to redraw after a PTY resize. */
   waitForRedraw(): Promise<void>;
@@ -102,10 +112,13 @@ export interface ResizeSequencer {
  *  drag ends the loop by itself; xterm stays at the old width (clipped) until it does. */
 export const MAX_PTY_FIRST_ROUNDS = 32;
 
-const mergeJobs = (a: ResizeJob | null, b: ResizeJob): ResizeJob => ({
-  refit: b.refit ?? a?.refit,
-  alwaysSyncPty: !!(a?.alwaysSyncPty || b.alwaysSyncPty),
-});
+export const mergeJobs = (a: ResizeJob | null, b: ResizeJob): ResizeJob => (a ? {
+  // A custom refit (e.g. one with a fit-key shortcut) must not stand in for a job that needs the
+  // default fit, so it survives only when both sides have one.
+  refit: a.refit && b.refit ? b.refit : undefined,
+  alwaysSyncPty: !!(a.alwaysSyncPty || b.alwaysSyncPty),
+  revealPin: b.revealPin ?? a.revealPin,
+} : { ...b });
 
 /**
  * Runs terminal resizes one at a time. A request that arrives while a PTY-first resize is waiting
@@ -123,31 +136,35 @@ export function createResizeSequencer(deps: ResizeSequencerDeps): ResizeSequence
   const runOne = async (job: ResizeJob) => {
     if (!deps.visible()) return;
     const before = deps.current();
-    let sent: GridSize | null = null;
-    let target = deps.propose();
-    let from = before;
-    // The layout can get narrower again while the shell redraws (another font step, the window
-    // still being dragged): xterm must not shrink below the width the shell last drew for, so
-    // tell the PTY again and wait once more. After MAX_PTY_FIRST_ROUNDS xterm follows the layout.
-    for (let round = 0; round < MAX_PTY_FIRST_ROUNDS; round++) {
-      if (!target || resizeOrder(from, target, { altBuffer: deps.altBuffer(), replaying: deps.replaying() }) !== 'pty-first') break;
-      deps.resizePty(target);
-      sent = target;
-      await deps.waitForRedraw();
-      if (disposed || !deps.visible()) {
-        // xterm was not resized: put the PTY back to xterm's grid. The tab is resized for real
-        // when it is shown or mounted again.
-        const now = deps.current();
-        if (ptySizeChanged(sent, now)) deps.resizePty(now);
-        return;
+    let ptyFirst = false;
+    try {
+      let target = deps.propose();
+      let from = before;
+      // The layout can get narrower again while the shell redraws (another font step, the window
+      // still being dragged): xterm must not shrink below the width the shell last drew for, so
+      // tell the PTY again and wait once more. After MAX_PTY_FIRST_ROUNDS xterm follows the layout.
+      for (let round = 0; round < MAX_PTY_FIRST_ROUNDS; round++) {
+        const ctx = { altBuffer: deps.altBuffer(), replaying: deps.replaying(), ptyLive: deps.ptyLive?.() ?? true };
+        if (!target || resizeOrder(from, target, ctx) !== 'pty-first') break;
+        deps.resizePty(target);
+        ptyFirst = true;
+        await deps.waitForRedraw();
+        // Hidden or unmounted during the wait: xterm is not resized now (it is when the tab is
+        // shown or mounted again); the finally block puts the PTY back to xterm's grid.
+        if (disposed || !deps.visible()) return;
+        from = target;
+        target = deps.propose();
       }
-      from = sent;
-      target = deps.propose();
-    }
-    (job.refit ?? deps.defaultRefit)();
-    const after = deps.current();
-    if (job.alwaysSyncPty ? validSize(after) && !(sent && !ptySizeChanged(sent, after)) : ptySizeChanged(sent ?? before, after)) {
-      deps.resizePty(after);
+      if (job.refit && job.revealPin == null) job.refit();
+      else deps.defaultRefit(job);
+    } finally {
+      // After a PTY-first run the PTY is always set to xterm's final grid: the sequencer's own
+      // record is not trusted (another resize_pty can land during the wait) and a refit that
+      // threw must not leave the PTY narrower than xterm.
+      const after = deps.current();
+      if (ptyFirst || job.alwaysSyncPty ? validSize(after) : ptySizeChanged(before, after)) {
+        deps.resizePty(after);
+      }
     }
   };
 
