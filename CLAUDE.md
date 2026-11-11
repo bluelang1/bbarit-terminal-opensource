@@ -166,6 +166,31 @@ Build/test gotchas:
   locales, Korean fallback per version) at build time. Window `tool-guide`
   (/guide, src/pages/GuidePage.tsx); the main window owns progress, spotlight and the
   one-time startup opening (src/guide/useGuideHost.ts; never in debug builds).
+- Anything that polls `git_*` goes through `createStatusPoller` (src/git/statusPoll.ts:
+  no overlap, waits 3x the last duration, cap 60 s); never a bare setInterval. Terminal
+  tabs in one repo share a read (src/git/terminalGitStatus.ts). Background status reads
+  pass `--no-optional-locks` so they never hold index.lock against a user commit.
+- Effects that start polling are keyed on a string key with the data in refs; keying on
+  `activeProject` / `busyTerminals` / `agentStatus` objects restarts them every render.
+- UI freeze triage: `sample <octo-ui pid> 5` shows what the main thread is stuck in, and
+  `pgrep -lf git` shows runaway subprocesses. Confirm the caller in code before blaming a panel.
+- Terminal width: the 28 px button strip is a layout column, and all sizing goes through
+  src/terminal/terminalStripLayout.ts (observer on the wrapper only). fit reserves a 14 px
+  scrollbar lane; the alternate buffer gives it to text, resized on `onBufferChange`.
+- App.css has a global `[title] { position: relative }` (tooltips): an absolutely
+  positioned element that carries `title` needs its own `[title]` override.
+- Last command (src/terminal/lastCommand.ts): shells commit on Enter only if the line was
+  echoed on the cursor row (password prompts are not); agent tabs commit when OSC 7501
+  reports work starting, since Enter is a newline there. Only human input and clicked
+  buttons are fed; nothing is recorded inside the alternate buffer of a shell tab.
+- A covered or hidden dev app window stops animation frames, so xterm rows look blank
+  while the buffer is full; check `document.visibilityState` before calling it a bug.
+  Scripted typing goes through `writeHumanInput` (xterm has disableStdin set).
+- Status bar DISK uses the walker in src-tauri/src/disk_usage.rs (same bytes as `du`,
+  cancellable, skips home/root on auto). `src-tauri/target` grows past 50 GB with
+  worktree builds; `cargo clean --manifest-path src-tauri/Cargo.toml` is safe.
+- Gate merges on `gh pr checks <n>` unpiped (a pipe hides its exit code).
+  src/guide/useGuideHost.tauri.test.ts is flaky in CI; rerun before suspecting the PR.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
