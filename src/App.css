@@ -3591,7 +3591,7 @@ body.ftree-dragging * {
 }
 
 /* 하단 상태 막대 왼쪽: 활성 터미널의 마지막 명령. 줄어들 수 있고(min-width 0) 막대의 절반을
-   넘지 않아 CPU/MEM/DISK를 밀어내지 않는다. 막대 글꼴·크기를 그대로 쓰고 색만 조금 진하게. */
+   넘지 않아 CPU/MEM/DISK를 밀어내지 않는다. 막대 글꼴·크기를 그대로 쓴다. */
 .status-bar-last-cmd {
   flex: 0 1 auto;
   min-width: 0;
@@ -3599,7 +3599,9 @@ body.ftree-dragging * {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: color-mix(in srgb, var(--text-color) 72%, transparent);
+  /* 연한 주황 + 살짝 굵게: 회색 수치들 사이에서 눈에 띄게. 글자색을 조금 섞어 밝은 테마에서도 읽힌다. */
+  color: color-mix(in srgb, #f5a25d 85%, var(--text-color));
+  font-weight: 600;
   white-space: nowrap;
 }
 
