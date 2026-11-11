@@ -36,8 +36,8 @@ describe('hints.toggle default', () => {
 
   it.each([
     ['MacIntel', 'cmd+j'],
-    ['Win32', 'ctrl+j'],
-    ['Linux x86_64', 'ctrl+j'],
+    ['Win32', 'alt+j'],
+    ['Linux x86_64', 'alt+j'],
   ])('binds hint mode to %s → %s without clashing with another default', (platform, keys) => {
     setPlatform(platform);
     const defaults = KeybindingManager.defaultBindings();

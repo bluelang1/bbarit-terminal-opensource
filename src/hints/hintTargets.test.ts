@@ -6,8 +6,7 @@ import {
   hintAnchor,
   hintDataKind,
   hintKindOf,
-  HINT_ANCHOR_MARGIN_PX,
-  isDangerHintTarget,
+  HINT_CORNER_OFFSET_PX,
   isHintDisabled,
   isHintExcluded,
   isHintHiddenByStyle,
@@ -48,29 +47,15 @@ describe('kinds', () => {
       <div id="t" data-hint="tab"></div>
       <div id="t2" data-terminal-tab-id="y"></div>
       <div id="w" data-terminal-wrap></div>
-      <button id="b"></button>`);
+      <button id="b" data-hint="nav"></button>`);
     expect(['p', 'p2', 't', 't2', 'w', 'b'].map((id) => hintKindOf(document.getElementById(id)!)))
-      .toEqual(['project', 'project', 'tab', 'tab', 'terminal', 'other']);
-  });
-
-  it('tags close/delete buttons as danger by class word, aria-label or title', () => {
-    mount(`
-      <button id="a" class="tab-close"></button>
-      <button id="b" class="ce-prop-delete"></button>
-      <button id="c" aria-label="Close"></button>
-      <button id="d" title="프로젝트 삭제"></button>
-      <button id="e" class="recent-project-item closed"></button>
-      <button id="f" title="Closer look"></button>
-      <button id="g" class="project-selector-edit"></button>`);
-    const danger = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id) => isDangerHintTarget(document.getElementById(id)!));
-    expect(danger).toEqual([true, true, true, true, false, false, false]);
+      .toEqual(['project', 'project', 'tab', 'tab', 'terminal', 'nav']);
   });
 
   it('maps to data-kind', () => {
-    expect(hintDataKind({ kind: 'project', danger: false })).toBe('project');
-    expect(hintDataKind({ kind: 'terminal', danger: false })).toBe('terminal');
-    expect(hintDataKind({ kind: 'other', danger: false })).toBe('button');
-    expect(hintDataKind({ kind: 'other', danger: true })).toBe('danger');
+    expect(hintDataKind({ kind: 'project' })).toBe('project');
+    expect(hintDataKind({ kind: 'terminal' })).toBe('terminal');
+    expect(hintDataKind({ kind: 'nav' })).toBe('nav');
   });
 });
 
@@ -146,17 +131,17 @@ describe('order', () => {
   const t = (id: string, kind: HintTarget['kind'], left: number, top: number): HintTarget => {
     const element = document.createElement('div');
     element.id = id;
-    return { element, kind, danger: false, rect: { left, top, width: 10, height: 10 } };
+    return { element, kind, rect: { left, top, width: 10, height: 10 } };
   };
 
-  it('puts projects, then tabs, then panes, then the rest in reading order', () => {
+  it('puts projects, then tabs, then panes, then nav controls in reading order', () => {
     const ordered = orderHintTargets([
-      t('btn-bottom', 'other', 0, 500),
+      t('btn-bottom', 'nav', 0, 500),
       t('pane', 'terminal', 300, 100),
-      t('btn-top-right', 'other', 700, 3),
+      t('btn-top-right', 'nav', 700, 3),
       t('proj-2', 'project', 0, 50),
       t('tab-1', 'tab', 300, 30),
-      t('btn-top-left', 'other', 100, 0),
+      t('btn-top-left', 'nav', 100, 0),
       t('proj-1', 'project', 0, 80),
     ]);
     // Projects/tabs keep DOM order (the on-screen list order), not their coordinates.
@@ -165,20 +150,23 @@ describe('order', () => {
 });
 
 describe('collectHintTargets', () => {
-  it('collects visible, enabled, reachable targets in hint order', () => {
+  it('collects only tagged navigation targets that are visible, enabled and reachable', () => {
     mount(`
-      <button id="hidden" style="display:none" data-box="0,0,10,10"></button>
-      <button id="zero" data-box="0,0,0,0"></button>
-      <button id="offscreen" data-box="-100,0,10,10"></button>
-      <button id="disabled" disabled data-box="0,0,10,10"></button>
-      <button id="covered" data-box="200,200,10,10"></button>
-      <button id="ok" data-box="500,10,20,10"></button>
+      <button id="hidden" data-hint="nav" style="display:none" data-box="0,0,10,10"></button>
+      <button id="zero" data-hint="nav" data-box="0,0,0,0"></button>
+      <button id="offscreen" data-hint="nav" data-box="-100,0,10,10"></button>
+      <button id="disabled" data-hint="nav" disabled data-box="0,0,10,10"></button>
+      <button id="covered" data-hint="nav" data-box="200,200,10,10"></button>
+      <button id="ok" data-hint="nav" data-box="500,10,20,10"></button>
+      <button id="plain" data-box="300,10,20,10"></button>
+      <div id="role" role="button" data-box="300,100,20,10"></div>
       <a id="link" href="#x" data-box="10,300,20,10"></a>
-      <a id="nolink" data-box="60,300,20,10"></a>
+      <button id="close" class="tab-close" title="Close" data-box="140,40,10,10"></button>
       <div id="tab" data-hint="tab" data-terminal-tab-id="t1" data-box="100,40,60,20"></div>
+      <div id="header" data-terminal-tab-id="t2" data-box="100,470,60,20"></div>
       <div id="proj" data-hint="project" data-project-tab-id="p1" role="button" data-box="0,40,80,20"></div>
-      <div id="pane" data-terminal-wrap data-box="100,60,600,400"><div class="xterm"><button id="xt" data-box="110,70,10,10"></button></div></div>
-      <button id="close" class="tab-close" data-box="140,40,10,10"></button>`);
+      <div id="pane" data-terminal-wrap data-box="100,60,600,400"><div class="xterm"><button id="xt" data-hint="nav" data-box="110,70,10,10"></button></div></div>
+      <button id="nav2" data-hint="nav" data-box="10,550,20,10"></button>`);
     const cover = document.createElement('div');
     document.elementFromPoint = ((x: number, y: number) => {
       if (x === 205 && y === 205) return cover;
@@ -190,16 +178,14 @@ describe('collectHintTargets', () => {
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(800);
     vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(600);
 
-    const targets = collectHintTargets(document, window);
-    expect(ids(targets)).toEqual(['proj', 'tab', 'pane', 'ok', 'close', 'link']);
-    expect(targets.find((x) => x.element.id === 'close')?.danger).toBe(true);
-    expect(ids(collectHintTargets(document, window, { includeDanger: false }))).not.toContain('close');
+    // Plain buttons, role=button, links, close buttons and split-pane headers are not hinted.
+    expect(ids(collectHintTargets(document, window))).toEqual(['proj', 'tab', 'pane', 'ok', 'nav2']);
   });
 
   it('only hints inside the top-most dialog when one is open', () => {
     mount(`
-      <button id="behind" data-box="10,10,20,20"></button>
-      <div class="modal-overlay" data-box="0,0,800,600"><div role="dialog" data-box="100,100,300,200"><button id="inside" data-box="120,120,40,20"></button></div></div>`);
+      <button id="behind" data-hint="nav" data-box="10,10,20,20"></button>
+      <div class="modal-overlay" data-box="0,0,800,600"><div role="dialog" data-box="100,100,300,200"><button id="untagged" data-box="120,160,40,20"></button><button id="inside" data-hint="nav" data-box="120,120,40,20"></button></div></div>`);
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(800);
     vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(600);
     document.elementFromPoint = undefined as unknown as typeof document.elementFromPoint;
@@ -209,15 +195,18 @@ describe('collectHintTargets', () => {
 
 describe('hintAnchor', () => {
   const vp = { width: 800, height: 600 };
+  const off = HINT_CORNER_OFFSET_PX;
   it('anchors at the top-left corner, or bottom-left for terminal panes', () => {
     expect(hintAnchor({ left: 100, top: 50, width: 80, height: 20 }, 'project', vp)).toEqual({ x: 100, y: 50, placement: 'corner' });
     expect(hintAnchor({ left: 100, top: 50, width: 300, height: 200 }, 'terminal', vp)).toEqual({ x: 100, y: 250, placement: 'bottom-left' });
   });
 
-  it('clamps to the viewport with a margin', () => {
-    const m = HINT_ANCHOR_MARGIN_PX;
-    expect(hintAnchor({ left: 0, top: 0, width: 10, height: 10 }, 'other', vp)).toEqual({ x: m, y: m, placement: 'corner' });
-    expect(hintAnchor({ left: 0, top: 100, width: 800, height: 500 }, 'terminal', vp)).toEqual({ x: m, y: 600 - m, placement: 'bottom-left' });
+  it('clamps so the -4px corner shift stays on screen', () => {
+    expect(hintAnchor({ left: 0, top: 0, width: 10, height: 10 }, 'nav', vp)).toEqual({ x: off, y: off, placement: 'corner' });
+    const right = hintAnchor({ left: 795, top: 595, width: 5, height: 5 }, 'nav', vp, 2);
+    expect(right.x).toBeLessThan(795);
+    expect(right.y).toBeLessThan(595);
+    expect(hintAnchor({ left: 0, top: 100, width: 800, height: 500 }, 'terminal', vp)).toEqual({ x: 0, y: 600, placement: 'bottom-left' });
   });
 });
 
@@ -243,9 +232,9 @@ describe('activateHintTarget', () => {
     const a = document.getElementById('a')!;
     const b = document.getElementById('b')!;
     a.addEventListener('click', (e) => e.preventDefault());
-    activateHintTarget(a, 'other');
+    activateHintTarget(a, 'nav');
     expect(document.activeElement).toBe(a);
-    activateHintTarget(b, 'other');
+    activateHintTarget(b, 'nav');
     expect(document.activeElement).toBe(a);
   });
 
@@ -253,7 +242,19 @@ describe('activateHintTarget', () => {
     const el = document.createElement('button');
     const onClick = vi.fn();
     el.addEventListener('click', onClick);
-    activateHintTarget(el, 'other');
+    activateHintTarget(el, 'nav');
     expect(onClick).not.toHaveBeenCalled();
+  });
+});
+
+describe('collectHintTargets in an untagged modal', () => {
+  it('returns nothing, so hint mode does not open', () => {
+    mount(`
+      <div data-hint="project" data-project-tab-id="p" data-box="0,0,50,20"></div>
+      <div class="confirm-overlay" data-box="0,0,800,600"><button data-box="10,10,20,20">OK</button></div>`);
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(800);
+    vi.spyOn(window, 'innerHeight', 'get').mockReturnValue(600);
+    document.elementFromPoint = undefined as unknown as typeof document.elementFromPoint;
+    expect(collectHintTargets(document, window)).toEqual([]);
   });
 });

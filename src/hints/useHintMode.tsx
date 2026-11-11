@@ -1,8 +1,9 @@
 // Hint mode: press the hint shortcut (keybinding `hints.toggle`), small labelled
-// boxes appear on clickable things, typing a label clicks that thing.
+// boxes appear on navigation targets, typing a label clicks that thing.
 //   labels  → hintLabels.ts      typed keys → hintMatch.ts
 //   targets → hintTargets.ts     badges     → HintOverlay.tsx
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import type { HintSize, HintStyle } from '../config/schema';
 import { HintOverlay, type HintBadge } from './HintOverlay';
 import { assignHintLabels } from './hintLabels';
 import { hintKeyStep } from './hintMatch';
@@ -42,7 +43,7 @@ export function buildHintEntries(
   const labels = assignHintLabels(targets.length);
   return labels.map((label, index) => {
     const target = targets[index];
-    const anchor = hintAnchor(target.rect, target.kind, viewport);
+    const anchor = hintAnchor(target.rect, target.kind, viewport, label.length);
     return {
       label,
       target,
@@ -51,7 +52,7 @@ export function buildHintEntries(
   });
 }
 
-export function useHintMode(): HintModeApi {
+export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } = {}): HintModeApi {
   const [session, setSession] = useState<HintSession | null>(null);
   const sessionRef = useRef<HintSession | null>(null);
   // Whatever had keyboard focus (usually a terminal) when hint mode opened.
@@ -146,7 +147,14 @@ export function useHintMode(): HintModeApi {
   }, []);
 
   const overlay = session
-    ? <HintOverlay badges={session.entries.map((entry) => entry.badge)} typed={session.typed} />
+    ? (
+      <HintOverlay
+        badges={session.entries.map((entry) => entry.badge)}
+        typed={session.typed}
+        hintStyle={appearance.style}
+        hintSize={appearance.size}
+      />
+    )
     : null;
 
   return { active: isActive, open, close, toggle, overlay };

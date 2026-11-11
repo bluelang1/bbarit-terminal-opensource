@@ -11,7 +11,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ### Added
 
-- Keyboard hint mode: press ⌘J (Ctrl+J on Windows/Linux) and a yellow label appears on every clickable thing on screen (projects, terminal tabs, terminal panes, buttons); type the label to click it. Picking a terminal pane puts the cursor in that terminal. With many targets some labels are two characters; Backspace removes one, and Esc or the same shortcut closes hint mode and returns focus to the terminal. Works while the Korean input method is on.
+- Keyboard hint mode: press ⌘J (Alt+J on Windows/Linux) and a yellow label appears on projects, terminal tabs, terminal panes and panel/view switches (sidebar, editor and terminal show/hide, view modes, toolbar panel buttons, settings and similar); type the label to go there. Picking a terminal pane puts the cursor in that terminal. Ordinary action buttons such as close or delete get no label. With many targets some labels are two characters; Backspace removes one, and Esc or the same shortcut closes hint mode and returns focus to the terminal. Works while the Korean input method is on; Settings > Shortcuts picks the style (raised, flat, dark, colour by kind) and size (small, normal).
 
 ### Changed
 

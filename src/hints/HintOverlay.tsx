@@ -1,4 +1,5 @@
 import { createPortal } from 'react-dom';
+import type { HintSize, HintStyle } from '../config/schema';
 import type { HintDataKind, HintPlacement } from './hintTargets';
 
 export interface HintBadge {
@@ -11,14 +12,26 @@ export interface HintBadge {
 
 /**
  * One fixed, click-through layer over the whole window with a badge per hint.
- * Every visual value lives in CSS custom properties on `.hint-overlay` (App.css).
+ * Every visual value lives in CSS custom properties on `.hint-theme` (App.css),
+ * picked by data-hint-style / data-hint-size (Settings > Shortcuts).
  * Badges whose label does not start with the typed prefix are hidden; the typed
  * part of the others is marked so it can be styled.
  */
-export function HintOverlay({ badges, typed }: { badges: readonly HintBadge[]; typed: string }) {
+export function HintOverlay({ badges, typed, hintStyle = 'raised', hintSize = 'small' }: {
+  badges: readonly HintBadge[];
+  typed: string;
+  hintStyle?: HintStyle;
+  hintSize?: HintSize;
+}) {
   if (badges.length === 0 || typeof document === 'undefined') return null;
   return createPortal(
-    <div className="hint-overlay" data-hint-overlay="" aria-hidden="true">
+    <div
+      className="hint-overlay hint-theme"
+      data-hint-overlay=""
+      data-hint-style={hintStyle}
+      data-hint-size={hintSize}
+      aria-hidden="true"
+    >
       {badges.map((badge) => {
         const matches = badge.label.startsWith(typed);
         return (

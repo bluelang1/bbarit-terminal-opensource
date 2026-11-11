@@ -211,6 +211,25 @@ export function normalizePetConfig(raw: unknown): PetConfig {
   };
 }
 
+/** Keyboard hint mode look (src/hints). Placement is fixed; these only change style and size. */
+export const HINT_STYLES = ['raised', 'flat', 'dark', 'byKind'] as const;
+export const HINT_SIZES = ['small', 'normal'] as const;
+export type HintStyle = typeof HINT_STYLES[number];
+export type HintSize = typeof HINT_SIZES[number];
+export interface HintsConfig {
+  style: HintStyle;
+  size: HintSize;
+}
+export const DEFAULT_HINTS_CONFIG: HintsConfig = { style: 'raised', size: 'small' };
+
+export function normalizeHintsConfig(raw: unknown): HintsConfig {
+  const v = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  return {
+    style: (HINT_STYLES as readonly unknown[]).includes(v.style) ? v.style as HintStyle : DEFAULT_HINTS_CONFIG.style,
+    size: (HINT_SIZES as readonly unknown[]).includes(v.size) ? v.size as HintSize : DEFAULT_HINTS_CONFIG.size,
+  };
+}
+
 export interface NoteTemplate {
   id: string;
   name: string;
@@ -368,6 +387,7 @@ export interface OctoConfig {
   projectConfigs: Record<string, ProjectConfig>;
   easterEggMedia: EasterEggMedia;
   pet: PetConfig;
+  hints: HintsConfig;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -514,6 +534,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   projectConfigs: {},
   easterEggMedia: { type: 'default', path: '' },
   pet: { ...DEFAULT_PET_CONFIG },
+  hints: { ...DEFAULT_HINTS_CONFIG },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -601,6 +622,7 @@ export function validateConfig(raw: unknown): OctoConfig {
       ? { type: input.easterEggMedia.type || 'default', path: input.easterEggMedia.path || '' }
       : { type: 'default', path: '' },
     pet: normalizePetConfig(input.pet),
+    hints: normalizeHintsConfig(input.hints),
   };
 }
 

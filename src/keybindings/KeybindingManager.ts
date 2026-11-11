@@ -52,8 +52,9 @@ export class KeybindingManager {
           ]
         : []),
       { id: 'task.open-last-completed', keys: `${mod}+shift+j` },
-      // Hint mode (src/hints): labels on clickable things; press again or Esc to close.
-      { id: 'hints.toggle', keys: `${mod}+j` },
+      // Hint mode (src/hints): labels on navigation targets; press again or Esc to close.
+      // Not Ctrl+J off macOS: terminal programs (Claude Code among them) use it for newline.
+      { id: 'hints.toggle', keys: isMac ? 'cmd+j' : 'alt+j' },
       { id: 'project.new', keys: `${mod}+n` },
       { id: 'settings.open', keys: `${mod}+,` },
       { id: 'view.toggle-terminal-mode', keys: `${mod}+shift+f` },

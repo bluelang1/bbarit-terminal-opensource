@@ -1,16 +1,10 @@
 // Which on-screen elements get a hint, in what order, where the badge goes,
 // and how a picked element is activated. DOM-only; no React.
 
-export type HintKind = 'project' | 'tab' | 'terminal' | 'other';
+export type HintKind = 'project' | 'tab' | 'terminal' | 'nav';
 
 /** `data-kind` on each hint box; per-kind colours are CSS-only (App.css `.hint-badge[data-kind=…]`). */
-export type HintDataKind = 'project' | 'tab' | 'terminal' | 'button' | 'danger';
-
-/**
- * Whether elements that close or delete something (tab ×, project close, delete
- * buttons) get hints. They are tagged data-kind="danger" either way.
- */
-export const HINT_INCLUDE_DANGER = true;
+export type HintDataKind = HintKind;
 
 export interface HintRect {
   left: number;
@@ -22,25 +16,22 @@ export interface HintRect {
 export interface HintTarget {
   element: HTMLElement;
   kind: HintKind;
-  /** Closes or deletes something (only ever set for kind 'other'). */
-  danger: boolean;
   rect: HintRect;
 }
 
 /**
- * Clickable things. Project rows/tabs carry `data-hint="project"` (and
- * data-project-tab-id), terminal tabs (tabs layout) `data-hint="tab"`; each terminal
- * pane is its XTerminal `[data-terminal-wrap]`. Split-layout pane headers also carry
- * data-terminal-tab-id but are not hinted on their own: the pane hint covers them.
+ * Hints are opt-in and only for navigation: things that move you somewhere or
+ * show/hide a part of the screen. Project rows/tabs (`data-hint="project"`,
+ * data-project-tab-id), terminal tabs (`data-hint="tab"`), terminal panes (the
+ * XTerminal `[data-terminal-wrap]`) and controls tagged `data-hint="nav"` in the JSX.
+ * Ordinary action buttons and close/delete buttons are never hinted.
  */
 export const HINT_TERMINAL_SELECTOR = '[data-terminal-wrap]';
 export const HINT_TARGET_SELECTOR = [
   HINT_TERMINAL_SELECTOR,
-  'button',
-  '[role="button"]',
-  '[role="tab"]',
-  'a[href]',
-  '[data-hint]',
+  '[data-hint="project"]',
+  '[data-hint="tab"]',
+  '[data-hint="nav"]',
   '[data-project-tab-id]',
 ].join(', ');
 
@@ -64,27 +55,11 @@ export function hintKindOf(element: Element): HintKind {
   if (element.hasAttribute('data-project-tab-id')) return 'project';
   if (element.hasAttribute('data-terminal-tab-id')) return 'tab';
   if (element.matches(HINT_TERMINAL_SELECTOR)) return 'terminal';
-  return 'other';
+  return 'nav';
 }
 
-const DANGER_CLASS_WORDS = new Set(['close', 'delete', 'remove', 'trash', 'kill']);
-const DANGER_LABEL = /\b(close|delete|remove|kill)\b|닫기|삭제|제거/i;
-
-/**
- * Closes or deletes something: a class token word like `tab-close` / `ce-prop-delete`,
- * or an aria-label / title saying so (English or Korean).
- */
-export function isDangerHintTarget(element: Element): boolean {
-  for (const token of Array.from(element.classList)) {
-    if (token.split(/[-_]/).some((word) => DANGER_CLASS_WORDS.has(word.toLowerCase()))) return true;
-  }
-  const label = `${element.getAttribute('aria-label') || ''} ${element.getAttribute('title') || ''}`;
-  return DANGER_LABEL.test(label);
-}
-
-export function hintDataKind(target: Pick<HintTarget, 'kind' | 'danger'>): HintDataKind {
-  if (target.kind !== 'other') return target.kind;
-  return target.danger ? 'danger' : 'button';
+export function hintDataKind(target: Pick<HintTarget, 'kind'>): HintDataKind {
+  return target.kind;
 }
 
 export function isHintExcluded(element: Element): boolean {
@@ -167,16 +142,16 @@ const READING_ROW_PX = 8;
 
 /**
  * Projects first (DOM = on-screen list order), then terminal tabs, then terminal
- * panes, then everything else top→bottom, left→right.
+ * panes, then nav controls top→bottom, left→right.
  */
 export function orderHintTargets(targets: readonly HintTarget[]): HintTarget[] {
-  const rank: Record<HintKind, number> = { project: 0, tab: 1, terminal: 2, other: 3 };
+  const rank: Record<HintKind, number> = { project: 0, tab: 1, terminal: 2, nav: 3 };
   return targets
     .map((target, index) => ({ target, index }))
     .sort((a, b) => {
       const kind = rank[a.target.kind] - rank[b.target.kind];
       if (kind !== 0) return kind;
-      if (a.target.kind !== 'other') return a.index - b.index;
+      if (a.target.kind !== 'nav') return a.index - b.index;
       const rowA = Math.round(a.target.rect.top / READING_ROW_PX);
       const rowB = Math.round(b.target.rect.top / READING_ROW_PX);
       if (rowA !== rowB) return rowA - rowB;
@@ -187,12 +162,7 @@ export function orderHintTargets(targets: readonly HintTarget[]): HintTarget[] {
 }
 
 /** Every element that should get a hint right now, in label order. */
-export function collectHintTargets(
-  doc: Document = document,
-  win: Window = window,
-  options: { includeDanger?: boolean } = {},
-): HintTarget[] {
-  const includeDanger = options.includeDanger ?? HINT_INCLUDE_DANGER;
+export function collectHintTargets(doc: Document = document, win: Window = window): HintTarget[] {
   const viewport = { width: win.innerWidth, height: win.innerHeight };
   const hitTest = typeof doc.elementFromPoint === 'function' ? (x: number, y: number) => doc.elementFromPoint(x, y) : null;
   const scope: ParentNode = findTopHintDialog(doc, win) ?? doc;
@@ -207,37 +177,48 @@ export function collectHintTargets(
     if (!hasHintArea(rect) || !isRectInViewport(rect, viewport)) continue;
     if (isHintHiddenByStyle(element, win)) continue;
     if (!isHintReachable(element, rect, hitTest)) continue;
-    const kind = hintKindOf(element);
-    const danger = kind === 'other' && isDangerHintTarget(element);
-    if (danger && !includeDanger) continue;
-    targets.push({ element, kind, danger, rect });
+    targets.push({ element, kind: hintKindOf(element), rect });
   }
   return orderHintTargets(targets);
 }
 
-/**
- * Keep anchors this far inside the viewport so a badge shifted off its anchor
- * (see `--hint-shift-*` in App.css) stays on screen.
- */
-export const HINT_ANCHOR_MARGIN_PX = 12;
+/** Corner badges straddle the target's top-left corner: CSS shifts them by this much up-left. */
+export const HINT_CORNER_OFFSET_PX = 4;
+/** Rough badge size for clamping (normal size, border + padding). */
+const BADGE_CHAR_PX = 8;
+const BADGE_EXTRA_PX = 10;
+const BADGE_HEIGHT_PX = 20;
 
 export type HintPlacement = 'corner' | 'bottom-left';
 
 /**
- * Where a badge is anchored. Most targets: their top-left corner (CSS shifts the
- * badge up-left so it only overlaps the corner). Terminal panes: their bottom-left
- * corner, near the prompt (CSS shifts the badge inside the pane). Clamped to the viewport.
+ * Where a badge is anchored. Most targets: their top-left corner, the badge
+ * straddling it (CSS shifts it -4px, -4px). Terminal panes: their bottom-left
+ * corner near the prompt (CSS shifts the badge up, inside the pane), because a
+ * pane's top-left corner is where its header / tab hint already sits. The anchor
+ * is clamped so the shifted badge stays inside the viewport.
  */
 export function hintAnchor(
   rect: HintRect,
   kind: HintKind,
   viewport: { width: number; height: number },
+  labelLength = 1,
 ): { x: number; y: number; placement: HintPlacement } {
-  const placement: HintPlacement = kind === 'terminal' ? 'bottom-left' : 'corner';
-  const x = rect.left;
-  const y = placement === 'bottom-left' ? rect.top + rect.height : rect.top;
-  const clamp = (v: number, max: number) => Math.max(HINT_ANCHOR_MARGIN_PX, Math.min(max - HINT_ANCHOR_MARGIN_PX, v));
-  return { x: clamp(x, viewport.width), y: clamp(y, viewport.height), placement };
+  const off = HINT_CORNER_OFFSET_PX;
+  const badgeWidth = labelLength * BADGE_CHAR_PX + BADGE_EXTRA_PX;
+  const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+  if (kind === 'terminal') {
+    return {
+      x: clamp(rect.left, 0, viewport.width - badgeWidth - 2 * off),
+      y: clamp(rect.top + rect.height, BADGE_HEIGHT_PX + 2 * off, viewport.height),
+      placement: 'bottom-left',
+    };
+  }
+  return {
+    x: clamp(rect.left, off, viewport.width - badgeWidth + off),
+    y: clamp(rect.top, off, viewport.height - BADGE_HEIGHT_PX + off),
+    placement: 'corner',
+  };
 }
 
 const isFocusableOther = (element: HTMLElement): boolean => {
@@ -257,7 +238,7 @@ export function activateHintTarget(element: HTMLElement, kind: HintKind): void {
   const r = element.getBoundingClientRect();
   const clientX = r.left + r.width / 2;
   const clientY = r.top + r.height / 2;
-  if (kind === 'other' && isFocusableOther(element)) {
+  if (kind === 'nav' && isFocusableOther(element)) {
     try { element.focus({ preventScroll: true }); } catch { /* ignore */ }
   }
   const base: MouseEventInit = {

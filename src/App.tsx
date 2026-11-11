@@ -2108,7 +2108,7 @@ function App() {
   // For callbacks/effects that run once but must speak the current language.
   const tLatestRef = useRef(t);
   tLatestRef.current = t;
-  const { updateConfig } = useConfig();
+  const { config: appConfig, updateConfig } = useConfig();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loungeUnreadCounts, setLoungeUnreadCounts] = useState<LoungeUnreadCounts>(loadLoungeUnreadCounts);
   const [chatWindowOpen, setChatWindowOpen] = useState(false);
@@ -5253,7 +5253,7 @@ Office project scaffold created by BBARIT Terminal.
   const projectSectionsRef = useRef<Array<ProjectDisplaySection<Project, ProjectGroup>>>([]);
   projectSectionsRef.current = projectSections;
   // Hint mode (src/hints): keyboard labels on clickable things, keybinding hints.toggle.
-  const hintMode = useHintMode();
+  const hintMode = useHintMode({ style: appConfig.hints?.style, size: appConfig.hints?.size });
   const hintModeToggle = hintMode.toggle;
   const toggleProjectFavorite = useCallback((projectId: string) => {
     setProjects(prev => prev.map(p => (p.id === projectId ? { ...p, favorite: !p.favorite } : p)));
@@ -17018,7 +17018,7 @@ Office project scaffold created by BBARIT Terminal.
               <div className={`view-mode-toggle mode-g1-${projectsAtLeft ? 'left' : 'top'}`}>
                 <div className="toggle-track-3" style={{ minWidth: 'unset' }}>
                   <span
-                    className={`toggle-seg ${!projectsAtLeft ? 'active' : ''}`}
+                    data-hint="nav" className={`toggle-seg ${!projectsAtLeft ? 'active' : ''}`}
                     onClick={() => setProjectsLocation('top')}
                     title={locale === 'ko' ? '프로젝트 탭을 위쪽에' : 'Projects on top'}
                   >
@@ -17031,7 +17031,7 @@ Office project scaffold created by BBARIT Terminal.
                     </svg>
                   </span>
                   <span
-                    className={`toggle-seg ${projectsAtLeft ? 'active' : ''}`}
+                    data-hint="nav" className={`toggle-seg ${projectsAtLeft ? 'active' : ''}`}
                     onClick={() => setProjectsLocation('left')}
                     title={locale === 'ko' ? '프로젝트 패널을 왼쪽에' : 'Projects on left'}
                   >
@@ -17044,7 +17044,7 @@ Office project scaffold created by BBARIT Terminal.
                     </svg>
                   </span>
                   <span
-                    className="toggle-seg"
+                    data-hint="nav" className="toggle-seg"
                     onClick={() => {
                       setLayoutTransition(true);
                       if (layoutTransitionTimer.current) clearTimeout(layoutTransitionTimer.current);
@@ -17063,22 +17063,22 @@ Office project scaffold created by BBARIT Terminal.
               {/* Group 2: Workspace mode (에디터 / 에디터+터미널 / 사이드 / 터미널) */}
               <div className={`view-mode-toggle mode-g2-${workspaceMode}`} style={{ marginLeft: 4 }}>
                 <div className="toggle-track-3">
-                  <span className={`toggle-seg ${workspaceMode === 'editor' ? 'active' : ''}`} onClick={() => setWorkspace('editor')} title={t('view.editor')}>
+                  <span data-hint="nav" className={`toggle-seg ${workspaceMode === 'editor' ? 'active' : ''}`} onClick={() => setWorkspace('editor')} title={t('view.editor')}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="12" y1="3" x2="12" y2="21"/>
                     </svg>
                   </span>
-                  <span className={`toggle-seg ${workspaceMode === 'default' ? 'active' : ''}`} onClick={() => setWorkspace('default')} title={`${t('view.editor')} + ${t('view.terminal')}`}>
+                  <span data-hint="nav" className={`toggle-seg ${workspaceMode === 'default' ? 'active' : ''}`} onClick={() => setWorkspace('default')} title={`${t('view.editor')} + ${t('view.terminal')}`}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="14" x2="21" y2="14"/><line x1="10" y1="3" x2="10" y2="14"/>
                     </svg>
                   </span>
-                  <span className={`toggle-seg ${workspaceMode === 'side' ? 'active' : ''}`} onClick={() => setWorkspace('side')} title={`${t('view.editor')} + ${t('view.terminal')} (${t('view.side')})`}>
+                  <span data-hint="nav" className={`toggle-seg ${workspaceMode === 'side' ? 'active' : ''}`} onClick={() => setWorkspace('side')} title={`${t('view.editor')} + ${t('view.terminal')} (${t('view.side')})`}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="14" y1="3" x2="14" y2="21"/>
                     </svg>
                   </span>
-                  <span className={`toggle-seg ${workspaceMode === 'terminal' ? 'active' : ''}`} onClick={() => setWorkspace('terminal')} title={t('view.terminal')}>
+                  <span data-hint="nav" className={`toggle-seg ${workspaceMode === 'terminal' ? 'active' : ''}`} onClick={() => setWorkspace('terminal')} title={t('view.terminal')}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/>
                     </svg>
@@ -17170,7 +17170,7 @@ Office project scaffold created by BBARIT Terminal.
               <button
                 key={`top-group-${group.id}`}
                 type="button"
-                className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
+                data-hint="nav" className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
                 data-group-drop-id={group.id}
                 data-project-tab-ignore-drag="true"
                 onClick={() => toggleGroupCollapsed(group.id)}
@@ -17638,7 +17638,7 @@ Office project scaffold created by BBARIT Terminal.
             {/* 툴바 전체 접기/펴기 — 접힌 상태에서는 이 토글만 남는다. */}
             <button
               type="button"
-              className="btn-top-small toolbar-collapse-toggle"
+              data-hint="nav" className="btn-top-small toolbar-collapse-toggle"
               onClick={toggleToolbarCollapsed}
               title={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
               aria-label={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
@@ -17652,12 +17652,12 @@ Office project scaffold created by BBARIT Terminal.
             <span className="toolbar-group-divider" style={{ order: 15 }} aria-hidden="true" />
             <span className="toolbar-group-divider" style={{ order: 21 }} aria-hidden="true" />
             <span className="toolbar-group-divider" style={{ order: 33 }} aria-hidden="true" />
-            {isToolbarVisible('git') && <button type="button" className="btn-top-small toolbar-tool tool-git" data-guide="git" onClick={() => setShowGitPanel(true)} title="Git">
+            {isToolbarVisible('git') && <button type="button" data-hint="nav" className="btn-top-small toolbar-tool tool-git" data-guide="git" onClick={() => setShowGitPanel(true)} title="Git">
               <LucideIcons.GitPullRequestArrow size={14} />
             </button>}
             <button
               type="button"
-              className="btn-top-small toolbar-tool tool-quick-open project-open-toolbar-btn"
+              data-hint="nav" className="btn-top-small toolbar-tool tool-quick-open project-open-toolbar-btn"
               onClick={() => {
                 closeFloatingMenus();
                 void openDocumentQuick();
@@ -17672,7 +17672,7 @@ Office project scaffold created by BBARIT Terminal.
               <div className="editors-launcher-wrap" style={{ position: 'relative', display: 'inline-flex' }}>
                 <button
                   type="button"
-                  className={`btn-top-small toolbar-tool tool-editors${showEditorsMenu ? ' active' : ''}`}
+                  data-hint="nav" className={`btn-top-small toolbar-tool tool-editors${showEditorsMenu ? ' active' : ''}`}
                   onClick={() => {
                     closeFloatingMenus('editors');
                     setShowEditorsMenu((v) => !v);
@@ -17745,31 +17745,31 @@ Office project scaffold created by BBARIT Terminal.
               </div>
             )}
 
-            {isToolbarVisible('noteGraph') && <button className="btn-top-small toolbar-tool tool-graph" onClick={() => { setShowNoteGraph(true); }} title={t('notes.graph')}><LucideIcons.Route size={14} /></button>}
-            {isToolbarVisible('planner') && <button className={`btn-top-small toolbar-tool tool-planner${showTodoGantt ? ' active' : ''}`} onClick={() => { if (showTodoGantt) { setShowTodoGantt(false); } else { setShowTodoGantt('todo'); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="Gantt Chart"><LucideIcons.Milestone size={14} /></button>}
+            {isToolbarVisible('noteGraph') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-graph" onClick={() => { setShowNoteGraph(true); }} title={t('notes.graph')}><LucideIcons.Route size={14} /></button>}
+            {isToolbarVisible('planner') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-planner${showTodoGantt ? ' active' : ''}`} onClick={() => { if (showTodoGantt) { setShowTodoGantt(false); } else { setShowTodoGantt('todo'); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="Gantt Chart"><LucideIcons.Milestone size={14} /></button>}
             {/* Planning AI disabled from the top toolbar for now.
-            {isToolbarVisible('planning') && <button className="btn-top-small toolbar-tool tool-planning" onClick={() => { void openToolWindow('planning'); }} title="Software Planning AI">
+            {isToolbarVisible('planning') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-planning" onClick={() => { void openToolWindow('planning'); }} title="Software Planning AI">
               <LucideIcons.BrainCircuit size={14} />
             </button>} */}
-            {isToolbarVisible('kanban') && <button className={`btn-top-small toolbar-tool tool-kanban${showKanbanModal ? ' active' : ''}`} onClick={() => { if (showKanbanModal) { setShowKanbanModal(false); } else { setShowKanbanModal(true); setShowTodoGantt(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title={t('view.kanban')}>
+            {isToolbarVisible('kanban') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-kanban${showKanbanModal ? ' active' : ''}`} onClick={() => { if (showKanbanModal) { setShowKanbanModal(false); } else { setShowKanbanModal(true); setShowTodoGantt(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title={t('view.kanban')}>
               <LucideIcons.Kanban size={14} />
             </button>}
-            <button className={`btn-top-small toolbar-tool tool-design${isMakekeWorkspace && designWorkspaceTab === 'bbarit-design' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-design') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-design'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Design">
+            <button data-hint="nav" className={`btn-top-small toolbar-tool tool-design${isMakekeWorkspace && designWorkspaceTab === 'bbarit-design' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-design') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-design'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Design">
               <LucideIcons.Palette size={14} />
             </button>
-            <button className={`btn-top-small toolbar-tool tool-cowork${isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-cowork'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Cowork">
+            <button data-hint="nav" className={`btn-top-small toolbar-tool tool-cowork${isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-cowork'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Cowork">
               <LucideIcons.Briefcase size={14} />
             </button>
-            <button className={`btn-top-small toolbar-tool tool-motion${isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-motion'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Motion — fal.ai image & video studio">
+            <button data-hint="nav" className={`btn-top-small toolbar-tool tool-motion${isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-motion'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Motion — fal.ai image & video studio">
             </button>
-            <button className={`btn-top-small toolbar-tool tool-image${isMakekeWorkspace && designWorkspaceTab === 'bbarit-image' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-image') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-image'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Image">
+            <button data-hint="nav" className={`btn-top-small toolbar-tool tool-image${isMakekeWorkspace && designWorkspaceTab === 'bbarit-image' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-image') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-image'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Image">
               <LucideIcons.Images size={14} />
             </button>
-            <button className={`btn-top-small toolbar-tool tool-marketing${isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-marketing'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Marketing">
+            <button data-hint="nav" className={`btn-top-small toolbar-tool tool-marketing${isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-marketing'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Marketing">
               <LucideIcons.TrendingUp size={14} />
             </button>
             <button
-              className="btn-top-small toolbar-tool tool-browser"
+              data-hint="nav" className="btn-top-small toolbar-tool tool-browser"
               onClick={() => {
                 void openToolWindow('browser');
                 setIsMakekeWorkspace(false);
@@ -17783,14 +17783,14 @@ Office project scaffold created by BBARIT Terminal.
             >
               <LucideIcons.Globe size={14} />
             </button>
-            {isToolbarVisible('pm2') && <button className={`btn-top-small toolbar-tool tool-pm2${showPm2Modal ? ' active' : ''}`} onClick={() => setShowPm2Modal(!showPm2Modal)} title={t('view.pm2')}>
+            {isToolbarVisible('pm2') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-pm2${showPm2Modal ? ' active' : ''}`} onClick={() => setShowPm2Modal(!showPm2Modal)} title={t('view.pm2')}>
               <LucideIcons.SquareTerminal size={14} />
             </button>}
-            {isToolbarVisible('hub') && <button className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
+            {isToolbarVisible('hub') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
               <LucideIcons.Waypoints size={14} />
             </button>}
             <button
-              className="btn-top-small toolbar-tool tool-collab"
+              data-hint="nav" className="btn-top-small toolbar-tool tool-collab"
               onClick={() => { void openToolWindow('chat'); }}
               title={loungeUnreadTotal > 0 ? `Chat · ${loungeUnreadTotal} unread` : 'Chat'}
             >
@@ -17802,7 +17802,7 @@ Office project scaffold created by BBARIT Terminal.
               )}
             </button>
             <button
-              className="btn-top-small toolbar-tool tool-thread"
+              data-hint="nav" className="btn-top-small toolbar-tool tool-thread"
               onClick={() => { void openToolWindow('thread'); }}
               title="BBARIT Thread"
             >
@@ -17828,25 +17828,25 @@ Office project scaffold created by BBARIT Terminal.
             )}
 
             {/* AI Debate disabled from the top toolbar for now.
-            {isToolbarVisible('debate') && <button className={`btn-top-small toolbar-tool tool-debate${showDebatePanel ? ' active' : ''}`} onClick={() => { setShowDebatePanel(v => !v); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); }} title="AI Debate"><LucideIcons.MessagesSquare size={14} /></button>}
+            {isToolbarVisible('debate') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-debate${showDebatePanel ? ' active' : ''}`} onClick={() => { setShowDebatePanel(v => !v); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); }} title="AI Debate"><LucideIcons.MessagesSquare size={14} /></button>}
             */}
-            {isToolbarVisible('skills') && <button className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
+            {isToolbarVisible('skills') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
             {/* BBARIT Browser 버튼 임시 비활성(2026-07-06, 사용자 지시): Windows CEF 표시가
                 아직 미해결(진행 기록 docs/CEF-WINDOWS-DEBUG-STATUS.md)이라 재개 전까지 숨긴다.
                 복원: 아래 false를 지우면 된다. */}
-            {BROWSER_TOOLBAR_BUTTON_ENABLED && isToolbarVisible('browser') && <button className="btn-top-small toolbar-tool tool-browser" onClick={() => { void openToolWindow('browser'); }} title={locale === 'ko' ? 'BBARIT Browser (별도 창으로 열기)' : 'BBARIT Browser (open in a separate window)'}><LucideIcons.Globe size={14} /></button>}
-            {isToolbarVisible('mcp') && <button className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
+            {BROWSER_TOOLBAR_BUTTON_ENABLED && isToolbarVisible('browser') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-browser" onClick={() => { void openToolWindow('browser'); }} title={locale === 'ko' ? 'BBARIT Browser (별도 창으로 열기)' : 'BBARIT Browser (open in a separate window)'}><LucideIcons.Globe size={14} /></button>}
+            {isToolbarVisible('mcp') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
               <LucideIcons.ServerCog size={14} />
               {runningMcpServers.size > 0 && <span style={{ position: 'absolute', top: 2, right: 2, width: 5, height: 5, borderRadius: '50%', background: '#22c55e' }} />}
             </button>}
 
-            {isToolbarVisible('secretary') && <button className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
-            {isToolbarVisible('dashboard') && <button className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
+            {isToolbarVisible('secretary') && <button data-hint="nav" className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
+            {isToolbarVisible('dashboard') && <button data-hint="nav" className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
 
-            <button className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
+            <button data-hint="nav" className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
 
             <button
-              className="btn-top-small toolbar-tool tool-settings"
+              data-hint="nav" className="btn-top-small toolbar-tool tool-settings"
               onClick={() => {
                 closeFloatingMenus('settings');
                 setShowGlobalSettings(true);
@@ -17856,7 +17856,7 @@ Office project scaffold created by BBARIT Terminal.
 
             <div ref={toolDropdownRef} className="tool-dropdown-wrap">
               <button
-                className="btn-top-small toolbar-tool tool-menu"
+                data-hint="nav" className="btn-top-small toolbar-tool tool-menu"
                 onClick={() => {
                   closeFloatingMenus('tool');
                   setShowToolDropdown(v => !v);
@@ -18138,7 +18138,7 @@ Office project scaffold created by BBARIT Terminal.
                 return (
                   <div key={`pg-${group.id}`} className="project-group" data-group-drop-id={group.id} style={{ '--group-color': group.color || '#8a7aa0' } as React.CSSProperties}>
                     <div
-                      className={`project-group-header ${dragOverGroupId === group.id ? 'drag-over' : ''}`}
+                      data-hint="nav" className={`project-group-header ${dragOverGroupId === group.id ? 'drag-over' : ''}`}
                       style={{ '--group-color': group.color || '#8a7aa0' } as React.CSSProperties}
                       onClick={() => toggleGroupCollapsed(group.id)}
                       onContextMenu={(e) => { e.preventDefault(); setGroupContextMenu({ x: e.clientX, y: e.clientY, groupId: group.id }); }}
@@ -18193,7 +18193,7 @@ Office project scaffold created by BBARIT Terminal.
         {/* Sidebar Toggle — show thin strip when hidden */}
         {sidebarHidden && viewMode !== 'terminal' && viewMode !== 'project-terminal' && viewMode !== 'pm2' && viewMode !== 'hub' && !isMonitorMode && (
           <div
-            className="sidebar-collapsed-strip"
+            data-hint="nav" className="sidebar-collapsed-strip"
             onClick={() => setSidebarHidden(false)}
             title={t('app.sidebar.show' as any) || 'Show Sidebar'}
             style={{
@@ -18228,7 +18228,7 @@ Office project scaffold created by BBARIT Terminal.
                   style={{ width: sidebarWidth, minWidth: sidebarWidth, outline: 'none' }}
                 >
                   <div
-                    className="sidebar-collapse-bar"
+                    data-hint="nav" className="sidebar-collapse-bar"
                     onClick={() => setSidebarHidden(true)}
                     title={t('app.sidebar.hide' as any) || 'Hide Sidebar'}
                     style={{
@@ -19226,7 +19226,7 @@ Office project scaffold created by BBARIT Terminal.
                         <div className="file-tree-header-title" style={{ flex: '1 1 100%', gap: 0 }}>
                           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                             <button
-                              className="note-section-toggle"
+                              data-hint="nav" className="note-section-toggle"
                               style={{
                                 opacity: isWikiSidebar ? 0.6 : 1,
                                 background: isWikiSidebar ? 'transparent' : 'color-mix(in srgb, var(--accent-color) 16%, transparent)',
@@ -19238,7 +19238,7 @@ Office project scaffold created by BBARIT Terminal.
                               {noteSectionLabel}
                             </button>
                             <button
-                              className="note-section-toggle"
+                              data-hint="nav" className="note-section-toggle"
                               style={{
                                 opacity: isWikiSidebar ? 1 : 0.6,
                                 background: isWikiSidebar ? 'color-mix(in srgb, var(--accent-color) 16%, transparent)' : 'transparent',
@@ -20703,7 +20703,7 @@ Office project scaffold created by BBARIT Terminal.
             <>
               {editorCollapsed ? (
                 <div
-                  className="panel-restore-bar"
+                  data-hint="nav" className="panel-restore-bar"
                   onClick={() => setEditorCollapsed(false)}
                   title={t('view.editor')}
                   style={{ width: 22, minWidth: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: activeStyle.accent, background: `color-mix(in srgb, ${activeStyle.accent} 10%, transparent)`, opacity: 0.9, transition: 'opacity 0.05s', flexShrink: 0, borderRight: `1px solid color-mix(in srgb, ${activeStyle.accent} 45%, transparent)`, writingMode: 'vertical-rl' }}
@@ -20926,7 +20926,7 @@ Office project scaffold created by BBARIT Terminal.
           {/* Restore bar: show terminal when in editor-only mode */}
           {viewMode === 'editor' && (
             <div
-              className="panel-restore-bar"
+              data-hint="nav" className="panel-restore-bar"
               onClick={() => setViewMode('default')}
               title={t('view.terminal')}
               style={{ height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: 0.35, transition: 'opacity 0.05s', flexShrink: 0, borderTop: '1px solid color-mix(in srgb, var(--text-color) 12%, transparent)' }}
@@ -20941,7 +20941,7 @@ Office project scaffold created by BBARIT Terminal.
           {/* Restore bar: show editor when in terminal-only mode */}
           {viewMode === 'terminal' && (
             <div
-              className="panel-restore-bar"
+              data-hint="nav" className="panel-restore-bar"
               onClick={() => setViewMode('default')}
               title={t('view.editor')}
               style={{ height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', opacity: 0.35, transition: 'opacity 0.05s', flexShrink: 0, borderBottom: '1px solid color-mix(in srgb, var(--text-color) 12%, transparent)' }}
@@ -20960,7 +20960,7 @@ Office project scaffold created by BBARIT Terminal.
             // 그 경우 빈 영역 전체를 복구 버튼으로 채운다.
             (viewMode === 'terminal' || viewMode === 'project-terminal' || editorCollapsed) ? (
               <div
-                className="panel-restore-bar"
+                data-hint="nav" className="panel-restore-bar"
                 onClick={() => setTerminalCollapsed(false)}
                 title={t('view.terminal')}
                 style={{ flex: 1, minHeight: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}
@@ -20973,7 +20973,7 @@ Office project scaffold created by BBARIT Terminal.
               </div>
             ) : (
             <div
-              className="panel-restore-bar"
+              data-hint="nav" className="panel-restore-bar"
               onClick={() => setTerminalCollapsed(false)}
               title={t('view.terminal')}
               style={{ height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: activeStyle.accent, background: `color-mix(in srgb, ${activeStyle.accent} 10%, transparent)`, opacity: 0.9, transition: 'opacity 0.05s', flexShrink: 0, borderTop: `1px solid color-mix(in srgb, ${activeStyle.accent} 45%, transparent)` }}
@@ -21002,7 +21002,7 @@ Office project scaffold created by BBARIT Terminal.
                 >
                   {/* Broker status lives in the harness modal now (one broker per harness). */}
                   <button
-                    className="btn-panel-eye"
+                    data-hint="nav" className="btn-panel-eye"
                     onClick={() => setTerminalCollapsed(true)}
                     title="Hide terminal"
                     style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', opacity: 0.4, padding: '0 5px', display: 'flex', alignItems: 'center', flexShrink: 0, transition: 'opacity 0.05s' }}
@@ -21043,7 +21043,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div className="terminal-layout-menu-wrap">
                       <button
                         type="button"
-                        className="btn-tab-action terminal-layout-trigger"
+                        data-hint="nav" className="btn-tab-action terminal-layout-trigger"
                         onClick={() => {
                           closeFloatingMenus('terminalLayout');
                           setShowTerminalLayoutMenu((value) => !value);
@@ -21070,7 +21070,7 @@ Office project scaffold created by BBARIT Terminal.
                             <button
                               key={mode}
                               type="button"
-                              className={`terminal-compact-menu-item${terminalSplitMode === mode ? ' active' : ''}`}
+                              data-hint="nav" className={`terminal-compact-menu-item${terminalSplitMode === mode ? ' active' : ''}`}
                               onClick={() => {
                                 action();
                                 setShowTerminalLayoutMenu(false);
@@ -21085,7 +21085,7 @@ Office project scaffold created by BBARIT Terminal.
                     </div>
 				                    <button
 				                      type="button"
-				                      className={`btn-tab-action terminal-mix-trigger${terminalSplitMode === 'mix' ? ' active' : ''}`}
+				                      data-hint="nav" className={`btn-tab-action terminal-mix-trigger${terminalSplitMode === 'mix' ? ' active' : ''}`}
 				                      onClick={() => {
 				                        setTerminalSplitMode('mix');
 				                        setShowTerminalLayoutMenu(false);

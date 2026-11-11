@@ -5,8 +5,8 @@ import { useHintMode, type HintModeApi } from './useHintMode';
 import { isHintModeActive } from './hintModeFlag';
 
 const api: { current: HintModeApi | null } = { current: null };
-function Harness() {
-  const hints = useHintMode();
+function Harness({ style, size }: { style?: 'raised' | 'flat' | 'dark' | 'byKind'; size?: 'small' | 'normal' }) {
+  const hints = useHintMode({ style, size });
   api.current = hints;
   return <>{hints.overlay}</>;
 }
@@ -28,12 +28,14 @@ beforeEach(() => {
     <div id="proj-a" data-hint="project" data-project-tab-id="a" role="button"></div>
     <div id="proj-b" data-hint="project" data-project-tab-id="b" role="button"></div>
     <div id="pane" data-terminal-wrap><textarea id="term-input"></textarea></div>
-    <button id="close" class="tab-close"></button>`;
+    <button id="nav" data-hint="nav"></button>
+    <button id="plain"></button>`;
   document.body.appendChild(fixture);
   place(fixture.querySelector('#proj-a')!, 0, 40, 100, 20);
   place(fixture.querySelector('#proj-b')!, 0, 60, 100, 20);
   place(fixture.querySelector('#pane')!, 120, 40, 500, 300);
-  place(fixture.querySelector('#close')!, 700, 5, 12, 12);
+  place(fixture.querySelector('#nav')!, 700, 5, 12, 12);
+  place(fixture.querySelector('#plain')!, 600, 5, 12, 12);
   for (const el of Array.from(fixture.querySelectorAll('[id]'))) {
     el.addEventListener('click', () => clicks.push(el.id));
   }
@@ -64,9 +66,25 @@ describe('useHintMode', () => {
       ['1', 'project', 'corner'],
       ['2', 'project', 'corner'],
       ['3', 'terminal', 'bottom-left'],
-      ['4', 'danger', 'corner'],
+      ['4', 'nav', 'corner'],
     ]);
     expect(document.activeElement).not.toBe(input);
+  });
+
+  it('puts the style and size on the overlay root (defaults raised / small)', () => {
+    const { rerender } = render(<Harness />);
+    act(() => api.current!.open());
+    const root = document.querySelector<HTMLElement>('.hint-overlay')!;
+    expect([root.dataset.hintStyle, root.dataset.hintSize]).toEqual(['raised', 'small']);
+    rerender(<Harness style="byKind" size="normal" />);
+    expect([root.dataset.hintStyle, root.dataset.hintSize]).toEqual(['byKind', 'normal']);
+  });
+
+  it('does not open when nothing is tagged', () => {
+    fixture.innerHTML = '<button id="only-plain"></button>';
+    render(<Harness />);
+    act(() => api.current!.open());
+    expect(api.current!.active).toBe(false);
   });
 
   it('activates by event.code even when the IME reports Hangul, then closes', () => {
@@ -142,6 +160,7 @@ describe('useHintMode', () => {
     for (let i = 0; i < 40; i += 1) {
       const b = document.createElement('button');
       b.id = `extra-${i}`;
+      b.setAttribute('data-hint', 'nav');
       fixture.appendChild(b);
       place(b, 10 * i, 500, 8, 8);
       b.addEventListener('click', () => clicks.push(b.id));

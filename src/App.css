@@ -12369,30 +12369,64 @@ textarea,
 }
 
 /* ── Hint mode (src/hints, keybinding hints.toggle) ──────────────────────────
-   Every visual value is a custom property on .hint-overlay, so the look (and a
-   colour per kind via --hint-<kind>-bg/-fg) can be changed here without code.
-   Badges carry data-kind="project|tab|terminal|button|danger" and
-   data-placement="corner|bottom-left"; left/top is the anchor point from JS. */
-.hint-overlay {
-  --hint-bg: #ffd60a;
-  --hint-fg: #111111;
-  --hint-border: 1px solid rgba(0, 0, 0, 0.8);
-  --hint-radius: 2px;
+   Every visual value is a custom property on .hint-theme (the overlay root and the
+   Settings sample). data-hint-style = raised (default) | flat | dark | byKind and
+   data-hint-size = small (default) | normal pick the values; Settings > Shortcuts
+   sets them (config.hints). Badges carry data-kind = project | tab | terminal | nav
+   and data-placement = corner | bottom-left; left/top is the anchor from JS. */
+.hint-theme {
+  /* raised (default) */
+  --hint-bg: linear-gradient(180deg, #fff785 0%, #ffc542 100%);
+  --hint-fg: #302505;
+  --hint-border-color: #c38a22;
+  --hint-radius: 3px;
+  --hint-shadow: 0 2px 4px rgba(0, 0, 0, 0.45);
+  /* small (default) */
+  --hint-font-size: 10px;
+  --hint-padding: 2px 3px;
   --hint-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --hint-font-size: 11px;
-  --hint-font-weight: 800;
-  --hint-line-height: 14px;
-  --hint-padding: 0 3px;
-  --hint-min-width: 9px;
+  --hint-font-weight: 700;
+  --hint-line-height: 1;
   --hint-text-transform: uppercase;
-  --hint-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
   --hint-typed-opacity: 0.4;
-  /* Corner badges: up-left of the target's top-left corner, overlapping it a little. */
-  --hint-corner-shift-x: -70%;
-  --hint-corner-shift-y: -70%;
-  /* Terminal-pane badges: inside the pane's bottom-left corner, near the prompt. */
+  /* Placement (fixed): corner badges straddle the target's top-left corner;
+     terminal-pane badges sit inside the pane's bottom-left corner, near the prompt. */
+  --hint-corner-shift-x: -4px;
+  --hint-corner-shift-y: -4px;
   --hint-terminal-shift-x: 8px;
   --hint-terminal-shift-y: calc(-100% - 8px);
+}
+
+.hint-theme[data-hint-style='flat'],
+.hint-theme[data-hint-style='byKind'] {
+  --hint-bg: #ffd60a;
+  --hint-fg: #14110a;
+  --hint-border-color: #14110a;
+  --hint-radius: 2px;
+  --hint-shadow: none;
+}
+
+.hint-theme[data-hint-style='dark'] {
+  --hint-bg: #14110a;
+  --hint-fg: #ffd60a;
+  --hint-border-color: #ffd60a;
+  --hint-radius: 2px;
+  --hint-shadow: none;
+}
+
+.hint-theme[data-hint-style='byKind'] {
+  --hint-project-bg: #ffd60a;
+  --hint-tab-bg: #7fd0ff;
+  --hint-terminal-bg: #9be56a;
+  --hint-nav-bg: #e8ebef;
+}
+
+.hint-theme[data-hint-size='normal'] {
+  --hint-font-size: 12px;
+  --hint-padding: 3px 4px;
+}
+
+.hint-overlay {
   position: fixed;
   inset: 0;
   z-index: 2147483647;
@@ -12402,9 +12436,8 @@ textarea,
 .hint-badge {
   position: absolute;
   box-sizing: border-box;
-  min-width: var(--hint-min-width);
   padding: var(--hint-padding);
-  border: var(--hint-border);
+  border: 1px solid var(--hint-border-color);
   border-radius: var(--hint-radius);
   background: var(--hint-bg);
   color: var(--hint-fg);
@@ -12432,8 +12465,7 @@ textarea,
 .hint-badge[data-kind='project'] { background: var(--hint-project-bg, var(--hint-bg)); color: var(--hint-project-fg, var(--hint-fg)); }
 .hint-badge[data-kind='tab'] { background: var(--hint-tab-bg, var(--hint-bg)); color: var(--hint-tab-fg, var(--hint-fg)); }
 .hint-badge[data-kind='terminal'] { background: var(--hint-terminal-bg, var(--hint-bg)); color: var(--hint-terminal-fg, var(--hint-fg)); }
-.hint-badge[data-kind='button'] { background: var(--hint-button-bg, var(--hint-bg)); color: var(--hint-button-fg, var(--hint-fg)); }
-.hint-badge[data-kind='danger'] { background: var(--hint-danger-bg, var(--hint-bg)); color: var(--hint-danger-fg, var(--hint-fg)); }
+.hint-badge[data-kind='nav'] { background: var(--hint-nav-bg, var(--hint-bg)); color: var(--hint-nav-fg, var(--hint-fg)); }
 
 .hint-badge[data-hidden='true'] {
   display: none;
@@ -12441,4 +12473,18 @@ textarea,
 
 .hint-badge-typed {
   opacity: var(--hint-typed-opacity);
+}
+
+/* Settings > Shortcuts live sample: same badges, laid out inline. */
+.hint-sample {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.hint-sample .hint-badge {
+  position: static;
+  transform: none;
 }
