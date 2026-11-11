@@ -115,7 +115,14 @@ const normalizeBrokerContinuous = (value: string | null | undefined): boolean =>
 import { emmetCSS, emmetHTML, emmetJSX } from 'emmet-monaco-es';
 import { initVimMode } from 'monaco-vim';
 import { KeybindingManager } from './keybindings/KeybindingManager';
-import { getProjectIdByUsageDelta, recordProjectUsage } from './projects/projectUsageHistory';
+import {
+  projectDisplaySections,
+  projectIdAtDisplayIndex,
+  projectIdByDisplayDelta,
+  visibleProjectsInOrder,
+  type ProjectDisplaySection,
+  type ProjectListLayout,
+} from './projects/projectDisplayOrder';
 import { NoteProvider, useNoteIndex, useNoteDispatch, useGlobalNotesDir, useRequestReindex } from './notes/NoteContext';
 import { updateVaultLinksAfterRename, rewriteWikiLinks } from './notes/linkMaintenance';
 import { applyTemplateVariables, buildDailyNoteContent, getDailyNotePath } from './notes/dailyNotes';
@@ -2136,10 +2143,6 @@ function App() {
   const [recentProjects, setRecentProjects] = useState<RecentProjectEntry[]>([]);
   const [startupDeferredTerminalIds, setStartupDeferredTerminalIds] = useState<Set<string>>(() => new Set());
   const projectsRef = useRef<Project[]>([]);
-  const projectUsageHistoryRef = useRef<string[]>([]);
-  const projectUsageSkipNextRecordRef = useRef(false);
-  const projectUsageCommitTimerRef = useRef<number | null>(null);
-  const currentProjectUsageKeyRef = useRef<string | null>(null);
   const activeProjectIdLatestRef = useRef<string | null>(null);
   // ── Window size/position restore & save ──
   useEffect(() => {
@@ -2399,9 +2402,6 @@ function App() {
   }, [applyRestoredProjects]);
   useEffect(() => { projectsRef.current = projects; }, [projects]);
   useEffect(() => { activeProjectIdLatestRef.current = activeProjectId; }, [activeProjectId]);
-  useEffect(() => () => {
-    if (projectUsageCommitTimerRef.current !== null) window.clearTimeout(projectUsageCommitTimerRef.current);
-  }, []);
   const confirmActionRef = useRef<null | (() => void | Promise<void>)>(null);
   const [confirmModal, setConfirmModal] = useState<null | {
     title: string;
@@ -5239,32 +5239,22 @@ Office project scaffold created by BBARIT Terminal.
   }, [activeProject?.workDir, sidebarTab, sidebarInstallingSkill]);
 
   // Favorites (즐겨찾기) float to the top; relative order is otherwise preserved.
-  const visibleProjects = useMemo(
-    () => projects.filter(p => !p.hidden).sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0)),
-    [projects],
+  const visibleProjects = useMemo(() => visibleProjectsInOrder(projects), [projects]);
+  // Which project list is on screen decides the order the project shortcuts walk
+  // (src/projects/projectDisplayOrder.ts); the renderers below draw these same sections.
+  const projectListLayout: ProjectListLayout = projectsLeftPanel
+    ? 'left-panel'
+    : viewMode === 'project-terminal' ? 'flat' : 'top-tabs';
+  const projectSections = useMemo(
+    () => projectDisplaySections(visibleProjects, projectGroups, projectListLayout),
+    [visibleProjects, projectGroups, projectListLayout],
   );
+  const projectSectionsRef = useRef<Array<ProjectDisplaySection<Project, ProjectGroup>>>([]);
+  projectSectionsRef.current = projectSections;
   const toggleProjectFavorite = useCallback((projectId: string) => {
     setProjects(prev => prev.map(p => (p.id === projectId ? { ...p, favorite: !p.favorite } : p)));
   }, []);
   const hiddenProjects = useMemo(() => projects.filter(p => p.hidden), [projects]);
-  useEffect(() => {
-    if (!activeProjectId) return;
-    if (!visibleProjects.some((project) => project.id === activeProjectId)) return;
-
-    if (projectUsageSkipNextRecordRef.current) {
-      projectUsageSkipNextRecordRef.current = false;
-      currentProjectUsageKeyRef.current = activeProjectId;
-      return;
-    }
-    if (currentProjectUsageKeyRef.current === activeProjectId) return;
-    if (projectUsageCommitTimerRef.current !== null) {
-      window.clearTimeout(projectUsageCommitTimerRef.current);
-      projectUsageCommitTimerRef.current = null;
-    }
-
-    currentProjectUsageKeyRef.current = activeProjectId;
-    projectUsageHistoryRef.current = recordProjectUsage(projectUsageHistoryRef.current, activeProjectId, visibleProjects);
-  }, [activeProjectId, visibleProjects]);
   // Stable key used to re-normalize tiled layout when terminals are added/removed.
   const activeTerminalIdsKey = useMemo(() => {
     if (!activeProject) return '';
@@ -12236,29 +12226,16 @@ Office project scaffold created by BBARIT Terminal.
       ));
     };
 
+    // Next/previous follow the project list on screen (+1 = the one below / to the right).
     const goProject = (delta: number) => {
-      if (visibleProjects.length <= 1) return;
-      const nextProjectId = getProjectIdByUsageDelta(
-        projectUsageHistoryRef.current,
-        visibleProjects,
-        activeProjectId,
-        delta,
-      );
-      if (!nextProjectId || nextProjectId === activeProjectId) return;
-
-      projectUsageSkipNextRecordRef.current = true;
-      if (projectUsageCommitTimerRef.current !== null) window.clearTimeout(projectUsageCommitTimerRef.current);
-      projectUsageCommitTimerRef.current = window.setTimeout(() => {
-        projectUsageCommitTimerRef.current = null;
-        if (activeProjectIdLatestRef.current !== nextProjectId) return;
-        projectUsageHistoryRef.current = recordProjectUsage(projectUsageHistoryRef.current, nextProjectId, projectsRef.current);
-      }, 700);
+      const nextProjectId = projectIdByDisplayDelta(projectSectionsRef.current, activeProjectIdLatestRef.current, delta);
+      if (!nextProjectId || nextProjectId === activeProjectIdLatestRef.current) return;
       setActiveProjectId(nextProjectId);
     };
 
     const switchProjectTab = (idx: number) => {
-      const p = visibleProjects[idx];
-      if (p) setActiveProjectId(p.id);
+      const projectId = projectIdAtDisplayIndex(projectSectionsRef.current, idx);
+      if (projectId) setActiveProjectId(projectId);
     };
 
     const switchTerminalTab = (idx: number) => {
@@ -12286,8 +12263,8 @@ Office project scaffold created by BBARIT Terminal.
       { id: 'command-palette.toggle', handler: () => setCommandPaletteOpen((prev) => !prev) },
       { id: 'settings.open', handler: () => setShowGlobalSettings(true) },
       { id: 'project.new', handler: () => setShowNewProjectModal(true) },
-      { id: 'project.next', handler: () => goProject(-1) },
-      { id: 'project.previous', handler: () => goProject(+1) },
+      { id: 'project.next', handler: () => goProject(+1) },
+      { id: 'project.previous', handler: () => goProject(-1) },
       { id: 'task.open-last-completed', handler: () => openPreviousCompletedTask() },
       { id: 'view.toggle-terminal-mode', handler: () => setViewMode((prev) => prev === 'editor' ? 'default' : prev === 'default' ? 'side' : prev === 'side' ? 'project-terminal' : prev === 'project-terminal' ? 'terminal' : prev === 'terminal' ? 'kanban' : prev === 'kanban' ? 'pm2' : prev === 'pm2' ? 'hub' : 'editor') },
       { id: 'terminal.new', handler: () => {
@@ -17182,14 +17159,7 @@ Office project scaffold created by BBARIT Terminal.
         {viewMode !== 'project-terminal' && !projectsLeftPanel && (
           <>
         {(() => {
-          const sections: Array<{ group: ProjectGroup | null; projects: Project[] }> = [
-            { group: null, projects: visibleProjects.filter((project) => !project.groupId || !projectGroups.some((group) => group.id === project.groupId)) },
-            ...projectGroups.map((group) => ({
-              group,
-              projects: visibleProjects.filter((project) => project.groupId === group.id),
-            })),
-          ];
-          return sections.flatMap(({ group, projects: sectionProjects }) => [
+          return projectSections.flatMap(({ group, projects: sectionProjects }) => [
             group ? (
               <button
                 key={`top-group-${group.id}`}
@@ -18150,8 +18120,14 @@ Office project scaffold created by BBARIT Terminal.
 	              </div>
 	            </div>
 	            <div className="project-selector-list">
-	              {projectGroups.map((group) => {
-                const groupProjects = visibleProjects.filter((p) => p.groupId === group.id);
+	              {projectSections.map(({ group, projects: groupProjects }) => {
+                if (!group) {
+                  return (
+                    <div key="pg-root" className="project-root-zone" data-group-drop-id="__root__">
+                      {groupProjects.map((p) => renderLeftProjectItem(p, groupProjects))}
+                    </div>
+                  );
+                }
                 return (
                   <div key={`pg-${group.id}`} className="project-group" data-group-drop-id={group.id} style={{ '--group-color': group.color || '#8a7aa0' } as React.CSSProperties}>
                     <div
@@ -18191,9 +18167,6 @@ Office project scaffold created by BBARIT Terminal.
                   </div>
                 );
               })}
-              <div className="project-root-zone" data-group-drop-id="__root__">
-                {(() => { const rootProjects = visibleProjects.filter((p) => !p.groupId || !projectGroups.some((g) => g.id === p.groupId)); return rootProjects.map((p) => renderLeftProjectItem(p, rootProjects)); })()}
-              </div>
             </div>
           </div>
         )}

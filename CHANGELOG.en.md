@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Changed
+
+- The next/previous project shortcuts (⌘⇧] / ⌘⇧[, plus Ctrl⇧] / Ctrl⇧[ on macOS) now follow the project list as shown on screen instead of most-recently-used order. Next is the project below (to the right in the top tabs), previous the one above, wrapping around at the ends; projects inside a collapsed group are skipped. The project number shortcuts (Ctrl+1~9 on macOS, Alt+1~9 on Windows/Linux) use the same on-screen order.
+
 ### Fixed
 
 - Programs running in a terminal no longer keep drawing for the old column count right after the terminal font size changes, and the shell prompt no longer moves down a line (leaving blank lines behind) each time the font gets bigger or the window gets narrower. The new size is sent to the terminal immediately and the prompt stays in place.

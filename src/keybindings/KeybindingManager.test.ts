@@ -11,7 +11,7 @@ describe('KeybindingManager defaults', () => {
     vi.unstubAllGlobals();
   });
 
-  it('registers macOS project MRU shortcuts on Ctrl+Shift brackets', () => {
+  it('registers macOS project list shortcuts on Ctrl+Shift brackets', () => {
     setPlatform('MacIntel');
 
     expect(KeybindingManager.defaultBindings()).toEqual(expect.arrayContaining([
