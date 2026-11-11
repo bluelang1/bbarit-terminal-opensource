@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.68] - 2026-11-11
+
 ### 추가
 
 - 아래 상태 막대에 선택한 프로젝트 폴더의 디스크 사용량(DISK)을 보여 줍니다. 프로젝트를 고를 때 한 번만 재고, 숫자를 누르면 다시 잽니다. 표시 순서는 CPU, MEM, DISK로 바뀌었습니다.
@@ -232,7 +234,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...HEAD
+[1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
 [1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66
 [1.1.65]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.64...v1.1.65
