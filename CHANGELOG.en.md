@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- Programs running in a terminal no longer keep drawing for the old column count right after the terminal font size changes, and the shell prompt no longer moves down a line (leaving blank lines behind) each time the font gets bigger or the window gets narrower. The new size is sent to the terminal immediately and the prompt stays in place.
+
 ## [1.1.68] - 2026-11-11
 
 ### Added

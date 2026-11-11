@@ -59,6 +59,8 @@ import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll'
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
+import { type GridSize } from './terminal/ptySize';
+import { createResizeSequencer, waitForQuietWrites, browserTimers, type ResizeJob, type ResizeSequencer } from './terminal/resizeSequencer';
 import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
@@ -209,21 +211,48 @@ const fitTerminalArea = (fit: FitAddon | null | undefined, term: Terminal | null
   if (applyTerminalAreaWidth(term, wrap) !== before) run();
 };
 
-// addon-fit's fit() with lane 0: rows from proposeDimensions (they do not depend on the lane),
-// cols from the same formula over the parent width. Same resize step as fit() itself.
-const fitWithoutLane = (fit: FitAddon, term: Terminal) => {
+// addon-fit's proposeDimensions() with lane 0: rows as fit proposes them (they do not depend on
+// the lane), cols from the same formula over the parent width. Null when fit cannot measure.
+const proposeWithoutLane = (fit: FitAddon, term: Terminal): GridSize | null => {
   const dims = fit.proposeDimensions();
   const parent = term.element?.parentElement;
   const cellWidth = cellWidthOf(term);
-  if (!dims || !parent || !term.element || !(cellWidth > 0) || Number.isNaN(dims.rows)) { fit.fit(); return; }
+  if (!dims || !parent || !term.element || !(cellWidth > 0) || Number.isNaN(dims.rows)) return null;
   const el = window.getComputedStyle(term.element);
   const padding = (parseInt(el.getPropertyValue('padding-left')) || 0) + (parseInt(el.getPropertyValue('padding-right')) || 0);
   const parentWidth = Math.max(0, parseInt(window.getComputedStyle(parent).getPropertyValue('width')) || 0);
-  const cols = fitAddonCols(parentWidth - padding, 0, cellWidth);
-  if (term.cols === cols && term.rows === dims.rows) return;
-  (term as any)._core?._renderService?.clear?.();
-  term.resize(cols, dims.rows);
+  return { cols: fitAddonCols(parentWidth - padding, 0, cellWidth), rows: dims.rows };
 };
+
+// addon-fit's fit() with lane 0. Same resize step as fit() itself.
+const fitWithoutLane = (fit: FitAddon, term: Terminal) => {
+  const dims = proposeWithoutLane(fit, term);
+  if (!dims) { fit.fit(); return; }
+  if (term.cols === dims.cols && term.rows === dims.rows) return;
+  (term as any)._core?._renderService?.clear?.();
+  term.resize(dims.cols, dims.rows);
+};
+
+// The grid the next fitTerminalArea would produce, without resizing xterm (sizes the area like
+// its first pass does). Used to tell the PTY the new size before xterm reflows.
+const proposeTerminalSize = (fit: FitAddon | null | undefined, term: Terminal | null | undefined, wrap: HTMLElement | null | undefined): GridSize | null => {
+  if (!fit || !term) return null;
+  applyTerminalAreaWidth(term, wrap);
+  if (scrollbarLaneFor(term) === 0) return proposeWithoutLane(fit, term);
+  const dims = fit.proposeDimensions();
+  if (!dims || Number.isNaN(dims.cols) || Number.isNaN(dims.rows)) return null;
+  return { cols: dims.cols, rows: dims.rows };
+};
+
+// After telling the PTY a narrower size first, xterm waits for the shell's prompt redraw: done once
+// parsed output has been quiet this long, or after the cap (nothing printed / busy program).
+// Measured on zsh + a two-line prompt: the redraw is parsed ~30-80 ms after resize_pty with the
+// polling transport once the loop is woken (pollPtySoon); an idle loop alone can sleep 200 ms.
+const PTY_REDRAW_QUIET_MS = 30;
+const PTY_REDRAW_CAP_MS = 250;
+// Font size steps (Cmd+= held or pressed quickly) refit and resize the PTY once, this long after
+// the last step.
+const FONT_RESIZE_COALESCE_MS = 150;
 const TELEGRAM_SCREEN_SNAPSHOT_MAX_CHARS = 16000;
 const TELEGRAM_LAST_SENT_MAX_CHARS = 4096;
 const TELEGRAM_COMMAND_BUFFER_MAX_CHARS = 2000;
@@ -599,6 +628,9 @@ function hasMeaningfulOutput(data: string): boolean {
 
 // Global read loop management (one loop per terminal)
 const readLoops = new Map<string, number>();
+// The read callback each polling loop is currently sleeping before (removed while a read runs),
+// so pollPtySoon can wake it early.
+const readLoopSleeping = new Map<string, () => void>();
 
 const processTerminalOutput = (terminalId: string, data: string) => {
   const state = terminalStates.get(terminalId);
@@ -1144,6 +1176,7 @@ const startReadLoop = (terminalId: string) => {
   if (readLoops.has(terminalId)) return; // already running
 
   const readFromPty = async () => {
+    readLoopSleeping.delete(terminalId);
     const state = terminalStates.get(terminalId);
     if (!state?.term || !state.readLoopActive) {
       readLoops.delete(terminalId);
@@ -1194,6 +1227,7 @@ const startReadLoop = (terminalId: string) => {
           : Math.min(PTY_READ_INTERVAL + idleCount * 10, 200);
       const timeoutId = window.setTimeout(() => readFromPty(), interval);
       readLoops.set(terminalId, timeoutId);
+      readLoopSleeping.set(terminalId, readFromPty);
     } else {
       readLoops.delete(terminalId);
     }
@@ -1204,6 +1238,21 @@ const startReadLoop = (terminalId: string) => {
 
   const timeoutId = window.setTimeout(readFromPty, PTY_READ_INTERVAL);
   readLoops.set(terminalId, timeoutId);
+  readLoopSleeping.set(terminalId, readFromPty);
+};
+
+// Wake an idle polling loop (which may sleep up to 200 ms) so output expected right now, such as
+// the shell's prompt redraw after resize_pty, is read at the fast interval. No-op with event
+// transport or while a read is already running.
+const pollPtySoon = (terminalId: string) => {
+  const state = terminalStates.get(terminalId);
+  if (!state || state.usesEventTransport || !state.readLoopActive) return;
+  state._idleCount = 0;
+  const read = readLoopSleeping.get(terminalId);
+  if (!read) return;
+  const pending = readLoops.get(terminalId);
+  if (pending != null) clearTimeout(pending);
+  readLoops.set(terminalId, window.setTimeout(read, PTY_READ_INTERVAL));
 };
 
 // Stop terminal read loop (used when deleting terminal)
@@ -1213,6 +1262,7 @@ const _stopReadLoop = (terminalId: string) => {
     clearTimeout(timeoutId);
     readLoops.delete(terminalId);
   }
+  readLoopSleeping.delete(terminalId);
   const state = terminalStates.get(terminalId);
   if (state) state.readLoopActive = false;
 };
@@ -1362,6 +1412,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   claudeSessionSourceRef.current = claudeSessionSource;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
+  // Every refit that may change the grid goes through one sequencer per terminal: a normal-buffer
+  // terminal that gets narrower tells the PTY first and lets the shell redraw before xterm
+  // reflows, so the prompt does not leave a stale line behind (src/terminal/resizeSequencer.ts).
+  const resizeSeqRef = useRef<ResizeSequencer | null>(null);
   // Set when the user submits input (Enter); gates the "task completed" toast so it
   // only fires after an actual request (not on the CLI's startup banner).
   const taskPendingRef = useRef(false);
@@ -3189,13 +3243,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const f = fitRef.current;
       const w = terminalWrapRef.current;
       if (!t || !f || !w || w.offsetWidth <= 0 || w.offsetHeight <= 0) return;
-      const { cols, rows } = t;
-      try {
-        preserveTerminalViewport(t, st, () => fitTerminalArea(f, t, w), true, true);
-      } catch { /* ignore */ }
-      if (t.cols !== cols || t.rows !== rows) {
-        invoke('resize_pty', { terminalId, rows: t.rows, cols: t.cols }).catch(() => {});
-      }
+      // Leaving the alternate buffer gives the scrollbar lane back (fewer cols): the shell then
+      // redraws its prompt for the narrower width before xterm reflows (resizeSequencer).
+      resizeSeqRef.current?.request();
     };
     const bufferChangeSub = term.buffer.onBufferChange(() => {
       if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
@@ -3426,9 +3476,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       }
     };
 
-    // Terminal fit and PTY resize
+    // Terminal fit and PTY resize (window resize). Goes through the resize sequencer like the
+    // wrap's ResizeObserver, so a narrower window tells the PTY first (resizeSequencer.ts).
     const fitTerminal = () => {
       if (disposed) return;
+      if (cliType !== 'ollama' && resizeSeqRef.current) {
+        resizeSeqRef.current.request({ refit: () => safeFit(true), alwaysSyncPty: true });
+        return;
+      }
       safeFit();
       if (termRef.current && cliType !== 'ollama') {
         invoke('resize_pty', {
@@ -5433,6 +5488,65 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     }
   }, [commitImeBridgeText, resolveImeCommitText, sendToPty]);
 
+  const requestResize = useCallback((job?: ResizeJob, delayMs?: number) => {
+    resizeSeqRef.current?.request(job, delayMs);
+  }, []);
+  useEffect(() => {
+    const wrapVisible = () => {
+      const wrap = terminalWrapRef.current;
+      const host = terminalMountRef.current || wrap;
+      return !!wrap && !!host && host.offsetWidth > 0 && host.offsetHeight > 0;
+    };
+    const seq = createResizeSequencer({
+      // The live terminal from the shared map: termRef is already null during unmount cleanup,
+      // when the PTY may still have to be put back to xterm's size.
+      current: () => {
+        const term = terminalStates.get(terminalId)?.term;
+        return { cols: term?.cols ?? 0, rows: term?.rows ?? 0 };
+      },
+      propose: () => proposeTerminalSize(fitRef.current, termRef.current, terminalWrapRef.current),
+      visible: () => !isDisposedRef.current && !!termRef.current && !!fitRef.current && wrapVisible(),
+      altBuffer: () => isAltBuffer(termRef.current),
+      replaying: () => !!terminalStates.get(terminalId)?.replayingOutput,
+      // Nothing can redraw without a running PTY: Ollama chat, deferStart before the first
+      // activation, or a program that exited. Those resize xterm first with no wait.
+      ptyLive: () => {
+        const st = terminalStates.get(terminalId);
+        return cliType !== 'ollama' && !!st?.ptyCreated && !st?._ptyExitDispatched;
+      },
+      defaultRefit: (job) => {
+        const term = termRef.current;
+        if (!term) return;
+        const state = terminalStates.get(terminalId);
+        const wrap = terminalWrapRef.current;
+        if (job.revealPin) {
+          // Back from hidden: restore the pin taken when it was hidden (captureHiddenPin).
+          restorePinAfterReveal(term, state, job.revealPin as HiddenPinSnapshot, () => fitTerminalArea(fitRef.current, term, wrap));
+          return;
+        }
+        preserveTerminalViewport(term, state, () => {
+          fitTerminalArea(fitRef.current, term, wrap);
+          term.refresh(0, term.rows - 1);
+        }, true, true);
+      },
+      resizePty: ({ cols, rows }) => { invoke('resize_pty', { terminalId, rows, cols }).catch(() => {}); },
+      waitForRedraw: () => {
+        const term = termRef.current;
+        if (!term) return Promise.resolve();
+        pollPtySoon(terminalId);
+        return waitForQuietWrites((listener) => term.onWriteParsed(listener), browserTimers, {
+          quietMs: PTY_REDRAW_QUIET_MS,
+          capMs: PTY_REDRAW_CAP_MS,
+        });
+      },
+    });
+    resizeSeqRef.current = seq;
+    return () => {
+      seq.dispose();
+      if (resizeSeqRef.current === seq) resizeSeqRef.current = null;
+    };
+  }, [terminalId, cliType]);
+
   // ResizeObserver로 컨테이너 크기 변경 감지
   useEffect(() => {
     const wrap = terminalWrapRef.current;
@@ -5454,24 +5568,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         }
         const returningPin = hiddenPin;
         hiddenPin = null;
-        try {
-          const state = terminalStates.get(terminalId);
-          const refit = () => {
-            fitTerminalArea(fitRef.current, termRef.current, wrap);
-          };
-          if (returningPin) {
-            restorePinAfterReveal(termRef.current, state, returningPin, refit);
-          } else {
-            preserveTerminalViewport(termRef.current, state, refit, true, true);
-          }
-          invoke('resize_pty', {
-            terminalId,
-            rows: termRef.current.rows,
-            cols: termRef.current.cols,
-          }).catch(() => {});
-        } catch {
-          // ignore
-        }
+        requestResize({ alwaysSyncPty: true, revealPin: returningPin ?? undefined });
       }, RESIZE_DEBOUNCE_MS);
     };
 
@@ -5484,7 +5581,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (resizeTimeout) clearTimeout(resizeTimeout);
       ro.disconnect();
     };
-  }, [terminalId]);
+  }, [terminalId, requestResize]);
 
   // 테마/설정 변경 처리
   useEffect(() => {
@@ -5524,12 +5621,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         screen.style.fontFamily = actualFont;
       }
 
+      // A new font size changes how many cells fit: refit and tell the PTY, or the program keeps
+      // drawing for the old size until some other resize happens. A smaller font (more columns)
+      // refits at once; a bigger one coalesces quick steps into one PTY-first resize. Hidden
+      // tabs are resized when they become active.
       if (fitRef.current) {
-        const state = terminalStates.get(terminalId);
-        preserveTerminalViewport(termRef.current, state, () => {
-          fitTerminalArea(fitRef.current, termRef.current, wrap);
-          termRef.current?.refresh(0, termRef.current.rows - 1);
-        }, true, true);
+        const proposed = proposeTerminalSize(fitRef.current, termRef.current, wrap);
+        const widening = !!proposed && proposed.cols > termRef.current.cols;
+        requestResize({}, widening ? 0 : FONT_RESIZE_COALESCE_MS);
       }
     };
 
@@ -5566,18 +5665,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         if (!term || !fit || isDisposedRef.current) return;
         const wrap = terminalWrapRef.current;
         if (!wrap || wrap.offsetWidth <= 0 || wrap.offsetHeight <= 0) return;
-        try {
-          const state = terminalStates.get(terminalId);
-          preserveTerminalViewport(term, state, () => {
-            fitTerminalArea(fit, term, wrap);
-            term.refresh(0, term.rows - 1);
-          }, true, true);
-          invoke('resize_pty', {
-            terminalId,
-            rows: term.rows,
-            cols: term.cols,
-          }).catch(() => {});
-        } catch { /* ignore */ }
+        requestResize({ alwaysSyncPty: true });
       };
       // Immediate + delayed fit to handle layout settling
       doFitAndRefresh();
@@ -5595,7 +5683,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     }
     wasActiveRef.current = isActive;
     return () => { timers.forEach((t) => window.clearTimeout(t)); };
-  }, [isActive, scrollActiveTerminalToBottom, terminalId]);
+  }, [isActive, scrollActiveTerminalToBottom, terminalId, requestResize]);
 
   // Track viewport position so we can show a floating "scroll to bottom" button only when needed.
   // Also listen for wheel events to immediately set userScrolledUp before onScroll fires.
