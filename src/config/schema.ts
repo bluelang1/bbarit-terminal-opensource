@@ -27,6 +27,8 @@ export interface TerminalConfig {
   autoSaveSession: boolean;
   autoSaveFiles: boolean;
   showProjectName: boolean;
+  /** Bottom terminal strip (per-terminal branch / change count). Off by default: it runs git status. */
+  showTerminalStrip: boolean;
   showTelegramControls: boolean;
   shellType: ShellType;
   tmuxAutoStart: boolean;
@@ -380,6 +382,7 @@ export const DEFAULT_TERMINAL_CONFIG: TerminalConfig = {
   autoSaveSession: true,
   autoSaveFiles: true,
   showProjectName: true,
+  showTerminalStrip: false,
   showTelegramControls: false,
   shellType: 'powershell',
   tmuxAutoStart: false,

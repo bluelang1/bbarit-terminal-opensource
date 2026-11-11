@@ -7948,7 +7948,7 @@ fn pty_attach_snapshot(state: State<'_, AppState>, terminal_id: String) -> Resul
     state.pty.attach_snapshot(&terminal_id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_add(
     repo_dir: String,
     worktree_dir: String,
@@ -7993,7 +7993,7 @@ fn git_worktree_add(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_head(worktree_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["rev-parse", "HEAD"])
@@ -8007,7 +8007,7 @@ fn git_worktree_head(worktree_dir: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_worktree_remove(worktree_dir: String) -> Result<(), String> {
     reject_option_like(&worktree_dir, "worktree path")?;
     // Force remove worktree
@@ -8027,7 +8027,7 @@ fn git_worktree_remove(worktree_dir: String) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_merge_branch(repo_dir: String, branch_name: String) -> Result<String, String> {
     reject_option_like(&branch_name, "branch name")?;
     // First, make sure we're on the main branch (or whatever was current before worktrees)
@@ -8165,7 +8165,7 @@ fn git_merge_branch(repo_dir: String, branch_name: String) -> Result<String, Str
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_delete_branch(repo_dir: String, branch_name: String) -> Result<(), String> {
     reject_option_like(&branch_name, "branch name")?;
     let output = common::no_window_command("git")
@@ -8183,7 +8183,7 @@ fn git_delete_branch(repo_dir: String, branch_name: String) -> Result<(), String
 }
 
 // Check if a directory is a git repository
-#[tauri::command]
+#[tauri::command(async)]
 fn git_is_repo(repo_dir: String) -> bool {
     common::no_window_command("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -8194,7 +8194,7 @@ fn git_is_repo(repo_dir: String) -> bool {
 }
 
 // Initialize a git repository and create an initial commit (needed for worktrees)
-#[tauri::command]
+#[tauri::command(async)]
 fn git_init_repo(dir: String) -> Result<String, String> {
     // git init
     let init = common::no_window_command("git")
@@ -8238,7 +8238,7 @@ fn git_init_repo(dir: String) -> Result<String, String> {
 }
 
 // Check if there are uncommitted changes (staged or unstaged)
-#[tauri::command]
+#[tauri::command(async)]
 fn git_has_uncommitted(repo_dir: String) -> Result<bool, String> {
     let output = common::no_window_command("git")
         .args(["status", "--porcelain"])
@@ -8250,7 +8250,7 @@ fn git_has_uncommitted(repo_dir: String) -> Result<bool, String> {
 }
 
 // Auto-stash uncommitted changes
-#[tauri::command]
+#[tauri::command(async)]
 fn git_stash_save(repo_dir: String, message: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["stash", "push", "-m", &message])
@@ -8267,7 +8267,7 @@ fn git_stash_save(repo_dir: String, message: String) -> Result<String, String> {
 }
 
 // Pop the latest stash
-#[tauri::command]
+#[tauri::command(async)]
 fn git_stash_pop(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["stash", "pop"])
@@ -8284,7 +8284,7 @@ fn git_stash_pop(repo_dir: String) -> Result<String, String> {
 }
 
 // Get current branch name
-#[tauri::command]
+#[tauri::command(async)]
 fn git_current_branch(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -8300,7 +8300,7 @@ fn git_current_branch(repo_dir: String) -> Result<String, String> {
 }
 
 // Count how many commits `branch` is ahead of `base`
-#[tauri::command]
+#[tauri::command(async)]
 fn git_branch_ahead_count(repo_dir: String, branch: String, base: String) -> Result<u32, String> {
     reject_option_like(&branch, "branch")?;
     reject_option_like(&base, "base")?;
@@ -8322,7 +8322,7 @@ fn git_branch_ahead_count(repo_dir: String, branch: String, base: String) -> Res
 }
 
 // Clean up stale orchestra worktrees from /tmp/octo-orch-*
-#[tauri::command]
+#[tauri::command(async)]
 fn git_cleanup_orch_worktrees(repo_dir: String) -> Result<u32, String> {
     let mut cleaned = 0u32;
     // List existing worktrees
@@ -8358,7 +8358,7 @@ fn git_cleanup_orch_worktrees(repo_dir: String) -> Result<u32, String> {
 // worktrees are preserved so an in-progress or resumable session is never destroyed.
 // On Windows a worktree whose shell is still CWD'd there is file-locked, so `git worktree
 // remove --force` fails for it — a second built-in safety net beyond keep_dirs.
-#[tauri::command]
+#[tauri::command(async)]
 fn git_cleanup_broker_worktrees(repo_dir: String, keep_dirs: Vec<String>) -> Result<u32, String> {
     fn norm(p: &str) -> String {
         p.replace('\\', "/").trim_end_matches('/').to_lowercase()
@@ -8721,10 +8721,10 @@ Rate each finding: Critical / High / Medium / Low / Informational\n",
 
 // --- Git Panel commands ---
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_status_full(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
-        .args(["status", "--porcelain=v2", "--branch"])
+        .args(["--no-optional-locks", "status", "--porcelain=v2", "--branch"])
         .current_dir(&repo_dir)
         .output()
         .map_err(|e| format!("git status failed: {e}"))?;
@@ -8735,7 +8735,7 @@ fn git_status_full(repo_dir: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_add(repo_dir: String, paths: Vec<String>) -> Result<(), String> {
     let mut args = vec!["add".to_string(), "--".to_string()];
     args.extend(paths);
@@ -8751,7 +8751,7 @@ fn git_add(repo_dir: String, paths: Vec<String>) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_restore(repo_dir: String, paths: Vec<String>, staged: bool) -> Result<(), String> {
     let mut args = vec!["restore".to_string()];
     if staged {
@@ -8771,7 +8771,7 @@ fn git_restore(repo_dir: String, paths: Vec<String>, staged: bool) -> Result<(),
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_commit_changes(repo_dir: String, message: String, amend: bool) -> Result<String, String> {
     let mut args = vec!["commit".to_string(), "-m".to_string(), message];
     if amend {
@@ -8789,7 +8789,7 @@ fn git_commit_changes(repo_dir: String, message: String, amend: bool) -> Result<
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_diff(
     repo_dir: String,
     path: Option<String>,
@@ -8815,7 +8815,7 @@ fn git_diff(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_diff_stat(repo_dir: String, commit: Option<String>) -> Result<String, String> {
     let mut args = vec!["diff".to_string(), "--stat".to_string()];
     if let Some(ref c) = commit {
@@ -8835,7 +8835,7 @@ fn git_diff_stat(repo_dir: String, commit: Option<String>) -> Result<String, Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_log(
     repo_dir: String,
     max_count: Option<u32>,
@@ -8875,7 +8875,7 @@ fn git_log(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_show(repo_dir: String, commit: String) -> Result<String, String> {
     reject_option_like(&commit, "commit")?;
     let output = common::no_window_command("git")
@@ -8895,7 +8895,7 @@ fn git_show(repo_dir: String, commit: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_branch_list(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args([
@@ -8913,7 +8913,7 @@ fn git_branch_list(repo_dir: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_branch_create(
     repo_dir: String,
     name: String,
@@ -8937,7 +8937,7 @@ fn git_branch_create(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_checkout(repo_dir: String, target: String) -> Result<String, String> {
     // `git checkout -` (previous branch) is the one legitimate dash target.
     if target.trim() != "-" {
@@ -8955,7 +8955,7 @@ fn git_checkout(repo_dir: String, target: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_fetch(repo_dir: String, remote: Option<String>, prune: bool) -> Result<String, String> {
     let mut args = vec!["fetch".to_string()];
     if prune {
@@ -8977,7 +8977,7 @@ fn git_fetch(repo_dir: String, remote: Option<String>, prune: bool) -> Result<St
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_pull(
     repo_dir: String,
     remote: Option<String>,
@@ -9008,7 +9008,7 @@ fn git_pull(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_push(
     repo_dir: String,
     remote: Option<String>,
@@ -9043,7 +9043,7 @@ fn git_push(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_remote_list(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["remote", "-v"])
@@ -9053,7 +9053,7 @@ fn git_remote_list(repo_dir: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_stash_list(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["stash", "list", "--format=%gd\t%s\t%aI"])
@@ -9063,7 +9063,7 @@ fn git_stash_list(repo_dir: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_stash_drop(repo_dir: String, stash_ref: Option<String>) -> Result<String, String> {
     let mut args = vec!["stash".to_string(), "drop".to_string()];
     if let Some(r) = stash_ref {
@@ -9082,7 +9082,7 @@ fn git_stash_drop(repo_dir: String, stash_ref: Option<String>) -> Result<String,
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_tag_list(repo_dir: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args([
@@ -9096,7 +9096,7 @@ fn git_tag_list(repo_dir: String) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_tag_create(
     repo_dir: String,
     name: String,
@@ -9131,7 +9131,7 @@ fn git_tag_create(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_tag_delete(repo_dir: String, name: String) -> Result<(), String> {
     reject_option_like(&name, "tag name")?;
     let output = common::no_window_command("git")
@@ -9146,7 +9146,7 @@ fn git_tag_delete(repo_dir: String, name: String) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_blame(repo_dir: String, path: String) -> Result<String, String> {
     let output = common::no_window_command("git")
         .args(["blame", "--porcelain", "--", &path])
@@ -9160,7 +9160,7 @@ fn git_blame(repo_dir: String, path: String) -> Result<String, String> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_clone(url: String, dest: String) -> Result<String, String> {
     reject_option_like(&url, "clone URL")?;
     reject_option_like(&dest, "clone destination")?;

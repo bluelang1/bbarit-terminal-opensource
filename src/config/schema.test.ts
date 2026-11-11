@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_PET_CONFIG, effectiveKeepRunningOnQuit, effectivePtyHolder, normalizePetConfig, validateConfig } from './schema';
+import { DEFAULT_PET_CONFIG, DEFAULT_TERMINAL_CONFIG, effectiveKeepRunningOnQuit, effectivePtyHolder, normalizePetConfig, validateConfig } from './schema';
 
 describe('effectivePtyHolder (mirrors pty_holder_wanted)', () => {
   it('follows the host default when unset; "on"/"off" override it', () => {
@@ -73,5 +73,18 @@ describe('pet config', () => {
     // Optional labels must be non-empty strings.
     expect(normalizePetConfig({ weather: { city: { name: ' Busan ', admin1: 3, country: ' ', lat: 35.1, lon: 129.0 } } }).weather.city)
       .toEqual({ name: 'Busan', lat: 35.1, lon: 129.0 });
+  });
+});
+
+describe('terminal.showTerminalStrip', () => {
+  it('defaults off for new configs and for saved configs without the key', () => {
+    expect(DEFAULT_TERMINAL_CONFIG.showTerminalStrip).toBe(false);
+    expect(validateConfig({}).terminal.showTerminalStrip).toBe(false);
+    expect(validateConfig({ version: 2, terminal: { fontSize: 13 } }).terminal.showTerminalStrip).toBe(false);
+  });
+
+  it('keeps an explicit choice', () => {
+    expect(validateConfig({ version: 2, terminal: { showTerminalStrip: true } }).terminal.showTerminalStrip).toBe(true);
+    expect(validateConfig({ version: 2, terminal: { showTerminalStrip: false } }).terminal.showTerminalStrip).toBe(false);
   });
 });

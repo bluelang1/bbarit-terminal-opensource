@@ -359,6 +359,8 @@ export const en = {
   // Terminal close / tmux
   'settings.terminal.tmuxAutoStart': 'Auto-start tmux',
   'settings.terminal.tmuxAutoStart.desc': 'Automatically start tmux session when opening a new shell tab',
+  'settings.terminal.showTerminalStrip': 'Show bottom terminal strip',
+  'settings.terminal.showTerminalStrip.desc': 'Show the branch and change count of each terminal in the bottom bar. Reads git status in the background, which can be slow on very large repositories.',
   'settings.terminal.confirmOnClose': 'Confirm on close',
   'settings.terminal.confirmOnClose.desc': 'Show confirmation when closing a terminal with running processes',
   'settings.terminal.ptyHolder': 'Use the PTY holder',

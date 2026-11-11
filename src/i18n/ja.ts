@@ -65,6 +65,8 @@ export const ja: Record<TranslationKey, string> = {
   'settings.terminal.autoSaveSession': 'セッション自動保存',
   'settings.terminal.tmuxAutoStart': 'tmux自動起動',
   'settings.terminal.tmuxAutoStart.desc': '新しいシェルタブを開くときに自動的にtmuxセッションを開始します',
+  'settings.terminal.showTerminalStrip': '下部のターミナル行を表示',
+  'settings.terminal.showTerminalStrip.desc': '下部バーに各ターミナルのブランチと変更数を表示します。バックグラウンドで git status を読み取るため、非常に大きなリポジトリでは遅くなることがあります。',
   'settings.terminal.confirmOnClose': '閉じる確認',
   'settings.terminal.confirmOnClose.desc': '実行中のプロセスがあるターミナルを閉じるとき確認メッセージを表示します',
   'settings.terminal.ptyHolder': 'Use the PTY holder',

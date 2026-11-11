@@ -2066,6 +2066,17 @@ export function SettingsPanel({
                     {t('settings.terminal.showProjectName.desc')}
                   </span>
                 </div>
+                <div className="setting-item toggle">
+                  <label>{t('settings.terminal.showTerminalStrip')}</label>
+                  <input
+                    type="checkbox"
+                    checked={terminalSettings.showTerminalStrip ?? false}
+                    onChange={(e) => updateTerminalSetting('showTerminalStrip', e.target.checked)}
+                  />
+                  <span className="setting-description">
+                    {t('settings.terminal.showTerminalStrip.desc')}
+                  </span>
+                </div>
               </div>
 
               <div className="settings-group">
