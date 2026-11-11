@@ -23325,6 +23325,7 @@ Office project scaffold created by BBARIT Terminal.
           display: 'flex', flexDirection: 'column', gap: 4, zIndex: 100,
         }}>
           <div
+            data-hint="nav"
             onClick={() => setShowPromptLibrary(true)}
             title={t('app.promptLibrary.open' as any, 'Open Prompt Library')}
             style={{

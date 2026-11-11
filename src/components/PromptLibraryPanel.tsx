@@ -129,6 +129,7 @@ export function PromptLibraryPanel({ isOpen, onClose, onSend, projectPath }: Pro
     }}>
       <div style={{ padding: '6px 8px', display: 'flex', alignItems: 'center', gap: 4, borderBottom: `1px solid ${border}`, flexShrink: 0 }}>
         <button
+          data-hint="nav"
           onClick={onClose}
           title={t('common.close')}
           style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', color: '#fff', display: 'flex', flexShrink: 0, fontSize: 20, fontWeight: 700, lineHeight: 1 }}
