@@ -18,9 +18,12 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 - The bottom terminal strip (branch and change count per terminal) is now hidden by default. Turn on "Show bottom terminal strip" under Settings > Terminal > Display to bring it back; while it is off, git status is not read for it.
 - The left project list now uses compact single-line rows so more projects fit on screen. The folder path moved to the row's hover tooltip, and the favorite, edit and close buttons appear on hover (favorite projects always show a star before the name).
 - The left project list can be resized between 180 and 520 px by dragging its right edge, and the width is remembered across restarts. Double-click the edge to return to the default 260 px.
+- Quick command buttons moved from the bottom bar into a button strip on the right side of each terminal, which never covers terminal text; full-screen TUIs (such as Claude Code's full-screen mode) also get the unused scrollbar space for text. The order is clear input, clear all input, rerun, clear terminal, then your own buttons, and they run in that terminal. Buttons with an empty command are hidden, and clear input has a new backspace icon.
+- The last-command display moved from the top of the terminal (yellow text that covered terminal output) to the left of the bottom status bar. It shows the selected terminal's command, shortened when long, with the full command on hover.
 
 ### Fixed
 
+- The last-command display (bottom bar, terminal tabs) no longer joins several inputs or shows startup commands and automated input. Shells show the line run with Enter; agent tabs (Claude and others) show the prompt actually submitted, whichever Enter key submits it, and text cleared without sending is dropped.
 - The whole app no longer freezes when a very large repository (hundreds of thousands of files) is the selected project: the git status shown under the terminals kept running `git status` without pause. Git commands no longer block the thread that draws the window, terminal tabs in the same repository share one status read, and refreshes (terminal git status and the Git panel) only run again after the previous one finishes, waiting longer on slow repositories (up to 60 seconds). Reading the status no longer takes Git's lock file, so staging or committing does not fail with "index.lock" errors.
 
 ## [1.1.67] - 2026-11-08

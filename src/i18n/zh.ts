@@ -2715,7 +2715,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "选择终端光标形状",
   'settings.terminal.inputMode.tooltip': "选择终端输入模式",
   'settings.terminal.shellType.tooltip': "选择默认 Windows Shell",
-  'settings.terminal.quickCommands.desc': "常用命令以图标按钮形式显示在终端下方，点击立即执行。",
+  'settings.terminal.quickCommands.desc': "常用命令以图标按钮形式显示在每个终端右侧的按钮栏中，点击即在该终端中立即执行。命令为空的条目不会显示，`!!` 条目显示为重新运行按钮。",
   'settings.terminal.quickCommands.pickIcon': "选择图标",
   'settings.terminal.quickCommands.placeholder': "命令...",
   'settings.theme.projectTheme.desc': "更改当前项目的颜色主题。",

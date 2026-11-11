@@ -43,14 +43,8 @@ import { CustomFontPicker } from './components/CustomFontPicker';
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { MIN_SUBMIT_DELAY_MS, autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
-import { queueButtonInput } from './terminal/buttonInput';
-import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
-
-// Plain shells need no TUI paste-settle delay before Enter; agent TUIs keep the gate default.
-const gateSubmitDelayFor = (cliType?: string): number | undefined => (
-  isInteractiveAgentTerminal(cliType) ? undefined : MIN_SUBMIT_DELAY_MS
-);
+import { autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
@@ -1004,19 +998,25 @@ function createTerminal(
   };
 }
 
-// 터미널에서 마지막으로 실행한 명령의 앞 10자 배지 — 터미널 상단 오버레이와
-// 하단 pill 공용. 새 명령 커밋 시 배지만 자체 재렌더(useSyncExternalStore).
-function TerminalLastCmd({ terminalId, overlay, big }: { terminalId: string; overlay?: boolean; big?: boolean }) {
+// 터미널에서 마지막으로 실행한 명령 배지 — 터미널 탭·하단 pill(앞 10자)과 하단 상태 막대
+// 왼쪽(`bar`, 전체 명령을 말줄임). 새 명령 커밋 시 배지만 자체 재렌더(useSyncExternalStore).
+function TerminalLastCmd({ terminalId, bar }: { terminalId?: string; bar?: boolean }) {
   useSyncExternalStore(subscribeLastCommands, lastCommandsVersion);
-  const cmd = lastCommandOf(terminalId);
+  const cmd = terminalId ? lastCommandOf(terminalId) : '';
   if (!cmd) return null;
-  const max = big ? 26 : 10;
-  const badge = (
-    <span className={big ? 'terminal-last-cmd-big' : 'terminal-last-cmd'} title={cmd}>
-      {cmd.length > max ? `${cmd.slice(0, max)}…` : cmd}
+  if (bar) {
+    return (
+      <span className="status-bar-last-cmd" title={cmd}>
+        <LucideIcons.ChevronRight size={10} aria-hidden="true" />
+        <span className="status-bar-last-cmd-text">{cmd}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="terminal-last-cmd" title={cmd}>
+      {cmd.length > 10 ? `${cmd.slice(0, 10)}…` : cmd}
     </span>
   );
-  return overlay ? <div className="terminal-last-cmd-overlay">{badge}</div> : badge;
 }
 
 // Main-grid terminal slot. While the terminal is popped out into its own OS
@@ -21915,11 +21915,6 @@ Office project scaffold created by BBARIT Terminal.
 	                          </div>
 	                        </div>
                         <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-                                                    {(
-                            <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-                                                            <TerminalLastCmd terminalId={terminal.id} big />
-                            </div>
-                          )}
                           {renderTerminalNameOverlay(proj, terminal, isActiveTerminal)}
                           <MainGridTerminal
                             detached={detachedTerminalIds.has(terminal.id)}
@@ -22507,11 +22502,6 @@ Office project scaffold created by BBARIT Terminal.
 			                            </div>
 			                          </div>
 			                          <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: paneView === 'terminal' ? 'flex' : 'none', flexDirection: 'column', position: 'relative' }}>
-			                            			                            {(
-			                              <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-			                                			                                <TerminalLastCmd terminalId={terminal.id} big />
-			                              </div>
-			                            )}
                               {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
 			                            <MainGridTerminal
 			                              detached={detachedTerminalIds.has(terminal.id)}
@@ -22850,11 +22840,6 @@ Office project scaffold created by BBARIT Terminal.
 		                                </div>
 		                              </div>
 		                              <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-		                                		                                {(
-		                                  <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-		                                    		                                    <TerminalLastCmd terminalId={terminal.id} big />
-		                                  </div>
-		                                )}
                                   {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
 		                                <MainGridTerminal
 		                                  detached={detachedTerminalIds.has(terminal.id)}
@@ -23164,11 +23149,6 @@ Office project scaffold created by BBARIT Terminal.
 	                        </div>
 	                      )}
                       <div className={`terminal-inner-wrapper ${terminalClickFlashId === terminal.id ? 'click-flash' : ''}`} style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
-                                                {(
-                          <div className="project-name-overlay" style={{ color: projectStyle.text }}>
-                                                        <TerminalLastCmd terminalId={terminal.id} big />
-                          </div>
-                        )}
                         {renderTerminalNameOverlay(activeProject, terminal, isActiveTerminal)}
                         <MainGridTerminal
                           detached={detachedTerminalIds.has(terminal.id)}
@@ -23734,7 +23714,7 @@ Office project scaffold created by BBARIT Terminal.
         </div>
       )}
 
-      {/* Process Stats Status Bar + Quick Commands */}
+      {/* Process Stats Status Bar */}
       <div className="process-stats-bar" style={{
         display: 'flex',
         alignItems: 'center',
@@ -23749,53 +23729,7 @@ Office project scaffold created by BBARIT Terminal.
         flexShrink: 0,
         userSelect: 'none',
       }}>
-        {/* Quick Commands */}
-        {(() => {
-          const qc = getConfigSnapshot().quickCommands;
-          if (!qc || qc.length === 0) return null;
-          return qc.map((cmd) => {
-            const LIcon = (LucideIcons as any)[cmd.icon];
-            const commandName = cmd.name === '다시실행해'
-              ? t('settings.terminal.quickCommands.rerun' as any, 'Run again')
-              : cmd.name === '컴파일해'
-                ? t('settings.terminal.quickCommands.compile' as any, 'Compile')
-                : cmd.name === '해줘'
-                  ? t('settings.terminal.quickCommands.doIt' as any, 'Do it')
-                  : cmd.name;
-            return (
-              <button
-                key={cmd.id}
-                type="button"
-                onClick={() => {
-                  const proj = projects.find((p) => p.id === activeProjectId);
-                  const tid = proj?.activeTerminalId;
-                  if (tid && cmd.command) {
-                    const quickTerm = proj?.terminals.find((tt) => tt.id === tid);
-                    void queueButtonInput(tid, cmd.command, { submit: true, submitDelayMs: gateSubmitDelayFor(quickTerm?.cliType) });
-                  }
-                }}
-                title={`${commandName}\n${cmd.command}`}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                  width: 22, height: 20, padding: '0 2px', borderRadius: 'var(--brutal-radius)',
-                  border: 'none', background: 'transparent',
-                  color: `color-mix(in srgb, ${activeStyle.text} 60%, transparent)`,
-                  cursor: 'pointer', transition: 'all 0.05s',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.color = activeStyle.accent;
-                  e.currentTarget.style.background = `color-mix(in srgb, ${activeStyle.accent} 15%, transparent)`;
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.color = `color-mix(in srgb, ${activeStyle.text} 55%, transparent)`;
-                  e.currentTarget.style.background = 'transparent';
-                }}
-              >
-                {LIcon ? <LIcon size={14} /> : <span style={{ fontSize: 13 }}>{cmd.icon || '⚡'}</span>}
-              </button>
-            );
-          });
-        })()}
+        <TerminalLastCmd terminalId={projects.find((p) => p.id === activeProjectId)?.activeTerminalId} bar />
         {showTerminalStrip && <div className="terminal-git-footer-strip" style={isMonitorMode ? { display: 'none' } : undefined}>
           {terminalGitFooterItems.map(({ project, terminal, workDir, isActive }) => {
             const status = terminalGitStatuses[terminal.id];

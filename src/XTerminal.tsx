@@ -49,12 +49,18 @@ import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
 import { AGENT_INSTALL_COMMAND } from './config/endpoints';
-import { Eraser, ListX, RotateCcw } from 'lucide-react';
+import { Delete, Eraser, ListX } from 'lucide-react';
+import * as LucideIcons from 'lucide-react';
+import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
+import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCommandColumn';
+import { FIT_SCROLLBAR_LANE, fitAddonCols, terminalAreaWidth } from './terminal/terminalStripLayout';
+import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
-import { feedTerminalInput } from './terminal/lastCommand';
+import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
+import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
@@ -156,6 +162,68 @@ function shellQuotePath(p: string): string {
 // Constants
 const PTY_READ_INTERVAL = 33; // ~30fps (memory/CPU optimized)
 const RESIZE_DEBOUNCE_MS = 250;
+// Button strip on the right of every terminal (clear/rerun/quick commands). The xterm mount
+// stops this far from the right edge, so fit computes cols without it and nothing overlaps text.
+const TERMINAL_GUTTER_WIDTH = 28;
+const TERMINAL_AREA_PAD = 8;
+// Set on the wrap element (never by React): the xterm area's px width from terminalAreaWidth. The
+// area is right-aligned against the fixed strip, so the cols rounding leftover becomes extra left
+// inset (same background as the terminal). Unset = plain layout (wrap - pad - strip).
+const TERMINAL_AREA_WIDTH_VAR = '--octo-terminal-area-width';
+const TERMINAL_AREA_WIDTH = `var(${TERMINAL_AREA_WIDTH_VAR}, calc(100% - ${TERMINAL_AREA_PAD + TERMINAL_GUTTER_WIDTH}px))`;
+
+// The alternate buffer (full-screen TUIs) has no scrollback, so xterm never draws a scrollbar
+// there: its text gets the lane addon-fit would otherwise keep empty.
+const isAltBuffer = (term: Terminal | null | undefined): boolean => {
+  try { return term?.buffer?.active?.type === 'alternate'; } catch { return false; }
+};
+const scrollbarLaneFor = (term: Terminal | null | undefined): number => (isAltBuffer(term) ? 0 : FIT_SCROLLBAR_LANE);
+const cellWidthOf = (term: Terminal | null | undefined): number =>
+  (term as any)?._core?._renderService?.dimensions?.css?.cell?.width || 0;
+
+const applyTerminalAreaWidth = (term: Terminal | null | undefined, wrap: HTMLElement | null | undefined): number | null => {
+  if (!wrap) return null;
+  const width = terminalAreaWidth({
+    wrapWidth: Math.floor(wrap.getBoundingClientRect().width),
+    padLeft: TERMINAL_AREA_PAD,
+    minStrip: TERMINAL_GUTTER_WIDTH,
+    lane: scrollbarLaneFor(term),
+    cellWidth: cellWidthOf(term),
+  });
+  if (width === null) wrap.style.removeProperty(TERMINAL_AREA_WIDTH_VAR);
+  else wrap.style.setProperty(TERMINAL_AREA_WIDTH_VAR, `${width}px`);
+  return width;
+};
+
+// Every fit goes through here: size the area for the current wrap width and cell, then fit. The
+// width never changes cols versus the plain layout; a second pass only covers a cell width that
+// changed during fit (font change). Bounded to two fits, so it cannot loop.
+const fitTerminalArea = (fit: FitAddon | null | undefined, term: Terminal | null | undefined, wrap: HTMLElement | null | undefined) => {
+  if (!fit) return;
+  const run = () => {
+    if (term && scrollbarLaneFor(term) === 0) fitWithoutLane(fit, term);
+    else fit.fit();
+  };
+  const before = applyTerminalAreaWidth(term, wrap);
+  run();
+  if (applyTerminalAreaWidth(term, wrap) !== before) run();
+};
+
+// addon-fit's fit() with lane 0: rows from proposeDimensions (they do not depend on the lane),
+// cols from the same formula over the parent width. Same resize step as fit() itself.
+const fitWithoutLane = (fit: FitAddon, term: Terminal) => {
+  const dims = fit.proposeDimensions();
+  const parent = term.element?.parentElement;
+  const cellWidth = cellWidthOf(term);
+  if (!dims || !parent || !term.element || !(cellWidth > 0) || Number.isNaN(dims.rows)) { fit.fit(); return; }
+  const el = window.getComputedStyle(term.element);
+  const padding = (parseInt(el.getPropertyValue('padding-left')) || 0) + (parseInt(el.getPropertyValue('padding-right')) || 0);
+  const parentWidth = Math.max(0, parseInt(window.getComputedStyle(parent).getPropertyValue('width')) || 0);
+  const cols = fitAddonCols(parentWidth - padding, 0, cellWidth);
+  if (term.cols === cols && term.rows === dims.rows) return;
+  (term as any)._core?._renderService?.clear?.();
+  term.resize(cols, dims.rows);
+};
 const TELEGRAM_SCREEN_SNAPSHOT_MAX_CHARS = 16000;
 const TELEGRAM_LAST_SENT_MAX_CHARS = 4096;
 const TELEGRAM_COMMAND_BUFFER_MAX_CHARS = 2000;
@@ -334,6 +402,8 @@ const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extr
     replaying: !!terminalStates.get(terminalId)?.replayingOutput,
     ...extra,
   };
+  // Last-command tracking in agent tabs commits on the working transition (terminal/lastCommand.ts).
+  if (!detail.replaying) noteAgentStatus(terminalId, detail.state, { cleared: detail.cleared });
   window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
 };
 
@@ -422,6 +492,29 @@ setInputGateHost({
   getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
   getAgentState: getTerminalAgentState,
   isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
+// Logical line under the cursor (wrapped rows joined). Read when Enter is typed, before the shell
+// answers, so the last-command tracker can drop lines the terminal never echoed (passwords).
+const cursorLineText = (term: Terminal | null | undefined): string | null => {
+  try {
+    const buf = term?.buffer?.active;
+    if (!buf) return null;
+    const y = buf.baseY + buf.cursorY;
+    let start = y;
+    while (start > 0 && y - start < 64 && buf.getLine(start)?.isWrapped) start--;
+    let end = y;
+    while (end - y < 64 && buf.getLine(end + 1)?.isWrapped) end++;
+    let text = '';
+    for (let i = start; i <= end; i++) text += buf.getLine(i)?.translateToString(i === end) ?? '';
+    return text;
+  } catch { return null; }
+};
+
+// 마지막 명령 추적(terminal/lastCommand.ts)이 셸 줄의 에코와 전체 화면 프로그램을 확인한다.
+setLastCommandHost({
+  cursorLineText: (terminalId) => cursorLineText(terminalStates.get(terminalId)?.term),
+  isAlternateBuffer: (terminalId) => isAltBuffer(terminalStates.get(terminalId)?.term),
 });
 
 // dev 전용 노출 — dev:screen js로 스크롤 핀 등 터미널 상태를 실측하기 위함
@@ -1128,6 +1221,7 @@ export { _stopReadLoop as stopReadLoop };
 // Fully dispose terminal (free memory)
 const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
   if (closePty) disposeInputGate(terminalId);
+  if (closePty) dropLastCommand(terminalId);
   if (closePty) clearAwaitingRestart(terminalId);
   // Process asynchronously to avoid conflicts with React rendering
   setTimeout(() => {
@@ -2262,10 +2356,16 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     imeBridgeComposingRef.current = false;
     imeBridgeCompositionTextRef.current = '';
     setImePreeditText('');
+    clearPendingCommand(terminalId);
     const st = terminalStates.get(terminalId);
     st?.writeToPty?.('\x05\x15');
     focusActiveInput();
   }, [focusActiveInput, terminalId]);
+
+  // Agent TUIs submit with whatever Enter the user bound; their last command follows OSC 7501.
+  useEffect(() => {
+    setLastCommandMode(terminalId, isInteractiveAgentTerminal(cliType) ? 'agent' : 'shell');
+  }, [terminalId, cliType]);
 
   // Multi-line variant for agent TUIs (see clearInputAll.ts); clearTerminalInput
   // resets local buffers and clears the current line, the loop takes the rest.
@@ -2932,7 +3032,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       requestAnimationFrame(() => {
         try {
           preserveTerminalViewport(term, existingState, () => {
-            fitAddon.fit();
+            fitTerminalArea(fitAddon, term, wrap);
             term.refresh(0, term.rows - 1);
           }, true, true);
         } catch {
@@ -3076,6 +3176,31 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     }
 
     let disposed = false;
+    // Entering/leaving the alternate buffer changes the scrollbar lane (scrollbarLaneFor), so
+    // re-size once the switch settles: quick toggles coalesce into one PTY resize, and saved
+    // output replays (which may flip buffers repeatedly) are sized once after they finish.
+    let bufferResizeTimer: number | null = null;
+    const resizeForBuffer = () => {
+      bufferResizeTimer = null;
+      if (disposed) return;
+      const st = terminalStates.get(terminalId);
+      if (st?.replayingOutput) { bufferResizeTimer = window.setTimeout(resizeForBuffer, 100); return; }
+      const t = termRef.current;
+      const f = fitRef.current;
+      const w = terminalWrapRef.current;
+      if (!t || !f || !w || w.offsetWidth <= 0 || w.offsetHeight <= 0) return;
+      const { cols, rows } = t;
+      try {
+        preserveTerminalViewport(t, st, () => fitTerminalArea(f, t, w), true, true);
+      } catch { /* ignore */ }
+      if (t.cols !== cols || t.rows !== rows) {
+        invoke('resize_pty', { terminalId, rows: t.rows, cols: t.cols }).catch(() => {});
+      }
+    };
+    const bufferChangeSub = term.buffer.onBufferChange(() => {
+      if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
+      bufferResizeTimer = window.setTimeout(resizeForBuffer, 50);
+    });
     // Startup once-gate rollback: autoStartedCliType is pre-set synchronously so a
     // remount within the startup delay can't double-inject. But if THIS mount disposes
     // before the delayed write fires (StrictMode double-mount, harness-window remount,
@@ -3125,7 +3250,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try {
         const state = terminalStates.get(terminalId);
         preserveTerminalViewport(termRef.current, state, () => {
-          fitRef.current?.fit();
+          fitTerminalArea(fitRef.current, termRef.current, wrap);
           termRef.current?.refresh(0, termRef.current.rows - 1);
           fixTerminalStyle();
         }, true, true);
@@ -3254,7 +3379,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         return;
       }
       _terminalLastActivity.set(terminalId, Date.now());
-      feedTerminalInput(terminalId, data);
       // Always works as long as PTY exists
       invoke('write_to_pty', { terminalId, data }).catch((err) => {
         console.error('[PTY] write_to_pty failed for', terminalId, ':', err);
@@ -4084,6 +4208,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     return () => {
       disposed = true;
       isDisposedRef.current = true;
+      bufferChangeSub.dispose();
+      if (bufferResizeTimer != null) window.clearTimeout(bufferResizeTimer);
 
       // If we pre-set the startup once-gate but disposed before the delayed write
       // fired, roll the gate back so the next mount actually injects the CLI start
@@ -4849,7 +4975,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // tracking effect; the advance only clamps at the right edge.
       setCursorOverlay((prev) => {
         if (!prev) return prev;
-        const wrapWidth = terminalWrapRef.current?.clientWidth ?? Infinity;
+        // Clamp at the terminal area's right edge, left of the button strip.
+        const mount = terminalMountRef.current;
+        const wrapWidth = mount ? mount.offsetLeft + mount.clientWidth : (terminalWrapRef.current?.clientWidth ?? Infinity);
         return advanceImeAnchor(prev, finalText, wrapWidth);
       });
     }
@@ -5308,7 +5436,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // ResizeObserver로 컨테이너 크기 변경 감지
   useEffect(() => {
     const wrap = terminalWrapRef.current;
-    const mount = terminalMountRef.current;
     if (!wrap) return;
 
     let resizeTimeout: number | null = null;
@@ -5330,7 +5457,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try {
           const state = terminalStates.get(terminalId);
           const refit = () => {
-            fitRef.current?.fit();
+            fitTerminalArea(fitRef.current, termRef.current, wrap);
           };
           if (returningPin) {
             restorePinAfterReveal(termRef.current, state, returningPin, refit);
@@ -5349,8 +5476,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     };
 
     const ro = new ResizeObserver(handleResize);
+    // Only the wrap: the mount's width is set from the wrap's (fitTerminalArea), and observing
+    // it would refit on our own writes.
     ro.observe(wrap);
-    if (mount) ro.observe(mount);
 
     return () => {
       if (resizeTimeout) clearTimeout(resizeTimeout);
@@ -5399,7 +5527,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (fitRef.current) {
         const state = terminalStates.get(terminalId);
         preserveTerminalViewport(termRef.current, state, () => {
-          fitRef.current?.fit();
+          fitTerminalArea(fitRef.current, termRef.current, wrap);
           termRef.current?.refresh(0, termRef.current.rows - 1);
         }, true, true);
       }
@@ -5441,7 +5569,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         try {
           const state = terminalStates.get(terminalId);
           preserveTerminalViewport(term, state, () => {
-            fit.fit();
+            fitTerminalArea(fit, term, wrap);
             term.refresh(0, term.rows - 1);
           }, true, true);
           invoke('resize_pty', {
@@ -5485,6 +5613,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     const wrap = terminalWrapRef.current;
     const onWheel = (e: WheelEvent) => {
       if (e.deltaY === 0) return;
+      // Wheel over the button strip scrolls the strip (if it overflows), never the terminal.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       const state = terminalStates.get(terminalId);
       if (!state) return;
       const term = state.term as any;
@@ -6220,6 +6350,55 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
   const ctxQuickCommands = (quickCommands || []).filter((c) => c.command.trim()).slice(0, 6);
 
+  // Button strip on the right (TERMINAL_GUTTER_WIDTH). Quick commands come from the live config: this
+  // component already re-renders on config changes through useTranslation's useConfig.
+  const { config: liveConfig } = useConfig();
+  const columnQuickCommands = quickCommandColumn(liveConfig.quickCommands);
+  const columnButtonStyle: React.CSSProperties = {
+    height: 20,
+    minWidth: 20,
+    padding: 0,
+    flexShrink: 0,
+    borderRadius: 'var(--brutal-radius)',
+    border: `1px solid ${style?.accent || '#89b4fa'}66`,
+    background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
+    color: style?.text || '#cdd6f4',
+    cursor: 'pointer',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    lineHeight: 1,
+  };
+  const keepTerminalFocus = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  // Acts on this pane's terminal, not the active one; goes through the button input gate.
+  const renderColumnQuickCommand = (cmd: QuickCommand) => {
+    // The icon name comes from user config: only accept real icon components
+    // (capitalized exports), never helpers such as `icons` / `createLucideIcon`.
+    const iconExport = /^[A-Z]/.test(cmd.icon || '') ? (LucideIcons as any)[cmd.icon] : null;
+    const LIcon = iconExport && (typeof iconExport === 'function' || (typeof iconExport === 'object' && '$$typeof' in iconExport))
+      ? iconExport
+      : null;
+    const commandName = quickCommandDisplayName(cmd.name, t);
+    return (
+      <button
+        key={`quick-${cmd.id}`}
+        type="button"
+        title={`${commandName}\n${cmd.command}`}
+        onMouseDown={keepTerminalFocus}
+        onClick={(e) => {
+          keepTerminalFocus(e);
+          void queueButtonInput(terminalId, cmd.command, { submit: true, submitDelayMs: gateSubmitDelayFor(cliType) });
+        }}
+        style={columnButtonStyle}
+      >
+        {LIcon ? <LIcon size={10} /> : <span style={{ fontSize: 10 }}>{cmd.icon || '⚡'}</span>}
+      </button>
+    );
+  };
+
   // Search options shared by every find call. Decorations are required for
   // onDidChangeResults (match counter) to fire.
   const searchAccent = style?.accent || '#89b4fa';
@@ -6539,7 +6718,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           data-terminal-mount
           style={{
             position: 'absolute',
-            inset: 8,
+            top: TERMINAL_AREA_PAD,
+            bottom: TERMINAL_AREA_PAD,
+            // Right-aligned against the strip: last column + FitAddon's 14 px scrollbar lane end at
+            // the hairline; the cols rounding leftover sits on the left (see fitTerminalArea).
+            right: TERMINAL_GUTTER_WIDTH,
+            width: TERMINAL_AREA_WIDTH,
           }}
         />
 
@@ -6697,7 +6881,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             style={{
               position: 'absolute',
               left: 12,
-              right: 12,
+              right: TERMINAL_GUTTER_WIDTH + 12,
               bottom: 12,
               zIndex: 190,
               padding: '10px 12px',
@@ -6796,7 +6980,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             }}
             style={{
               position: 'absolute',
-              left: '50%',
+              left: `calc(100% - ${TERMINAL_GUTTER_WIDTH}px - ${TERMINAL_AREA_WIDTH} / 2)`, // centre of the xterm area
               bottom: 12,
               transform: 'translateX(-50%)',
               zIndex: 180,
@@ -6821,105 +7005,79 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             ↓ {t('terminal.scrollToBottom')}
           </button>
         )}
+        {/* Button strip: outside the xterm mount (see TERMINAL_GUTTER_WIDTH). Bottom-aligned via the
+            first button's auto margin, which still lets an overflowing strip scroll to its top. */}
         <div
+          data-terminal-gutter
+          onMouseDown={keepTerminalFocus}
           style={{
             position: 'absolute',
-            right: 12,
-            bottom: 12,
+            top: 0,
+            right: 0,
+            bottom: 0,
+            width: TERMINAL_GUTTER_WIDTH,
+            boxSizing: 'border-box',
             display: 'flex',
             flexDirection: 'column',
+            alignItems: 'center',
             gap: 8,
+            padding: '8px 0',
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            overscrollBehavior: 'contain',
+            scrollbarWidth: 'none',
+            background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 94%, ${style?.text || '#cdd6f4'})`,
+            borderLeft: `1px solid color-mix(in srgb, ${style?.text || '#cdd6f4'} 12%, transparent)`,
             zIndex: 180,
             pointerEvents: 'auto',
           }}
         >
           <button
             type="button"
-            title={t('terminal.clear')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              clearTerminalView();
-            }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
-          >
-            <Eraser size={10} />
-          </button>
-          <button
-            type="button"
             title={t('terminal.clearInput')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
+            onMouseDown={keepTerminalFocus}
             onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
+              keepTerminalFocus(e);
               clearTerminalInput();
             }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
+            style={{ ...columnButtonStyle, marginTop: 'auto' }}
           >
-            <RotateCcw size={10} />
+            <Delete size={10} />
           </button>
           <button
             type="button"
             title={t('terminal.clearInputAll')}
-            onMouseDown={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-            }}
+            onMouseDown={keepTerminalFocus}
             onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
+              keepTerminalFocus(e);
               clearTerminalInputAll();
             }}
-            style={{
-              height: 20,
-              minWidth: 20,
-              padding: 0,
-              borderRadius: 'var(--brutal-radius)',
-              border: `1px solid ${style?.accent || '#89b4fa'}66`,
-              background: `color-mix(in srgb, ${style?.bg || '#1e1e2e'} 88%, black 12%)`,
-              color: style?.text || '#cdd6f4',
-              cursor: 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              lineHeight: 1,
-            }}
+            style={columnButtonStyle}
           >
             <ListX size={10} />
           </button>
+          {columnQuickCommands.rerun && renderColumnQuickCommand(columnQuickCommands.rerun)}
+          <button
+            type="button"
+            title={t('terminal.clear')}
+            onMouseDown={keepTerminalFocus}
+            onClick={(e) => {
+              keepTerminalFocus(e);
+              clearTerminalView();
+            }}
+            style={columnButtonStyle}
+          >
+            <Eraser size={10} />
+          </button>
+          {columnQuickCommands.custom.length > 0 && (
+            <>
+              <div
+                aria-hidden="true"
+                style={{ height: 1, width: 20, flexShrink: 0, background: `${style?.accent || '#89b4fa'}66` }}
+              />
+              {columnQuickCommands.custom.map(renderColumnQuickCommand)}
+            </>
+          )}
         </div>
       </div>
 

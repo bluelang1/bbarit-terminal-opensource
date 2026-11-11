@@ -2715,7 +2715,7 @@ export const it: Record<TranslationKey, string> = {
   'settings.terminal.cursorShape.tooltip': "Seleziona la forma del cursore del terminale",
   'settings.terminal.inputMode.tooltip': "Seleziona la modalità di input del terminale",
   'settings.terminal.shellType.tooltip': "Seleziona la shell Windows predefinita",
-  'settings.terminal.quickCommands.desc': "Comandi frequenti mostrati come pulsanti icona sotto il terminale. Clicca per eseguire subito.",
+  'settings.terminal.quickCommands.desc': "Comandi frequenti mostrati come pulsanti icona nella striscia di pulsanti a destra di ogni terminale; un clic esegue il comando in quel terminale. Le voci con comando vuoto sono nascoste e la voce `!!` appare come pulsante per rieseguire.",
   'settings.terminal.quickCommands.pickIcon': "Scegli icona",
   'settings.terminal.quickCommands.placeholder': "comando...",
   'settings.theme.projectTheme.desc': "Cambia il tema colore del progetto corrente.",
