@@ -1782,6 +1782,7 @@ export function SettingsPanel({
         nextTerminal: `${mod}+]`,
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+        hintMode: `${mod}+J`,
         toggleTerminalMode: `${mod}+\``,
         openSettings: `${mod}+,`,
         newProject: `${mod}+N`,
@@ -1802,6 +1803,7 @@ export function SettingsPanel({
         nextTerminal: `${mod}+]`,
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+        hintMode: `${mod}+J`,
         toggleTerminalMode: `${alt}+F12`,
         openSettings: isMacPlatform ? `${mod}+,` : `Ctrl+Alt+S`,
         newProject: `${mod}+N`,
@@ -1822,6 +1824,7 @@ export function SettingsPanel({
       nextTerminal: `${mod}+]`,
       prevTerminal: `${mod}+[`,
       lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+      hintMode: `${mod}+J`,
       toggleTerminalMode: `${mod}+${shift}+F`,
       openSettings: `${mod}+,`,
       newProject: `${mod}+N`,
@@ -3720,6 +3723,7 @@ export function SettingsPanel({
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.nextTerminal')}</span><span className="shortcut-key">{shortcutLabel.nextTerminal}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.prevTerminal')}</span><span className="shortcut-key">{shortcutLabel.prevTerminal}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.lastCompletedTask')}</span><span className="shortcut-key">{shortcutLabel.lastCompletedTask}</span></div>
+                  <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.hintMode')}</span><span className="shortcut-key">{shortcutLabel.hintMode}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.terminalOnlyMode')}</span><span className="shortcut-key">{shortcutLabel.toggleTerminalMode}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.copy')}</span><span className="shortcut-key">⌘/Ctrl+C</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.paste')}</span><span className="shortcut-key">⌘/Ctrl+V</span></div>

@@ -2668,6 +2668,7 @@ export const en = {
   'settings.agent.stt.disableMicProcessing': "Disable mic processing",
   'settings.agent.stt.inputBoost': "Input boost",
   'settings.shortcuts.lastCompletedTask': "Go to Recent Task",
+  'settings.shortcuts.hintMode': "Keyboard Hints (click by typing)",
   'settings.notes.templates': "Note Templates",
   'settings.about.tagline': "BBARIT Terminal — All-in-one IDE for AI vibe coding",
   'settings.about.developer': "Developed & operated by: BBARIT",

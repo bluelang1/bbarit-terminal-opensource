@@ -123,6 +123,7 @@ import {
   type ProjectDisplaySection,
   type ProjectListLayout,
 } from './projects/projectDisplayOrder';
+import { useHintMode } from './hints/useHintMode';
 import { NoteProvider, useNoteIndex, useNoteDispatch, useGlobalNotesDir, useRequestReindex } from './notes/NoteContext';
 import { updateVaultLinksAfterRename, rewriteWikiLinks } from './notes/linkMaintenance';
 import { applyTemplateVariables, buildDailyNoteContent, getDailyNotePath } from './notes/dailyNotes';
@@ -5251,6 +5252,9 @@ Office project scaffold created by BBARIT Terminal.
   );
   const projectSectionsRef = useRef<Array<ProjectDisplaySection<Project, ProjectGroup>>>([]);
   projectSectionsRef.current = projectSections;
+  // Hint mode (src/hints): keyboard labels on clickable things, keybinding hints.toggle.
+  const hintMode = useHintMode();
+  const hintModeToggle = hintMode.toggle;
   const toggleProjectFavorite = useCallback((projectId: string) => {
     setProjects(prev => prev.map(p => (p.id === projectId ? { ...p, favorite: !p.favorite } : p)));
   }, []);
@@ -8812,6 +8816,7 @@ Office project scaffold created by BBARIT Terminal.
       <div
         key={`selector-left-${project.id}`}
         data-project-tab-id={project.id}
+        data-hint="project"
         data-project-drop-id={project.id}
         data-project-drop-orientation="vertical"
         role="button"
@@ -12266,6 +12271,7 @@ Office project scaffold created by BBARIT Terminal.
       { id: 'project.next', handler: () => goProject(+1) },
       { id: 'project.previous', handler: () => goProject(-1) },
       { id: 'task.open-last-completed', handler: () => openPreviousCompletedTask() },
+      { id: 'hints.toggle', handler: () => hintModeToggle() },
       { id: 'view.toggle-terminal-mode', handler: () => setViewMode((prev) => prev === 'editor' ? 'default' : prev === 'default' ? 'side' : prev === 'side' ? 'project-terminal' : prev === 'project-terminal' ? 'terminal' : prev === 'terminal' ? 'kanban' : prev === 'kanban' ? 'pm2' : prev === 'pm2' ? 'hub' : 'editor') },
       { id: 'terminal.new', handler: () => {
         if (!activeProjectId) return;
@@ -17185,6 +17191,7 @@ Office project scaffold created by BBARIT Terminal.
           <div
             key={project.id}
             data-project-tab-id={project.id}
+            data-hint="project"
             data-project-drop-id={project.id}
             data-project-drop-orientation="horizontal"
             className={[
@@ -18181,6 +18188,7 @@ Office project scaffold created by BBARIT Terminal.
           />
         )}
         {isProjectPanelResizing && createPortal(<div className="project-panel-resize-overlay" aria-hidden="true" />, document.body)}
+        {hintMode.overlay}
 
         {/* Sidebar Toggle — show thin strip when hidden */}
         {sidebarHidden && viewMode !== 'terminal' && viewMode !== 'project-terminal' && viewMode !== 'pm2' && viewMode !== 'hub' && !isMonitorMode && (
@@ -20595,6 +20603,7 @@ Office project scaffold created by BBARIT Terminal.
 	                    <div
 	                      key={`selector-${project.id}`}
                         data-project-drop-id={project.id}
+                        data-hint="project"
                         data-project-drop-orientation="vertical"
                         role="button"
                         tabIndex={0}
@@ -21254,6 +21263,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={terminal.id}
                       data-terminal-tab-id={terminal.id}
+                      data-hint="tab"
                       className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminalStatusClass(terminal.id)}`}
                       title={terminal.name}
                       style={isTerminalFiltered(terminal.id) ? { opacity: 0.25, pointerEvents: 'none' } : undefined}

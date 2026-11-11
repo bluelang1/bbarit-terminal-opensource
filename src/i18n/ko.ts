@@ -2670,6 +2670,7 @@ export const ko: Record<TranslationKey, string> = {
   'settings.agent.stt.disableMicProcessing': "마이크 처리 끄기",
   'settings.agent.stt.inputBoost': "입력 증폭",
   'settings.shortcuts.lastCompletedTask': "최근 작업으로 이동",
+  'settings.shortcuts.hintMode': "키보드 힌트 (글자로 클릭)",
   'settings.notes.templates': "노트 템플릿",
   'settings.about.tagline': "빠릿터미널 — AI 바이브코딩 올인원 IDE",
   'settings.about.developer': "개발 · 운영: BBARIT (빠릿)",

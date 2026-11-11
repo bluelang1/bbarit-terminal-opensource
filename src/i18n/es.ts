@@ -2612,6 +2612,7 @@ export const es: Record<TranslationKey, string> = {
   'settings.agent.stt.disableMicProcessing': "Desactivar procesamiento del micrófono",
   'settings.agent.stt.inputBoost': "Amplificación de entrada",
   'settings.shortcuts.lastCompletedTask': "Ir a la tarea reciente",
+  'settings.shortcuts.hintMode': "Pistas de teclado (clic tecleando)",
   'settings.notes.templates': "Plantillas de notas",
   'settings.about.tagline': "BBARIT Terminal — IDE todo en uno para AI vibe coding",
   'settings.about.developer': "Desarrollado y operado por: BBARIT",

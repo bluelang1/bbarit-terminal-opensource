@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Added
+
+- Keyboard hint mode: press ⌘J (Ctrl+J on Windows/Linux) and a yellow label appears on every clickable thing on screen (projects, terminal tabs, terminal panes, buttons); type the label to click it. Picking a terminal pane puts the cursor in that terminal. With many targets some labels are two characters; Backspace removes one, and Esc or the same shortcut closes hint mode and returns focus to the terminal. Works while the Korean input method is on.
+
 ### Changed
 
 - The next/previous project shortcuts (⌘⇧] / ⌘⇧[, plus Ctrl⇧] / Ctrl⇧[ on macOS) now follow the project list as shown on screen instead of most-recently-used order. Next is the project below (to the right in the top tabs), previous the one above, wrapping around at the ends; projects inside a collapsed group are skipped. The project number shortcuts (Ctrl+1~9 on macOS, Alt+1~9 on Windows/Linux) use the same on-screen order.

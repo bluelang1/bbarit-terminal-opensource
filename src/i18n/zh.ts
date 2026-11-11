@@ -2612,6 +2612,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.agent.stt.disableMicProcessing': "禁用麦克风处理",
   'settings.agent.stt.inputBoost': "输入增益",
   'settings.shortcuts.lastCompletedTask': "转到最近任务",
+  'settings.shortcuts.hintMode': "键盘提示 (输入字符点击)",
   'settings.notes.templates': "笔记模板",
   'settings.about.tagline': "BBARIT Terminal — AI 氛围编码一体化 IDE",
   'settings.about.developer': "开发与运营：BBARIT",

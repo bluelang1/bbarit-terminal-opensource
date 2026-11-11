@@ -2612,6 +2612,7 @@ export const ja: Record<TranslationKey, string> = {
   'settings.agent.stt.disableMicProcessing': "マイク処理を無効化",
   'settings.agent.stt.inputBoost': "入力ブースト",
   'settings.shortcuts.lastCompletedTask': "最近のタスクへ移動",
+  'settings.shortcuts.hintMode': "キーボードヒント (文字でクリック)",
   'settings.notes.templates': "ノートテンプレート",
   'settings.about.tagline': "BBARIT Terminal — AI バイブコーディングのためのオールインワン IDE",
   'settings.about.developer': "開発・運営: BBARIT",

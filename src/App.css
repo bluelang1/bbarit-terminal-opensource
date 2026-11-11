@@ -10050,7 +10050,7 @@ input[type="range"]::-webkit-slider-thumb {
   top: 14px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2147483600;
+  z-index: 2147483647;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -12366,4 +12366,79 @@ textarea,
 .project-terminal-dots.agent-done .project-terminal-dots-more {
   color: #22c55e;
   opacity: 1;
+}
+
+/* ── Hint mode (src/hints, keybinding hints.toggle) ──────────────────────────
+   Every visual value is a custom property on .hint-overlay, so the look (and a
+   colour per kind via --hint-<kind>-bg/-fg) can be changed here without code.
+   Badges carry data-kind="project|tab|terminal|button|danger" and
+   data-placement="corner|bottom-left"; left/top is the anchor point from JS. */
+.hint-overlay {
+  --hint-bg: #ffd60a;
+  --hint-fg: #111111;
+  --hint-border: 1px solid rgba(0, 0, 0, 0.8);
+  --hint-radius: 2px;
+  --hint-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --hint-font-size: 11px;
+  --hint-font-weight: 800;
+  --hint-line-height: 14px;
+  --hint-padding: 0 3px;
+  --hint-min-width: 9px;
+  --hint-text-transform: uppercase;
+  --hint-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  --hint-typed-opacity: 0.4;
+  /* Corner badges: up-left of the target's top-left corner, overlapping it a little. */
+  --hint-corner-shift-x: -70%;
+  --hint-corner-shift-y: -70%;
+  /* Terminal-pane badges: inside the pane's bottom-left corner, near the prompt. */
+  --hint-terminal-shift-x: 8px;
+  --hint-terminal-shift-y: calc(-100% - 8px);
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+}
+
+.hint-badge {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: var(--hint-min-width);
+  padding: var(--hint-padding);
+  border: var(--hint-border);
+  border-radius: var(--hint-radius);
+  background: var(--hint-bg);
+  color: var(--hint-fg);
+  box-shadow: var(--hint-shadow);
+  font-family: var(--hint-font-family);
+  font-size: var(--hint-font-size);
+  font-weight: var(--hint-font-weight);
+  line-height: var(--hint-line-height);
+  text-align: center;
+  text-transform: var(--hint-text-transform);
+  white-space: nowrap;
+  transform: translate(var(--hint-shift-x, 0), var(--hint-shift-y, 0));
+}
+
+.hint-badge[data-placement='corner'] {
+  --hint-shift-x: var(--hint-corner-shift-x);
+  --hint-shift-y: var(--hint-corner-shift-y);
+}
+
+.hint-badge[data-placement='bottom-left'] {
+  --hint-shift-x: var(--hint-terminal-shift-x);
+  --hint-shift-y: var(--hint-terminal-shift-y);
+}
+
+.hint-badge[data-kind='project'] { background: var(--hint-project-bg, var(--hint-bg)); color: var(--hint-project-fg, var(--hint-fg)); }
+.hint-badge[data-kind='tab'] { background: var(--hint-tab-bg, var(--hint-bg)); color: var(--hint-tab-fg, var(--hint-fg)); }
+.hint-badge[data-kind='terminal'] { background: var(--hint-terminal-bg, var(--hint-bg)); color: var(--hint-terminal-fg, var(--hint-fg)); }
+.hint-badge[data-kind='button'] { background: var(--hint-button-bg, var(--hint-bg)); color: var(--hint-button-fg, var(--hint-fg)); }
+.hint-badge[data-kind='danger'] { background: var(--hint-danger-bg, var(--hint-bg)); color: var(--hint-danger-fg, var(--hint-fg)); }
+
+.hint-badge[data-hidden='true'] {
+  display: none;
+}
+
+.hint-badge-typed {
+  opacity: var(--hint-typed-opacity);
 }
