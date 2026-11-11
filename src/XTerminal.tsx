@@ -59,7 +59,7 @@ import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll'
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
-import { clearPendingCommand, noteAgentStatus, setLastCommandMode } from './terminal/lastCommand';
+import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
@@ -492,6 +492,29 @@ setInputGateHost({
   getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
   getAgentState: getTerminalAgentState,
   isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
+// Logical line under the cursor (wrapped rows joined). Read when Enter is typed, before the shell
+// answers, so the last-command tracker can drop lines the terminal never echoed (passwords).
+const cursorLineText = (term: Terminal | null | undefined): string | null => {
+  try {
+    const buf = term?.buffer?.active;
+    if (!buf) return null;
+    const y = buf.baseY + buf.cursorY;
+    let start = y;
+    while (start > 0 && y - start < 64 && buf.getLine(start)?.isWrapped) start--;
+    let end = y;
+    while (end - y < 64 && buf.getLine(end + 1)?.isWrapped) end++;
+    let text = '';
+    for (let i = start; i <= end; i++) text += buf.getLine(i)?.translateToString(i === end) ?? '';
+    return text;
+  } catch { return null; }
+};
+
+// 마지막 명령 추적(terminal/lastCommand.ts)이 셸 줄의 에코와 전체 화면 프로그램을 확인한다.
+setLastCommandHost({
+  cursorLineText: (terminalId) => cursorLineText(terminalStates.get(terminalId)?.term),
+  isAlternateBuffer: (terminalId) => isAltBuffer(terminalStates.get(terminalId)?.term),
 });
 
 // dev 전용 노출 — dev:screen js로 스크롤 핀 등 터미널 상태를 실측하기 위함
@@ -1198,6 +1221,7 @@ export { _stopReadLoop as stopReadLoop };
 // Fully dispose terminal (free memory)
 const disposeTerminalRuntime = (terminalId: string, closePty: boolean) => {
   if (closePty) disposeInputGate(terminalId);
+  if (closePty) dropLastCommand(terminalId);
   if (closePty) clearAwaitingRestart(terminalId);
   // Process asynchronously to avoid conflicts with React rendering
   setTimeout(() => {

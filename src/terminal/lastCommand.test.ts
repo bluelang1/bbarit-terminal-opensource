@@ -6,7 +6,9 @@ import {
   dropLastCommand,
   feedTerminalInput,
   lastCommandOf,
+  isEchoedOnRow,
   noteAgentStatus,
+  setLastCommandHost,
   setLastCommandMode,
 } from './lastCommand';
 
@@ -14,7 +16,7 @@ const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
 
 const T = 't';
-afterEach(() => { dropLastCommand(T); resetInputGate(); vi.useRealTimers(); });
+afterEach(() => { dropLastCommand(T); setLastCommandHost(null); resetInputGate(); vi.useRealTimers(); });
 
 const SHIFT_ENTER = '\x1b[13;2u';
 const CMD_ENTER = '\x1b[13;9u';
@@ -101,8 +103,89 @@ describe('last command: shell tabs', () => {
     expect(lastCommandOf(T)).toBe('pwd');
   });
 
+  it('ignores DCS replies that reach the tracker', () => {
+    feedTerminalInput(T, 'ls\x1bP1$r0 q\x1b\\\r');
+    expect(lastCommandOf(T)).toBe('ls');
+  });
+
+  it('caps pending text at 4000 characters, keeping the head', () => {
+    feedTerminalInput(T, 'echo ' + 'x'.repeat(5000) + '\r');
+    expect(lastCommandOf(T)).toBe('echo ' + 'x'.repeat(3995));
+  });
+
+  it('dropLastCommand frees the entry', () => {
+    feedTerminalInput(T, 'ls\r');
+    dropLastCommand(T);
+    expect(lastCommandOf(T)).toBe('');
+  });
+
   it('returns an empty string for unknown terminals', () => {
     expect(lastCommandOf('t-none')).toBe('');
+  });
+});
+
+describe('last command: shell echo check', () => {
+  const screen = (row: string, alt = false) => {
+    const st = { row, alt };
+    setLastCommandHost({ cursorLineText: () => st.row, isAlternateBuffer: () => st.alt });
+    return st;
+  };
+
+  it('does not record a line the terminal did not echo (sudo password)', () => {
+    const st = screen('');
+    st.row = '~ % sudo ls';
+    feedTerminalInput(T, 'sudo ls\r');
+    expect(lastCommandOf(T)).toBe('sudo ls');
+    st.row = 'Password:';
+    feedTerminalInput(T, 'hunter2\r');
+    expect(lastCommandOf(T)).toBe('sudo ls');
+  });
+
+  it('does not record a line typed on a password prompt even if it looks echoed', () => {
+    const st = screen('[sudo] password for me: ');
+    feedTerminalInput(T, 'me\r');
+    expect(lastCommandOf(T)).toBe('');
+    st.row = '비밀번호 입력: ';
+    feedTerminalInput(T, '입력\r');
+    expect(lastCommandOf(T)).toBe('');
+  });
+
+  it('tolerates the last few keystrokes not being echoed yet, and wrapped rows', () => {
+    const st = screen('~ % npm run d');
+    feedTerminalInput(T, 'npm run dev\r');
+    expect(lastCommandOf(T)).toBe('npm run dev');
+    st.row = '~ % echo   hello';
+    feedTerminalInput(T, 'echo   hello\r');
+    expect(lastCommandOf(T)).toBe('echo   hello');
+  });
+
+  it('echo rule', () => {
+    expect(isEchoedOnRow('ls', '~ % ls')).toBe(true);
+    expect(isEchoedOnRow('ls', '~ % ')).toBe(false);
+    expect(isEchoedOnRow('git status', '~ % git sta')).toBe(true);
+    expect(isEchoedOnRow('git status', '~ % git s')).toBe(false);
+    expect(isEchoedOnRow('hunter2', 'Password:')).toBe(false);
+  });
+
+  it('ignores keystrokes while a full-screen program owns the alternate buffer', () => {
+    const st = screen('~ % vim x');
+    feedTerminalInput(T, 'vim x\r');
+    st.alt = true;
+    feedTerminalInput(T, 'iHello\x1b:wq\r');
+    expect(lastCommandOf(T)).toBe('vim x');
+    st.alt = false;
+    st.row = '~ % ls';
+    feedTerminalInput(T, 'ls\r');
+    expect(lastCommandOf(T)).toBe('ls');
+  });
+
+  it('keeps tracking agent tabs in the alternate buffer', () => {
+    screen('', true);
+    setLastCommandMode(T, 'agent');
+    noteAgentStatus(T, 'idle');
+    feedTerminalInput(T, 'hello');
+    noteAgentStatus(T, 'working');
+    expect(lastCommandOf(T)).toBe('hello');
   });
 });
 
@@ -133,7 +216,7 @@ describe('last command: agent tabs', () => {
     expect(lastCommandOf(T)).toBe('!ls -la');
   });
 
-  it('drops uncommitted text on Ctrl+C, Ctrl+U, Esc and when the turn ends', () => {
+  it('drops uncommitted text on Ctrl+C, Ctrl+U and Esc', () => {
     agent();
     for (const clear of ['\x03', '\x15', '\x1b']) {
       feedTerminalInput(T, 'draft');
@@ -143,12 +226,37 @@ describe('last command: agent tabs', () => {
       expect(lastCommandOf(T)).toBe('real');
       noteAgentStatus(T, 'idle');
     }
+  });
+
+  it('keeps text typed ahead while the agent works and commits it on the next turn', () => {
+    agent();
+    feedTerminalInput(T, 'first');
     noteAgentStatus(T, 'working');
-    feedTerminalInput(T, 'typed while working'); // turn ends without a new working transition
-    noteAgentStatus(T, 'done');
-    feedTerminalInput(T, 'second');
+    feedTerminalInput(T, 'typed ahead');
+    noteAgentStatus(T, 'idle'); // the draft is still in the agent's input box
+    expect(lastCommandOf(T)).toBe('first');
+    feedTerminalInput(T, '\r');
     noteAgentStatus(T, 'working');
-    expect(lastCommandOf(T)).toBe('second');
+    expect(lastCommandOf(T)).toBe('typed ahead');
+  });
+
+  it('commits on Enter only for real slash/bang commands, not for a leading path', () => {
+    agent();
+    feedTerminalInput(T, '/model opus\r');
+    expect(lastCommandOf(T)).toBe('/model opus');
+    feedTerminalInput(T, '/Users/foo bar\r'); // a path: Enter is a line break
+    expect(lastCommandOf(T)).toBe('/model opus');
+    feedTerminalInput(T, 'please');
+    noteAgentStatus(T, 'working');
+    expect(lastCommandOf(T)).toBe('/Users/foo bar please');
+  });
+
+  it('treats Option+Enter (ESC CR) as a line break', () => {
+    agent();
+    feedTerminalInput(T, 'foo\x1b\rbar');
+    expect(lastCommandOf(T)).toBe('');
+    noteAgentStatus(T, 'working');
+    expect(lastCommandOf(T)).toBe('foo bar');
   });
 
   it('never records answers to a permission prompt', () => {
@@ -214,6 +322,15 @@ describe('last command: which writes count', () => {
     await vi.runAllTimersAsync();
     await auto;
     expect(lastCommandOf(T)).toBe('pwd');
+  });
+
+  it('does not feed terminal query replies (DECRQSS) into the tracker', () => {
+    const writes = host();
+    writeHumanInput(T, 'ls', (d) => writes.push(d));
+    writeHumanInput(T, '\x1bP1$r0 q\x1b\\', (d) => writes.push(d));
+    writeHumanInput(T, '\r', (d) => writes.push(d));
+    expect(lastCommandOf(T)).toBe('ls');
+    expect(writes.join('')).toBe('ls\x1bP1$r0 q\x1b\\\r');
   });
 
   it('returns to shell tracking when the agent clears its status (exited to the shell)', () => {

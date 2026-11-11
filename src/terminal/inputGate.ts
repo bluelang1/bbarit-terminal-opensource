@@ -203,6 +203,8 @@ export function writeHumanInput(terminalId: string, data: string, writeRaw: PtyW
 
 function trackedWriter(terminalId: string, write: PtyWriter): PtyWriter {
   return (data) => {
+    // 질의 응답·마우스·포커스 보고는 사람이 친 글이 아니다(마지막 명령에 섞이지 않게).
+    if (isNonTypingInput(data)) { write(data); return; }
     feedTerminalInput(terminalId, data);
     write(data);
   };

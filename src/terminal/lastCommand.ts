@@ -7,13 +7,20 @@
 // (Shift/Cmd+Enter, `ESC[13;<mod>u`)는 셸이 실행하지 않으므로 커밋하지 않는다. 히스토리 호출
 // (↑/↓)과 Tab 완성은 줄 내용을 알 수 없게 만들어, 그 줄은 아무것도 기록하지 않는다(틀린 명령보다
 // 빈 표시가 낫다). bracketed paste 안의 줄바꿈은 줄 안에 남아 "첫 줄 …"로 보인다.
+// 에코 확인(호스트가 커서 줄을 줄 때): Enter 를 PTY 에 쓰기 직전에 커서가 있는 논리 줄(줄바꿈으로
+// 접힌 행 포함)을 읽어, 친 글이 화면에 찍히지 않았으면(비밀번호 입력처럼 에코가 꺼진 줄) 버리고
+// 이전 명령을 유지한다 — isEchoedOnRow 규칙. 커서 줄이 password/passphrase/암호/비밀번호 를
+// 담고 있어도 버린다. 대체 버퍼(vim·less·htop 같은 전체 화면 프로그램)가 켜져 있는 동안의
+// 키 입력은 명령이 아니므로 기록하지 않고 대기 글을 버린다.
 //
 // 에이전트 탭(cliType 이 셸이 아니거나 OSC 7501 을 보고한 탭): 어떤 Enter 변형이 제출인지는
 // 사용자 키 설정에 달렸으므로 Enter 는 모두 줄바꿈이고, 7501 상태가 working 으로 바뀌는 순간
 // 대기 중인 글을 한 줄로 접어 커밋한다. `/`·`!` 로 시작하는 글은 working 전환이 없으니 Enter 에서
-// 바로 커밋한다. 커밋되지 않은 글은 Ctrl+C·Ctrl+U·Esc·입력 지우기 버튼, idle/done 전환, 승인
-// 대기(blocked)에서 벗어날 때 버린다 — 다음 프롬프트에 섞이지 않게. 7501 을 아직 보고하지 않은
-// 에이전트 탭은 일반 Enter 에서 커밋한다(7501 없는 CLI 의 기본 제출 키).
+// 바로 커밋한다(첫 토큰에 `/` 가 더 없을 때만 슬래시 명령이다 — `/Users/foo` 는 경로). Option+Enter
+// (ESC CR)도 다른 Enter 변형처럼 줄바꿈이다. 커밋되지 않은 글은 Ctrl+C·Ctrl+U·Esc·입력 지우기
+// 버튼과 승인 대기(blocked)에서 벗어날 때만 버린다. 작업 중에 미리 쳐 둔 글은 입력창에 남아
+// 있으므로 idle/done 전환에서 버리지 않는다. 7501 을 아직 보고하지 않은 에이전트 탭은 일반
+// Enter 에서 커밋한다(7501 없는 CLI 의 기본 제출 키). 대기 글은 MAX_PENDING 글자에서 멈춘다.
 //
 // 한국어 IME: XTerminal 의 IME 브리지는 조합 중에는 아무것도 보내지 않고 compositionend 마다
 // 확정된 글자(NFC)만 한 번 보낸다. 그래서 여기서는 확정 글자만 보이고, Backspace 는 코드포인트
@@ -22,6 +29,52 @@
 import type { AgentTabState } from './programStatus';
 
 export type LastCommandMode = 'shell' | 'agent';
+
+/** XTerminal 이 주는 화면 상태. 없으면 에코 확인·대체 버퍼 무시를 하지 않는다. */
+export interface LastCommandHost {
+  /** 커서가 있는 논리 줄(접힌 행을 이어 붙인 것). 모르면 null. */
+  cursorLineText?: (terminalId: string) => string | null;
+  /** 전체 화면 프로그램이 대체 버퍼를 쓰는 중인지. */
+  isAlternateBuffer?: (terminalId: string) => boolean;
+}
+
+let host: LastCommandHost | null = null;
+
+export function setLastCommandHost(next: LastCommandHost | null) {
+  host = next;
+}
+
+/** 대기 글 상한(코드포인트). 넘으면 앞부분만 남기고 더 붙이지 않는다. */
+const MAX_PENDING = 4000;
+/** 에코가 아직 도착하지 않았을 수 있는 마지막 키 수. */
+const ECHO_LAG = 3;
+const SECRET_PROMPT = /password|passphrase|암호|비밀번호/i;
+
+const squash = (s: string) => s.normalize('NFC').replace(/\s+/g, ' ');
+
+/**
+ * 친 글이 커서 줄에 찍혔는지. Enter 직전에는 마지막 몇 키의 에코가 아직 오지 않았을 수 있어,
+ * 앞쪽 max(3, 길이-3) 글자(3 글자 이하면 전부)가 커서 줄에 그대로 있으면 에코된 것으로 본다.
+ * 공백은 한 칸으로 접어 비교한다.
+ */
+export function isEchoedOnRow(text: string, row: string): boolean {
+  const t = Array.from(squash(text).trim());
+  if (t.length === 0) return true;
+  const need = t.length <= ECHO_LAG ? t.length : Math.max(ECHO_LAG, t.length - ECHO_LAG);
+  return squash(row).includes(t.slice(0, need).join('').trimEnd());
+}
+
+/** 셸 줄이 실제로 화면에 찍힌 명령인지(비밀번호 프롬프트가 아니고 에코됐는지). */
+const shellLineVisible = (id: string, raw: string): boolean => {
+  const row = host?.cursorLineText?.(id);
+  if (row == null) return true;
+  if (SECRET_PROMPT.test(row)) return false;
+  const lines = raw.split('\n').map((l) => l.trim()).filter(Boolean);
+  return isEchoedOnRow(lines[lines.length - 1] || '', row);
+};
+
+/** 셸 탭에서 `/` 뒤 첫 토큰에 `/` 가 더 없으면 슬래시 명령, `!` 로 시작하면 셸 명령. */
+const isInstantCommand = (text: string) => text.startsWith('!') || /^\/[^\s/]*(?:\s|$)/.test(text);
 
 interface Pending {
   chars: string[];
@@ -65,6 +118,7 @@ const commit = (id: string, p: Pending): boolean => {
   const unknown = p.unknown;
   const raw = p.chars.join('').normalize('NFC');
   resetPending(p);
+  if (!unknown && !isAgent(id) && !shellLineVisible(id, raw)) return false;
   let cmd: string;
   if (isAgent(id)) {
     cmd = raw.replace(/\s+/g, ' ').trim();
@@ -83,6 +137,7 @@ const commit = (id: string, p: Pending): boolean => {
 };
 
 const insert = (p: Pending, ch: string) => {
+  if (p.chars.length >= MAX_PENDING) return;
   p.chars.splice(p.cursor, 0, ch);
   p.cursor++;
 };
@@ -111,7 +166,7 @@ const wordEndAfter = (p: Pending): number => {
 const enter = (id: string, p: Pending, csiU: boolean): boolean => {
   if (isAgent(id)) {
     const text = p.chars.join('').trimStart();
-    if (text.startsWith('/') || text.startsWith('!')) return commit(id, p);
+    if (isInstantCommand(text)) return commit(id, p);
     // 7501 을 아직 보고하지 않은 에이전트: 일반 Enter 가 제출.
     if (!csiU && !p.inPaste && !agentStates.has(id)) return commit(id, p);
     insert(p, '\n');
@@ -126,6 +181,12 @@ const enter = (id: string, p: Pending, csiU: boolean): boolean => {
 export function feedTerminalInput(terminalId: string, data: string) {
   const p = pendingOf(terminalId);
   const agent = isAgent(terminalId);
+  if (!agent && host?.isAlternateBuffer?.(terminalId)) {
+    // vim·less·htop 같은 전체 화면 프로그램의 키는 셸 명령이 아니다.
+    resetPending(p);
+    p.inPaste = false;
+    return;
+  }
   let changed = false;
   const chars = Array.from(data);
   for (let i = 0; i < chars.length; i++) {
@@ -162,8 +223,8 @@ export function feedTerminalInput(terminalId: string, data: string) {
         }
         continue;
       }
-      if (next === ']') {
-        // OSC(예: 7501 질의 응답)는 BEL 또는 ST(ESC \) 까지 건너뛴다.
+      if (next === ']' || next === 'P') {
+        // OSC(예: 7501 질의 응답)·DCS(예: DECRQSS 응답)는 BEL 또는 ST(ESC \) 까지 건너뛴다.
         let j = i + 2;
         while (j < chars.length && chars[j] !== '\x07' && !(chars[j] === '\x1b' && chars[j + 1] === '\\')) j++;
         i = chars[j] === '\x1b' ? j + 1 : j;
@@ -179,6 +240,8 @@ export function feedTerminalInput(terminalId: string, data: string) {
         i += 2;
         continue;
       }
+      // Option+Enter(ESC CR): 다른 Enter 변형과 같다(에이전트는 줄바꿈, 셸은 실행 안 함).
+      if (next === '\r') { changed = enter(terminalId, p, true) || changed; i += 1; continue; }
       // Alt+키: ESC + 글자.
       if (next === '\x7f' || next === '\b') deleteBefore(p, p.cursor - wordStartBefore(p));
       else if (next === 'b') p.cursor = wordStartBefore(p);
@@ -222,8 +285,9 @@ export function setLastCommandMode(terminalId: string, mode: LastCommandMode) {
 }
 
 /**
- * OSC 7501 상태 전환. working 으로 바뀌면 대기 글을 커밋하고, idle/done 으로 바뀌거나 승인 대기
- * (blocked)에서 벗어나면 커밋되지 않은 글을 버린다. 재생(replay) 중인 보고는 넘기지 않는다.
+ * OSC 7501 상태 전환. working 으로 바뀌면 대기 글을 커밋하고, 승인 대기(blocked)에서 벗어나면
+ * 커밋되지 않은 글(승인 답)을 버린다. idle/done 에서는 버리지 않는다 — 작업 중에 미리 친 글은
+ * 입력창에 남아 다음 제출에 쓰인다. 재생(replay) 중인 보고는 넘기지 않는다.
  */
 export function noteAgentStatus(terminalId: string, state: AgentTabState, opts?: { cleared?: boolean }) {
   if (opts?.cleared) {
@@ -237,11 +301,7 @@ export function noteAgentStatus(terminalId: string, state: AgentTabState, opts?:
   if (prev === state) return;
   const p = pendingOf(terminalId);
   if (prev === 'blocked') { resetPending(p); return; }
-  if (state === 'working') {
-    if (commit(terminalId, p)) notify();
-    return;
-  }
-  if (state === 'idle' || state === 'done') resetPending(p);
+  if (state === 'working' && commit(terminalId, p)) notify();
 }
 
 /** 입력 지우기 버튼 등 — 대기 중인 글을 버린다. */
