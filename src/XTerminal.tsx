@@ -59,6 +59,7 @@ import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll'
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
+import { ptySizeChanged } from './terminal/ptySize';
 import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
@@ -5526,10 +5527,18 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
       if (fitRef.current) {
         const state = terminalStates.get(terminalId);
+        const term = termRef.current;
+        const { cols, rows: rowCount } = term;
         preserveTerminalViewport(termRef.current, state, () => {
           fitTerminalArea(fitRef.current, termRef.current, wrap);
           termRef.current?.refresh(0, termRef.current.rows - 1);
         }, true, true);
+        // A new font size changes how many cells fit: tell the PTY, or the program keeps
+        // drawing for the old size until some other resize happens. Hidden tabs (no size
+        // yet) are resized when they become active.
+        if (ptySizeChanged({ cols, rows: rowCount }, term)) {
+          invoke('resize_pty', { terminalId, rows: term.rows, cols: term.cols }).catch(() => {});
+        }
       }
     };
 

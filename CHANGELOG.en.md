@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- Programs running in a terminal no longer keep drawing for the old column count right after the terminal font size changes; the new size is sent to the terminal immediately.
+
 ## [1.1.68] - 2026-11-11
 
 ### Added
