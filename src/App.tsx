@@ -193,6 +193,7 @@ import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
 import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
+import { useDialogFocus } from './a11y/dialogFocus';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
 
 
@@ -2445,23 +2446,16 @@ function App() {
   const isHarnessWindowRef = useRef(false);
   const confirmModalOpenRef = useRef(false);
   confirmModalOpenRef.current = !!confirmModal;
-  useEffect(() => {
-    if (!confirmModal) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.repeat) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        confirmAndClose();
-      }
-      if (e.key === 'Escape' && !e.repeat) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        closeConfirm();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [confirmAndClose, closeConfirm, confirmModal]);
+  // Focus moves into the dialog on open (Cancel for destructive confirms, else the
+  // confirm button), Enter/Space act on the focused button, Tab stays inside, Esc
+  // cancels, and focus goes back (usually to the terminal) on close.
+  const confirmModalRef = useRef<HTMLDivElement | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmOkRef = useRef<HTMLButtonElement | null>(null);
+  useDialogFocus(confirmModalRef, !!confirmModal, {
+    initialFocus: () => (confirmModal?.danger ? confirmCancelRef.current : confirmOkRef.current),
+    onEscape: closeConfirm,
+  });
   const renderConfirmModal = useCallback(() => {
     if (!confirmModal) return null;
     return (
@@ -2473,7 +2467,11 @@ function App() {
         }}
       >
         <div
+          ref={confirmModalRef}
           className="confirm-modal"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label={confirmModal.title}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
         >
@@ -2483,6 +2481,7 @@ function App() {
           )}
           <div className="confirm-actions">
             <button
+              ref={confirmCancelRef}
               type="button"
               className="confirm-cancel"
               title={`${t('common.cancel')} (Esc)`}
@@ -2501,10 +2500,11 @@ function App() {
               {confirmModal.cancelLabel || t('common.cancel')}
             </button>
             <button
+              ref={confirmOkRef}
               type="button"
               className={`confirm-ok ${confirmModal.danger ? 'danger' : ''}`}
               onClick={confirmAndClose}
-              title={`${t('common.confirm')} (Enter)`}
+              title={confirmModal.danger ? t('common.confirm') : `${t('common.confirm')} (Enter)`}
             >
               {confirmModal.confirmLabel || t('common.confirm')}
             </button>

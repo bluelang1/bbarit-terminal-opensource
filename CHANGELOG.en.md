@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- In confirmation dialogs, Enter no longer confirms while the Cancel button has focus. When a dialog opens, focus now moves to one of its buttons (Cancel for actions that cannot be undone, such as deleting; otherwise the confirm button); Enter and Space press the focused button, Tab stays inside the dialog, and Esc cancels. When the dialog closes, focus goes back to where it was (usually the terminal).
+
 ## [1.1.69] - 2026-11-12
 
 ### Added
