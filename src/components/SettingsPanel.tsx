@@ -1785,6 +1785,8 @@ export function SettingsPanel({
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
         hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
+        nextRegion: 'F6',
+        prevRegion: 'Shift+F6',
         toggleTerminalMode: `${mod}+\``,
         openSettings: `${mod}+,`,
         newProject: `${mod}+N`,
@@ -1806,6 +1808,8 @@ export function SettingsPanel({
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
         hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
+        nextRegion: 'F6',
+        prevRegion: 'Shift+F6',
         toggleTerminalMode: `${alt}+F12`,
         openSettings: isMacPlatform ? `${mod}+,` : `Ctrl+Alt+S`,
         newProject: `${mod}+N`,
@@ -1827,6 +1831,8 @@ export function SettingsPanel({
       prevTerminal: `${mod}+[`,
       lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
       hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
+      nextRegion: 'F6',
+      prevRegion: 'Shift+F6',
       toggleTerminalMode: `${mod}+${shift}+F`,
       openSettings: `${mod}+,`,
       newProject: `${mod}+N`,
@@ -3726,6 +3732,8 @@ export function SettingsPanel({
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.prevTerminal')}</span><span className="shortcut-key">{shortcutLabel.prevTerminal}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.lastCompletedTask')}</span><span className="shortcut-key">{shortcutLabel.lastCompletedTask}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.hintMode')}</span><span className="shortcut-key">{shortcutLabel.hintMode}</span></div>
+                  <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.nextRegion')}</span><span className="shortcut-key">{shortcutLabel.nextRegion}</span></div>
+                  <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.prevRegion')}</span><span className="shortcut-key">{shortcutLabel.prevRegion}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.terminalOnlyMode')}</span><span className="shortcut-key">{shortcutLabel.toggleTerminalMode}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.copy')}</span><span className="shortcut-key">⌘/Ctrl+C</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.paste')}</span><span className="shortcut-key">⌘/Ctrl+V</span></div>
@@ -3769,6 +3777,19 @@ export function SettingsPanel({
                       <option key={size} value={size}>{t(`settings.hints.size.${size}` as any)}</option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              <div className="settings-group">
+                <h3>{t('settings.regionKeys.title')}</h3>
+                <div className="setting-item toggle">
+                  <label>{t('settings.regionKeys.label')}</label>
+                  <input
+                    type="checkbox"
+                    checked={config.regionKeys !== false}
+                    onChange={(e) => updateConfig((prev) => ({ ...prev, regionKeys: e.target.checked }))}
+                  />
+                  <span className="setting-description">{t('settings.regionKeys.desc')}</span>
                 </div>
               </div>
 

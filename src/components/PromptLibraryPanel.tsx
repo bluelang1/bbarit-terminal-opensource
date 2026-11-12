@@ -121,7 +121,7 @@ export function PromptLibraryPanel({ isOpen, onClose, onSend, projectPath }: Pro
   if (!isOpen) return null;
 
   return (
-    <div style={{
+    <div data-kbd-region="prompts" style={{
       width: 300, minWidth: 300, height: '100%',
       background: '#000', color: '#fff',
       borderLeft: `1px solid ${border}`,

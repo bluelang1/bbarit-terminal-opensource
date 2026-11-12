@@ -68,6 +68,7 @@ import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
 import { isHintModeActive } from './hints/hintModeFlag';
+import { registerActiveTerminal, shouldTerminalTakeFocus } from './a11y/regions';
 
 // Enter variants a terminal must keep apart: Shift+Enter and Cmd+Enter go out as kitty CSI-u
 // (Cmd = super bit, 1 + 8) so TUIs such as Claude Code can bind them; plain Enter is CR.
@@ -2337,6 +2338,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     });
   }, [focusActiveInput]);
 
+  // F6 into the terminal region focuses the active terminal the way a click does (src/a11y/regions.ts).
+  useEffect(() => {
+    if (!isActive) return;
+    const scope = terminalWrapRef.current?.closest<HTMLElement>('[data-terminal-scope]');
+    if (!scope) return;
+    return registerActiveTerminal(scope, focusActiveInput);
+  }, [isActive, focusActiveInput]);
+
   const updateScrollButtonVisibility = useCallback(() => {
     const term = terminalStates.get(terminalId)?.term || termRef.current;
     if (!term) {
@@ -2480,8 +2489,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     // On pointer interaction, keep focus on the bridge.
     wrap.addEventListener('pointerdown', refocusBridge, true);
 
-    // Initial focus.
-    refocusBridge();
+    // Initial focus, unless the keyboard user moved to another region (F6/Tab, src/a11y/regions.ts).
+    if (shouldTerminalTakeFocus()) refocusBridge();
 
     return () => {
       if (refocusTimer != null) window.clearTimeout(refocusTimer);
@@ -2795,6 +2804,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       // Don't steal focus if terminal is not visible
       if (wrap.offsetParent === null) return;
       const activeEl = document.activeElement as HTMLElement | null;
@@ -3154,6 +3165,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const searchAddon = new SearchAddon();
 
       term.open(terminalElement);
+      // Out of the Tab order: Tab walking the chrome must not enter a terminal (click, F6,
+      // hint mode and the switch shortcuts still focus it).
+      term.textarea?.setAttribute('tabindex', '-1');
       
       // Position helper textarea at cursor for natural OS IME composition
       if (cursorOverlay) {
@@ -5690,7 +5704,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       doFitAndRefresh();
       timers.push(window.setTimeout(doFitAndRefresh, 150));
       // 에디터에서 돌아올 때 포커스 + 커서 위치 복원 (#39)
-      timers.push(window.setTimeout(() => { if (!isDisposedRef.current) focusActiveInput(); }, 200));
+      // Not while the keyboard user is in another region (F6/Tab, src/a11y/regions.ts).
+      timers.push(window.setTimeout(() => { if (!isDisposedRef.current && shouldTerminalTakeFocus()) focusActiveInput(); }, 200));
 
       const state = terminalStates.get(terminalId);
       const term = state?.term || termRef.current;
@@ -6074,6 +6089,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       const wrap = terminalWrapRef.current;
       // Don't steal focus if terminal is not visible
       if (wrap && wrap.offsetParent === null) return;
@@ -6590,6 +6607,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   return (
     <div
       data-terminal-scope
+      data-kbd-region="terminal"
       style={{
         width: '100%',
         height: '100%',
@@ -7117,6 +7135,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             first button's auto margin, which still lets an overflowing strip scroll to its top. */}
         <div
           data-terminal-gutter
+          data-kbd-region="terminal-strip"
           onMouseDown={keepTerminalFocus}
           style={{
             position: 'absolute',
@@ -7292,6 +7311,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         <input
           ref={inputRef}
           type="text"
+          tabIndex={-1}
           value={inputValue}
           onChange={(e) => {
             if (suppressNextOnChangeRef.current) {

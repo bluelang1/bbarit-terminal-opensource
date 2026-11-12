@@ -388,6 +388,8 @@ export interface OctoConfig {
   easterEggMedia: EasterEggMedia;
   pet: PetConfig;
   hints: HintsConfig;
+  /** F6 / Shift+F6 move between screen regions (src/a11y/regions.ts); off = F6 goes to the terminal. */
+  regionKeys: boolean;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -535,6 +537,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   easterEggMedia: { type: 'default', path: '' },
   pet: { ...DEFAULT_PET_CONFIG },
   hints: { ...DEFAULT_HINTS_CONFIG },
+  regionKeys: true,
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -623,6 +626,7 @@ export function validateConfig(raw: unknown): OctoConfig {
       : { type: 'default', path: '' },
     pet: normalizePetConfig(input.pet),
     hints: normalizeHintsConfig(input.hints),
+    regionKeys: input.regionKeys !== false,
   };
 }
 

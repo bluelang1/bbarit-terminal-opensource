@@ -19,6 +19,9 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 - In confirmation dialogs, Enter no longer confirms while the Cancel button has focus. When a dialog opens, focus now moves to one of its buttons (Cancel for actions that cannot be undone, such as deleting; otherwise the confirm button); Enter and Space press the focused button, Tab stays inside the dialog, and Esc cancels. When the dialog closes, focus goes back to where it was (usually the terminal).
 - In the tabs view, the Tab key no longer moves into the input and buttons of terminal tabs that are not on screen. Tab now only visits the terminal you can see.
 - The Tab key now moves through the top toolbar in the order the buttons appear on screen, left to right. Before, it jumped around, starting at the hide-toolbar button on the far right. The button layout is unchanged.
+### Added
+
+- Move between screen regions by keyboard: F6 moves focus through the top bar, toolbar, project list, sidebar, editor, terminal header and tabs, terminal, right quick-command buttons, open panel, prompt library and bottom status bar, and Shift+F6 goes the other way. It works inside a terminal, so you can leave a terminal without the mouse, and each region puts focus back where you last were (or on the selected project or tab). Once you leave, the terminal no longer pulls focus back; clicking it, F6 back into it, a hint pick, a project/tab switch shortcut, or Enter/Space on a project or terminal tab returns to it. Tab walking the screen skips terminal inputs (Tab inside a terminal still completes in the shell). On Mac laptop keyboards you may need Fn+F6. The keys are listed in Settings > Shortcuts; while the feature is on F6 is not passed to terminal programs, and switching it off there sends F6 / Shift+F6 to the terminal as before (mc, htop, nano).
 
 ## [1.1.69] - 2026-11-12
 
