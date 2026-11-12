@@ -45,6 +45,7 @@ import { shouldNotifyReady } from './terminal/readyNotify';
 import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
+import { wrapPosixCliCheck } from './terminal/cliLaunchCommand';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
@@ -3685,13 +3686,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const hasFlag = (flag: string) => normalizedFlags.includes(flag);
       const flagsToString = (flags: string[]) => (flags.length > 0 ? ' ' + flags.join(' ') : '');
       const wrapCliCheck = (cmd: string, binName: string, installHint?: string): string => {
-        const hint = installHint ? ` Install: ${installHint}` : '';
         if (isWindows) {
           // PowerShell: avoid ScriptBlock { } which can misparse CLI flags.
           // Use simple cmd.exe-style: check then run with semicolon.
           return `${cmd}`;
         }
-        return `command -v ${binName} >/dev/null 2>&1 && ${cmd} || echo "${binName} CLI not found.${hint}"`;
+        return wrapPosixCliCheck(cmd, binName, installHint);
       };
 
       // Resolve the bundled internal bbarit agent binary (vendored + shipped inside
@@ -3861,7 +3861,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           let cmd = 'reasonix code';
           cmd += flagsToString(normalizedFlags);
           if (isWindows) return cmd;
-          return `command -v reasonix >/dev/null 2>&1 && ${cmd} || command -v npx >/dev/null 2>&1 && npx -y reasonix@latest code${flagsToString(normalizedFlags)} || echo "reasonix CLI not found. Install: npm i -g reasonix"`;
+          return wrapPosixCliCheck(cmd, 'reasonix', 'npm i -g reasonix', {
+            binName: 'npx',
+            cmd: `npx -y reasonix@latest code${flagsToString(normalizedFlags)}`,
+          });
         })(),
         bbarit: (() => {
           // Internalized agent: launch THIS app's own executable with

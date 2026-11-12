@@ -2,12 +2,14 @@
 // boxes appear on navigation targets, typing a label clicks that thing.
 //   labels  → hintLabels.ts      typed keys → hintMatch.ts
 //   targets → hintTargets.ts     badges     → HintOverlay.tsx
+//   a pick that opens a menu → menuKeyboard.ts
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { HintSize, HintStyle } from '../config/schema';
 import { HintOverlay, type HintBadge } from './HintOverlay';
 import { assignHintLabels } from './hintLabels';
 import { hintKeyStep } from './hintMatch';
 import { HINT_MODE_ATTR } from './hintModeFlag';
+import { focusMenu, openedMenuOf } from './menuKeyboard';
 import {
   activateHintTarget,
   collectHintTargets,
@@ -167,11 +169,16 @@ export function useHintMode(appearance: { style?: HintStyle; size?: HintSize } =
       if (!entry) return;
       const { element, kind } = entry.target;
       activateHintTarget(element, kind);
-      // A panel/view toggle does not take focus: hand it back to the terminal on the
-      // next frame unless the click moved focus somewhere itself. Project, tab and
-      // pane picks leave focus to the terminal they activate.
-      if ((kind === 'nav' || kind === 'tool') && previous) {
+      // A pick that opened a menu (menuKeyboard.ts) moves focus into it, so arrows
+      // and Enter work; closing the menu gives focus back to `previous`. A panel/view
+      // toggle does not take focus: hand it back to the terminal on the next frame
+      // unless the click moved focus somewhere itself. Project, tab and pane picks
+      // leave focus to the terminal they activate.
+      if (kind === 'nav' || kind === 'tool') {
         window.requestAnimationFrame(() => {
+          const menu = openedMenuOf(element);
+          if (menu && focusMenu(menu, previous)) return;
+          if (!previous) return;
           const now = document.activeElement;
           if ((!now || now === document.body) && previous.isConnected) {
             try { previous.focus({ preventScroll: true }); } catch { /* ignore */ }

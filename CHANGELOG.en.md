@@ -13,6 +13,9 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 - After changing the terminal font size or the window size, Claude Code's status line and bottom lines could stay blank until Ctrl+L. They now redraw.
 - Starting with this version, folder access permissions (Documents, Desktop, Downloads) survive app updates. Until now macOS forgot them on every update, so terminals in `~/Documents` failed with `Operation not permitted`. The first update onto this version asks for the permission once more.
+- Hint mode: on small icon buttons (the toolbar and the terminal pane buttons) the label box now sits centred just below the button (above it when there is no room) instead of covering the icon, so you can tell which button each label belongs to.
+- AI tool tabs no longer print a false "CLI not found" message when the tool is installed but exits with an error (for example when it cannot read the current folder). The message now appears only when the tool is really not installed, and the tool's own error stays visible.
+- Hint mode: picking the terminal layout, Office or tool (☰) menu now puts keyboard focus inside it. Arrow Up/Down and Home/End move between items, Enter/Space choose, and Esc closes the menu and returns focus to the terminal you were using. Keys pressed while the menu is open no longer reach the terminal.
 
 ## [1.1.69] - 2026-11-12
 

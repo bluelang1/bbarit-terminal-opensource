@@ -17690,11 +17690,15 @@ Office project scaffold created by BBARIT Terminal.
                     setShowEditorsMenu((v) => !v);
                   }}
                   title="Office"
+                  aria-haspopup="menu"
+                  aria-expanded={showEditorsMenu}
+                  aria-controls="editors-launcher-menu"
                 >
                   <LucideIcons.FilePenLine size={14} />
                 </button>
                 {showEditorsMenu && (
                   <div
+                    id="editors-launcher-menu" role="menu" data-menu-nav
                     style={{
                       position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 13000,
                       minWidth: 200, padding: 4, display: 'flex', flexDirection: 'column',
@@ -17715,6 +17719,7 @@ Office project scaffold created by BBARIT Terminal.
                       <button
                         key={item.blank}
                         type="button"
+                        role="menuitem"
                         onClick={() => { void createBlankEditorFile(item.blank); }}
                         title={locale === 'ko' ? `새 ${item.label} 문서 (Untitled.${item.blank})` : `New blank ${item.label} (Untitled.${item.blank})`}
                         style={{
@@ -17740,6 +17745,7 @@ Office project scaffold created by BBARIT Terminal.
                       <button
                         key={item.label}
                         type="button"
+                        role="menuitem"
                         onClick={() => { void openEditorFileOfKind(item.name, item.ext); }}
                         style={{
                           display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
@@ -17874,6 +17880,9 @@ Office project scaffold created by BBARIT Terminal.
                   setShowToolDropdown(v => !v);
                 }}
                 title={t('app.menu')}
+                aria-haspopup="menu"
+                aria-expanded={showToolDropdown}
+                aria-controls="tool-dropdown-menu"
                 style={{ position: 'relative' }}
               >
                 <Menu size={14} />
@@ -17882,9 +17891,10 @@ Office project scaffold created by BBARIT Terminal.
                 )}
               </button>
               {showToolDropdown && (
-                <div className="tool-dropdown-menu">
+                <div id="tool-dropdown-menu" role="menu" data-menu-nav className="tool-dropdown-menu">
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => {
                       setRoundtableOpen(true);
@@ -17922,6 +17932,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={id}
                       className="tool-dropdown-item"
+                      role="menuitem" tabIndex={-1}
                       data-toolbar-visible={isToolbarVisible(id) ? 'true' : 'false'}
                       style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
                       onClick={() => { action(); setShowToolDropdown(false); }}
@@ -17941,6 +17952,7 @@ Office project scaffold created by BBARIT Terminal.
                   <div className="tool-dropdown-divider" />
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => { void guide.open({ mode: 'start' }); setShowToolDropdown(false); }}
                   >
@@ -17949,6 +17961,7 @@ Office project scaffold created by BBARIT Terminal.
                   </div>
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => { void guide.open({ mode: 'whatsnew' }); setShowToolDropdown(false); }}
                   >
@@ -21061,13 +21074,15 @@ Office project scaffold created by BBARIT Terminal.
                           setShowTerminalLayoutMenu((value) => !value);
                         }}
                         title={t('app.layout.pick' as any, 'Terminal layout')}
+                        aria-haspopup="menu"
                         aria-expanded={showTerminalLayoutMenu}
+                        aria-controls="terminal-layout-menu"
                       >
                         <TerminalLayoutIcon mode={terminalSplitMode} size={14} />
                         <LucideIcons.ChevronDown size={11} />
                       </button>
                       {showTerminalLayoutMenu && (
-                        <div className="terminal-compact-menu terminal-layout-menu">
+                        <div id="terminal-layout-menu" role="menu" data-menu-nav className="terminal-compact-menu terminal-layout-menu">
                           <div className="terminal-compact-menu-title">{t('app.layout.pick' as any, 'Terminal layout')}</div>
                           {([
                             ['tabs', t('app.layout.tabs' as any), () => setTerminalSplitMode('tabs')],
@@ -21082,6 +21097,7 @@ Office project scaffold created by BBARIT Terminal.
                             <button
                               key={mode}
                               type="button"
+                              role="menuitem"
                               data-hint="nav" className={`terminal-compact-menu-item${terminalSplitMode === mode ? ' active' : ''}`}
                               onClick={() => {
                                 action();
