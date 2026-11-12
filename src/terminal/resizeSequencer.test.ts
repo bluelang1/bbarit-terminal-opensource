@@ -372,6 +372,22 @@ describe('redraw nudge', () => {
     expect(h.pty).toEqual([]);
   });
 
+  it('a nudge asked for while hidden runs with the next job once the tab is shown', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
+    h.state.visible = false;
+    h.seq.request({ nudge: true });
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.pty).toEqual([]);
+    h.state.visible = true;
+    h.seq.request({});
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.pty).toEqual([{ cols: 167, rows: 51 }, { cols: 168, rows: 51 }]);
+    // Only once.
+    h.seq.request({});
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.pty).toHaveLength(2);
+  });
+
   it('puts the PTY back to xterm size when disposed during the nudge', async () => {
     const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
     h.seq.request({ nudge: true });

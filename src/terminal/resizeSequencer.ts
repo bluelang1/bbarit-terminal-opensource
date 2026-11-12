@@ -167,9 +167,21 @@ export function createResizeSequencer(deps: ResizeSequencerDeps): ResizeSequence
     }
   };
 
+  // A nudge asked for while the tab was hidden (output replayed into a background tab) is kept
+  // and runs with the next job after the tab is shown: showing a tab is a same-size refit,
+  // which sends the program no SIGWINCH by itself.
+  let pendingNudge = false;
+
   const runOne = async (job: ResizeJob) => {
-    if (!deps.visible()) return;
-    if (await resizeOnce(job) && job.nudge) await nudge();
+    if (!deps.visible()) {
+      if (job.nudge) pendingNudge = true;
+      return;
+    }
+    const wantNudge = !!job.nudge || pendingNudge;
+    if (await resizeOnce(job) && wantNudge) {
+      pendingNudge = false;
+      await nudge();
+    }
   };
 
   // Returns false when the run stopped early (hidden or disposed during the wait).
