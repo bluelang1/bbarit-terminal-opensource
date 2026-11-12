@@ -9,6 +9,8 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+## [1.1.70] - 2026-11-12
+
 ### Added
 
 - Move between screen regions by keyboard: F6 moves focus through the top bar, toolbar, project list, sidebar, editor, terminal header and tabs, terminal, right quick-command buttons, open panel, prompt library and bottom status bar, and Shift+F6 goes the other way. It works inside a terminal, so you can leave a terminal without the mouse, and each region puts focus back where you last were (or on the selected project or tab). Once you leave, the terminal no longer pulls focus back; clicking it, F6 back into it, a hint pick, a project/tab switch shortcut, or Enter/Space on a project or terminal tab returns to it. Tab walking the screen skips terminal inputs (Tab inside a terminal still completes in the shell). On Mac laptop keyboards you may need Fn+F6. The keys are listed in Settings > Shortcuts; while the feature is on F6 is not passed to terminal programs, and switching it off there sends F6 / Shift+F6 to the terminal as before (mc, htop, nano).
@@ -265,7 +267,8 @@ The first release of this fork, based on the original author's `v1.1.50`.
 - The built-in agent reads `.mcp.json` and `.bbarit/models.json` only in trusted projects, and `/trust no` takes precedence over the app's auto-approve run option.
 - Updated or replaced dependencies with known vulnerabilities and removed unused ones.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...HEAD
+[1.1.70]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...v1.1.70
 [1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67

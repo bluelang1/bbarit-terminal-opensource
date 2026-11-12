@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.70] - 2026-11-12
+
 ### 추가
 
 - 키보드로 화면 영역 이동: F6을 누르면 위쪽 막대, 도구 막대, 프로젝트 목록, 사이드바, 편집기, 터미널 머리말·탭, 터미널, 오른쪽 빠른 명령 버튼, 열린 패널, 프롬프트 라이브러리, 아래 상태 막대 순으로 포커스가 옮겨 가고 Shift+F6은 반대로 갑니다. 터미널 안에서도 동작하므로 마우스 없이 터미널을 빠져나올 수 있고, 각 영역에서는 마지막으로 있던 곳(없으면 지금 선택된 프로젝트·탭)에 포커스가 놓입니다. 한 번 빠져나오면 터미널이 포커스를 도로 가져가지 않으며, 터미널을 누르거나 F6으로 돌아가거나 힌트·프로젝트/탭 전환 단축키를 쓰거나 키보드로 프로젝트·터미널 탭을 골라 Enter/Space를 누르면 다시 터미널로 갑니다. Tab으로 화면을 돌 때는 터미널 입력을 건너뜁니다(터미널 안의 Tab은 그대로 셸 자동 완성). Mac 노트북 키보드에서는 Fn+F6을 눌러야 할 수 있습니다. 설정 > 단축키에서 키를 볼 수 있고, 이 기능을 켜 두면 F6은 터미널 프로그램에 전달되지 않으며 끄면 F6·Shift+F6이 예전처럼 터미널로 갑니다(mc, htop, nano 등).
@@ -264,7 +266,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...HEAD
+[1.1.70]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...v1.1.70
 [1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
