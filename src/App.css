@@ -432,7 +432,9 @@ body {
 .tool-dropdown-item[data-toolbar-visible="false"] {
   color: color-mix(in srgb, var(--text-color) 68%, transparent);
 }
-.tool-dropdown-item:hover {
+.tool-dropdown-item:hover,
+.tool-dropdown-item:focus-visible,
+[data-menu-nav] .tool-dropdown-item:focus {
   opacity: 1;
   background: color-mix(in srgb, var(--accent-color) 14%, transparent);
 }
@@ -10306,9 +10308,21 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .terminal-compact-menu-item:hover,
-.terminal-compact-menu-item.active {
+.terminal-compact-menu-item.active,
+.terminal-compact-menu-item:focus-visible,
+[data-menu-nav] .terminal-compact-menu-item:focus {
   border-color: color-mix(in srgb, var(--accent-color) 34%, transparent);
   background: color-mix(in srgb, var(--accent-color) 11%, transparent);
+}
+
+/* Keyboard focus in a menu (src/hints/menuKeyboard.ts): hover look plus an inset ring.
+   Items of a [data-menu-nav] menu only take focus from the keyboard (hint pick, arrows),
+   and WebKit does not always count script focus as :focus-visible, so :focus is styled too. */
+.terminal-compact-menu-item:focus-visible,
+.tool-dropdown-item:focus-visible,
+[data-menu-nav] [role="menuitem"]:focus {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
 }
 
 .terminal-create-menu {

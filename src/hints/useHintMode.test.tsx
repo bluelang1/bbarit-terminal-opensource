@@ -3,6 +3,7 @@ import { act, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useHintMode, type HintModeApi } from './useHintMode';
 import { isHintModeActive } from './hintModeFlag';
+import { installMenuKeyboard } from './menuKeyboard';
 
 const api: { current: HintModeApi | null } = { current: null };
 function Harness({ style, size }: { style?: 'raised' | 'flat' | 'dark' | 'byKind'; size?: 'small' | 'normal' }) {
@@ -172,6 +173,45 @@ describe('useHintMode', () => {
     expect(document.activeElement).not.toBe(input);
     frames.forEach((cb) => cb(0));
     expect(document.activeElement).toBe(input);
+    vi.restoreAllMocks();
+  });
+
+  it('a nav pick that opens a menu moves focus into it; Escape closes it and focus returns to the terminal', async () => {
+    const uninstall = installMenuKeyboard(window);
+    const frames: FrameRequestCallback[] = [];
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => { frames.push(cb); return frames.length; });
+    const trigger = fixture.querySelector<HTMLButtonElement>('#nav')!;
+    trigger.setAttribute('aria-haspopup', 'menu');
+    trigger.setAttribute('aria-controls', 'pick-menu');
+    trigger.setAttribute('aria-expanded', 'false');
+    trigger.addEventListener('click', () => {
+      const existing = document.getElementById('pick-menu');
+      if (existing) {
+        existing.remove();
+        trigger.setAttribute('aria-expanded', 'false');
+        return;
+      }
+      const menu = document.createElement('div');
+      menu.id = 'pick-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('data-menu-nav', '');
+      menu.innerHTML = '<button id="m1" role="menuitem">1</button><button id="m2" role="menuitem" class="active">2</button>';
+      fixture.appendChild(menu);
+      trigger.setAttribute('aria-expanded', 'true');
+    });
+    render(<Harness />);
+    act(() => api.current!.open());
+    press('Digit4', '4');
+    expect(document.getElementById('pick-menu')).not.toBeNull();
+    frames.forEach((cb) => cb(0));
+    expect(document.activeElement?.id).toBe('m2');
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    expect(document.activeElement?.id).toBe('m1');
+    document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    expect(document.getElementById('pick-menu')).toBeNull();
+    await Promise.resolve();
+    expect(document.activeElement).toBe(input);
+    uninstall();
     vi.restoreAllMocks();
   });
 
