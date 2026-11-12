@@ -12373,7 +12373,8 @@ textarea,
    Settings sample). data-hint-style = raised (default) | flat | dark | byKind and
    data-hint-size = small (default) | normal pick the values; Settings > Shortcuts
    sets them (config.hints). Badges carry data-kind = project | tab | terminal | nav
-   and data-placement = corner | bottom-left; left/top is the anchor from JS. */
+   and data-placement = corner | bottom-left | below | above; left/top is the anchor
+   from JS (hintAnchor in src/hints/hintTargets.ts). */
 .hint-theme {
   /* raised (default) */
   --hint-bg: linear-gradient(180deg, #fff785 0%, #ffc542 100%);
@@ -12390,9 +12391,15 @@ textarea,
   --hint-text-transform: uppercase;
   --hint-typed-opacity: 0.4;
   /* Placement (fixed): corner badges straddle the target's top-left corner;
-     terminal-pane badges sit inside the pane's bottom-left corner, near the prompt. */
+     terminal-pane badges sit inside the pane's bottom-left corner, near the prompt;
+     small icon targets get a badge centred under (or over) them so the icon shows.
+     The anchor for below/above is the edge centre; JS already allows the 2px overlap. */
   --hint-corner-shift-x: -4px;
   --hint-corner-shift-y: -4px;
+  --hint-below-shift-x: -50%;
+  --hint-below-shift-y: 0;
+  --hint-above-shift-x: -50%;
+  --hint-above-shift-y: -100%;
   --hint-terminal-shift-x: 8px;
   --hint-terminal-shift-y: calc(-100% - 8px);
 }
@@ -12461,6 +12468,16 @@ textarea,
 .hint-badge[data-placement='bottom-left'] {
   --hint-shift-x: var(--hint-terminal-shift-x);
   --hint-shift-y: var(--hint-terminal-shift-y);
+}
+
+.hint-badge[data-placement='below'] {
+  --hint-shift-x: var(--hint-below-shift-x);
+  --hint-shift-y: var(--hint-below-shift-y);
+}
+
+.hint-badge[data-placement='above'] {
+  --hint-shift-x: var(--hint-above-shift-x);
+  --hint-shift-y: var(--hint-above-shift-y);
 }
 
 .hint-badge[data-kind='project'] { background: var(--hint-project-bg, var(--hint-bg)); color: var(--hint-project-fg, var(--hint-fg)); }

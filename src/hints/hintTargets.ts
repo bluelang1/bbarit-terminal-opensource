@@ -192,19 +192,43 @@ export function collectHintTargets(doc: Document = document, win: Window = windo
 
 /** Corner badges straddle the target's top-left corner: CSS shifts them by this much up-left. */
 export const HINT_CORNER_OFFSET_PX = 4;
+/**
+ * A target narrower AND shorter than this is an icon-sized control (toolbar and
+ * pane buttons are 24-28 px squares): a corner badge would cover its icon, so its
+ * badge hangs off an edge instead. Wide-but-short rows (project rows, tabs) keep
+ * the corner badge so it never lands on the next row.
+ */
+export const HINT_SMALL_TARGET_PX = 32;
+/** How far an edge badge may reach into its small target. */
+export const HINT_EDGE_OVERLAP_PX = 2;
 /** Rough badge size for clamping (normal size, border + padding). */
 const BADGE_CHAR_PX = 8;
 const BADGE_EXTRA_PX = 10;
 const BADGE_HEIGHT_PX = 20;
+/** Gap kept between an edge badge and the viewport's left/right edge. */
+const VIEWPORT_MARGIN_PX = 2;
 
-export type HintPlacement = 'corner' | 'bottom-left';
+/**
+ * corner = straddles the top-left corner; bottom-left = inside a terminal pane,
+ * near the prompt; below / above = centred on a small target, hanging from its
+ * bottom (or, without room, its top) edge so the icon stays visible.
+ */
+export type HintPlacement = 'corner' | 'bottom-left' | 'below' | 'above';
+
+export function isSmallHintTarget(rect: HintRect): boolean {
+  return rect.width < HINT_SMALL_TARGET_PX && rect.height < HINT_SMALL_TARGET_PX;
+}
 
 /**
  * Where a badge is anchored. Most targets: their top-left corner, the badge
- * straddling it (CSS shifts it -4px, -4px). Terminal panes: their bottom-left
- * corner near the prompt (CSS shifts the badge up, inside the pane), because a
- * pane's top-left corner is where its header / tab hint already sits. The anchor
- * is clamped so the shifted badge stays inside the viewport.
+ * straddling it (CSS shifts it -4px, -4px). Small targets (isSmallHintTarget):
+ * the centre of their bottom edge, the badge hanging below with at most
+ * HINT_EDGE_OVERLAP_PX inside the target (CSS centres it with -50%); when it
+ * would run off the bottom of the viewport it hangs above the top edge instead.
+ * Terminal panes: their bottom-left corner near the prompt (CSS shifts the badge
+ * up, inside the pane), because a pane's top-left corner is where its header /
+ * tab hint already sits. The anchor is clamped so the shifted badge stays inside
+ * the viewport.
  */
 export function hintAnchor(
   rect: HintRect,
@@ -221,6 +245,16 @@ export function hintAnchor(
       y: clamp(rect.top + rect.height, BADGE_HEIGHT_PX + 2 * off, viewport.height),
       placement: 'bottom-left',
     };
+  }
+  if (isSmallHintTarget(rect)) {
+    const half = badgeWidth / 2;
+    const x = clamp(rect.left + rect.width / 2, half + VIEWPORT_MARGIN_PX, viewport.width - half - VIEWPORT_MARGIN_PX);
+    const belowTop = rect.top + rect.height - HINT_EDGE_OVERLAP_PX;
+    const aboveBottom = rect.top + HINT_EDGE_OVERLAP_PX;
+    if (belowTop + BADGE_HEIGHT_PX <= viewport.height || aboveBottom - BADGE_HEIGHT_PX < 0) {
+      return { x, y: clamp(belowTop, 0, viewport.height - BADGE_HEIGHT_PX), placement: 'below' };
+    }
+    return { x, y: aboveBottom, placement: 'above' };
   }
   return {
     x: clamp(rect.left, off, viewport.width - badgeWidth + off),

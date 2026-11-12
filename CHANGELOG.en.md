@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- Hint mode: on small icon buttons (the toolbar and the terminal pane buttons) the label box now sits centred just below the button (above it when there is no room) instead of covering the icon, so you can tell which button each label belongs to.
+
 ## [1.1.69] - 2026-11-12
 
 ### Added

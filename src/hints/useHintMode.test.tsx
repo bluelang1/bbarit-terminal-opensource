@@ -66,7 +66,7 @@ describe('useHintMode', () => {
       ['1', 'project', 'corner'],
       ['2', 'project', 'corner'],
       ['3', 'terminal', 'bottom-left'],
-      ['4', 'nav', 'corner'],
+      ['4', 'nav', 'below'],
     ]);
     expect(document.activeElement).not.toBe(input);
   });

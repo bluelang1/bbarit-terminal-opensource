@@ -4,6 +4,9 @@ import {
   collectHintTargets,
   findTopHintDialog,
   hintAnchor,
+  HINT_EDGE_OVERLAP_PX,
+  HINT_SMALL_TARGET_PX,
+  isSmallHintTarget,
   hintDataKind,
   hintKindOf,
   HINT_CORNER_OFFSET_PX,
@@ -208,20 +211,57 @@ describe('collectHintTargets', () => {
   });
 });
 
+describe('isSmallHintTarget', () => {
+  it('is true only when both sides are under the threshold', () => {
+    const n = HINT_SMALL_TARGET_PX;
+    expect(isSmallHintTarget({ left: 0, top: 0, width: 24, height: 24 })).toBe(true);
+    expect(isSmallHintTarget({ left: 0, top: 0, width: 28, height: 28 })).toBe(true);
+    expect(isSmallHintTarget({ left: 0, top: 0, width: n - 1, height: n - 1 })).toBe(true);
+    expect(isSmallHintTarget({ left: 0, top: 0, width: n, height: 24 })).toBe(false);
+    // Wide-but-short rows (project rows, tabs) and tall thin edges keep the corner badge.
+    expect(isSmallHintTarget({ left: 0, top: 0, width: 200, height: 22 })).toBe(false);
+    expect(isSmallHintTarget({ left: 0, top: 0, width: 6, height: 400 })).toBe(false);
+  });
+});
+
 describe('hintAnchor', () => {
   const vp = { width: 800, height: 600 };
   const off = HINT_CORNER_OFFSET_PX;
+  const overlap = HINT_EDGE_OVERLAP_PX;
   it('anchors at the top-left corner, or bottom-left for terminal panes', () => {
     expect(hintAnchor({ left: 100, top: 50, width: 80, height: 20 }, 'project', vp)).toEqual({ x: 100, y: 50, placement: 'corner' });
     expect(hintAnchor({ left: 100, top: 50, width: 300, height: 200 }, 'terminal', vp)).toEqual({ x: 100, y: 250, placement: 'bottom-left' });
   });
 
   it('clamps so the -4px corner shift stays on screen', () => {
-    expect(hintAnchor({ left: 0, top: 0, width: 10, height: 10 }, 'nav', vp)).toEqual({ x: off, y: off, placement: 'corner' });
-    const right = hintAnchor({ left: 795, top: 595, width: 5, height: 5 }, 'nav', vp, 2);
+    expect(hintAnchor({ left: 0, top: 0, width: 40, height: 40 }, 'nav', vp)).toEqual({ x: off, y: off, placement: 'corner' });
+    const right = hintAnchor({ left: 795, top: 595, width: 40, height: 40 }, 'nav', vp, 2);
+    expect(right.placement).toBe('corner');
     expect(right.x).toBeLessThan(795);
     expect(right.y).toBeLessThan(595);
     expect(hintAnchor({ left: 0, top: 100, width: 800, height: 500 }, 'terminal', vp)).toEqual({ x: 0, y: 600, placement: 'bottom-left' });
+  });
+
+  it('hangs a centred badge below a small icon button, overlapping it by at most 2px', () => {
+    // 24px toolbar button at (300, 10): badge centred on x=312, top edge at 34 - 2.
+    expect(hintAnchor({ left: 300, top: 10, width: 24, height: 24 }, 'tool', vp)).toEqual({ x: 312, y: 32, placement: 'below' });
+    expect(hintAnchor({ left: 300, top: 10, width: 28, height: 28 }, 'nav', vp, 2)).toEqual({ x: 314, y: 36, placement: 'below' });
+    const a = hintAnchor({ left: 300, top: 10, width: 24, height: 24 }, 'tool', vp);
+    expect(10 + 24 - a.y).toBeLessThanOrEqual(overlap);
+  });
+
+  it('hangs it above when there is no room below', () => {
+    // Bottom-of-window button: below would end past 600, so it sits on the top edge.
+    expect(hintAnchor({ left: 300, top: 580, width: 20, height: 20 }, 'nav', vp)).toEqual({ x: 310, y: 580 + overlap, placement: 'above' });
+  });
+
+  it('keeps edge badges inside the viewport horizontally', () => {
+    const left = hintAnchor({ left: 0, top: 10, width: 12, height: 12 }, 'tool', vp, 2);
+    const right = hintAnchor({ left: 790, top: 10, width: 10, height: 10 }, 'tool', vp, 2);
+    // Two-char badge is ~26px wide; centred anchors must leave half of it on screen.
+    expect(left.placement).toBe('below');
+    expect(left.x - 13).toBeGreaterThanOrEqual(0);
+    expect(right.x + 13).toBeLessThanOrEqual(800);
   });
 });
 
