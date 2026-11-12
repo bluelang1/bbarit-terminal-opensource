@@ -3021,6 +3021,7 @@ export const en = {
   // i18n batch: misc2
   'terminal.clearInput': "Clear input",
   'terminal.clearInputAll': 'Clear all input (every line)',
+  'terminal.redrawScreen': 'Redraw screen (Ctrl+L, keeps your input)',
   'terminal.searchPlaceholder': "Search...",
   'terminal.ollamaNoModelSettings': "No model selected. Go to Settings → Agent → Ollama to configure.",
   'terminal.ollamaIntro': "Type your message and press Enter. Type /clear to reset, /model <name> to switch.",

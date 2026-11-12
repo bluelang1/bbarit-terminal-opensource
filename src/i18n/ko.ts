@@ -3023,6 +3023,7 @@ export const ko: Record<TranslationKey, string> = {
   // i18n batch: misc2
   'terminal.clearInput': "입력 지우기",
   'terminal.clearInputAll': '입력 전체 지우기 (모든 줄)',
+  'terminal.redrawScreen': '화면 다시 그리기 (Ctrl+L, 입력 유지)',
   'terminal.searchPlaceholder': "검색...",
   'terminal.ollamaNoModelSettings': "선택된 모델이 없습니다. 설정 → Agent → Ollama에서 구성하세요.",
   'terminal.ollamaIntro': "메시지를 입력하고 Enter를 누르세요. /clear로 초기화, /model <name>으로 모델 전환.",
