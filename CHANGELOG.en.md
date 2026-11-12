@@ -9,6 +9,8 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+## [1.1.69] - 2026-11-12
+
 ### Added
 
 - Keyboard hint mode: press ⌘J (Alt+J on Windows/Linux) and a yellow label appears on projects, terminal tabs, terminal panes and panel/view switches (sidebar, editor and terminal show/hide, view modes, toolbar panel buttons, settings and similar); type the label to go there. Picking a terminal pane puts the cursor in that terminal. Ordinary action buttons such as close or delete get no label. With many targets some labels are two characters; Backspace removes one, and Esc or the same shortcut closes hint mode and returns focus to the terminal. Works while the Korean input method is on; Settings > Shortcuts picks the style (raised, flat, dark, colour by kind) and size (small, normal).
@@ -247,7 +249,8 @@ The first release of this fork, based on the original author's `v1.1.50`.
 - The built-in agent reads `.mcp.json` and `.bbarit/models.json` only in trusted projects, and `/trust no` takes precedence over the app's auto-approve run option.
 - Updated or replaced dependencies with known vulnerabilities and removed unused ones.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...HEAD
+[1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
 [1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66

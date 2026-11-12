@@ -8,6 +8,8 @@
 
 ## [Unreleased]
 
+## [1.1.69] - 2026-11-12
+
 ### 추가
 
 - 키보드 힌트 모드: ⌘J(Windows/Linux는 Alt+J)를 누르면 프로젝트, 터미널 탭, 터미널 창과 패널·화면 전환 버튼(사이드바·편집기·터미널 접기/펴기, 화면 모드, 도구 막대의 패널 버튼, 설정 등)에 노란 글자 상자가 뜨고, 그 글자를 치면 그곳으로 이동합니다. 터미널 창을 고르면 그 터미널 입력으로 바로 갑니다. 닫기·삭제 같은 일반 동작 버튼에는 뜨지 않습니다. 대상이 많으면 두 글자를 치며, 백스페이스로 한 글자 지우고 Esc나 같은 단축키를 다시 누르면 닫히고 원래 터미널로 돌아갑니다. 한글 입력 상태에서도 동작하며, 설정 > 단축키에서 모양(입체·평면·어두운·종류별 색)과 크기(작게·보통)를 고를 수 있습니다.
@@ -246,7 +248,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...HEAD
+[1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67
 [1.1.66]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.65...v1.1.66
