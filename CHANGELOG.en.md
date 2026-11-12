@@ -16,6 +16,9 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 - Hint mode: on small icon buttons (the toolbar and the terminal pane buttons) the label box now sits centred just below the button (above it when there is no room) instead of covering the icon, so you can tell which button each label belongs to.
 - AI tool tabs no longer print a false "CLI not found" message when the tool is installed but exits with an error (for example when it cannot read the current folder). The message now appears only when the tool is really not installed, and the tool's own error stays visible.
 - Hint mode: picking the terminal layout, Office or tool (☰) menu now puts keyboard focus inside it. Arrow Up/Down and Home/End move between items, Enter/Space choose, and Esc closes the menu and returns focus to the terminal you were using. Keys pressed while the menu is open no longer reach the terminal.
+- In confirmation dialogs, Enter no longer confirms while the Cancel button has focus. When a dialog opens, focus now moves to one of its buttons (Cancel for actions that cannot be undone, such as deleting; otherwise the confirm button); Enter and Space press the focused button, Tab stays inside the dialog, and Esc cancels. When the dialog closes, focus goes back to where it was (usually the terminal).
+- In the tabs view, the Tab key no longer moves into the input and buttons of terminal tabs that are not on screen. Tab now only visits the terminal you can see.
+- The Tab key now moves through the top toolbar in the order the buttons appear on screen, left to right. Before, it jumped around, starting at the hide-toolbar button on the far right. The button layout is unchanged.
 
 ## [1.1.69] - 2026-11-12
 
