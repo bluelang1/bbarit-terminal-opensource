@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Added
+
+- Move between screen regions by keyboard: F6 moves focus through the top bar, toolbar, project list, sidebar, editor, terminal header and tabs, terminal, right quick-command buttons, open panel, prompt library and bottom status bar, and Shift+F6 goes the other way. It works inside a terminal, so you can leave a terminal without the mouse, and each region puts focus back where you last were (or on the selected project or tab). Once you leave, the terminal no longer pulls focus back; clicking it, F6 back into it, a hint pick or a project/tab switch shortcut returns to it. Tab walking the screen skips terminal inputs (Tab inside a terminal still completes in the shell). The keys are listed in Settings > Shortcuts; F6 is no longer passed to terminal programs.
+
 ## [1.1.69] - 2026-11-12
 
 ### Added

@@ -101,6 +101,15 @@ input[type="range"]::-moz-range-thumb {
   outline-offset: 2px;
 }
 
+/* Keyboard regions (F6, src/a11y/regions.ts): wherever focus lands keeps a ring, even on
+   elements that set outline: none (inline styles included). Text fields and editors show
+   their caret instead; the terminal shows its cursor. */
+[data-kbd-region]:focus-visible:not(input):not(textarea),
+[data-kbd-region] :focus-visible:not(input):not(textarea):not([contenteditable]):not(.monaco-editor *):not(.cm-editor *) {
+  outline: 2px solid var(--accent-color) !important;
+  outline-offset: -2px;
+}
+
 /* Skip link for keyboard navigation */
 .skip-link {
   position: absolute;

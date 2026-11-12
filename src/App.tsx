@@ -16930,7 +16930,7 @@ Office project scaffold created by BBARIT Terminal.
 
 
       {/* Top Bar */}
-      <div className="project-tabs" style={isMonitorMode ? { display: 'none' } : undefined}>
+      <div className="project-tabs" data-kbd-region="topbar" style={isMonitorMode ? { display: 'none' } : undefined}>
         {/* Forced flex line break: keeps the toolbar + left controls on the top
             row and drops the project tabs onto their own row below (see App.css). */}
         <span className="project-tabs-row-break" aria-hidden="true" />
@@ -17182,7 +17182,7 @@ Office project scaffold created by BBARIT Terminal.
               <button
                 key={`top-group-${group.id}`}
                 type="button"
-                data-hint="nav" className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
+                data-hint="nav" data-kbd-region="projects" className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
                 data-group-drop-id={group.id}
                 data-project-tab-ignore-drag="true"
                 onClick={() => toggleGroupCollapsed(group.id)}
@@ -17204,6 +17204,7 @@ Office project scaffold created by BBARIT Terminal.
             key={project.id}
             data-project-tab-id={project.id}
             data-hint="project"
+            data-kbd-region="projects"
             data-project-drop-id={project.id}
             data-project-drop-orientation="horizontal"
             className={[
@@ -17644,6 +17645,7 @@ Office project scaffold created by BBARIT Terminal.
         {/* Right Utils */}
         <div
           className="top-toolbar"
+          data-kbd-region="toolbar"
           style={isMonitorMode ? { display: 'none' } : { position: 'relative', zIndex: 12000, overflow: 'visible' }}
         >
           <div className={`top-utils${toolbarCollapsed ? ' toolbar-collapsed' : ''}`}>
@@ -18076,7 +18078,7 @@ Office project scaffold created by BBARIT Terminal.
       <div className="main-content">
         {/* 맨 왼쪽 프로젝트 패널 (Group 1 = Left 선택 시) */}
         {projectsLeftPanel && !isMonitorMode && (
-          <div ref={projectPanelRef} className="project-selector-panel" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
+          <div ref={projectPanelRef} className="project-selector-panel" data-kbd-region="projects" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
 	            <div className="project-selector-panel-header">
 	              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
 	                <span>{t('app.project.title' as any, 'Projects')}</span>
@@ -18234,6 +18236,7 @@ Office project scaffold created by BBARIT Terminal.
 		            <div
                   ref={fileTreeSidebarRef}
                   className="file-tree-sidebar"
+                  data-kbd-region="sidebar"
                   tabIndex={-1}
                   onMouseDownCapture={(e) => { focusFileTreeSidebarFromInteraction(e.target); }}
                   onContextMenuCapture={(e) => { focusFileTreeSidebarFromInteraction(e.target); }}
@@ -20590,7 +20593,7 @@ Office project scaffold created by BBARIT Terminal.
           {/* project-terminal 구 모드 호환: 기존 viewMode === 'project-terminal'만 이 위치에 렌더.
               projectsLeftPanel일 때는 main-content 맨 왼쪽에서 렌더됨 (아래 참조) */}
           {viewMode === 'project-terminal' && !projectsLeftPanel && (
-            <div className="project-selector-panel">
+            <div className="project-selector-panel" data-kbd-region="projects">
               <div className="project-selector-panel-header">
                 <span>{t('app.project.title' as any, 'Projects')}</span>
                 <div className="project-selector-panel-actions">
@@ -20726,7 +20729,7 @@ Office project scaffold created by BBARIT Terminal.
                   <span style={{ fontSize: 10 }}>{t('view.editor')}</span>
                 </div>
               ) : (
-              <div ref={editorAreaRef} style={{ flex: viewMode === 'side' ? 'none' : 1, width: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, maxWidth: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, height: viewMode === 'side' ? '100%' : undefined, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+              <div ref={editorAreaRef} data-kbd-region="editor" style={{ flex: viewMode === 'side' ? 'none' : 1, width: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, maxWidth: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, height: viewMode === 'side' ? '100%' : undefined, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
                 {showTodoGantt ? (
                   <React.Suspense fallback={null}>
                     <TodoGanttPanel
@@ -21010,6 +21013,7 @@ Office project scaffold created by BBARIT Terminal.
 	          }>
 		            <div
                   className="terminals-header"
+                  data-kbd-region="terminal-header"
                   style={isMonitorMode ? { display: 'none' } : { overflow: 'visible', position: 'relative', zIndex: 2000 }}
                 >
                   {/* Broker status lives in the harness modal now (one broker per harness). */}
@@ -21269,7 +21273,7 @@ Office project scaffold created by BBARIT Terminal.
 			            </div>
             {/* Terminal Tabs (only in tabs mode) */}
             {activeProject && terminalSplitMode === 'tabs' && (
-              <div className="terminals-tabs">
+              <div className="terminals-tabs" data-kbd-region="terminal-header">
                 <div className="terminals-tabs-list">
                   {activeProject.terminals.map((terminal, tabIdx) => (
                     <div
@@ -23711,7 +23715,7 @@ Office project scaffold created by BBARIT Terminal.
       )}
 
       {/* Process Stats Status Bar */}
-      <div className="process-stats-bar" style={{
+      <div className="process-stats-bar" data-kbd-region="statusbar" style={{
         display: 'flex',
         alignItems: 'center',
         gap: 4,

@@ -136,7 +136,7 @@ export function McpPanel({
   const style = currentStyle || { bg: '#1e1e2e', text: '#cdd6f4', accent: '#89b4fa' };
 
   return (
-    <div className="mcp-panel-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="mcp-panel-overlay" data-kbd-region="panel" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div
         className="mcp-panel"
         onMouseDown={(e) => e.stopPropagation()}

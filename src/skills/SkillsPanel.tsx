@@ -952,7 +952,7 @@ export function SkillsPanel({
   const style = currentStyle || { bg: '#1e1e2e', text: '#cdd6f4', accent: '#89b4fa' };
 
   return (
-    <div className="skills-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="skills-overlay" data-kbd-region="panel" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div
         className="skills-panel"
         onMouseDown={(e) => e.stopPropagation()}

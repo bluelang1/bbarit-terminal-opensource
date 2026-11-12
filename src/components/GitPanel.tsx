@@ -577,7 +577,7 @@ export function GitPanel({ isOpen, onClose, currentStyle, workDir, projects, act
   if (!isOpen) return null;
 
   return (
-    <div className="git-panel-overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="git-panel-overlay" data-kbd-region="panel" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="git-panel" onMouseDown={e => e.stopPropagation()}
         style={{ '--git-bg': style.bg, '--git-text': style.text, '--git-accent': style.accent } as React.CSSProperties}>
 

@@ -234,7 +234,7 @@ export function DatabasePanel({ isOpen, onClose, currentStyle }: DatabasePanelPr
   const connectedConns = dbConnections.filter(c => connectedIds.has(c.id));
 
   return (
-    <div className="db-panel-overlay" ref={overlayRef} onKeyDown={handleKeyDown} tabIndex={-1}
+    <div className="db-panel-overlay" data-kbd-region="panel" ref={overlayRef} onKeyDown={handleKeyDown} tabIndex={-1}
       onClick={e => { if (e.target === overlayRef.current) onClose(); }}
     >
       <div className="db-panel" style={{ background: bg, color: text, border: `1px solid ${accent}22` }}>
