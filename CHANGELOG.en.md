@@ -12,6 +12,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 ### Fixed
 
 - Hint mode: on small icon buttons (the toolbar and the terminal pane buttons) the label box now sits centred just below the button (above it when there is no room) instead of covering the icon, so you can tell which button each label belongs to.
+- AI tool tabs no longer print a false "CLI not found" message when the tool is installed but exits with an error (for example when it cannot read the current folder). The message now appears only when the tool is really not installed, and the tool's own error stays visible.
 
 ## [1.1.69] - 2026-11-12
 
