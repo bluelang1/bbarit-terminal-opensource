@@ -11970,39 +11970,10 @@ textarea,
 }
 
 /* ── Top toolbar: category grouping ──
-   Reorder the (DOM-fixed) tool buttons into semantic groups via flex `order`,
-   and separate groups with a thin vertical divider + wider gap. Both pseudo-
-   elements are already used (::before = glass icon, ::after = label), so the
-   dividers are real <span class="toolbar-group-divider"> elements placed in the
-   flow with their own inline `order`. Icon/label/glass mapping is class-based,
-   so reordering here changes nothing else. */
-.top-utils > .tool-secretary        { order: 0 !important; }  /* pinned first, standalone */
-/* divider order 1 */
-.top-utils > .tool-git              { order: 2 !important; }
-.top-utils > .tool-quick-open       { order: 4 !important; }
-.top-utils > .editors-launcher-wrap { order: 6 !important; }
-.top-utils > .tool-browser          { order: 8 !important; }
-/* divider order 9 */
-.top-utils > .tool-graph            { order: 10 !important; }
-.top-utils > .tool-planner          { order: 12 !important; }
-.top-utils > .tool-kanban           { order: 14 !important; }
-/* divider order 15 */
-.top-utils > .tool-design           { order: 16 !important; }
-.top-utils > .tool-cowork           { order: 18 !important; }
-.top-utils > .tool-marketing        { order: 19 !important; }
-.top-utils > .tool-image            { order: 20 !important; }
-.top-utils > .tool-motion           { order: 20 !important; } /* ties with Image; DOM order puts Motion first */
-/* divider order 21 */
-.top-utils > .tool-pm2              { order: 22 !important; }
-.top-utils > .tool-hub              { order: 24 !important; }
-.top-utils > .tool-dashboard        { order: 25 !important; }
-.top-utils > .tool-skills           { order: 26 !important; }
-.top-utils > .tool-mcp              { order: 28 !important; }
-.top-utils > .tool-collab           { order: 30 !important; }
-.top-utils > .tool-broker           { order: 32 !important; }
-/* divider order 33 */
-.top-utils > .tool-settings         { order: 34 !important; }
-
+   The tool buttons are written in App.tsx in on-screen order (no flex `order`,
+   so keyboard Tab order matches what is shown). Groups are separated by thin
+   vertical <span class="toolbar-group-divider"> elements; both pseudo-elements
+   are already used (::before = glass icon, ::after = label). */
 .top-utils > .toolbar-group-divider {
   flex: none !important;
   width: 1px !important;
@@ -12263,7 +12234,6 @@ textarea,
 /* 상단 툴바 전체 접기/펴기 — 접힌 상태에서는 토글 버튼만 남는다 (사용자 피드백:
    버튼이 너무 많고 복잡). 개별 눈알 토글(tool-dropdown-pin)과는 독립. */
 .top-utils .toolbar-collapse-toggle {
-  order: 100;
   width: 22px;
   min-width: 22px;
   height: 24px;

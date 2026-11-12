@@ -13,6 +13,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 - In confirmation dialogs, Enter no longer confirms while the Cancel button has focus. When a dialog opens, focus now moves to one of its buttons (Cancel for actions that cannot be undone, such as deleting; otherwise the confirm button); Enter and Space press the focused button, Tab stays inside the dialog, and Esc cancels. When the dialog closes, focus goes back to where it was (usually the terminal).
 - In the tabs view, the Tab key no longer moves into the input and buttons of terminal tabs that are not on screen. Tab now only visits the terminal you can see.
+- The Tab key now moves through the top toolbar in the order the buttons appear on screen, left to right. Before, it jumped around, starting at the hide-toolbar button on the far right. The button layout is unchanged.
 
 ## [1.1.69] - 2026-11-12
 
