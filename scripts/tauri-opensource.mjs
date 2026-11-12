@@ -14,9 +14,16 @@ export const FORK_RELEASE_CONFIG = 'src-tauri/tauri.fork.conf.json';
 export const FORK_RELEASE_FLAG = '--fork-release';
 
 const UPDATER_KEY_ENV = /^TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)?$/;
+// The fork's own self-signed code-signing identity (SHA-1 or common name of a
+// certificate in the keychain search list; the release workflow sets it from a
+// temporary keychain). A fixed certificate keeps the app's designated
+// requirement, and with it macOS folder permissions, the same across updates.
+export const FORK_CODESIGN_IDENTITY_ENV = 'FORK_CODESIGN_IDENTITY';
 
 export function sourceBuildEnvironment(parentEnvironment, platform = process.platform, { forkRelease = false } = {}) {
   const environment = { ...parentEnvironment };
+  const forkIdentity = forkRelease ? (parentEnvironment[FORK_CODESIGN_IDENTITY_ENV] ?? '').trim() : '';
+  delete environment[FORK_CODESIGN_IDENTITY_ENV];
   for (const name of Object.keys(environment)) {
     // A fork release keeps only the updater signing key; Apple credentials,
     // Windows certificates and TAURI_CONFIG are always dropped.
@@ -27,7 +34,9 @@ export function sourceBuildEnvironment(parentEnvironment, platform = process.pla
   }
   // Ad-hoc signing uses no Apple account or certificate. The explicit value
   // also prevents a developer's ambient identity from replacing the config.
-  if (platform === 'darwin') environment.APPLE_SIGNING_IDENTITY = '-';
+  // Only a fork release may name the fork's self-signed identity instead
+  // (still no Apple account, no notarization).
+  if (platform === 'darwin') environment.APPLE_SIGNING_IDENTITY = forkIdentity || '-';
   return environment;
 }
 

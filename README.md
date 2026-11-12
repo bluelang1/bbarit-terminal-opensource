@@ -138,6 +138,19 @@ node scripts/fork-release-manifest.mjs --tag v1.1.51 --repo bluelang1/bbarit-ter
 
 원작자 서명 설치본(`com.octo.terminal`)은 원작자 키로만 검증하므로 이 포크의 릴리스를 받지 않습니다. 포크 빌드(`com.bbarit.terminal.source`)를 한 번 직접 설치한 뒤부터 자동 업데이트가 이어집니다. ad-hoc 서명 앱의 교체·재실행은 실제 macOS에서 확인해야 합니다.
 
+#### 고정 코드 서명 인증서(폴더 권한 유지)
+
+ad-hoc 서명 앱은 macOS 개인정보 보호(TCC)가 앱의 해시(cdhash)에 권한을 묶어서, 업데이트할 때마다 문서·데스크탑·다운로드 폴더 접근 권한이 조용히 사라지고 `~/Documents` 안의 터미널이 `Operation not permitted`로 실패합니다. 릴리스를 자체 서명(self-signed) 인증서 하나로 계속 서명하면 지정 요구사항(designated requirement)이 `identifier "com.bbarit.terminal.source" and certificate root = H"<인증서 SHA-1>"`으로 버전이 바뀌어도 같아서 권한이 유지됩니다. Apple Developer ID나 공증이 아니므로 Gatekeeper 안내는 그대로입니다.
+
+```sh
+scripts/fork-codesign-cert.sh ~/secure/bbarit-codesign   # 최초 1회. 저장소 밖, 백업되는 곳
+```
+
+스크립트는 openssl로 10년짜리 코드 서명 인증서와 `.p12`를 만들고 저장소 시크릿을 넣는 `gh secret set` 명령(`FORK_CODESIGN_P12_BASE64`, `FORK_CODESIGN_P12_PASSWORD`)을 출력만 합니다. 실행하거나 키체인에 넣지 않습니다. 시크릿이 있으면 [`fork-release.yml`](.github/workflows/fork-release.yml)이 러너에 임시 키체인을 만들어 인증서를 넣고, 래퍼가 그 SHA-1을 `FORK_CODESIGN_IDENTITY` → `APPLE_SIGNING_IDENTITY`로 넘겨 Tauri 빌드 안에서 앱을 서명합니다(업데이트 압축본도 서명된 앱으로 만들어집니다). 빌드 뒤 `codesign --verify --deep --strict`와 지정 요구사항을 확인하고, 시크릿이 있는데 ad-hoc이면 실패합니다. 시크릿이 없으면 경고만 남기고 지금처럼 ad-hoc으로 빌드합니다.
+
+- ad-hoc 빌드에서 인증서 서명 빌드로 처음 업데이트할 때는 권한을 한 번 더 묻습니다. 그 뒤로는 유지됩니다.
+- 인증서를 잃어버리거나 새로 만들면 지정 요구사항이 바뀌어 권한을 다시 한 번 묻습니다. `.p12`와 비밀번호를 저장소 밖에 백업하고 커밋하지 마세요.
+
 ## Rust 검사
 
 ```sh

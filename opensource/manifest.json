@@ -128,6 +128,7 @@
     "scripts/export-opensource.py",
     "scripts/tauri-opensource.mjs",
     "scripts/fork-release-manifest.mjs",
+    "scripts/fork-codesign-cert.sh",
     "scripts/vite-dev.mjs",
     "scripts/check-ui-mojibake.mjs",
     "scripts/check-bundled-scripts.mjs",

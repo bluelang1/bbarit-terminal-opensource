@@ -72,6 +72,14 @@ Build/test gotchas:
   restores the Rust cache (~35 min cold); the first main run is cold too.
 - The original installed app (com.octo.terminal, author-signed) cannot receive
   fork updates; only an installed fork build (com.bbarit.terminal.source) can.
+- Fork releases sign the app with a fixed self-signed cert when the secrets
+  FORK_CODESIGN_P12_BASE64 / FORK_CODESIGN_P12_PASSWORD exist (make them with
+  scripts/fork-codesign-cert.sh <dir>); otherwise ad-hoc + warning. Ad-hoc ties
+  TCC folder grants to the cdhash, so every update dropped them. The first update
+  onto a cert-signed build asks once more; a lost/new cert means one more reset.
+  Tauri 2.10 takes the identity from APPLE_SIGNING_IDENTITY (the wrapper maps
+  FORK_CODESIGN_IDENTITY only for --fork-release); APPLE_CERTIFICATE is unusable
+  (it only accepts Apple-prefixed "Developer ID…" certs with an OU).
 - bbarit-ctl / tauri-dev-screen auto-scan accepts com.bbarit.terminal.source
   first and com.octo.terminal as fallback; BBARIT_BRIDGE_APP_ID pins one.
 - Claude Code stores sessions in ~/.claude/projects/<cwd with every
