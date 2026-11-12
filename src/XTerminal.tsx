@@ -66,6 +66,7 @@ import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
+import { isHintModeActive } from './hints/hintModeFlag';
 
 // Enter variants a terminal must keep apart: Shift+Enter and Cmd+Enter go out as kitty CSI-u
 // (Cmd = super bit, 1 + 8) so TUIs such as Claude Code can bind them; plain Enter is CR.
@@ -2498,6 +2499,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     console.log('[SIGINT Debug] Installing global keydown handler for terminal:', terminalId);
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       const k = getShortcutKey(e);
       const ctrl = e.ctrlKey;
       const meta = e.metaKey;
@@ -2640,6 +2642,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       const k = getShortcutKey(e);
       const key = e.key;
       const ctrl = e.ctrlKey;
@@ -2786,6 +2789,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     if (!bridge || !wrap) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       // Don't steal focus if terminal is not visible
       if (wrap.offsetParent === null) return;
       const activeEl = document.activeElement as HTMLElement | null;
@@ -2835,6 +2839,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     };
 
     const onWindowKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       const key = e.key;
       const k = getShortcutKey(e);
       const ctrl = e.ctrlKey;
@@ -4428,6 +4433,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     
     // Clipboard shortcuts - handle at window level
     const handleWindowKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       if (!isActive) return;
       const wrap = terminalWrapRef.current;
       const target = e.target as HTMLElement | null;
@@ -6054,6 +6060,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     if (!useImeInput) return;
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
       const wrap = terminalWrapRef.current;
       // Don't steal focus if terminal is not visible
       if (wrap && wrap.offsetParent === null) return;

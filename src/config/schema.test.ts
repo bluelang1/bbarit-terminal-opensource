@@ -88,3 +88,11 @@ describe('terminal.showTerminalStrip', () => {
     expect(validateConfig({ version: 2, terminal: { showTerminalStrip: false } }).terminal.showTerminalStrip).toBe(false);
   });
 });
+
+describe('hints config', () => {
+  it('defaults to raised / small and drops unknown values', () => {
+    expect(validateConfig({}).hints).toEqual({ style: 'raised', size: 'small' });
+    expect(validateConfig({ hints: { style: 'dark', size: 'normal' } }).hints).toEqual({ style: 'dark', size: 'normal' });
+    expect(validateConfig({ hints: { style: 'neon', size: 'huge' } } as any).hints).toEqual({ style: 'raised', size: 'small' });
+  });
+});

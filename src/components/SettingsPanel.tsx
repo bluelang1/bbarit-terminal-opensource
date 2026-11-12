@@ -21,6 +21,7 @@ import {
   type LinearTeam,
 } from '../integrations/linear';
 import { useConfig, getConfigSnapshot } from '../config/ConfigContext';
+import { HINT_SIZES, HINT_STYLES, normalizeHintsConfig } from '../config/schema';
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '../i18n/en';
 import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit, effectivePtyHolder } from '../config/schema';
@@ -1769,6 +1770,7 @@ export function SettingsPanel({
     );
   };
 
+  const hintsConfig = normalizeHintsConfig(config.hints);
   const shortcutLabel = useMemo(() => {
     const mod = isMacPlatform ? '⌘' : 'Ctrl';
     const alt = isMacPlatform ? '⌥' : 'Alt';
@@ -1782,6 +1784,7 @@ export function SettingsPanel({
         nextTerminal: `${mod}+]`,
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+        hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
         toggleTerminalMode: `${mod}+\``,
         openSettings: `${mod}+,`,
         newProject: `${mod}+N`,
@@ -1802,6 +1805,7 @@ export function SettingsPanel({
         nextTerminal: `${mod}+]`,
         prevTerminal: `${mod}+[`,
         lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+        hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
         toggleTerminalMode: `${alt}+F12`,
         openSettings: isMacPlatform ? `${mod}+,` : `Ctrl+Alt+S`,
         newProject: `${mod}+N`,
@@ -1822,6 +1826,7 @@ export function SettingsPanel({
       nextTerminal: `${mod}+]`,
       prevTerminal: `${mod}+[`,
       lastCompletedTask: `Ctrl+Tab / ${mod}+${shift}+J`,
+      hintMode: isMacPlatform ? '⌘+J' : 'Alt+J',
       toggleTerminalMode: `${mod}+${shift}+F`,
       openSettings: `${mod}+,`,
       newProject: `${mod}+N`,
@@ -3720,6 +3725,7 @@ export function SettingsPanel({
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.nextTerminal')}</span><span className="shortcut-key">{shortcutLabel.nextTerminal}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.prevTerminal')}</span><span className="shortcut-key">{shortcutLabel.prevTerminal}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.lastCompletedTask')}</span><span className="shortcut-key">{shortcutLabel.lastCompletedTask}</span></div>
+                  <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.hintMode')}</span><span className="shortcut-key">{shortcutLabel.hintMode}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.terminalOnlyMode')}</span><span className="shortcut-key">{shortcutLabel.toggleTerminalMode}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.copy')}</span><span className="shortcut-key">⌘/Ctrl+C</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.paste')}</span><span className="shortcut-key">⌘/Ctrl+V</span></div>
@@ -3730,6 +3736,39 @@ export function SettingsPanel({
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.terminalFontSize')}</span><span className="shortcut-key">⌘/Ctrl+= / ⌘/Ctrl+-</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.saveFile')}</span><span className="shortcut-key">{shortcutLabel.save}</span></div>
                   <div className="shortcut-item"><span className="shortcut-name">{t('settings.shortcuts.closeAllEditors')}</span><span className="shortcut-key">{shortcutLabel.closeAllEditors}</span></div>
+                </div>
+              </div>
+
+              <div className="settings-group">
+                <h3>{t('settings.hints.title')}</h3>
+                <p className="shortcut-note">{t('settings.hints.desc').replace('{key}', shortcutLabel.hintMode)}</p>
+                <div className="setting-item">
+                  <label>{t('settings.hints.style')}</label>
+                  <select
+                    value={hintsConfig.style}
+                    onChange={(e) => updateConfig((prev) => ({ ...prev, hints: normalizeHintsConfig({ ...hintsConfig, style: e.target.value }) }))}
+                  >
+                    {HINT_STYLES.map((style) => (
+                      <option key={style} value={style}>{t(`settings.hints.style.${style}` as any)}</option>
+                    ))}
+                  </select>
+                  <span className="hint-theme hint-sample" data-hint-style={hintsConfig.style} data-hint-size={hintsConfig.size} aria-hidden="true">
+                    <span className="hint-badge" data-kind="project">1</span>
+                    <span className="hint-badge" data-kind="tab">2</span>
+                    <span className="hint-badge" data-kind="terminal">3</span>
+                    <span className="hint-badge" data-kind="nav">a</span>
+                  </span>
+                </div>
+                <div className="setting-item">
+                  <label>{t('settings.hints.size')}</label>
+                  <select
+                    value={hintsConfig.size}
+                    onChange={(e) => updateConfig((prev) => ({ ...prev, hints: normalizeHintsConfig({ ...hintsConfig, size: e.target.value }) }))}
+                  >
+                    {HINT_SIZES.map((size) => (
+                      <option key={size} value={size}>{t(`settings.hints.size.${size}` as any)}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
 

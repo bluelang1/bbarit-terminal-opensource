@@ -6,6 +6,7 @@
  */
 
 import { parseKeybinding, matchesEvent, normalizeEventKeyForShortcut, type KeyBindingEntry } from './parser';
+import { isHintModeActive } from '../hints/hintModeFlag';
 
 export interface KeybindingHandler {
   id: string;
@@ -51,6 +52,9 @@ export class KeybindingManager {
           ]
         : []),
       { id: 'task.open-last-completed', keys: `${mod}+shift+j` },
+      // Hint mode (src/hints): labels on navigation targets; press again or Esc to close.
+      // Not Ctrl+J off macOS: terminal programs (Claude Code among them) use it for newline.
+      { id: 'hints.toggle', keys: isMac ? 'cmd+j' : 'alt+j' },
       { id: 'project.new', keys: `${mod}+n` },
       { id: 'settings.open', keys: `${mod}+,` },
       { id: 'view.toggle-terminal-mode', keys: `${mod}+shift+f` },
@@ -154,6 +158,8 @@ export class KeybindingManager {
     if (this.listener) return;
 
     this.listener = (e: KeyboardEvent) => {
+      // Hint mode owns the keyboard while it is open (src/hints/useHintMode.tsx).
+      if (isHintModeActive()) return;
       // Always allow Ctrl+C in terminal to send SIGINT - check this first before any other logic
       const k = normalizeEventKeyForShortcut(e);
       const target = e.target as HTMLElement;
@@ -212,7 +218,7 @@ export class KeybindingManager {
 
       if (isTyping && !allowInInputs) {
         // Still allow certain global shortcuts even in inputs
-        const globalShortcuts = ['command-palette.toggle', 'settings.open', 'file.open-document', 'view.toggle-terminal-mode', 'view.toggle-editor', 'view.toggle-sidebar', 'task.open-last-completed'];
+        const globalShortcuts = ['command-palette.toggle', 'settings.open', 'file.open-document', 'view.toggle-terminal-mode', 'view.toggle-editor', 'view.toggle-sidebar', 'task.open-last-completed', 'hints.toggle'];
         for (const binding of this.bindings) {
           if (globalShortcuts.includes(binding.id) && matchesEvent(binding.binding, e)) {
             e.preventDefault();

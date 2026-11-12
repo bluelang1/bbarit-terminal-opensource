@@ -121,6 +121,25 @@ function GitKeysIllustration() {
   );
 }
 
+function HintsIllustration() {
+  return (
+    <div className="gi-hints">
+      <div className="gi-hints-list">
+        {['1', '2', '3'].map((label, i) => (
+          <div key={label} className={`gi-hints-row${i === 1 ? ' gi-hints-picked' : ''}`}>
+            <b className="gi-hints-badge">{label}</b>
+            <span className="gi-git-file" />
+          </div>
+        ))}
+      </div>
+      <div className="gi-keys">
+        <span className="gi-key gi-key-1">⌘ J</span>
+        <span className="gi-key gi-key-2">2</span>
+      </div>
+    </div>
+  );
+}
+
 // 8x8 pixel octopus, two frames for the walk cycle.
 const OCTO_BODY = [
   '..oooo..',
@@ -169,6 +188,7 @@ export function StepIllustration({ id }: { id: GuideStepId }) {
     case 'status': return <StatusIllustration />;
     case 'keep-running': return <KeepRunningIllustration />;
     case 'git-keys': return <GitKeysIllustration />;
+    case 'hints': return <HintsIllustration />;
     case 'pet': return <PetIllustration />;
   }
 }
