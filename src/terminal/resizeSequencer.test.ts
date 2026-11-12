@@ -110,14 +110,33 @@ describe('createResizeSequencer', () => {
   afterEach(() => { vi.useRealTimers(); });
 
   it('narrowing a shell: PTY first, waits for the redraw, then xterm, then the PTY at xterm size', async () => {
-    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
+    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 51 });
     h.seq.request();
-    expect(h.events).toEqual(['pty 157x46', 'wait']);
+    expect(h.events).toEqual(['pty 157x51', 'wait']);
     await h.finishWait();
     // The final sync is always sent after a PTY-first run: another resize_pty (e.g. an attach
-    // nudge) may have landed during the wait.
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'xterm 157x46', 'pty 157x46']);
+    // nudge) may have landed during the wait. Same rows: exactly these two PTY calls.
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'xterm 157x51', 'pty 157x51']);
+    expect(h.state.xterm).toEqual({ cols: 157, rows: 51 });
+  });
+
+  it('narrower and shorter: the PTY-first step keeps the rows, the final sync changes them', async () => {
+    // xterm drops the lines below the cursor when it loses rows (an inline TUI's status line and
+    // footer). The program must get its row change after that, so it repaints them.
+    const h = harness({ cols: 168, rows: 51 }, { cols: 157, rows: 46 });
+    h.seq.request();
+    expect(h.events).toEqual(['pty 157x51', 'wait']);
+    await h.finishWait();
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'xterm 157x46', 'pty 157x46']);
     expect(h.state.xterm).toEqual({ cols: 157, rows: 46 });
+  });
+
+  it('narrower and taller: the PTY-first step keeps the rows, the final sync changes them', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 150, rows: 60 });
+    h.seq.request();
+    expect(h.events).toEqual(['pty 150x51', 'wait']);
+    await h.finishWait();
+    expect(h.events).toEqual(['pty 150x51', 'wait', 'xterm 150x60', 'pty 150x60']);
   });
 
   it('with no live PTY narrowing resizes xterm first and does not wait', async () => {
@@ -134,7 +153,7 @@ describe('createResizeSequencer', () => {
     h.seq.request();
     await h.finishWait();
     expect(h.state.xterm).toEqual({ cols: 168, rows: 51 });
-    expect(h.pty).toEqual([{ cols: 157, rows: 46 }, { cols: 168, rows: 51 }]);
+    expect(h.pty).toEqual([{ cols: 157, rows: 51 }, { cols: 168, rows: 51 }]);
     // Later requests still run.
     h.state.refitThrows = false;
     h.seq.request();
@@ -175,9 +194,32 @@ describe('createResizeSequencer', () => {
     }
     expect(h.events).toEqual([]);
     await vi.advanceTimersByTimeAsync(50);
-    expect(h.events).toEqual(['pty 140x45', 'wait']);
+    expect(h.events).toEqual(['pty 140x51', 'wait']);
     await h.finishWait();
-    expect(h.events).toEqual(['pty 140x45', 'wait', 'xterm 140x45', 'pty 140x45']);
+    expect(h.events).toEqual(['pty 140x51', 'wait', 'xterm 140x45', 'pty 140x45']);
+  });
+
+  it('a font step back and forth inside the coalesce window resizes nothing; a burst ends with the PTY at xterm size', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
+    h.state.layout = { cols: 157, rows: 48 };
+    h.seq.request({}, 150);
+    await vi.advanceTimersByTimeAsync(60);
+    h.state.layout = { cols: 168, rows: 51 };
+    h.seq.request({}, 150);
+    await vi.advanceTimersByTimeAsync(150);
+    // One refit to the unchanged layout, no PTY call.
+    expect(h.events).toEqual(['xterm 168x51']);
+    expect(h.pty).toEqual([]);
+    h.events.length = 0;
+    for (const layout of [{ cols: 157, rows: 48 }, { cols: 147, rows: 45 }, { cols: 138, rows: 42 }]) {
+      h.state.layout = layout;
+      h.seq.request({}, 150);
+      await vi.advanceTimersByTimeAsync(60);
+    }
+    await vi.advanceTimersByTimeAsync(90);
+    await h.finishWait();
+    expect(h.events).toEqual(['pty 138x51', 'wait', 'xterm 138x42', 'pty 138x42']);
+    expect(h.pty.at(-1)).toEqual(h.state.xterm);
   });
 
   it('a request during the wait runs afterwards against the new layout', async () => {
@@ -188,7 +230,7 @@ describe('createResizeSequencer', () => {
     await h.finishWait();
     // The first run fits xterm to the layout of that moment (160, wider than what the PTY got,
     // so no second wait) and the PTY follows it; the queued run then only re-syncs the PTY.
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'xterm 160x48', 'pty 160x48', 'xterm 160x48', 'pty 160x48']);
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'xterm 160x48', 'pty 160x48', 'xterm 160x48', 'pty 160x48']);
     expect(h.state.xterm).toEqual({ cols: 160, rows: 48 });
     expect(h.waiting()).toBe(false);
   });
@@ -198,9 +240,9 @@ describe('createResizeSequencer', () => {
     h.seq.request();
     h.state.layout = { cols: 147, rows: 43 };
     await h.finishWait();
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 147x43', 'wait']);
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'pty 147x51', 'wait']);
     await h.finishWait();
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 147x43', 'wait', 'xterm 147x43', 'pty 147x43']);
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'pty 147x51', 'wait', 'xterm 147x43', 'pty 147x43']);
   });
 
   it('stops re-sending after a bounded number of rounds', async () => {
@@ -231,7 +273,7 @@ describe('createResizeSequencer', () => {
     h.seq.request();
     h.seq.dispose();
     await h.finishWait();
-    expect(h.events).toEqual(['pty 157x46', 'wait', 'pty 168x51']);
+    expect(h.events).toEqual(['pty 157x51', 'wait', 'pty 168x51']);
     h.seq.request();
     h.seq.request({}, 10);
     await vi.advanceTimersByTimeAsync(20);
@@ -244,7 +286,7 @@ describe('createResizeSequencer', () => {
     h.seq.dispose();
     h.state.gone = true;
     await h.finishWait();
-    expect(h.pty).toEqual([{ cols: 157, rows: 46 }]);
+    expect(h.pty).toEqual([{ cols: 157, rows: 51 }]);
   });
 
   it('a job without a custom refit makes the merged run use the default refit', async () => {
@@ -285,7 +327,7 @@ describe('createResizeSequencer', () => {
     h.seq.request({ refit });
     await h.finishWait();
     expect(refit).toHaveBeenCalledTimes(1);
-    expect(h.pty).toEqual([{ cols: 157, rows: 46 }, { cols: 150, rows: 46 }]);
+    expect(h.pty).toEqual([{ cols: 157, rows: 51 }, { cols: 150, rows: 46 }]);
   });
 });
 

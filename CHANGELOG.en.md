@@ -9,6 +9,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Fixed
+
+- After changing the terminal font size or the window size, Claude Code's status line and bottom lines could stay blank until Ctrl+L. They now redraw.
+
 ## [1.1.69] - 2026-11-12
 
 ### Added

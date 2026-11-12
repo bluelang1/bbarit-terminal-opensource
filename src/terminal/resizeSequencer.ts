@@ -8,6 +8,13 @@
 // wide grid; when xterm then shrinks, nothing on screen is longer than the new width and the
 // reflow wraps nothing. Full-screen TUIs (alternate buffer) repaint everything on SIGWINCH and
 // widening never wraps, so both keep the old order: xterm first, then the PTY.
+//
+// The PTY-first step sends only the new column count and keeps xterm's current rows. When xterm
+// loses rows it drops the lines below the cursor whatever they hold, and an inline TUI such as
+// Claude Code keeps its cursor on the input line with its status line and footer below it. Had the
+// PTY already been given the new rows, the program would have repainted before xterm dropped those
+// lines and the final PTY sync would carry no change, so they would stay blank. With the rows kept,
+// the final sync changes the rows and the program repaints after xterm has shrunk.
 import { ptySizeChanged, type GridSize } from './ptySize';
 
 export type ResizeOrder = 'none' | 'xterm-first' | 'pty-first';
@@ -146,13 +153,16 @@ export function createResizeSequencer(deps: ResizeSequencerDeps): ResizeSequence
       for (let round = 0; round < MAX_PTY_FIRST_ROUNDS; round++) {
         const ctx = { altBuffer: deps.altBuffer(), replaying: deps.replaying(), ptyLive: deps.ptyLive?.() ?? true };
         if (!target || resizeOrder(from, target, ctx) !== 'pty-first') break;
-        deps.resizePty(target);
+        // New columns, xterm's rows (see the top of this file): a row change reaches the program
+        // with the final sync, after xterm has resized.
+        const step = { cols: target.cols, rows: from.rows };
+        deps.resizePty(step);
         ptyFirst = true;
         await deps.waitForRedraw();
         // Hidden or unmounted during the wait: xterm is not resized now (it is when the tab is
         // shown or mounted again); the finally block puts the PTY back to xterm's grid.
         if (disposed || !deps.visible()) return;
-        from = target;
+        from = step;
         target = deps.propose();
       }
       if (job.refit && job.revealPin == null) job.refit();
