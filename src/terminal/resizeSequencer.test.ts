@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MAX_PTY_FIRST_ROUNDS, createResizeSequencer, mergeJobs, resizeOrder, waitForQuietWrites, type ResizeJob, type ResizeSequencerDeps } from './resizeSequencer';
+import { MAX_PTY_FIRST_ROUNDS, REDRAW_NUDGE_MS, createResizeSequencer, mergeJobs, resizeOrder, waitForQuietWrites, type ResizeJob, type ResizeSequencerDeps } from './resizeSequencer';
 import type { GridSize } from './ptySize';
 
 const normal = { altBuffer: false, replaying: false };
@@ -331,6 +331,65 @@ describe('createResizeSequencer', () => {
   });
 });
 
+describe('redraw nudge', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('sends one column less, then xterm size after REDRAW_NUDGE_MS', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
+    h.seq.request({ nudge: true });
+    await Promise.resolve();
+    expect(h.pty).toEqual([{ cols: 167, rows: 51 }]);
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS - 1);
+    expect(h.pty).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(h.pty).toEqual([{ cols: 167, rows: 51 }, { cols: 168, rows: 51 }]);
+  });
+
+  it('a real resize requested during the nudge runs after the PTY is back', async () => {
+    const h = harness({ cols: 157, rows: 46 }, { cols: 157, rows: 46 });
+    h.seq.request({ nudge: true });
+    await Promise.resolve();
+    h.state.layout = { cols: 168, rows: 51 };
+    h.seq.request();
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.events).toEqual(['xterm 157x46', 'pty 156x46', 'pty 157x46', 'xterm 168x51', 'pty 168x51']);
+  });
+
+  it('is skipped while replaying output, without a live PTY or while hidden', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
+    h.state.replaying = true;
+    h.seq.request({ nudge: true });
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    h.state.replaying = false;
+    h.state.ptyLive = false;
+    h.seq.request({ nudge: true });
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    h.state.ptyLive = true;
+    h.state.visible = false;
+    h.seq.request({ nudge: true });
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.pty).toEqual([]);
+  });
+
+  it('puts the PTY back to xterm size when disposed during the nudge', async () => {
+    const h = harness({ cols: 168, rows: 51 }, { cols: 168, rows: 51 });
+    h.seq.request({ nudge: true });
+    await Promise.resolve();
+    h.seq.dispose();
+    await vi.advanceTimersByTimeAsync(REDRAW_NUDGE_MS);
+    expect(h.pty).toEqual([{ cols: 167, rows: 51 }, { cols: 168, rows: 51 }]);
+  });
+
+  it('merged into a resize job, nudges once after the resize', async () => {
+    const h = harness({ cols: 157, rows: 46 }, { cols: 168, rows: 51 });
+    h.seq.request({ nudge: true }, 50);
+    h.seq.request({}, 50);
+    await vi.advanceTimersByTimeAsync(50 + REDRAW_NUDGE_MS);
+    expect(h.events).toEqual(['xterm 168x51', 'pty 168x51', 'pty 167x51', 'pty 168x51']);
+  });
+});
+
 describe('mergeJobs', () => {
   const a = () => {};
   const b = () => {};
@@ -340,8 +399,10 @@ describe('mergeJobs', () => {
     expect(mergeJobs({}, { refit: b }).refit).toBeUndefined();
     expect(mergeJobs(null, { refit: b }).refit).toBe(b);
   });
-  it('ORs the PTY sync flag and keeps the latest reveal pin', () => {
+  it('ORs the PTY sync and nudge flags and keeps the latest reveal pin', () => {
     expect(mergeJobs({ alwaysSyncPty: true, revealPin: 1 }, {})).toMatchObject({ alwaysSyncPty: true, revealPin: 1 });
+    expect(mergeJobs({ nudge: true }, {}).nudge).toBe(true);
+    expect(mergeJobs({}, { nudge: true }).nudge).toBe(true);
     expect(mergeJobs({ revealPin: 1 }, { revealPin: 2 }).revealPin).toBe(2);
   });
 });

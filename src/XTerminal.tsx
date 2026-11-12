@@ -2393,6 +2393,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // ignore
     }
     setShowScrollToBottom(false);
+    // xterm.clear() erases the screen behind the program's back. An agent TUI that repaints only
+    // changed cells (Claude Code's status line) would leave the rest blank: nudge a full repaint.
+    // The sequencer skips it without a live PTY or while output is being replayed.
+    if (cliType !== 'shell') resizeSeqRef.current?.request({ nudge: true });
     if (cliType === 'bbarit') {
       const st = terminalStates.get(terminalId);
       st?.writeToPty?.('\x15/clear\x0d');
@@ -4013,7 +4017,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               restoredState.ptyCreated = true;
               if (restoredProbe.markCliAutoStarted) restoredState.autoStartedCliType = cliType;
             }
-            if (restoredProbe.bufferedOutput && !disposed) await replayOutput(restoredProbe.bufferedOutput);
+            if (restoredProbe.bufferedOutput && !disposed) {
+              await replayOutput(restoredProbe.bufferedOutput);
+              // The program is alive (check_pty_alive) and attached (the snapshot drained its
+              // read queue), but the replay is only the capped tail of its output: an incremental
+              // renderer's static cells may be missing. Same size sends no SIGWINCH, so nudge.
+              if (!disposed && cliType !== 'shell') resizeSeqRef.current?.request({ nudge: true });
+            }
           }
         }
 
