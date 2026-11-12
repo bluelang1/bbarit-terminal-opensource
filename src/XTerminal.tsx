@@ -57,6 +57,7 @@ import { FIT_SCROLLBAR_LANE, fitAddonCols, terminalAreaWidth } from './terminal/
 import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
 import { redrawScreenKeyFor } from './terminal/redrawScreen';
+import { codexLaunchCommand } from './terminal/codexSession';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
@@ -115,6 +116,8 @@ interface XTerminalProps {
   claudeSessionId?: string;
   /** 'hook' ids are resumed only when resumeLastSession is on; 'app' (or absent) always. */
   claudeSessionSource?: ClaudeSessionSource;
+  /** "Codex (new session)" tab: always a fresh `codex`, never the shared `codex resume --last`. */
+  codexFreshSession?: boolean;
   extraFlags?: string[];
   modelId?: string;
   mcpConfigPath?: string;
@@ -1379,7 +1382,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, codexFreshSession, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1412,6 +1415,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   claudeSessionIdRef.current = claudeSessionId;
   const claudeSessionSourceRef = useRef(claudeSessionSource);
   claudeSessionSourceRef.current = claudeSessionSource;
+  const codexFreshSessionRef = useRef(codexFreshSession);
+  codexFreshSessionRef.current = codexFreshSession;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Every refit that may change the grid goes through one sequencer per terminal: a normal-buffer
@@ -3777,9 +3782,11 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             modeFlags.push('--model', shellQuoteArg(modelId, argShell));
           }
-          const cmd = resumeLastSession
-            ? `codex resume --last${flagsToString([...modeFlags, ...normalizedFlags])}`
-            : `codex${flagsToString([...modeFlags, ...normalizedFlags])}`;
+          const cmd = codexLaunchCommand({
+            resumeLastSession: !!resumeLastSession,
+            freshSession: codexFreshSessionRef.current,
+            flags: flagsToString([...modeFlags, ...normalizedFlags]),
+          });
           return wrapCliCheck(cmd, 'codex', 'npm i -g @openai/codex');
         })(),
         cursor: (() => {

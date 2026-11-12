@@ -12,6 +12,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 ### Added
 
 - Claude Code terminals get a Redraw screen button in the button strip on the right. When the screen looks out of sync, it sends Ctrl+L so Claude Code repaints the whole screen; text you were typing stays in the prompt. It also works in fullscreen mode. Codex terminals do not get it, because Ctrl+L there clears instead of repainting, and plain shell terminals do not either.
+- “Codex (new session)” in the add-AI-terminal menu and the command palette. Even with "Resume Last Session" turned on in Settings, this tab never picks up the folder's latest Codex conversation (`codex resume --last`); it always starts a new one, and tabs are named like “Codex (new session) 1”. After an app restart the tab starts a new conversation again (unlike Claude, Codex offers no way to pin a session to a tab and resume it). Codex child tabs started by the agent relay start the same way, so they no longer pick up the parent's conversation.
 
 ## [1.1.69] - 2026-11-12
 

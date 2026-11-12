@@ -127,11 +127,16 @@ export const CTL_REF = 'node "$BBARIT_CTL"';
 
 /**
  * agent.run 이 만드는 자식 탭. Claude 는 전용 세션(`--session-id <uuid>`)으로 띄운다 — 같은
- * 프로젝트 폴더에 부모의 대화가 있으면 `--continue` 가 부모 대화를 이어 버린다. 이름은
+ * 프로젝트 폴더에 부모의 대화가 있으면 `--continue` 가 부모 대화를 이어 버린다. Codex 도 같은
+ * 이유로 "Codex (새 대화)" 탭으로 띄운다(`codex resume --last` 대신 늘 새 `codex`). 이름은
  * `--name` 또는 `<cliType> (agent)`.
  */
-export function agentRunTerminalSpec(cliType: string, name?: string): { name: string; freshClaudeSession: boolean } {
-  return { name: (name || '').trim() || `${cliType} (agent)`, freshClaudeSession: cliType === 'claude' };
+export function agentRunTerminalSpec(cliType: string, name?: string): { name: string; freshClaudeSession: boolean; freshCodexSession: boolean } {
+  return {
+    name: (name || '').trim() || `${cliType} (agent)`,
+    freshClaudeSession: cliType === 'claude',
+    freshCodexSession: cliType === 'codex',
+  };
 }
 
 /** 전용 Claude 세션 탭의 필드(addTerminal 이 새 터미널에 붙인다). */
