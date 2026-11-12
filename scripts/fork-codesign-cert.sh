@@ -104,7 +104,10 @@ log="$("$openssl_bin" req -x509 -newkey rsa:3072 -sha256 -nodes -days 3650 \
   -keyout "$key" -out "$cert" 2>&1)" || { printf '%s\n' "$log" >&2; exit 1; }
 
 # No trailing newline: `gh secret set < file` would keep it in the secret.
-printf '%s' "$("$openssl_bin" rand -hex 24)" > "$password_file"
+p12_password="$("$openssl_bin" rand -hex 24)"
+[ -n "$p12_password" ] || { echo "openssl rand produced no password" >&2; exit 1; }
+printf '%s' "$p12_password" > "$password_file"
+unset p12_password
 "$openssl_bin" pkcs12 -export -inkey "$key" -in "$cert" -name "$common_name" \
   -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1 \
   -passout "file:$password_file" -out "$p12"
