@@ -12,6 +12,7 @@ import {
   regionLanding,
   registerActiveTerminal,
   resetKbdRegionsForTest,
+  kbdRegionMemoryForTest,
   shouldTerminalTakeFocus,
   type RegionEnv,
 } from './regions';
@@ -36,6 +37,13 @@ const mount = (html: string) => {
 const env = (): RegionEnv => ({ doc: document, win: window });
 const byId = (id: string) => document.getElementById(id) as HTMLElement;
 const names = () => availableRegions(env()).map((r) => r.name);
+/** Tab pressed on `from` and the browser moved focus to `to` (needs fake timers). */
+const tabTo = (from: HTMLElement, to: HTMLElement) => {
+  from.focus();
+  from.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+  to.focus();
+  vi.advanceTimersByTime(0);
+};
 const activeId = () => (document.activeElement as HTMLElement | null)?.id || '(body)';
 
 // A small version of the real window: top bar with the project tabs inside it (each tab is
@@ -171,8 +179,7 @@ describe('picking a project or terminal tab by keyboard', () => {
     try {
       byId('tab1').setAttribute('tabindex', '-1');
       byId('tab1').setAttribute(KBD_ITEM_ATTR, '');
-      byId('tab1').focus();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      tabTo(byId('new-tab'), byId('tab1'));
       expect(isKeyboardInChrome()).toBe(true);
       const clicked = vi.fn();
       byId('tab1').addEventListener('click', clicked);
@@ -213,8 +220,8 @@ describe('picking a project or terminal tab by keyboard', () => {
     const { focus } = withTerminal();
     const off = installKbdRegions(window);
     try {
-      byId('row').focus();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      tabTo(byId('git'), byId('row'));
+      expect(isKeyboardInChrome()).toBe(true);
       const ev = press(byId('row'));
       expect(ev.defaultPrevented).toBe(false); // the row's own handler decides
       expect(isKeyboardInChrome()).toBe(false);
@@ -250,8 +257,7 @@ describe('picking a project or terminal tab by keyboard', () => {
     const { focus } = withTerminal();
     const off = installKbdRegions(window);
     try {
-      byId('git').focus();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      tabTo(byId('search'), byId('git'));
       press(byId('git'));
       press(byId('new-tab'));
       vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS * 2);
@@ -333,6 +339,7 @@ describe('cycleKeyboardRegion', () => {
 
 describe('keyboard-in-chrome guard for terminal auto-focus', () => {
   it('holds the terminal back after F6 into the chrome until the user acts on the terminal', () => {
+    vi.useFakeTimers();
     mount(LAYOUT);
     const { focus } = withTerminal();
     const off = installKbdRegions(window);
@@ -355,8 +362,7 @@ describe('keyboard-in-chrome guard for terminal auto-focus', () => {
       noteTerminalNavigation();
       expect(shouldTerminalTakeFocus()).toBe(true);
 
-      byId('git').focus();
-      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      tabTo(byId('reload'), byId('git'));
       expect(shouldTerminalTakeFocus()).toBe(false);
       // Focus entering the terminal (click, F6, hint pick) clears it.
       focus();
@@ -412,5 +418,97 @@ describe('XTerminal call sites', () => {
     expect(src).toMatch(/ref=\{imeBridgeRef\}\s+tabIndex=\{-1\}/);
     expect(src).toContain('data-kbd-region="terminal"');
     expect(src).toContain('data-kbd-region="terminal-strip"');
+  });
+});
+
+describe('review fixes', () => {
+  it('Tab sets the chrome flag only when it moved focus to another chrome element', () => {
+    vi.useFakeTimers();
+    mount(`${LAYOUT}
+      <div data-kbd-region="editor"><div class="monaco-editor"><textarea id="mon"></textarea></div><textarea id="note"></textarea></div>
+      <div class="modal-overlay" data-kbd-region="panel"><input id="f1"><input id="f2"></div>`);
+    const off = installKbdRegions(window);
+    try {
+      // Indent: focus stays where it was.
+      tabTo(byId('mon'), byId('mon'));
+      expect(isKeyboardInChrome()).toBe(false);
+      // Between modal fields.
+      tabTo(byId('f1'), byId('f2'));
+      expect(isKeyboardInChrome()).toBe(false);
+      // Into a textarea / editor.
+      tabTo(byId('git'), byId('note'));
+      expect(isKeyboardInChrome()).toBe(false);
+      // To another chrome control.
+      tabTo(byId('git'), byId('search'));
+      expect(isKeyboardInChrome()).toBe(true);
+    } finally {
+      off();
+    }
+  });
+
+  it('a terminal covered by a full-window panel is not a region (hit test)', () => {
+    mount(`${LAYOUT}<div id="ov" class="git-panel-overlay" data-kbd-region="panel" data-box="0,0,1000,1000"><button id="pbtn" data-box="100,100,10,10">x</button></div>`);
+    withTerminal();
+    const ov = byId('ov');
+    // Everything under the overlay hits the overlay; its own button hits itself.
+    (document as any).elementFromPoint = (x: number, y: number) => (x === 105 && y === 105 ? byId('pbtn') : ov);
+    try {
+      expect(names()).toEqual(['panel']);
+      expect(cycleKeyboardRegion(1)).toBe('panel');
+      expect(activeId()).toBe('pbtn');
+    } finally {
+      delete (document as any).elementFromPoint;
+    }
+  });
+
+  it('a focusable container (sidebar) lands on something inside it, also when it was the last focus', () => {
+    mount(`<div id="side" data-kbd-region="sidebar" tabindex="-1"><button id="inner">files</button></div>`);
+    const off = installKbdRegions(window);
+    try {
+      byId('side').focus();
+      expect(regionLanding('sidebar', env())?.id).toBe('inner');
+      byId('inner').remove();
+      expect(regionLanding('sidebar', env())?.id).toBe('side');
+    } finally {
+      off();
+    }
+  });
+
+  it('removes tabindex/data-kbd-item from an item once it loses focus', () => {
+    mount(LAYOUT);
+    byId('git').focus();
+    cycleKeyboardRegion(1);
+    const tab = byId('p2');
+    expect(tab.getAttribute('tabindex')).toBe('-1');
+    byId('git').focus();
+    expect(tab.hasAttribute('tabindex')).toBe(false);
+    expect(tab.hasAttribute(KBD_ITEM_ATTR)).toBe(false);
+  });
+
+  it('drops remembered elements that left the document', () => {
+    mount(LAYOUT);
+    const off = installKbdRegions(window);
+    try {
+      byId('search').focus();
+      expect(kbdRegionMemoryForTest()).toContain('toolbar');
+      byId('search').remove();
+      byId('stat').focus();
+      expect(kbdRegionMemoryForTest()).not.toContain('toolbar');
+    } finally {
+      off();
+    }
+  });
+
+  it('XTerminal refocus handlers leave keys on the strip buttons alone', () => {
+    const src = readFileSync(join(process.cwd(), 'src/XTerminal.tsx'), 'utf8');
+    const guard = "if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;";
+    // Bridge keystroke refocus + IME-input typing box.
+    for (const marker of ["if (activeEl === bridge) return;", "const handleGlobalKeyDown = (e: KeyboardEvent) => {"]) {
+      const at = src.indexOf(marker);
+      expect(at).toBeGreaterThan(0);
+      const fnStart = src.lastIndexOf('(e: KeyboardEvent) => {', at + marker.length);
+      const body = src.slice(fnStart, fnStart + 700);
+      expect(body).toContain(guard);
+    }
   });
 });

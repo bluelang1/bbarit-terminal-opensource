@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { KeybindingManager } from './KeybindingManager';
 import { detectConflicts, matchesEvent, parseKeybindings } from './parser';
-import { isKeyboardInChrome, registerActiveTerminal, resetKbdRegionsForTest } from '../a11y/regions';
+import { cycleKeyboardRegion, isKeyboardInChrome, registerActiveTerminal, resetKbdRegionsForTest } from '../a11y/regions';
+
+// Settings > Shortcuts "regionKeys" switch, read through the config snapshot.
+const cfg = vi.hoisted(() => ({ regionKeys: true }));
+vi.mock('../config/ConfigContext', () => ({ getConfigSnapshot: () => cfg }));
 
 const setPlatform = (platform: string) => {
   vi.stubGlobal('navigator', { platform });
@@ -141,9 +145,66 @@ describe('focus.nextRegion / focus.prevRegion', () => {
     km.register('terminal.tab-1', handler);
     km.attach();
     try {
-      git.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      git.focus();
+      cycleKeyboardRegion(1); // F6 into the toolbar
       expect(isKeyboardInChrome()).toBe(true);
       git.dispatchEvent(new KeyboardEvent('keydown', { key: '1', code: 'Digit1', metaKey: true, bubbles: true, cancelable: true }));
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(isKeyboardInChrome()).toBe(false);
+    } finally {
+      km.destroy();
+    }
+  });
+
+  it('with region keys switched off, F6 / Shift+F6 go to the terminal as before', () => {
+    vi.useFakeTimers();
+    setPlatform('MacIntel');
+    cfg.regionKeys = false;
+    document.body.innerHTML = `
+      <div data-kbd-region="toolbar"><button id="git">git</button></div>
+      <div data-terminal-scope data-kbd-region="terminal"><textarea id="bridge"></textarea></div>`;
+    const bridge = document.getElementById('bridge') as HTMLTextAreaElement;
+    const km = new KeybindingManager();
+    km.init();
+    km.attach();
+    try {
+      bridge.focus();
+      const terminalSaw = vi.fn();
+      bridge.addEventListener('keydown', terminalSaw);
+      for (const shiftKey of [false, true]) {
+        const ev = new KeyboardEvent('keydown', { key: 'F6', code: 'F6', shiftKey, bubbles: true, cancelable: true });
+        bridge.dispatchEvent(ev);
+        expect(ev.defaultPrevented).toBe(false);
+      }
+      vi.runAllTimers();
+      expect(terminalSaw).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(bridge);
+    } finally {
+      cfg.regionKeys = true;
+      km.destroy();
+    }
+  });
+
+  it('task.open-last-completed from a text field lets the opened terminal take focus', () => {
+    setPlatform('MacIntel');
+    document.body.innerHTML = '<input id="field">';
+    const field = document.getElementById('field') as HTMLInputElement;
+    const km = new KeybindingManager();
+    km.init();
+    const handler = vi.fn();
+    km.register('task.open-last-completed', handler);
+    km.attach();
+    try {
+      document.body.insertAdjacentHTML('beforeend', '<div data-kbd-region="toolbar"><button id="git">git</button></div>');
+      const git = document.getElementById('git') as HTMLElement;
+      const box = () => ({ left: 0, top: 0, width: 10, height: 10, right: 10, bottom: 10, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+      git.getBoundingClientRect = box;
+      git.parentElement!.getBoundingClientRect = box;
+      git.focus();
+      cycleKeyboardRegion(1);
+      expect(isKeyboardInChrome()).toBe(true);
+      field.focus();
+      field.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', code: 'KeyJ', metaKey: true, shiftKey: true, bubbles: true, cancelable: true }));
       expect(handler).toHaveBeenCalledTimes(1);
       expect(isKeyboardInChrome()).toBe(false);
     } finally {

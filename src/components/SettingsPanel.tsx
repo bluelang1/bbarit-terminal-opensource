@@ -3781,6 +3781,19 @@ export function SettingsPanel({
               </div>
 
               <div className="settings-group">
+                <h3>{t('settings.regionKeys.title')}</h3>
+                <div className="setting-item toggle">
+                  <label>{t('settings.regionKeys.label')}</label>
+                  <input
+                    type="checkbox"
+                    checked={config.regionKeys !== false}
+                    onChange={(e) => updateConfig((prev) => ({ ...prev, regionKeys: e.target.checked }))}
+                  />
+                  <span className="setting-description">{t('settings.regionKeys.desc')}</span>
+                </div>
+              </div>
+
+              <div className="settings-group">
                 <h3>{t('settings.shortcuts.split')}</h3>
                 <p className="shortcut-note">{t('settings.shortcuts.split.desc')}</p>
                 <div className="shortcut-list">

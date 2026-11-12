@@ -2799,6 +2799,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       // Don't steal focus if terminal is not visible
       if (wrap.offsetParent === null) return;
       const activeEl = document.activeElement as HTMLElement | null;
@@ -6074,6 +6076,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       const wrap = terminalWrapRef.current;
       // Don't steal focus if terminal is not visible
       if (wrap && wrap.offsetParent === null) return;

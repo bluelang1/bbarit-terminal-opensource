@@ -8,11 +8,16 @@
 import { parseKeybinding, matchesEvent, normalizeEventKeyForShortcut, type KeyBindingEntry } from './parser';
 import { isHintModeActive } from '../hints/hintModeFlag';
 import { installKbdRegions, noteTerminalNavigation, requestRegionCycle } from '../a11y/regions';
+import { getConfigSnapshot } from '../config/ConfigContext';
+
+/** Settings > Shortcuts can give F6 back to terminal programs (mc, htop, nano). */
+const regionKeysOn = (): boolean => getConfigSnapshot()?.regionKeys !== false;
 
 /** Region cycling (src/a11y/regions.ts) needs no App state, so its handlers are built in. */
 const BUILTIN_HANDLERS: Array<[string, () => boolean | void]> = [
-  ['focus.nextRegion', () => requestRegionCycle(1)],
-  ['focus.prevRegion', () => requestRegionCycle(-1)],
+  // `false` = not handled: the key goes on to the terminal exactly as before.
+  ['focus.nextRegion', () => (regionKeysOn() ? requestRegionCycle(1) : false)],
+  ['focus.prevRegion', () => (regionKeysOn() ? requestRegionCycle(-1) : false)],
 ];
 
 /** Shortcuts that switch terminal/project: the terminal they land on may take focus again. */
@@ -238,9 +243,11 @@ export class KeybindingManager {
         const globalShortcuts = ['command-palette.toggle', 'settings.open', 'file.open-document', 'view.toggle-terminal-mode', 'view.toggle-editor', 'view.toggle-sidebar', 'task.open-last-completed', 'hints.toggle', 'focus.nextRegion', 'focus.prevRegion'];
         for (const binding of this.bindings) {
           if (globalShortcuts.includes(binding.id) && matchesEvent(binding.binding, e)) {
-            e.preventDefault();
             const handler = this.handlers.get(binding.id);
-            if (handler) handler();
+            if (handler && returnsFocusToTerminal(binding.id)) noteTerminalNavigation();
+            const result = handler ? handler() : undefined;
+            // Region keys switched off in Settings pass through; the rest behave as before.
+            if (result !== false || !binding.id.startsWith('focus.')) e.preventDefault();
             return;
           }
         }

@@ -96,3 +96,11 @@ describe('hints config', () => {
     expect(validateConfig({ hints: { style: 'neon', size: 'huge' } } as any).hints).toEqual({ style: 'raised', size: 'small' });
   });
 });
+
+describe('regionKeys', () => {
+  it('is on unless explicitly turned off', () => {
+    expect(validateConfig({}).regionKeys).toBe(true);
+    expect(validateConfig({ regionKeys: false } as any).regionKeys).toBe(false);
+    expect(validateConfig({ regionKeys: 'no' } as any).regionKeys).toBe(true);
+  });
+});

@@ -49,6 +49,11 @@ export const KBD_REGION_ORDER = [
   'statusbar',       // bottom status bar
 ] as const;
 
+/** Focus inside these is a modal's, never "the keyboard is in the chrome". */
+const MODAL_SELECTOR = '[aria-modal="true"], .confirm-overlay, .settings-overlay, [class*="modal-overlay"], [class*="modal-backdrop"]';
+/** Landing in these by Tab is editing, not walking the chrome. */
+const EDITOR_SELECTOR = '.monaco-editor, .cm-editor, textarea, [contenteditable=""], [contenteditable="true"]';
+
 /** Set on elements this module made focusable (tabindex=-1) so Enter/Space can click them. */
 export const KBD_ITEM_ATTR = 'data-kbd-item';
 
@@ -63,6 +68,8 @@ const FOCUSABLE_SELECTOR = [
   '[contenteditable="true"]',
   'summary',
 ].join(', ');
+
+const ITEM_LIKE_SELECTOR = 'button, a[href], [role="button"], [data-kbd-item], [data-project-tab-id], [data-terminal-tab-id], [data-hint]';
 
 const CURRENT_ITEM_SELECTOR = [
   '[aria-current]:not([aria-current="false"])',
@@ -87,6 +94,21 @@ let lastRegion: string | null = null;
 let keyboardInChrome = false;
 /** Active terminals: their region element → the function a click on the terminal runs. */
 const terminalFocusers = new Map<HTMLElement, () => void>();
+
+/** Drop remembered elements that left the document so detached trees are not kept alive. */
+function pruneDetached(): void {
+  for (const [name, el] of Array.from(lastFocused.entries())) {
+    if (!el.isConnected) lastFocused.delete(name);
+  }
+  for (const el of Array.from(terminalFocusers.keys())) {
+    if (!el.isConnected) terminalFocusers.delete(el);
+  }
+}
+
+/** Test helper: the region names with a remembered element. */
+export function kbdRegionMemoryForTest(): string[] {
+  return Array.from(lastFocused.keys());
+}
 
 /** Test helper: forget everything remembered. */
 export function resetKbdRegionsForTest(): void {
@@ -126,6 +148,10 @@ const isReachable = (el: Element, doc: Document): boolean => {
 const isUsable = (el: HTMLElement, env: RegionEnv): boolean =>
   !isHintDisabled(el) && isShown(el, env.win) && isReachable(el, env.doc);
 
+/** A region element that is a whole container (not an item such as a tab or a button). */
+const isContainerRoot = (el: Element): boolean =>
+  el.hasAttribute(KBD_REGION_ATTR) && !el.matches(ITEM_LIKE_SELECTOR);
+
 /** The region element `el` belongs to is `root` (not a region nested inside it). */
 const ownedBy = (root: HTMLElement, el: Element): boolean => regionRootOf(el) === root;
 
@@ -136,13 +162,15 @@ const visibleRoots = (name: string, env: RegionEnv): HTMLElement[] =>
 /** Tab-order focusables of a region element (plus the element itself if it has a tabindex). */
 export function regionFocusables(root: HTMLElement, env: RegionEnv): HTMLElement[] {
   const out: HTMLElement[] = [];
-  if (root.hasAttribute('tabindex') && isUsable(root, env)) out.push(root);
   for (const el of Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))) {
     if (el.tabIndex < 0) continue;
     if (!ownedBy(root, el)) continue;
     if (el.closest('.xterm, [data-hint-overlay]')) continue;
     if (isUsable(el, env)) out.push(el);
   }
+  // A focusable container (the file-tree sidebar, a panel overlay) only as a last resort:
+  // a ring around the whole container says little, so something inside it wins.
+  if (root.hasAttribute('tabindex') && isUsable(root, env)) out.push(root);
   return out;
 }
 
@@ -157,7 +185,8 @@ function currentItem(root: HTMLElement, env: RegionEnv): HTMLElement | null {
 /** The active terminal (registered focuser) that is on screen, preferring the remembered one. */
 function activeTerminal(env: RegionEnv): { el: HTMLElement; focus: () => void } | null {
   const shown = Array.from(terminalFocusers.entries())
-    .filter(([el]) => regionNameOf(el) === TERMINAL_REGION && isShown(el, env.win))
+    // Covered by a full-window panel (Git, MCP, …) = not reachable: F6 must not land there.
+    .filter(([el]) => regionNameOf(el) === TERMINAL_REGION && isShown(el, env.win) && isReachable(el, env.doc))
     .sort(([a], [b]) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
   if (shown.length === 0) return null;
   const remembered = lastFocused.get(TERMINAL_REGION);
@@ -179,7 +208,7 @@ export function regionLanding(name: string, env: RegionEnv): HTMLElement | null 
   const remembered = lastFocused.get(name);
   if (remembered && remembered.isConnected) {
     const root = regionRootOf(remembered);
-    if (root && roots.includes(root) && isUsable(remembered, env)) return remembered;
+    if (root && roots.includes(root) && !isContainerRoot(remembered) && isUsable(remembered, env)) return remembered;
   }
   for (const root of roots) {
     const cur = currentItem(root, env);
@@ -211,6 +240,7 @@ function regionNamesInDom(env: RegionEnv): string[] {
 
 /** Regions that are on screen and have somewhere to land, in visual order. */
 export function availableRegions(env: RegionEnv): AvailableRegion[] {
+  pruneDetached();
   const out: AvailableRegion[] = [];
   for (const name of regionNamesInDom(env)) {
     if (name === TERMINAL_REGION) {
@@ -229,6 +259,13 @@ function focusLanding(el: HTMLElement, name: string): void {
     // A clickable item (project tab, terminal tab) that is not focusable by itself.
     el.setAttribute('tabindex', '-1');
     el.setAttribute(KBD_ITEM_ATTR, '');
+    // Only while it holds keyboard focus: afterwards a mouse click must not focus the tab
+    // (and a later Space/Enter must not click it again).
+    el.addEventListener('blur', () => {
+      if (!el.hasAttribute(KBD_ITEM_ATTR)) return;
+      el.removeAttribute(KBD_ITEM_ATTR);
+      el.removeAttribute('tabindex');
+    }, { once: true });
   }
   keyboardInChrome = true;
   try { el.focus(); } catch { /* ignore */ }
@@ -309,7 +346,7 @@ export function shouldTerminalTakeFocus(doc: Document | undefined = typeof docum
   if (!active || active === doc.body) return true;
   const name = regionNameOf(active);
   if (!name || name === TERMINAL_REGION) return true;
-  if (active.closest('[aria-modal="true"], .confirm-overlay, .settings-overlay')) return true;
+  if (active.closest(MODAL_SELECTOR)) return true;
   return false;
 }
 
@@ -343,6 +380,7 @@ export function installKbdRegions(win: Window = window): () => void {
       const target = e.target as HTMLElement | null;
       const name = regionNameOf(target);
       if (!target || !name) return;
+      pruneDetached();
       lastFocused.set(name, target);
       lastRegion = name;
       if (name === TERMINAL_REGION) keyboardInChrome = false;
@@ -352,8 +390,19 @@ export function installKbdRegions(win: Window = window): () => void {
       if (isHintModeActive(doc)) return;
       const target = e.target as HTMLElement | null;
       if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
-        // Tab inside a terminal goes to the shell (completion); anywhere else it walks the chrome.
-        if (regionNameOf(target) !== TERMINAL_REGION) keyboardInChrome = true;
+        // Tab inside a terminal goes to the shell (completion). Elsewhere it counts as walking
+        // the chrome only if it really moved focus to another chrome element: not a Tab that
+        // indents in an editor/textarea, and not Tab between the fields of a modal.
+        if (regionNameOf(target) === TERMINAL_REGION) return;
+        const from = doc.activeElement;
+        setTimeout(() => {
+          const to = doc.activeElement as HTMLElement | null;
+          if (!to || to === from || to === doc.body) return; // indent, or focus did not move
+          const name = regionNameOf(to);
+          if (!name || name === TERMINAL_REGION) return;
+          if (to.closest(MODAL_SELECTOR) || to.closest(EDITOR_SELECTOR)) return;
+          keyboardInChrome = true;
+        }, 0);
         return;
       }
       if (!(e.key === 'Enter' || e.key === ' ') || e.repeat || e.isComposing

@@ -103,8 +103,9 @@ input[type="range"]::-moz-range-thumb {
 
 /* Keyboard regions (F6, src/a11y/regions.ts): wherever focus lands keeps a ring, even on
    elements that set outline: none (inline styles included). Text fields and editors show
-   their caret instead; the terminal shows its cursor. */
-[data-kbd-region]:focus-visible:not(input):not(textarea),
+   their caret instead; the terminal shows its cursor. Region containers that take focus
+   themselves (file-tree sidebar, panel overlays) get no forced ring around the whole box. */
+[data-kbd-region]:is(button, a[href], [role="button"], [data-kbd-item], [data-project-tab-id], [data-terminal-tab-id]):focus-visible,
 [data-kbd-region] :focus-visible:not(input):not(textarea):not([contenteditable]):not(.monaco-editor *):not(.cm-editor *) {
   outline: 2px solid var(--accent-color) !important;
   outline-offset: -2px;
