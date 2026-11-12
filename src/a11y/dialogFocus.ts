@@ -91,6 +91,8 @@ export function useDialogFocus(
     const onKeyDown = (e: KeyboardEvent) => {
       const box = dialogRef.current;
       if (!box) return;
+      // An Enter that commits an IME composition is not a dialog key.
+      if (e.isComposing || e.keyCode === 229) return;
       const active = doc.activeElement;
       const inside = !!active && box.contains(active);
       if (e.key === 'Escape') {
