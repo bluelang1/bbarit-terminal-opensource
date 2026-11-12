@@ -14,8 +14,9 @@
 // registered (XTerminal's focusActiveInput — what a click on the terminal does).
 //
 // "Keyboard is in chrome": set when F6 lands outside a terminal or Tab is pressed outside
-// one; cleared by any mouse press, by focus entering a terminal, and by the terminal/project
-// switch shortcuts (noteTerminalNavigation). While it is set and focus sits in a chrome
+// one; cleared by any mouse press, by focus entering a terminal, by the terminal/project
+// switch shortcuts (noteTerminalNavigation) and by Enter/Space on a project row/tab or a
+// terminal tab (which then focuses that terminal). Other chrome buttons keep focus. While it is set and focus sits in a chrome
 // region, terminal auto-focus paths (activation refocus, IME bridge initial focus) stand
 // down — see shouldTerminalTakeFocus. Mouse users never set it, so their flow is unchanged.
 
@@ -312,6 +313,20 @@ export function shouldTerminalTakeFocus(doc: Document | undefined = typeof docum
   return false;
 }
 
+/** Project rows/tabs and terminal tabs: choosing one by keyboard goes to its terminal. */
+const PICK_ITEM_SELECTOR = '[data-project-tab-id], [data-terminal-tab-id], [data-hint="project"], [data-hint="tab"]';
+/** After a pick that switches terminals, XTerminal's activation refocus (200 ms) normally wins. */
+export const PICK_FOCUS_FALLBACK_MS = 250;
+
+function focusTerminalAfterPick(env: RegionEnv, delayMs: number): void {
+  setTimeout(() => {
+    if (keyboardInChrome) return; // the user moved on (F6 / Tab) in the meantime
+    const active = env.doc.activeElement;
+    if (active && active !== env.doc.body && regionNameOf(active) === TERMINAL_REGION) return;
+    activeTerminal(env)?.focus();
+  }, delayMs);
+}
+
 // ── listeners ───────────────────────────────────────────────────────────────────────────
 let installCount = 0;
 let uninstall: (() => void) | null = null;
@@ -341,12 +356,26 @@ export function installKbdRegions(win: Window = window): () => void {
         if (regionNameOf(target) !== TERMINAL_REGION) keyboardInChrome = true;
         return;
       }
-      if ((e.key === 'Enter' || e.key === ' ') && !e.repeat && !e.isComposing
-        && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey
-        && target?.hasAttribute?.(KBD_ITEM_ATTR) && doc.activeElement === target) {
-        // Enter/Space clicks the item the way a mouse would (as a hint pick does), but the
-        // keyboard stays here like it does for native buttons: the synthetic mousedown
-        // must not count as the mouse user coming back.
+      if (!(e.key === 'Enter' || e.key === ' ') || e.repeat || e.isComposing
+        || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey
+        || !target || doc.activeElement !== target) return;
+      if (target.matches?.(PICK_ITEM_SELECTOR)) {
+        // Picking a project or terminal tab by keyboard goes to that terminal, like a click
+        // or a switch shortcut: the activation refocus may run, and when the item was
+        // already the current one (no activation happens) the terminal is focused here.
+        const wasCurrent = target.classList.contains('active');
+        keyboardInChrome = false;
+        if (target.hasAttribute(KBD_ITEM_ATTR)) {
+          e.preventDefault();
+          e.stopPropagation();
+          activateHintTarget(target, hintKindOf(target));
+        } // native rows (role=button) run their own Enter/Space handler
+        focusTerminalAfterPick({ doc, win }, wasCurrent ? 0 : PICK_FOCUS_FALLBACK_MS);
+        return;
+      }
+      if (target.hasAttribute(KBD_ITEM_ATTR)) {
+        // Any other item made focusable here: click it, keyboard stays (like a native button);
+        // the synthetic mousedown must not count as the mouse user coming back.
         e.preventDefault();
         e.stopPropagation();
         activateHintTarget(target, hintKindOf(target));

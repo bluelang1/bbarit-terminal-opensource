@@ -8,6 +8,7 @@ import {
   isKeyboardInChrome,
   KBD_ITEM_ATTR,
   noteTerminalNavigation,
+  PICK_FOCUS_FALLBACK_MS,
   regionLanding,
   registerActiveTerminal,
   resetKbdRegionsForTest,
@@ -127,8 +128,10 @@ describe('landing spot', () => {
     }
   });
 
-  it('makes a non-focusable current item focusable (tabindex -1) and Enter clicks it', () => {
+  it('makes a non-focusable current item focusable (tabindex -1) and Enter on it goes to the terminal', () => {
+    vi.useFakeTimers();
     mount(LAYOUT);
+    const { focus } = withTerminal();
     const off = installKbdRegions(window);
     try {
       byId('reload').focus();
@@ -142,9 +145,118 @@ describe('landing spot', () => {
       for (const type of ['mousedown', 'mouseup', 'click']) tab.addEventListener(type, () => events.push(type));
       tab.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
       expect(events).toEqual(['mousedown', 'mouseup', 'click']);
-      // Like a native button pressed by keyboard: the terminal does not grab focus afterwards.
+      expect(isKeyboardInChrome()).toBe(false);
+      // Already the current project: no activation refocus will come, so it focuses directly.
+      vi.advanceTimersByTime(0);
+      expect(focus).toHaveBeenCalledTimes(1);
+      expect(activeId()).toBe('bridge');
+    } finally {
+      off();
+    }
+  });
+});
+
+describe('picking a project or terminal tab by keyboard', () => {
+  const press = (el: HTMLElement, key = 'Enter') => {
+    const ev = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+    el.dispatchEvent(ev);
+    return ev;
+  };
+
+  it('a different tab: clicks it, lets the activation refocus run, and falls back after a delay', () => {
+    vi.useFakeTimers();
+    mount(LAYOUT);
+    const { focus } = withTerminal();
+    const off = installKbdRegions(window);
+    try {
+      byId('tab1').setAttribute('tabindex', '-1');
+      byId('tab1').setAttribute(KBD_ITEM_ATTR, '');
+      byId('tab1').focus();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
       expect(isKeyboardInChrome()).toBe(true);
-      expect(shouldTerminalTakeFocus()).toBe(false);
+      const clicked = vi.fn();
+      byId('tab1').addEventListener('click', clicked);
+      press(byId('tab1'), ' ');
+      expect(clicked).toHaveBeenCalledTimes(1);
+      expect(isKeyboardInChrome()).toBe(false);
+      expect(shouldTerminalTakeFocus()).toBe(true);
+      vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS - 1);
+      expect(focus).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(focus).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
+  });
+
+  it('no fallback focus when the activation refocus already put focus in the terminal', () => {
+    vi.useFakeTimers();
+    mount(LAYOUT);
+    const { focus } = withTerminal();
+    const off = installKbdRegions(window);
+    try {
+      byId('tab1').setAttribute('tabindex', '-1');
+      byId('tab1').setAttribute(KBD_ITEM_ATTR, '');
+      byId('tab1').focus();
+      press(byId('tab1'));
+      byId('bridge').focus();
+      vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS);
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      off();
+    }
+  });
+
+  it('native project rows keep their own Enter handler and still end in the terminal', () => {
+    vi.useFakeTimers();
+    mount(`${LAYOUT}<div data-kbd-region="sidebar"><div id="row" role="button" tabindex="0" data-hint="project" class="project-selector-item">row</div></div>`);
+    const { focus } = withTerminal();
+    const off = installKbdRegions(window);
+    try {
+      byId('row').focus();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      const ev = press(byId('row'));
+      expect(ev.defaultPrevented).toBe(false); // the row's own handler decides
+      expect(isKeyboardInChrome()).toBe(false);
+      vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS);
+      expect(focus).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
+  });
+
+  it('F6 away before the fallback fires cancels it', () => {
+    vi.useFakeTimers();
+    mount(LAYOUT);
+    const { focus } = withTerminal();
+    const off = installKbdRegions(window);
+    try {
+      byId('tab1').setAttribute('tabindex', '-1');
+      byId('tab1').setAttribute(KBD_ITEM_ATTR, '');
+      byId('tab1').focus();
+      press(byId('tab1'));
+      cycleKeyboardRegion(-1);
+      expect(isKeyboardInChrome()).toBe(true);
+      vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS);
+      expect(focus).not.toHaveBeenCalled();
+    } finally {
+      off();
+    }
+  });
+
+  it('other chrome buttons keep focus', () => {
+    vi.useFakeTimers();
+    mount(LAYOUT);
+    const { focus } = withTerminal();
+    const off = installKbdRegions(window);
+    try {
+      byId('git').focus();
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }));
+      press(byId('git'));
+      press(byId('new-tab'));
+      vi.advanceTimersByTime(PICK_FOCUS_FALLBACK_MS * 2);
+      expect(isKeyboardInChrome()).toBe(true);
+      expect(focus).not.toHaveBeenCalled();
     } finally {
       off();
     }
