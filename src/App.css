@@ -107,7 +107,7 @@ input[type="range"]::-moz-range-thumb {
    themselves (file-tree sidebar, panel overlays) get no forced ring around the whole box. */
 [data-kbd-region]:is(button, a[href], [role="button"], [data-kbd-item], [data-project-tab-id], [data-terminal-tab-id]):focus-visible,
 [data-kbd-region] :focus-visible:not(input):not(textarea):not([contenteditable]):not(.monaco-editor *):not(.cm-editor *),
-[data-kbd-landed]:focus:not(input):not(textarea):not([contenteditable]):not([data-kbd-region]:not(button, a[href], [role="button"], [data-kbd-item], [data-project-tab-id], [data-terminal-tab-id])) {
+[data-kbd-landed]:not(input):not(textarea):not([contenteditable]):not([data-kbd-region]:not(button, a[href], [role="button"], [data-kbd-item], [data-project-tab-id], [data-terminal-tab-id])) {
   outline: 2px solid var(--accent-color) !important;
   outline-offset: -2px;
 }
