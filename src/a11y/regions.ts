@@ -56,6 +56,8 @@ const EDITOR_SELECTOR = '.monaco-editor, .cm-editor, textarea, [contenteditable=
 
 /** Set on elements this module made focusable (tabindex=-1) so Enter/Space can click them. */
 export const KBD_ITEM_ATTR = 'data-kbd-item';
+/** On the element F6 just landed on, until it loses focus: draws the focus ring (App.css). */
+export const KBD_LANDED_ATTR = 'data-kbd-landed';
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -269,6 +271,12 @@ function focusLanding(el: HTMLElement, name: string): void {
   }
   keyboardInChrome = true;
   try { el.focus(); } catch { /* ignore */ }
+  // The ring must not depend on :focus-visible: WebKit decides that from its own
+  // "last input was the keyboard" heuristic, which a programmatic focus may not meet.
+  if (el.ownerDocument.activeElement === el) {
+    el.setAttribute(KBD_LANDED_ATTR, '');
+    el.addEventListener('blur', () => el.removeAttribute(KBD_LANDED_ATTR), { once: true });
+  }
   lastFocused.set(name, el);
   lastRegion = name;
 }
