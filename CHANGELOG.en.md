@@ -12,6 +12,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 ### Fixed
 
 - After changing the terminal font size or the window size, Claude Code's status line and bottom lines could stay blank until Ctrl+L. They now redraw.
+- Starting with this version, folder access permissions (Documents, Desktop, Downloads) survive app updates. Until now macOS forgot them on every update, so terminals in `~/Documents` failed with `Operation not permitted`. The first update onto this version asks for the permission once more.
 
 ## [1.1.69] - 2026-11-12
 
