@@ -194,6 +194,7 @@ import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as crea
 import { createStatusPoller } from './git/statusPoll';
 import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
 import { useDialogFocus } from './a11y/dialogFocus';
+import { isHiddenStackedPane, isStackedTerminalMode } from './terminal/stackedPanes';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
 
 
@@ -2043,7 +2044,7 @@ const calculateTerminalPosition = (
     transition: 'opacity 0.05s ease',
   };
 
-  if (mode === 'tabs' || mode === 'tiled' || mode === 'tiled_tb' || mode === 'tree') {
+  if (isStackedTerminalMode(mode)) {
     return {
       ...base,
       top: 0,
@@ -23040,6 +23041,9 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={terminal.id}
                       className={`terminal-wrapper ${isActiveTerminal ? 'active' : ''} ${terminal.brokerRole ? `broker-term broker-${terminal.brokerRole}` : ''}`}
+                      // Stacked (tabs) mode: the hidden panes stay mounted (PTY output keeps
+                      // rendering) but must not be reachable with Tab.
+                      inert={isHiddenStackedPane(terminalSplitMode, isActiveTerminal)}
                       style={{
                         ...posStyle,
                         display: isTerminalFiltered(terminal.id) ? 'none' : 'flex',
