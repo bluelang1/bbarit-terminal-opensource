@@ -2967,7 +2967,6 @@ export const de: Record<TranslationKey, string> = {
   // i18n batch: misc2
   'terminal.clearInput': "Eingabe löschen",
   'terminal.clearInputAll': 'Gesamte Eingabe löschen (alle Zeilen)',
-  'terminal.redrawScreen': 'Bildschirm neu zeichnen (Strg+L, Eingabe bleibt)',
   'terminal.searchPlaceholder': "Suchen...",
   'terminal.ollamaNoModelSettings': "Kein Modell ausgewählt. Konfigurieren Sie es unter Einstellungen → Agent → Ollama.",
   'terminal.ollamaIntro': "Nachricht eingeben und Enter drücken. /clear zum Zurücksetzen, /model <name> zum Wechseln.",

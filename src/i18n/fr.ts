@@ -2967,7 +2967,6 @@ export const fr: Record<TranslationKey, string> = {
   // i18n batch: misc2
   'terminal.clearInput': "Effacer la saisie",
   'terminal.clearInputAll': 'Effacer toute la saisie (toutes les lignes)',
-  'terminal.redrawScreen': "Redessiner l'écran (Ctrl+L, garde la saisie)",
   'terminal.searchPlaceholder': "Rechercher...",
   'terminal.ollamaNoModelSettings': "Aucun modèle sélectionné. Allez dans Paramètres → Agent → Ollama pour configurer.",
   'terminal.ollamaIntro': "Saisissez votre message et appuyez sur Entrée. /clear pour réinitialiser, /model <name> pour changer.",

@@ -49,14 +49,13 @@ import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
 import { AGENT_INSTALL_COMMAND } from './config/endpoints';
-import { Delete, Eraser, ListX, RefreshCw } from 'lucide-react';
+import { Delete, Eraser, ListX } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCommandColumn';
 import { FIT_SCROLLBAR_LANE, fitAddonCols, terminalAreaWidth } from './terminal/terminalStripLayout';
 import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
-import { redrawScreenKeyFor } from './terminal/redrawScreen';
 import { codexLaunchCommand } from './terminal/codexSession';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
@@ -6457,7 +6456,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   // component already re-renders on config changes through useTranslation's useConfig.
   const { config: liveConfig } = useConfig();
   const columnQuickCommands = quickCommandColumn(liveConfig.quickCommands);
-  const redrawKey = redrawScreenKeyFor(cliType);
   const columnButtonStyle: React.CSSProperties = {
     height: 20,
     minWidth: 20,
@@ -7173,22 +7171,6 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           >
             <Eraser size={10} />
           </button>
-          {redrawKey && (
-            <button
-              type="button"
-              title={t('terminal.redrawScreen')}
-              aria-label={t('terminal.redrawScreen')}
-              onMouseDown={keepTerminalFocus}
-              onClick={(e) => {
-                keepTerminalFocus(e);
-                // Raw key, no Enter: the CLI repaints and keeps the typed prompt (redrawScreen.ts).
-                void queueButtonInput(terminalId, redrawKey, { submit: false });
-              }}
-              style={columnButtonStyle}
-            >
-              <RefreshCw size={10} />
-            </button>
-          )}
           {columnQuickCommands.custom.length > 0 && (
             <>
               <div

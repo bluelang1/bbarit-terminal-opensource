@@ -2967,7 +2967,6 @@ export const it: Record<TranslationKey, string> = {
   // i18n batch: misc2
   'terminal.clearInput': "Cancella input",
   'terminal.clearInputAll': "Cancella tutto l'input (tutte le righe)",
-  'terminal.redrawScreen': "Ridisegna lo schermo (Ctrl+L, mantiene l'input)",
   'terminal.searchPlaceholder': "Cerca...",
   'terminal.ollamaNoModelSettings': "Nessun modello selezionato. Vai in Impostazioni → Agent → Ollama per configurarlo.",
   'terminal.ollamaIntro': "Scrivi il messaggio e premi Invio. /clear per azzerare, /model <name> per cambiare.",

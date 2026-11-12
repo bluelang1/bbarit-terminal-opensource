@@ -2967,7 +2967,6 @@ export const ja: Record<TranslationKey, string> = {
   // i18n batch: misc2
   'terminal.clearInput': "入力をクリア",
   'terminal.clearInputAll': '入力をすべてクリア(全行)',
-  'terminal.redrawScreen': '画面を再描画（Ctrl+L、入力は保持）',
   'terminal.searchPlaceholder': "検索...",
   'terminal.ollamaNoModelSettings': "モデルが選択されていません。設定 → Agent → Ollama で設定してください。",
   'terminal.ollamaIntro': "メッセージを入力して Enter を押してください。/clear でリセット、/model <name> で切り替え。",
