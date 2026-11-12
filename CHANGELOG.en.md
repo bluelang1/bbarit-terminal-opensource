@@ -22,6 +22,9 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 ### Added
 
 - Move between screen regions by keyboard: F6 moves focus through the top bar, toolbar, project list, sidebar, editor, terminal header and tabs, terminal, right quick-command buttons, open panel, prompt library and bottom status bar, and Shift+F6 goes the other way. It works inside a terminal, so you can leave a terminal without the mouse, and each region puts focus back where you last were (or on the selected project or tab). Once you leave, the terminal no longer pulls focus back; clicking it, F6 back into it, a hint pick, a project/tab switch shortcut, or Enter/Space on a project or terminal tab returns to it. Tab walking the screen skips terminal inputs (Tab inside a terminal still completes in the shell). On Mac laptop keyboards you may need Fn+F6. The keys are listed in Settings > Shortcuts; while the feature is on F6 is not passed to terminal programs, and switching it off there sends F6 / Shift+F6 to the terminal as before (mc, htop, nano).
+### Added
+
+- “Codex (new session)” in the add-AI-terminal menu and the command palette. Even with "Resume Last Session" turned on in Settings, this tab never picks up the folder's latest Codex conversation (`codex resume --last`); it always starts a new one, and tabs are named like “Codex (new session) 1”. After an app restart the tab starts a new conversation again (unlike Claude, Codex offers no way to pin a session to a tab and resume it). Codex child tabs started by the agent relay start the same way, so they no longer pick up the parent's conversation.
 
 ## [1.1.69] - 2026-11-12
 

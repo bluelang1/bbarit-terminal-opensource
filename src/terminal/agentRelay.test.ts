@@ -383,15 +383,19 @@ describe('noteTailLines (TUI answer selection)', () => {
 describe('agent.run child terminal', () => {
   it('claude children get a dedicated session id (no --continue into the parent conversation)', () => {
     const spec = agentRunTerminalSpec('claude');
-    expect(spec).toEqual({ name: 'claude (agent)', freshClaudeSession: true });
+    expect(spec).toEqual({ name: 'claude (agent)', freshClaudeSession: true, freshCodexSession: false });
     const fields = dedicatedClaudeSessionFields(spec.freshClaudeSession, () => '0b6c7d8e-1f2a-4b3c-8d4e-5f6a7b8c9d0e');
     const terminal = { id: 'c1', name: spec.name, cliType: 'claude', ...fields };
     expect(terminal.claudeSessionId).toBe('0b6c7d8e-1f2a-4b3c-8d4e-5f6a7b8c9d0e');
     expect(terminal.claudeSessionSource).toBe('app');
   });
 
+  it('codex children start a fresh Codex session (no resume --last into the parent conversation)', () => {
+    expect(agentRunTerminalSpec('codex', ' reviewer ')).toEqual({ name: 'reviewer', freshClaudeSession: false, freshCodexSession: true });
+  });
+
   it('other children keep the shared behaviour and --name wins', () => {
-    expect(agentRunTerminalSpec('codex', ' reviewer ')).toEqual({ name: 'reviewer', freshClaudeSession: false });
+    expect(agentRunTerminalSpec('gemini', ' reviewer ')).toEqual({ name: 'reviewer', freshClaudeSession: false, freshCodexSession: false });
     expect(dedicatedClaudeSessionFields(false, () => 'x')).toEqual({});
   });
 
