@@ -5,6 +5,8 @@
  * Persisted to ~/.config/octo/config.json.
  */
 
+import { DEFAULT_WINDOW_PIN, readWindowPin, type WindowPinState } from '../window/windowPin';
+
 // ───────────────────────── Sub-types ─────────────────────────
 
 export const LATEST_OPENAI_STT_MODEL = 'gpt-4o-transcribe';
@@ -390,6 +392,8 @@ export interface OctoConfig {
   hints: HintsConfig;
   /** F6 / Shift+F6 move between screen regions (src/a11y/regions.ts); off = F6 goes to the terminal. */
   regionKeys: boolean;
+  /** Window pin: always on top (main + the app's other windows, not the pet) / main follows the active desktop (src/window/windowPin.ts). */
+  window: WindowPinState;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -538,6 +542,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   pet: { ...DEFAULT_PET_CONFIG },
   hints: { ...DEFAULT_HINTS_CONFIG },
   regionKeys: true,
+  window: { ...DEFAULT_WINDOW_PIN },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -627,6 +632,7 @@ export function validateConfig(raw: unknown): OctoConfig {
     pet: normalizePetConfig(input.pet),
     hints: normalizeHintsConfig(input.hints),
     regionKeys: input.regionKeys !== false,
+    window: readWindowPin(input.window),
   };
 }
 

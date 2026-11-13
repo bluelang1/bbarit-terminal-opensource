@@ -11,6 +11,7 @@
     "core:window:allow-show",
     "core:window:allow-unminimize",
     "core:window:allow-set-always-on-top",
+    "core:window:allow-set-visible-on-all-workspaces",
     "core:window:allow-destroy",
     "core:window:allow-set-size",
     "core:window:allow-maximize",

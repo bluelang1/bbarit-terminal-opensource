@@ -10,8 +10,8 @@ const CHROME_KEYS = [
 ];
 
 describe('GUIDE_STEPS', () => {
-  it('six steps in spec order', () => {
-    expect(GUIDE_STEPS.map(s => s.id)).toEqual(['project', 'ai-terminal', 'status', 'keep-running', 'git-keys', 'hints', 'pet']);
+  it('steps in spec order', () => {
+    expect(GUIDE_STEPS.map(s => s.id)).toEqual(['project', 'ai-terminal', 'status', 'keep-running', 'git-keys', 'hints', 'window-pin', 'pet']);
   });
 
   it('pet hidden off macOS', () => {
@@ -47,6 +47,8 @@ describe('GUIDE_STEPS', () => {
     expect(byId.project.target?.altSelector).toBe('[data-guide="new-project-folder"]');
     expect(byId['ai-terminal'].target?.selector).toBe('[data-guide="ai-terminal"]');
     expect(byId['git-keys'].target?.selector).toBe('[data-guide="git"]');
+    expect(byId['window-pin'].target?.selector).toBe('[data-guide="window-pin"]');
+    expect(byId['window-pin'].macOnly).toBeUndefined();
     expect(byId.status.target).toBeUndefined();
     expect(byId.status.action).toBeUndefined();
     expect(byId.hints.target).toBeUndefined();

@@ -25,6 +25,7 @@ import { HINT_SIZES, HINT_STYLES, normalizeHintsConfig } from '../config/schema'
 import { useTranslation } from '../i18n';
 import type { TranslationKey } from '../i18n/en';
 import { LATEST_OPENAI_STT_MODEL, effectiveKeepRunningOnQuit, effectivePtyHolder } from '../config/schema';
+import { currentPlatform, followDesktopsSupported, readWindowPin } from '../window/windowPin';
 import { describePtyBackend, getPtyRecovery, hostDebugBuild, ptyHolderDefaultOn } from '../terminal/ptyRecovery';
 import type { AgentConfig, TerminalConfig, EditorConfig, NoteTemplate, SttConfig } from '../config/schema';
 import { getModelsForCliType } from '../config/modelPresets';
@@ -171,6 +172,8 @@ export const STORAGE_KEY_GEMINI_API_KEY = 'octo-gemini-api-key';
 
 // Local Whisper voice input is macOS-only (see src-tauri/Cargo.toml). On Windows
 // the whole Speech-to-Text settings group is hidden.
+/** "Follow desktops" (window pin) is macOS-only (Spaces). */
+const FOLLOW_DESKTOPS_SUPPORTED = followDesktopsSupported(currentPlatform());
 const IS_WINDOWS = (() => {
   try { return navigator.platform.toLowerCase().includes('win'); } catch { return false; }
 })();
@@ -2224,6 +2227,24 @@ export function SettingsPanel({
                     {t('settings.terminal.keepRunningOnQuit.desc')}
                   </span>
                 </div>
+              </div>
+
+              <div className="settings-group">
+                <h3>{t('settings.window.title')}</h3>
+                {(FOLLOW_DESKTOPS_SUPPORTED ? ['followDesktops', 'alwaysOnTop'] as const : ['alwaysOnTop'] as const).map((key) => (
+                  <div className="setting-item toggle" key={key}>
+                    <label>{t(`settings.window.${key}`)}</label>
+                    <input
+                      type="checkbox"
+                      checked={readWindowPin(config.window)[key]}
+                      onChange={(e) => {
+                        const value = e.target.checked;
+                        updateConfig((prev) => ({ ...prev, window: { ...readWindowPin(prev.window), [key]: value } }));
+                      }}
+                    />
+                    <span className="setting-description">{t(`settings.window.${key}.desc`)}</span>
+                  </div>
+                ))}
               </div>
 
               <div className="settings-group">

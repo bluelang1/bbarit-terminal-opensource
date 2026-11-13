@@ -44,6 +44,7 @@ mod semble;
 mod skills_db;
 mod video_edit;
 mod web_terminal;
+mod window_pin;
 
 use futures::StreamExt;
 use portable_pty::CommandBuilder;
@@ -10626,6 +10627,8 @@ fn main() {
             lan_discovery::lan_list_peers,
             lan_discovery::lan_set_ssh,
             lan_discovery::lan_stop_discovery,
+            // Window pin (always on top / all desktops)
+            window_pin::window_pin_apply,
             // Desktop pet
             pet::pet_list_characters,
             pet::pet_open_main,

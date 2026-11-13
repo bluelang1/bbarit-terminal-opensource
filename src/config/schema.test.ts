@@ -104,3 +104,17 @@ describe('regionKeys', () => {
     expect(validateConfig({ regionKeys: 'no' } as any).regionKeys).toBe(true);
   });
 });
+
+describe('window pin', () => {
+  it('both switches are off for old config files and anything but true', () => {
+    expect(validateConfig({}).window).toEqual({ alwaysOnTop: false, followDesktops: false });
+    expect(validateConfig({ window: { alwaysOnTop: 'yes' } } as any).window).toEqual({ alwaysOnTop: false, followDesktops: false });
+  });
+
+  it('keeps saved values', () => {
+    expect(validateConfig({ window: { alwaysOnTop: true, followDesktops: true } } as any).window)
+      .toEqual({ alwaysOnTop: true, followDesktops: true });
+    expect(validateConfig({ window: { followDesktops: true } } as any).window)
+      .toEqual({ alwaysOnTop: false, followDesktops: true });
+  });
+});
