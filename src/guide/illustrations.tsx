@@ -2,6 +2,7 @@
 // step, animated in src/pages/GuidePage.css (motion stops under
 // prefers-reduced-motion). Phase 2 may swap these for recorded clips.
 import type { ReactNode } from 'react';
+import { Layers, Pin } from 'lucide-react';
 import type { GuideStepId } from './steps';
 
 function WindowFrame({ children, className = '' }: { children: ReactNode; className?: string }) {
@@ -140,6 +141,21 @@ function HintsIllustration() {
   );
 }
 
+function WindowPinIllustration() {
+  return (
+    <div className="gi-hints">
+      <div className="gi-hints-list">
+        {[Layers, Pin].map((Icon, i) => (
+          <div key={i} className="gi-hints-row gi-hints-picked">
+            <b className="gi-hints-badge"><Icon size={12} strokeWidth={2.5} style={{ display: 'block' }} /></b>
+            <span className="gi-git-file" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // 8x8 pixel octopus, two frames for the walk cycle.
 const OCTO_BODY = [
   '..oooo..',
@@ -189,6 +205,7 @@ export function StepIllustration({ id }: { id: GuideStepId }) {
     case 'keep-running': return <KeepRunningIllustration />;
     case 'git-keys': return <GitKeysIllustration />;
     case 'hints': return <HintsIllustration />;
+    case 'window-pin': return <WindowPinIllustration />;
     case 'pet': return <PetIllustration />;
   }
 }

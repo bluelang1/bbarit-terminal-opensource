@@ -8,6 +8,12 @@
 
 ## [Unreleased]
 
+## [1.1.71] - 2026-11-13
+
+### 추가
+
+- 창 고정: 위쪽 막대의 종 버튼 옆에 버튼이 생겼습니다. 핀 버튼은 메인 창을 다른 창보다 항상 위에 두고, 켜 두는 동안 가이드·도구 창·분리한 터미널 같은 앱의 다른 창도 함께 위에 띄워 메인 창 뒤로 숨지 않게 합니다(데스크톱 펫은 그대로). macOS에서는 겹친 창 버튼도 있어, 다른 데스크톱(Space)으로 옮기면 메인 창이 그 데스크톱으로 따라옵니다(창은 한 번에 한 데스크톱에만 있고, 그 데스크톱의 다른 창들 뒤에 조용히 도착합니다. 보면서 옮겨 다니려면 핀 버튼도 함께 켜세요). 둘 다 기본은 꺼짐이고, 켜 둔 상태는 앱을 다시 열어도 유지되며, 설정 > 터미널 > 창에서도 같은 값을 바꿀 수 있습니다.
+
 ## [1.1.70] - 2026-11-12
 
 ### 추가
@@ -266,7 +272,8 @@
 - 내장 에이전트는 신뢰한 프로젝트에서만 `.mcp.json`과 `.bbarit/models.json`을 읽고, `/trust no`가 앱의 자동 승인 실행 옵션보다 우선합니다.
 - 취약점이 알려진 의존성을 업데이트하거나 교체하고, 쓰지 않는 의존성을 정리했습니다.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.71...HEAD
+[1.1.71]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...v1.1.71
 [1.1.70]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...v1.1.70
 [1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68

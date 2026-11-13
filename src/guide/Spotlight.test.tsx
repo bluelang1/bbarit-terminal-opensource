@@ -5,6 +5,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   calls: [] as string[],
   guideBox: { x: 2000, y: 0, w: 900, h: 620 },
+  mainPinned: false,
+}));
+
+vi.mock('../config/ConfigContext', () => ({
+  getConfigSnapshot: () => ({ window: { alwaysOnTop: h.mainPinned, followDesktops: false } }),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true }));
@@ -48,7 +53,7 @@ async function mount() {
 }
 
 describe('Spotlight guide window pinning', () => {
-  beforeEach(() => { h.calls = []; h.guideBox = { x: 2000, y: 0, w: 900, h: 620 }; addTarget(); });
+  beforeEach(() => { h.calls = []; h.guideBox = { x: 2000, y: 0, w: 900, h: 620 }; h.mainPinned = false; addTarget(); });
   afterEach(() => { vi.useRealTimers(); document.body.innerHTML = ''; });
 
   it('pins a guide beside the target, and Esc un-pins it', async () => {
@@ -91,5 +96,14 @@ describe('Spotlight guide window pinning', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     await flush();
     expect(h.calls).toEqual(['top:false', 'focus']);
+  });
+
+  it('leaves the guide on top while the main window is pinned (window pin)', async () => {
+    h.mainPinned = true;
+    await mount();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    await flush();
+    expect(h.calls).not.toContain('top:false');
+    expect(h.calls.at(-1)).toBe('focus');
   });
 });

@@ -8,6 +8,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { MousePointerClick, MapPin } from 'lucide-react';
 import { GUIDE_WINDOW_LABEL, type GuideStep } from './steps';
+import { getConfigSnapshot } from '../config/ConfigContext';
+import { keepGuideOnTopAfterSpotlight } from '../window/windowPin';
 import { placeCaption, resolveTarget, screenBoxOf, shouldPinGuide, type ScreenBox } from './spotlightTarget';
 import './Spotlight.css';
 
@@ -72,7 +74,10 @@ export function Spotlight({ step, t, onClose }: {
     enqueue(async () => {
       const guide = await guideWindow();
       if (!guide) return;
-      await guide.setAlwaysOnTop(false).catch(() => {});
+      // A pinned main window keeps the app's other windows on top (window pin).
+      if (!keepGuideOnTopAfterSpotlight(getConfigSnapshot().window)) {
+        await guide.setAlwaysOnTop(false).catch(() => {});
+      }
       await guide.setFocus().catch(() => {});
     });
   }, [enqueue]);

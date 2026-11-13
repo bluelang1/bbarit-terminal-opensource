@@ -2,7 +2,8 @@ import React, { useState, useCallback, useEffect, useMemo, useRef, startTransiti
 import { createPortal } from 'react-dom';
 import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { listen as tauriListen, emit as tauriEmit, emitTo as tauriEmitTo } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, getAllWindows, Window as TauriWindow } from '@tauri-apps/api/window';
+import { applyWindowPin, currentPlatform, followDesktopsSupported, followsMainPin, nativePinFor, readWindowPin, setSecondaryOnTop, windowPinAction } from './window/windowPin';
 import { listenNativeDragDrop } from './utils/nativeDragDrop';
 import { LogicalSize, LogicalPosition } from '@tauri-apps/api/dpi';
 import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
@@ -229,6 +230,10 @@ requestIdleCallback(() => {
 });
 
 const IS_WINDOWS = navigator.platform.toLowerCase().includes('win');
+/** "Follow desktops" (window pin) is macOS-only (Spaces). */
+const FOLLOW_DESKTOPS_SUPPORTED = followDesktopsSupported(currentPlatform());
+/** macOS: level + Mission Control behavior set natively (src-tauri/src/window_pin.rs). */
+const NATIVE_WINDOW_PIN = nativePinFor(currentPlatform(), invoke);
 
 // OS notification for task-complete / agent-waiting alerts. Follows the existing
 // settings: notifyWhenWaiting !== 'never', playOsNotifySound, osNotifySoundName.
@@ -2115,7 +2120,7 @@ function App() {
   // For callbacks/effects that run once but must speak the current language.
   const tLatestRef = useRef(t);
   tLatestRef.current = t;
-  const { config: appConfig, updateConfig } = useConfig();
+  const { config: appConfig, updateConfig, ready: configReady } = useConfig();
   const [projects, setProjects] = useState<Project[]>([]);
   const [loungeUnreadCounts, setLoungeUnreadCounts] = useState<LoungeUnreadCounts>(loadLoungeUnreadCounts);
   const [chatWindowOpen, setChatWindowOpen] = useState(false);
@@ -2152,6 +2157,32 @@ function App() {
   const [startupDeferredTerminalIds, setStartupDeferredTerminalIds] = useState<Set<string>>(() => new Set());
   const projectsRef = useRef<Project[]>([]);
   const activeProjectIdLatestRef = useRef<string | null>(null);
+  // ── Window pin (config.window): applied once config has loaded; always-on-top carries to the app's other windows (not the pet) ──
+  const windowPin = readWindowPin(appConfig.window);
+  const windowPinTouchedRef = useRef(false);
+  useEffect(() => {
+    if (!isTauri()) return;
+    const win = getCurrentWindow();
+    // A saved follow flag is ignored where the switch is hidden (not macOS).
+    const state = { alwaysOnTop: windowPin.alwaysOnTop, followDesktops: windowPin.followDesktops && FOLLOW_DESKTOPS_SUPPORTED };
+    if (windowPinAction({ label: win.label, ready: configReady, touched: windowPinTouchedRef.current, state }) === 'skip') return;
+    windowPinTouchedRef.current = true;
+    void applyWindowPin(win, state, NATIVE_WINDOW_PIN);
+    // The app's other windows (not the pet) follow, so they never open behind a pinned main.
+    void getAllWindows().then(all => setSecondaryOnTop(all, state.alwaysOnTop, NATIVE_WINDOW_PIN)).catch(() => {});
+    if (!state.alwaysOnTop) return;
+    // `live` stops a pin that was still looking its window up when the switch went off.
+    let live = true;
+    const unlisten = tauriListen<{ label?: string }>('tauri://window-created', (e) => {
+      const label = e.payload?.label;
+      if (!label || !followsMainPin(label)) return;
+      void TauriWindow.getByLabel(label).then(w => (w && live ? setSecondaryOnTop([w], true, NATIVE_WINDOW_PIN) : undefined)).catch(() => {});
+    });
+    return () => { live = false; void unlisten.then(fn => fn()).catch(() => {}); };
+  }, [configReady, windowPin.alwaysOnTop, windowPin.followDesktops]);
+  const setWindowPin = useCallback((key: 'alwaysOnTop' | 'followDesktops', value: boolean) => {
+    updateConfig(prev => ({ ...prev, window: { ...readWindowPin(prev.window), [key]: value } }));
+  }, [updateConfig]);
   // ── Window size/position restore & save ──
   useEffect(() => {
     if (!isTauri()) return;
@@ -17183,6 +17214,76 @@ Office project scaffold created by BBARIT Terminal.
                   ? <LucideIcons.Bell size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
                   : <LucideIcons.BellOff size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />}
               </button>
+
+              {/* 창 고정 — 데스크톱 따라오기 / 항상 위 (config.window; 항상 위는 펫을 뺀 앱의 다른 창에도 적용) */}
+              <span data-guide="window-pin" style={{ marginLeft: 4, display: 'inline-flex', gap: 4, flexShrink: 0 }}>
+                {FOLLOW_DESKTOPS_SUPPORTED && (() => {
+                  const on = windowPin.followDesktops;
+                  return (
+                    <button
+                      className="view-mode-apply-all"
+                      onClick={() => setWindowPin('followDesktops', !on)}
+                      title={on
+                        ? (locale === 'ko' ? '데스크톱 따라오기: 켜짐 (클릭하면 끔)' : 'Follow desktops: on (click to turn off)')
+                        : (locale === 'ko' ? '데스크톱 따라오기: 꺼짐 (클릭하면 켬)' : 'Follow desktops: off (click to turn on)')}
+                      aria-pressed={on}
+                      style={{
+                        padding: 0,
+                        width: 26,
+                        height: 22,
+                        background: on ? `${activeStyle.accent}22` : 'transparent',
+                        border: `1px solid ${on ? activeStyle.accent : `${activeStyle.text}33`}`,
+                        borderRadius: 'var(--brutal-radius)',
+                        color: on ? activeStyle.accent : activeStyle.text,
+                        cursor: 'pointer',
+                        opacity: on ? 1 : 0.6,
+                        transition: 'all 0.05s ease',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = `${activeStyle.accent}22`; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.opacity = on ? '1' : '0.6'; e.currentTarget.style.background = on ? `${activeStyle.accent}22` : 'transparent'; }}
+                    >
+                      <LucideIcons.Layers size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
+                    </button>
+                  );
+                })()}
+                {(() => {
+                  const on = windowPin.alwaysOnTop;
+                  return (
+                    <button
+                      className="view-mode-apply-all"
+                      onClick={() => setWindowPin('alwaysOnTop', !on)}
+                      title={on
+                        ? (locale === 'ko' ? '항상 위에 표시: 켜짐 (클릭하면 끔)' : 'Always on top: on (click to turn off)')
+                        : (locale === 'ko' ? '항상 위에 표시: 꺼짐 (클릭하면 켬)' : 'Always on top: off (click to turn on)')}
+                      aria-pressed={on}
+                      style={{
+                        padding: 0,
+                        width: 26,
+                        height: 22,
+                        background: on ? `${activeStyle.accent}22` : 'transparent',
+                        border: `1px solid ${on ? activeStyle.accent : `${activeStyle.text}33`}`,
+                        borderRadius: 'var(--brutal-radius)',
+                        color: on ? activeStyle.accent : activeStyle.text,
+                        cursor: 'pointer',
+                        opacity: on ? 1 : 0.6,
+                        transition: 'all 0.05s ease',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        flexShrink: 0,
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = `${activeStyle.accent}22`; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.opacity = on ? '1' : '0.6'; e.currentTarget.style.background = on ? `${activeStyle.accent}22` : 'transparent'; }}
+                    >
+                      <LucideIcons.Pin size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
+                    </button>
+                  );
+                })()}
+              </span>
             </>
           );
         })()}
