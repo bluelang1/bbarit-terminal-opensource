@@ -91,7 +91,10 @@ jobs:
             libxdo-dev \
             pkg-config \
             wget
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: Rust 1.100 changed type inference and the Linux-only `screenshots`
+      # 0.8.10 dependency no longer compiles (E0277 `!: ReadAll`, rust-lang/rust#148922).
+      # Go back to `stable` once that crate is upgraded or replaced.
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
