@@ -5635,7 +5635,7 @@ dependencies = [
 
 [[package]]
 name = "octo-ui"
-version = "1.1.70"
+version = "1.1.71"
 dependencies = [
  "aes",
  "aes-gcm",

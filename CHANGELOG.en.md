@@ -9,6 +9,8 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+## [1.1.71] - 2026-11-13
+
 ### Added
 
 - Window pin: new buttons next to the bell in the top bar. The pin keeps the main window above other windows, and while it is on the app's other windows (guide, tool windows, detached terminals) stay on top too so they never open behind it (the desktop pet is unchanged). On macOS a stacked-windows button also makes the main window follow you to the desktop (Space) you switch to (it is on one desktop at a time and arrives behind that desktop's windows; turn the pin on as well to keep it in view while you move). Both are off by default, stay as you left them after a restart, and are also under Settings > Terminal > Window.
@@ -271,7 +273,8 @@ The first release of this fork, based on the original author's `v1.1.50`.
 - The built-in agent reads `.mcp.json` and `.bbarit/models.json` only in trusted projects, and `/trust no` takes precedence over the app's auto-approve run option.
 - Updated or replaced dependencies with known vulnerabilities and removed unused ones.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.71...HEAD
+[1.1.71]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...v1.1.71
 [1.1.70]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...v1.1.70
 [1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
