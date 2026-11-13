@@ -45,6 +45,7 @@ import { shouldNotifyReady } from './terminal/readyNotify';
 import { claudeSessionArgsToFlags, isLocalWorkDir, resolveClaudeSessionArgs, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { looksLikeAgentUiReady, looksLikePlainShellPrompt, stripTerminalControls, stripInjectedEcho } from './terminal/agentReadiness';
 import { normalizeCliFlagLines, shellQuoteArg } from './terminal/cliCommandArgs';
+import { wrapPosixCliCheck } from './terminal/cliLaunchCommand';
 import { htmlClipboardToText } from './terminal/htmlClipboard';
 import { attachWindowFocusRestore } from './terminal/windowFocusRestore';
 import { detectCliLaunchFailure, buildCliInstallGuide, type CliLaunchFailureKind, type CliInstallGuide } from './terminal/cliInstallGuard';
@@ -56,6 +57,7 @@ import { quickCommandColumn, quickCommandDisplayName } from './terminal/quickCom
 import { FIT_SCROLLBAR_LANE, fitAddonCols, terminalAreaWidth } from './terminal/terminalStripLayout';
 import { useConfig } from './config/ConfigContext';
 import { runClearAllInput, usesSingleLineClear } from './terminal/clearInputAll';
+import { codexLaunchCommand } from './terminal/codexSession';
 import { useTranslation } from './i18n';
 import 'xterm/css/xterm.css';
 import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
@@ -67,6 +69,7 @@ import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
 import { ClampedMenu } from './components/ClampedMenu';
 import { isHintModeActive } from './hints/hintModeFlag';
+import { registerActiveTerminal, shouldTerminalTakeFocus } from './a11y/regions';
 
 // Enter variants a terminal must keep apart: Shift+Enter and Cmd+Enter go out as kitty CSI-u
 // (Cmd = super bit, 1 + 8) so TUIs such as Claude Code can bind them; plain Enter is CR.
@@ -114,6 +117,8 @@ interface XTerminalProps {
   claudeSessionId?: string;
   /** 'hook' ids are resumed only when resumeLastSession is on; 'app' (or absent) always. */
   claudeSessionSource?: ClaudeSessionSource;
+  /** "Codex (new session)" tab: always a fresh `codex`, never the shared `codex resume --last`. */
+  codexFreshSession?: boolean;
   extraFlags?: string[];
   modelId?: string;
   mcpConfigPath?: string;
@@ -1378,7 +1383,7 @@ export const releaseTerminalRuntime = (terminalId: string) => disposeTerminalRun
 // raw shell. A module-level constant keeps the identity stable across renders.
 const EMPTY_EXTRA_FLAGS: string[] = [];
 
-export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
+export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, isActive, style, fontFamily, fontSize: fontSizeProp = 14, cursorBlink = false, cursorStyle = 'bar', scrollback = 5000, cliType = 'shell', autoAccept = false, startupMode, codexWebSearch = true, resumeLastSession = false, claudeSessionId, claudeSessionSource, codexFreshSession, extraFlags = EMPTY_EXTRA_FLAGS, modelId, mcpConfigPath, inputMode = 'direct', shellType, githubAccount, telegram, projectWorkDir, isRestored: _isRestored = false, deferStart = false, playSoundWhenDone = false, tmuxAutoStart = false, onReady, onDispose, onOutput, onCommand, skills, onRunSkill, quickCommands, csiUKeys = true, jisYenToBackslash = false }: XTerminalProps) {
   // Validate fontSize range (8-20px only, defaults to 14px otherwise)
   const { t } = useTranslation();
   const fontSize = (fontSizeProp && fontSizeProp >= 8 && fontSizeProp <= 20) ? fontSizeProp : 14;
@@ -1411,6 +1416,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   claudeSessionIdRef.current = claudeSessionId;
   const claudeSessionSourceRef = useRef(claudeSessionSource);
   claudeSessionSourceRef.current = claudeSessionSource;
+  const codexFreshSessionRef = useRef(codexFreshSession);
+  codexFreshSessionRef.current = codexFreshSession;
   const initRef = useRef(false);
   const isDisposedRef = useRef(false);
   // Every refit that may change the grid goes through one sequencer per terminal: a normal-buffer
@@ -2336,6 +2343,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     });
   }, [focusActiveInput]);
 
+  // F6 into the terminal region focuses the active terminal the way a click does (src/a11y/regions.ts).
+  useEffect(() => {
+    if (!isActive) return;
+    const scope = terminalWrapRef.current?.closest<HTMLElement>('[data-terminal-scope]');
+    if (!scope) return;
+    return registerActiveTerminal(scope, focusActiveInput);
+  }, [isActive, focusActiveInput]);
+
   const updateScrollButtonVisibility = useCallback(() => {
     const term = terminalStates.get(terminalId)?.term || termRef.current;
     if (!term) {
@@ -2393,6 +2408,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // ignore
     }
     setShowScrollToBottom(false);
+    // xterm.clear() erases the screen behind the program's back. An agent TUI that repaints only
+    // changed cells (Claude Code's status line) would leave the rest blank: nudge a full repaint.
+    // The sequencer skips it without a live PTY or while output is being replayed.
+    if (cliType === 'claude') resizeSeqRef.current?.request({ nudge: true });
     if (cliType === 'bbarit') {
       const st = terminalStates.get(terminalId);
       st?.writeToPty?.('\x15/clear\x0d');
@@ -2475,8 +2494,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
     // On pointer interaction, keep focus on the bridge.
     wrap.addEventListener('pointerdown', refocusBridge, true);
 
-    // Initial focus.
-    refocusBridge();
+    // Initial focus, unless the keyboard user moved to another region (F6/Tab, src/a11y/regions.ts).
+    if (shouldTerminalTakeFocus()) refocusBridge();
 
     return () => {
       if (refocusTimer != null) window.clearTimeout(refocusTimer);
@@ -2790,6 +2809,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       // Don't steal focus if terminal is not visible
       if (wrap.offsetParent === null) return;
       const activeEl = document.activeElement as HTMLElement | null;
@@ -3149,6 +3170,9 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const searchAddon = new SearchAddon();
 
       term.open(terminalElement);
+      // Out of the Tab order: Tab walking the chrome must not enter a terminal (click, F6,
+      // hint mode and the switch shortcuts still focus it).
+      term.textarea?.setAttribute('tabindex', '-1');
       
       // Position helper textarea at cursor for natural OS IME composition
       if (cursorOverlay) {
@@ -3681,13 +3705,12 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       const hasFlag = (flag: string) => normalizedFlags.includes(flag);
       const flagsToString = (flags: string[]) => (flags.length > 0 ? ' ' + flags.join(' ') : '');
       const wrapCliCheck = (cmd: string, binName: string, installHint?: string): string => {
-        const hint = installHint ? ` Install: ${installHint}` : '';
         if (isWindows) {
           // PowerShell: avoid ScriptBlock { } which can misparse CLI flags.
           // Use simple cmd.exe-style: check then run with semicolon.
           return `${cmd}`;
         }
-        return `command -v ${binName} >/dev/null 2>&1 && ${cmd} || echo "${binName} CLI not found.${hint}"`;
+        return wrapPosixCliCheck(cmd, binName, installHint);
       };
 
       // Resolve the bundled internal bbarit agent binary (vendored + shipped inside
@@ -3776,9 +3799,11 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             modeFlags.push('--model', shellQuoteArg(modelId, argShell));
           }
-          const cmd = resumeLastSession
-            ? `codex resume --last${flagsToString([...modeFlags, ...normalizedFlags])}`
-            : `codex${flagsToString([...modeFlags, ...normalizedFlags])}`;
+          const cmd = codexLaunchCommand({
+            resumeLastSession: !!resumeLastSession,
+            freshSession: codexFreshSessionRef.current,
+            flags: flagsToString([...modeFlags, ...normalizedFlags]),
+          });
           return wrapCliCheck(cmd, 'codex', 'npm i -g @openai/codex');
         })(),
         cursor: (() => {
@@ -3857,7 +3882,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           let cmd = 'reasonix code';
           cmd += flagsToString(normalizedFlags);
           if (isWindows) return cmd;
-          return `command -v reasonix >/dev/null 2>&1 && ${cmd} || command -v npx >/dev/null 2>&1 && npx -y reasonix@latest code${flagsToString(normalizedFlags)} || echo "reasonix CLI not found. Install: npm i -g reasonix"`;
+          return wrapPosixCliCheck(cmd, 'reasonix', 'npm i -g reasonix', {
+            binName: 'npx',
+            cmd: `npx -y reasonix@latest code${flagsToString(normalizedFlags)}`,
+          });
         })(),
         bbarit: (() => {
           // Internalized agent: launch THIS app's own executable with
@@ -4013,7 +4041,13 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
               restoredState.ptyCreated = true;
               if (restoredProbe.markCliAutoStarted) restoredState.autoStartedCliType = cliType;
             }
-            if (restoredProbe.bufferedOutput && !disposed) await replayOutput(restoredProbe.bufferedOutput);
+            if (restoredProbe.bufferedOutput && !disposed) {
+              await replayOutput(restoredProbe.bufferedOutput);
+              // The program is alive (check_pty_alive) and attached (the snapshot drained its
+              // read queue), but the replay is only the capped tail of its output: an incremental
+              // renderer's static cells may be missing. Same size sends no SIGWINCH, so nudge.
+              if (!disposed && cliType === 'claude') resizeSeqRef.current?.request({ nudge: true });
+            }
           }
         }
 
@@ -5677,7 +5711,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       doFitAndRefresh();
       timers.push(window.setTimeout(doFitAndRefresh, 150));
       // 에디터에서 돌아올 때 포커스 + 커서 위치 복원 (#39)
-      timers.push(window.setTimeout(() => { if (!isDisposedRef.current) focusActiveInput(); }, 200));
+      // Not while the keyboard user is in another region (F6/Tab, src/a11y/regions.ts).
+      timers.push(window.setTimeout(() => { if (!isDisposedRef.current && shouldTerminalTakeFocus()) focusActiveInput(); }, 200));
 
       const state = terminalStates.get(terminalId);
       const term = state?.term || termRef.current;
@@ -6061,6 +6096,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
 
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (isHintModeActive()) return; // hint mode owns the keyboard (src/hints)
+      // Keys on a focused strip button (F6 / Tab) are the button's: Enter/Space click it.
+      if ((e.target as Element | null)?.closest?.('[data-terminal-gutter]')) return;
       const wrap = terminalWrapRef.current;
       // Don't steal focus if terminal is not visible
       if (wrap && wrap.offsetParent === null) return;
@@ -6577,6 +6614,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   return (
     <div
       data-terminal-scope
+      data-kbd-region="terminal"
       style={{
         width: '100%',
         height: '100%',
@@ -7104,6 +7142,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
             first button's auto margin, which still lets an overflowing strip scroll to its top. */}
         <div
           data-terminal-gutter
+          data-kbd-region="terminal-strip"
           onMouseDown={keepTerminalFocus}
           style={{
             position: 'absolute',
@@ -7279,6 +7318,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
         <input
           ref={inputRef}
           type="text"
+          tabIndex={-1}
           value={inputValue}
           onChange={(e) => {
             if (suppressNextOnChangeRef.current) {

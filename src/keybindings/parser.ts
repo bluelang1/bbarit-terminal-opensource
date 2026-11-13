@@ -58,6 +58,8 @@ const codeToKey = (code?: string): string | null => {
   if (!code) return null;
   if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  // Function keys: an IME mid-composition can report key "Process" (keyCode 229) for them.
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code.toLowerCase();
   return CODE_KEY_ALIASES[code] || null;
 };
 

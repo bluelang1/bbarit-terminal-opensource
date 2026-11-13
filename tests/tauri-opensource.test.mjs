@@ -121,6 +121,32 @@ test('fork releases keep only the updater signing key in the environment', () =>
   assert.doesNotThrow(() => checkForkReleaseEnvironment({}, ['dev', '--fork-release']));
 });
 
+test('only fork releases sign with the fork code-signing identity', () => {
+  const parent = {
+    PATH: '/toolchain',
+    APPLE_SIGNING_IDENTITY: 'Example Developer ID',
+    TAURI_SIGNING_PRIVATE_KEY: 'test-only-placeholder',
+    FORK_CODESIGN_IDENTITY: ' 0123456789ABCDEF0123456789ABCDEF01234567 ',
+  };
+  assert.deepEqual(sourceBuildEnvironment(parent, 'darwin', { forkRelease: true }), {
+    PATH: '/toolchain',
+    TAURI_SIGNING_PRIVATE_KEY: 'test-only-placeholder',
+    APPLE_SIGNING_IDENTITY: '0123456789ABCDEF0123456789ABCDEF01234567',
+  });
+  // Source builds stay ad-hoc even when the variable is set.
+  assert.deepEqual(sourceBuildEnvironment(parent, 'darwin'), { PATH: '/toolchain', APPLE_SIGNING_IDENTITY: '-' });
+  // An empty identity (secrets not configured) keeps the ad-hoc signature.
+  assert.equal(
+    sourceBuildEnvironment({ ...parent, FORK_CODESIGN_IDENTITY: '  ' }, 'darwin', { forkRelease: true }).APPLE_SIGNING_IDENTITY,
+    '-',
+  );
+  assert.deepEqual(sourceBuildEnvironment(parent, 'win32', { forkRelease: true }), {
+    PATH: '/toolchain',
+    TAURI_SIGNING_PRIVATE_KEY: 'test-only-placeholder',
+  });
+  assert.equal(parent.FORK_CODESIGN_IDENTITY, ' 0123456789ABCDEF0123456789ABCDEF01234567 ');
+});
+
 test('bridge CLIs default to the source build identifier', () => {
   const identifier = JSON.parse(readFileSync(new URL('../src-tauri/tauri.opensource.conf.json', import.meta.url), 'utf8')).identifier;
   for (const script of ['scripts/bbarit-ctl.mjs', 'scripts/tauri-dev-screen.mjs']) {

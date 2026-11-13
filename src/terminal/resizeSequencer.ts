@@ -8,6 +8,13 @@
 // wide grid; when xterm then shrinks, nothing on screen is longer than the new width and the
 // reflow wraps nothing. Full-screen TUIs (alternate buffer) repaint everything on SIGWINCH and
 // widening never wraps, so both keep the old order: xterm first, then the PTY.
+//
+// The PTY-first step sends only the new column count and keeps xterm's current rows. When xterm
+// loses rows it drops the lines below the cursor whatever they hold, and an inline TUI such as
+// Claude Code keeps its cursor on the input line with its status line and footer below it. Had the
+// PTY already been given the new rows, the program would have repainted before xterm dropped those
+// lines and the final PTY sync would carry no change, so they would stay blank. With the rows kept,
+// the final sync changes the rows and the program repaints after xterm has shrunk.
 import { ptySizeChanged, type GridSize } from './ptySize';
 
 export type ResizeOrder = 'none' | 'xterm-first' | 'pty-first';
@@ -81,6 +88,12 @@ export interface ResizeJob {
   /** Opaque scroll pin to restore after the tab was hidden (handled by defaultRefit). Kept
    *  across merges, so a later job cannot drop it. */
   revealPin?: unknown;
+  /** After the resize, make the program repaint: PTY one column narrower, then back after
+   *  REDRAW_NUDGE_MS. For screens erased behind the program's back (Clear terminal, output
+   *  replay), where an incremental renderer would only redraw the cells that change. Skipped
+   *  while hidden, replaying or without a live PTY. Runs inside the queue, so a real resize
+   *  waits until the PTY is back at xterm's size. */
+  nudge?: boolean;
 }
 
 export interface ResizeSequencerDeps {
@@ -108,6 +121,10 @@ export interface ResizeSequencer {
   dispose(): void;
 }
 
+/** Gap between the two halves of a redraw nudge. A program reads its size when SIGWINCH arrives
+ *  and ignores one that shows no change, so the narrower size must still be there when it reads. */
+export const REDRAW_NUDGE_MS = 100;
+
 /** Safety bound only: each extra round needs strictly fewer columns than the last, so a window
  *  drag ends the loop by itself; xterm stays at the old width (clipped) until it does. */
 export const MAX_PTY_FIRST_ROUNDS = 32;
@@ -118,6 +135,7 @@ export const mergeJobs = (a: ResizeJob | null, b: ResizeJob): ResizeJob => (a ? 
   refit: a.refit && b.refit ? b.refit : undefined,
   alwaysSyncPty: !!(a.alwaysSyncPty || b.alwaysSyncPty),
   revealPin: b.revealPin ?? a.revealPin,
+  nudge: !!(a.nudge || b.nudge),
 } : { ...b });
 
 /**
@@ -133,8 +151,41 @@ export function createResizeSequencer(deps: ResizeSequencerDeps): ResizeSequence
   let delayed: ResizeJob | null = null;
   let delayTimer: unknown = null;
 
+  const sleep = (ms: number) => new Promise<void>((resolve) => { timers.set(resolve, ms); });
+
+  const nudge = async () => {
+    if (disposed || !deps.visible() || deps.replaying() || deps.ptyLive?.() === false) return;
+    const size = deps.current();
+    if (!validSize(size) || size.cols < 3) return;
+    deps.resizePty({ cols: size.cols - 1, rows: size.rows });
+    try {
+      await sleep(REDRAW_NUDGE_MS);
+    } finally {
+      // Back to xterm's grid even when hidden or disposed meanwhile (like a PTY-first run).
+      const now = deps.current();
+      deps.resizePty(validSize(now) ? now : size);
+    }
+  };
+
+  // A nudge asked for while the tab was hidden (output replayed into a background tab) is kept
+  // and runs with the next job after the tab is shown: showing a tab is a same-size refit,
+  // which sends the program no SIGWINCH by itself.
+  let pendingNudge = false;
+
   const runOne = async (job: ResizeJob) => {
-    if (!deps.visible()) return;
+    if (!deps.visible()) {
+      if (job.nudge) pendingNudge = true;
+      return;
+    }
+    const wantNudge = !!job.nudge || pendingNudge;
+    if (await resizeOnce(job) && wantNudge) {
+      pendingNudge = false;
+      await nudge();
+    }
+  };
+
+  // Returns false when the run stopped early (hidden or disposed during the wait).
+  const resizeOnce = async (job: ResizeJob): Promise<boolean> => {
     const before = deps.current();
     let ptyFirst = false;
     try {
@@ -146,17 +197,21 @@ export function createResizeSequencer(deps: ResizeSequencerDeps): ResizeSequence
       for (let round = 0; round < MAX_PTY_FIRST_ROUNDS; round++) {
         const ctx = { altBuffer: deps.altBuffer(), replaying: deps.replaying(), ptyLive: deps.ptyLive?.() ?? true };
         if (!target || resizeOrder(from, target, ctx) !== 'pty-first') break;
-        deps.resizePty(target);
+        // New columns, xterm's rows (see the top of this file): a row change reaches the program
+        // with the final sync, after xterm has resized.
+        const step = { cols: target.cols, rows: from.rows };
+        deps.resizePty(step);
         ptyFirst = true;
         await deps.waitForRedraw();
         // Hidden or unmounted during the wait: xterm is not resized now (it is when the tab is
         // shown or mounted again); the finally block puts the PTY back to xterm's grid.
-        if (disposed || !deps.visible()) return;
-        from = target;
+        if (disposed || !deps.visible()) return false;
+        from = step;
         target = deps.propose();
       }
       if (job.refit && job.revealPin == null) job.refit();
       else deps.defaultRefit(job);
+      return true;
     } finally {
       // After a PTY-first run the PTY is always set to xterm's final grid: the sequencer's own
       // record is not trusted (another resize_pty can land during the wait) and a refit that

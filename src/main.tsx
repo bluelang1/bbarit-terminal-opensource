@@ -23,6 +23,7 @@ import { ConfigProvider } from './config/ConfigContext'
 import { AppBootstrap } from './AppBootstrap'
 import { ProductNoticeGate } from './ProductNoticeGate'
 import { installMenuSelectAllBridge } from './menuSelectAllBridge'
+import { installMenuKeyboard } from './hints/menuKeyboard'
 
 function installBrutalistControlGuard() {
   if (typeof document === 'undefined') return;
@@ -58,6 +59,8 @@ summary,
 
 installBrutalistControlGuard();
 installMenuSelectAllBridge();
+// Before React renders: its window keydown listener must run before component ones.
+installMenuKeyboard();
 
 // The desktop pet window (/pet) is a tiny transparent canvas: it skips Monaco, the DB
 // bootstrap, the config provider and the product notice gate (src/pages/PetPage.tsx).

@@ -166,6 +166,7 @@ import { createDragGhost, landDragGhost, moveDragGhost, type DragGhost } from '.
 import { KV_KEY_PROJECT_PANEL_WIDTH, PROJECT_PANEL_DEFAULT_WIDTH, clampProjectPanelWidth, parseProjectPanelWidth } from './projectPanelWidth';
 import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } from './projectDropTargets';
 import { isClaudeSessionId, newClaudeSessionId, type ClaudeSessionSource } from './terminal/claudeSessionDir';
+import { dedicatedCodexSessionFields, restoredCodexFreshSession } from './terminal/codexSession';
 import { applyReportedClaudeSessionToProjects, CLAUDE_SESSION_REPORTED_EVENT, isDedicatedClaudeTab, type ClaudeSessionReport } from './terminal/claudeSessionReport';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
@@ -193,6 +194,8 @@ import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
 import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
+import { useDialogFocus } from './a11y/dialogFocus';
+import { isHiddenStackedPane, isStackedTerminalMode } from './terminal/stackedPanes';
 const SchedulerPanel = React.lazy(() => import('./scheduler/SchedulerPanel').then(m => ({ default: m.SchedulerPanel })));
 
 
@@ -620,6 +623,8 @@ interface TerminalInstance {
   claudeSessionId?: string;
   /** 'app' = dedicated tab (always resumed); 'hook' = reported id, resumed only with resumeLastSession. Absent with an id = 'app'. */
   claudeSessionSource?: ClaudeSessionSource;
+  /** "Codex (new session)" tab: always launches a fresh `codex`, never the shared `codex resume --last`. */
+  codexFreshSession?: boolean;
   /** Set on the two terminals opened by the Broker Agent, for strong visual distinction. */
   brokerRole?: 'developer' | 'reviewer';
 }
@@ -1909,6 +1914,7 @@ function saveProjects(projects: Project[], activeId: string | null, agentLinks?:
         lastWorkDir: t.lastWorkDir || '',
         claudeSessionId: t.claudeSessionId || undefined,
         claudeSessionSource: t.claudeSessionId ? (t.claudeSessionSource || undefined) : undefined,
+        codexFreshSession: restoredCodexFreshSession(t),
       })),
       activeTerminalId: p.activeTerminalId,
     })),
@@ -1956,6 +1962,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
               lastWorkDir,
               claudeSessionId: isClaudeSessionId(t?.claudeSessionId) ? t.claudeSessionId : undefined,
               claudeSessionSource: isClaudeSessionId(t?.claudeSessionId) ? (t?.claudeSessionSource === 'hook' ? 'hook' : 'app') : undefined,
+              codexFreshSession: restoredCodexFreshSession({ cliType, codexFreshSession: t?.codexFreshSession }),
             } as TerminalInstance;
           })
         : [createTerminal()];
@@ -2042,7 +2049,7 @@ const calculateTerminalPosition = (
     transition: 'opacity 0.05s ease',
   };
 
-  if (mode === 'tabs' || mode === 'tiled' || mode === 'tiled_tb' || mode === 'tree') {
+  if (isStackedTerminalMode(mode)) {
     return {
       ...base,
       top: 0,
@@ -2445,23 +2452,16 @@ function App() {
   const isHarnessWindowRef = useRef(false);
   const confirmModalOpenRef = useRef(false);
   confirmModalOpenRef.current = !!confirmModal;
-  useEffect(() => {
-    if (!confirmModal) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && !e.repeat) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        confirmAndClose();
-      }
-      if (e.key === 'Escape' && !e.repeat) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        closeConfirm();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [confirmAndClose, closeConfirm, confirmModal]);
+  // Focus moves into the dialog on open (Cancel for destructive confirms, else the
+  // confirm button), Enter/Space act on the focused button, Tab stays inside, Esc
+  // cancels, and focus goes back (usually to the terminal) on close.
+  const confirmModalRef = useRef<HTMLDivElement | null>(null);
+  const confirmCancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmOkRef = useRef<HTMLButtonElement | null>(null);
+  useDialogFocus(confirmModalRef, !!confirmModal, {
+    initialFocus: () => (confirmModal?.danger ? confirmCancelRef.current : confirmOkRef.current),
+    onEscape: closeConfirm,
+  });
   const renderConfirmModal = useCallback(() => {
     if (!confirmModal) return null;
     return (
@@ -2473,7 +2473,11 @@ function App() {
         }}
       >
         <div
+          ref={confirmModalRef}
           className="confirm-modal"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label={confirmModal.title}
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => e.stopPropagation()}
         >
@@ -2483,6 +2487,7 @@ function App() {
           )}
           <div className="confirm-actions">
             <button
+              ref={confirmCancelRef}
               type="button"
               className="confirm-cancel"
               title={`${t('common.cancel')} (Esc)`}
@@ -2501,10 +2506,11 @@ function App() {
               {confirmModal.cancelLabel || t('common.cancel')}
             </button>
             <button
+              ref={confirmOkRef}
               type="button"
               className={`confirm-ok ${confirmModal.danger ? 'danger' : ''}`}
               onClick={confirmAndClose}
-              title={`${t('common.confirm')} (Enter)`}
+              title={confirmModal.danger ? t('common.confirm') : `${t('common.confirm')} (Enter)`}
             >
               {confirmModal.confirmLabel || t('common.confirm')}
             </button>
@@ -7545,13 +7551,14 @@ Office project scaffold created by BBARIT Terminal.
         if (!projectId) return { ok: false, error: 'no active project' };
         const workDir = (request?.workDir ? String(request.workDir).trim() : '')
           || callerTerm?.lastWorkDir || callerProject?.workDir || undefined;
-        // Claude 자식은 전용 세션 — `--continue` 로 부모 대화를 이어받지 않게 한다.
+        // Claude·Codex 자식은 전용 세션 — `--continue`·`resume --last` 로 부모 대화를 이어받지 않게 한다.
         const spec = agentRunTerminalSpec(cliType, request?.name ? String(request.name) : undefined);
         const name = spec.name;
         const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name, workDir, {
           projectId,
           activate: !caller,
           freshClaudeSession: spec.freshClaudeSession,
+          freshCodexSession: spec.freshCodexSession,
         });
         if (!terminalId) return { ok: false, error: 'failed to create terminal' };
         // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
@@ -12550,6 +12557,7 @@ Office project scaffold created by BBARIT Terminal.
     { id: 'cp.terminal.new-claude', label: t('cp.newClaude' as any), category: 'terminal', run: () => addTerminal('claude') },
     { id: 'cp.terminal.new-claude-session', label: t('cp.newClaudeNew' as any), category: 'terminal', run: () => addTerminal('claude', undefined, undefined, undefined, { freshClaudeSession: true }) },
     { id: 'cp.terminal.new-codex', label: t('cp.newCodex' as any), category: 'terminal', run: () => addTerminal('codex') },
+    { id: 'cp.terminal.new-codex-session', label: t('cp.newCodexNew' as any), category: 'terminal', run: () => addTerminal('codex', undefined, undefined, undefined, { freshCodexSession: true }) },
     { id: 'cp.terminal.new-cursor', label: t('cp.newCursor' as any), category: 'terminal', run: () => addTerminal('cursor') },
     { id: 'cp.terminal.new-opencode', label: t('cp.newOpenCode' as any), category: 'terminal', run: () => addTerminal('opencode') },
     { id: 'cp.terminal.new-kimi', label: t('cp.newKimi' as any), category: 'terminal', run: () => addTerminal('kimi') },
@@ -14454,7 +14462,7 @@ Office project scaffold created by BBARIT Terminal.
     recordRecentProject({ workDir: path, displayName, styleIndex, fontIndex, customFontFamily });
   };
 
-  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string, options?: { freshClaudeSession?: boolean; projectId?: string; activate?: boolean }): string | undefined => {
+  const addTerminal = (cliType: 'shell' | 'claude' | 'codex' | 'cursor' | 'opencode' | 'kimi' | 'gemini' | 'ollama' | 'qwen' | 'pi' | 'reasonix' | 'bbarit' | 'bbarit-oss' | 'gajae' = 'shell', autoAccept?: boolean, nameOverride?: string, workDirOverride?: string, options?: { freshClaudeSession?: boolean; freshCodexSession?: boolean; projectId?: string; activate?: boolean }): string | undefined => {
     // projectId: 다른 프로젝트에 만든다(기본 활성 프로젝트). activate:false: 새 탭으로 포커스를 옮기지 않는다.
     const targetProjectId = options?.projectId || activeProjectId;
     if (!targetProjectId) return undefined;
@@ -14508,15 +14516,20 @@ Office project scaffold created by BBARIT Terminal.
 
     // 터미널을 미리 생성하여 ID 확보
     const freshClaude = resolvedCliType === 'claude' && !!options?.freshClaudeSession;
-    const termName = nameOverride || (freshClaude ? t('terminal.claudeNew' as any) : `${cliNames[resolvedCliType]}`);
+    const freshCodex = resolvedCliType === 'codex' && !!options?.freshCodexSession;
+    const termName = nameOverride || (freshClaude ? t('terminal.claudeNew' as any) : freshCodex ? t('terminal.codexNew' as any) : `${cliNames[resolvedCliType]}`);
+    // "X N" numbering counts plain and "new session" tabs separately.
+    const isFreshTab = (t: TerminalInstance) => (resolvedCliType === 'codex' ? !!t.codexFreshSession : isDedicatedClaudeTab(t));
     const preCount = (terminalSplitMode === 'tree'
       ? (projects.find(p => p.id === targetProjectId)?.terminals ?? [])
       : (projects.find(p => p.id === targetProjectId)?.terminals ?? [])
-    ).filter(t => t.cliType === resolvedCliType && isDedicatedClaudeTab(t) === freshClaude).length + 1;
+    ).filter(t => t.cliType === resolvedCliType && isFreshTab(t) === (freshClaude || freshCodex)).length + 1;
     const terminal = createTerminal(nameOverride ? termName : `${termName} ${preCount}`, resolvedCliType, shouldAutoAccept, startupMode);
     // A dedicated Claude session: the tab launches `claude --session-id <uuid>` and
     // later `--resume <uuid>`, so it never shares a conversation with other tabs.
     Object.assign(terminal, dedicatedClaudeSessionFields(freshClaude, newClaudeSessionId));
+    // "Codex (new session)": always a fresh `codex`, never `codex resume --last` (codexSession.ts).
+    Object.assign(terminal, dedicatedCodexSessionFields(freshCodex));
     // Optional per-terminal working directory (e.g. a Broker Harness git worktree),
     // so the CLI launches inside that isolated dir instead of the project root.
     if (workDirOverride && workDirOverride.trim()) terminal.lastWorkDir = workDirOverride.trim();
@@ -16930,7 +16943,7 @@ Office project scaffold created by BBARIT Terminal.
 
 
       {/* Top Bar */}
-      <div className="project-tabs" style={isMonitorMode ? { display: 'none' } : undefined}>
+      <div className="project-tabs" data-kbd-region="topbar" style={isMonitorMode ? { display: 'none' } : undefined}>
         {/* Forced flex line break: keeps the toolbar + left controls on the top
             row and drops the project tabs onto their own row below (see App.css). */}
         <span className="project-tabs-row-break" aria-hidden="true" />
@@ -17182,7 +17195,7 @@ Office project scaffold created by BBARIT Terminal.
               <button
                 key={`top-group-${group.id}`}
                 type="button"
-                data-hint="nav" className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
+                data-hint="nav" data-kbd-region="projects" className={`top-project-group${group.collapsed ? ' collapsed' : ''}`}
                 data-group-drop-id={group.id}
                 data-project-tab-ignore-drag="true"
                 onClick={() => toggleGroupCollapsed(group.id)}
@@ -17204,6 +17217,7 @@ Office project scaffold created by BBARIT Terminal.
             key={project.id}
             data-project-tab-id={project.id}
             data-hint="project"
+            data-kbd-region="projects"
             data-project-drop-id={project.id}
             data-project-drop-orientation="horizontal"
             className={[
@@ -17644,26 +17658,21 @@ Office project scaffold created by BBARIT Terminal.
         {/* Right Utils */}
         <div
           className="top-toolbar"
+          data-kbd-region="toolbar"
           style={isMonitorMode ? { display: 'none' } : { position: 'relative', zIndex: 12000, overflow: 'visible' }}
         >
           <div className={`top-utils${toolbarCollapsed ? ' toolbar-collapsed' : ''}`}>
-            {/* 툴바 전체 접기/펴기 — 접힌 상태에서는 이 토글만 남는다. */}
+            {/* Buttons are written in on-screen order (no CSS `order`), so Tab follows what you see.
+               Dividers separate the groups. */}
             <button
-              type="button"
-              data-hint="nav" className="btn-top-small toolbar-collapse-toggle"
-              onClick={toggleToolbarCollapsed}
-              title={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
-              aria-label={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
+              data-hint="tool" className="btn-top-small toolbar-tool tool-thread"
+              onClick={() => { void openToolWindow('thread'); }}
+              title="BBARIT Thread"
             >
-              {toolbarCollapsed ? <LucideIcons.ChevronsLeft size={13} /> : <LucideIcons.ChevronsRight size={13} />}
+              <LucideIcons.AtSign size={14} />
             </button>
-            {/* Category group dividers — positioned by flex `order` (see App.css).
-                DOM order here is irrelevant; each sits at a group boundary. */}
-            <span className="toolbar-group-divider" style={{ order: 1 }} aria-hidden="true" />
-            <span className="toolbar-group-divider" style={{ order: 9 }} aria-hidden="true" />
-            <span className="toolbar-group-divider" style={{ order: 15 }} aria-hidden="true" />
-            <span className="toolbar-group-divider" style={{ order: 21 }} aria-hidden="true" />
-            <span className="toolbar-group-divider" style={{ order: 33 }} aria-hidden="true" />
+            {isToolbarVisible('secretary') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
+            <span className="toolbar-group-divider" aria-hidden="true" />
             {isToolbarVisible('git') && <button type="button" data-hint="tool" className="btn-top-small toolbar-tool tool-git" data-guide="git" onClick={() => setShowGitPanel(true)} title="Git">
               <LucideIcons.GitPullRequestArrow size={14} />
             </button>}
@@ -17690,11 +17699,15 @@ Office project scaffold created by BBARIT Terminal.
                     setShowEditorsMenu((v) => !v);
                   }}
                   title="Office"
+                  aria-haspopup="menu"
+                  aria-expanded={showEditorsMenu}
+                  aria-controls="editors-launcher-menu"
                 >
                   <LucideIcons.FilePenLine size={14} />
                 </button>
                 {showEditorsMenu && (
                   <div
+                    id="editors-launcher-menu" role="menu" data-menu-nav
                     style={{
                       position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 13000,
                       minWidth: 200, padding: 4, display: 'flex', flexDirection: 'column',
@@ -17715,6 +17728,7 @@ Office project scaffold created by BBARIT Terminal.
                       <button
                         key={item.blank}
                         type="button"
+                        role="menuitem"
                         onClick={() => { void createBlankEditorFile(item.blank); }}
                         title={locale === 'ko' ? `새 ${item.label} 문서 (Untitled.${item.blank})` : `New blank ${item.label} (Untitled.${item.blank})`}
                         style={{
@@ -17740,6 +17754,7 @@ Office project scaffold created by BBARIT Terminal.
                       <button
                         key={item.label}
                         type="button"
+                        role="menuitem"
                         onClick={() => { void openEditorFileOfKind(item.name, item.ext); }}
                         style={{
                           display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px',
@@ -17757,29 +17772,6 @@ Office project scaffold created by BBARIT Terminal.
               </div>
             )}
 
-            {isToolbarVisible('noteGraph') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-graph" onClick={() => { setShowNoteGraph(true); }} title={t('notes.graph')}><LucideIcons.Route size={14} /></button>}
-            {isToolbarVisible('planner') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-planner${showTodoGantt ? ' active' : ''}`} onClick={() => { if (showTodoGantt) { setShowTodoGantt(false); } else { setShowTodoGantt('todo'); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="Gantt Chart"><LucideIcons.Milestone size={14} /></button>}
-            {/* Planning AI disabled from the top toolbar for now.
-            {isToolbarVisible('planning') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-planning" onClick={() => { void openToolWindow('planning'); }} title="Software Planning AI">
-              <LucideIcons.BrainCircuit size={14} />
-            </button>} */}
-            {isToolbarVisible('kanban') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-kanban${showKanbanModal ? ' active' : ''}`} onClick={() => { if (showKanbanModal) { setShowKanbanModal(false); } else { setShowKanbanModal(true); setShowTodoGantt(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title={t('view.kanban')}>
-              <LucideIcons.Kanban size={14} />
-            </button>}
-            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-design${isMakekeWorkspace && designWorkspaceTab === 'bbarit-design' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-design') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-design'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Design">
-              <LucideIcons.Palette size={14} />
-            </button>
-            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-cowork${isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-cowork'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Cowork">
-              <LucideIcons.Briefcase size={14} />
-            </button>
-            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-motion${isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-motion'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Motion — fal.ai image & video studio">
-            </button>
-            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-image${isMakekeWorkspace && designWorkspaceTab === 'bbarit-image' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-image') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-image'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Image">
-              <LucideIcons.Images size={14} />
-            </button>
-            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-marketing${isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-marketing'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Marketing">
-              <LucideIcons.TrendingUp size={14} />
-            </button>
             <button
               data-hint="tool" className="btn-top-small toolbar-tool tool-browser"
               onClick={() => {
@@ -17795,11 +17787,47 @@ Office project scaffold created by BBARIT Terminal.
             >
               <LucideIcons.Globe size={14} />
             </button>
+            {/* BBARIT Browser 버튼 임시 비활성(2026-07-06, 사용자 지시): Windows CEF 표시가
+                아직 미해결(진행 기록 docs/CEF-WINDOWS-DEBUG-STATUS.md)이라 재개 전까지 숨긴다.
+                복원: 아래 false를 지우면 된다. */}
+            {BROWSER_TOOLBAR_BUTTON_ENABLED && isToolbarVisible('browser') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-browser" onClick={() => { void openToolWindow('browser'); }} title={locale === 'ko' ? 'BBARIT Browser (별도 창으로 열기)' : 'BBARIT Browser (open in a separate window)'}><LucideIcons.Globe size={14} /></button>}
+            <span className="toolbar-group-divider" aria-hidden="true" />
+            {isToolbarVisible('noteGraph') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-graph" onClick={() => { setShowNoteGraph(true); }} title={t('notes.graph')}><LucideIcons.Route size={14} /></button>}
+            {isToolbarVisible('planner') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-planner${showTodoGantt ? ' active' : ''}`} onClick={() => { if (showTodoGantt) { setShowTodoGantt(false); } else { setShowTodoGantt('todo'); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="Gantt Chart"><LucideIcons.Milestone size={14} /></button>}
+            {/* Planning AI disabled from the top toolbar for now.
+            {isToolbarVisible('planning') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-planning" onClick={() => { void openToolWindow('planning'); }} title="Software Planning AI">
+              <LucideIcons.BrainCircuit size={14} />
+            </button>} */}
+            {isToolbarVisible('kanban') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-kanban${showKanbanModal ? ' active' : ''}`} onClick={() => { if (showKanbanModal) { setShowKanbanModal(false); } else { setShowKanbanModal(true); setShowTodoGantt(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title={t('view.kanban')}>
+              <LucideIcons.Kanban size={14} />
+            </button>}
+            <span className="toolbar-group-divider" aria-hidden="true" />
+            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-design${isMakekeWorkspace && designWorkspaceTab === 'bbarit-design' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-design') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-design'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Design">
+              <LucideIcons.Palette size={14} />
+            </button>
+            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-cowork${isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-cowork') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-cowork'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Cowork">
+              <LucideIcons.Briefcase size={14} />
+            </button>
+            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-marketing${isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-marketing') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-marketing'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Marketing">
+              <LucideIcons.TrendingUp size={14} />
+            </button>
+            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-motion${isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-motion') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-motion'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Motion — fal.ai image & video studio">
+            </button>
+            <button data-hint="tool" className={`btn-top-small toolbar-tool tool-image${isMakekeWorkspace && designWorkspaceTab === 'bbarit-image' ? ' active' : ''}`} onClick={() => { setBrowserInEditor(false); if (isMakekeWorkspace && designWorkspaceTab === 'bbarit-image') { setIsMakekeWorkspace(false); } else { setIsMakekeWorkspace(true); setDesignWorkspaceTab('bbarit-image'); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode !== 'default' && viewMode !== 'editor' && viewMode !== 'side') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); } }} title="BBARIT Image">
+              <LucideIcons.Images size={14} />
+            </button>
+            <span className="toolbar-group-divider" aria-hidden="true" />
             {isToolbarVisible('pm2') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-pm2${showPm2Modal ? ' active' : ''}`} onClick={() => setShowPm2Modal(!showPm2Modal)} title={t('view.pm2')}>
               <LucideIcons.SquareTerminal size={14} />
             </button>}
             {isToolbarVisible('hub') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
               <LucideIcons.Waypoints size={14} />
+            </button>}
+            {isToolbarVisible('dashboard') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
+            {isToolbarVisible('skills') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
+            {isToolbarVisible('mcp') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
+              <LucideIcons.ServerCog size={14} />
+              {runningMcpServers.size > 0 && <span style={{ position: 'absolute', top: 2, right: 2, width: 5, height: 5, borderRadius: '50%', background: '#22c55e' }} />}
             </button>}
             <button
               data-hint="tool" className="btn-top-small toolbar-tool tool-collab"
@@ -17813,13 +17841,18 @@ Office project scaffold created by BBARIT Terminal.
                 </span>
               )}
             </button>
+            <button data-hint="tool" className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
+            <span className="toolbar-group-divider" aria-hidden="true" />
             <button
-              data-hint="tool" className="btn-top-small toolbar-tool tool-thread"
-              onClick={() => { void openToolWindow('thread'); }}
-              title="BBARIT Thread"
-            >
-              <LucideIcons.AtSign size={14} />
-            </button>
+              data-hint="tool" className="btn-top-small toolbar-tool tool-settings"
+              onClick={() => {
+                closeFloatingMenus('settings');
+                setShowGlobalSettings(true);
+              }}
+              title={t('app.settings')}
+            ><LucideIcons.Settings size={14} /></button>
+
+            {/* Hidden by App.css (display: none): kept for their toolbar-visibility settings. */}
             {!IS_WINDOWS && isToolbarVisible('mic') && <button
               className={`btn-top-small toolbar-tool tool-mic ${micRecording ? 'mic-active' : ''}`}
               onClick={() => { if (micRecording) { void stopMic(); } else { void startMic('manual'); } }}
@@ -17842,29 +17875,6 @@ Office project scaffold created by BBARIT Terminal.
             {/* AI Debate disabled from the top toolbar for now.
             {isToolbarVisible('debate') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-debate${showDebatePanel ? ' active' : ''}`} onClick={() => { setShowDebatePanel(v => !v); setShowTodoGantt(false); setShowKanbanModal(false); if (viewMode === 'terminal') setViewMode('default'); if (editorCollapsed) setEditorCollapsed(false); }} title="AI Debate"><LucideIcons.MessagesSquare size={14} /></button>}
             */}
-            {isToolbarVisible('skills') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
-            {/* BBARIT Browser 버튼 임시 비활성(2026-07-06, 사용자 지시): Windows CEF 표시가
-                아직 미해결(진행 기록 docs/CEF-WINDOWS-DEBUG-STATUS.md)이라 재개 전까지 숨긴다.
-                복원: 아래 false를 지우면 된다. */}
-            {BROWSER_TOOLBAR_BUTTON_ENABLED && isToolbarVisible('browser') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-browser" onClick={() => { void openToolWindow('browser'); }} title={locale === 'ko' ? 'BBARIT Browser (별도 창으로 열기)' : 'BBARIT Browser (open in a separate window)'}><LucideIcons.Globe size={14} /></button>}
-            {isToolbarVisible('mcp') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
-              <LucideIcons.ServerCog size={14} />
-              {runningMcpServers.size > 0 && <span style={{ position: 'absolute', top: 2, right: 2, width: 5, height: 5, borderRadius: '50%', background: '#22c55e' }} />}
-            </button>}
-
-            {isToolbarVisible('secretary') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-secretary" onClick={() => { void openSecretary(); }} title="BBARIT Secretary"><LucideIcons.UserRound size={14} /></button>}
-            {isToolbarVisible('dashboard') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
-
-            <button data-hint="tool" className="btn-top-small toolbar-tool tool-broker" onClick={() => { void openHarnessWindow(); }} title={locale === 'ko' ? '브로커 하네스 — 여러 개발·검토 페어 관리' : 'Broker Harness - manage dev/review pairs'}><OctoAntler size={15} /></button>
-
-            <button
-              data-hint="tool" className="btn-top-small toolbar-tool tool-settings"
-              onClick={() => {
-                closeFloatingMenus('settings');
-                setShowGlobalSettings(true);
-              }}
-              title={t('app.settings')}
-            ><LucideIcons.Settings size={14} /></button>
 
             <div ref={toolDropdownRef} className="tool-dropdown-wrap">
               <button
@@ -17874,6 +17884,9 @@ Office project scaffold created by BBARIT Terminal.
                   setShowToolDropdown(v => !v);
                 }}
                 title={t('app.menu')}
+                aria-haspopup="menu"
+                aria-expanded={showToolDropdown}
+                aria-controls="tool-dropdown-menu"
                 style={{ position: 'relative' }}
               >
                 <Menu size={14} />
@@ -17882,9 +17895,10 @@ Office project scaffold created by BBARIT Terminal.
                 )}
               </button>
               {showToolDropdown && (
-                <div className="tool-dropdown-menu">
+                <div id="tool-dropdown-menu" role="menu" data-menu-nav className="tool-dropdown-menu">
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => {
                       setRoundtableOpen(true);
@@ -17922,6 +17936,7 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={id}
                       className="tool-dropdown-item"
+                      role="menuitem" tabIndex={-1}
                       data-toolbar-visible={isToolbarVisible(id) ? 'true' : 'false'}
                       style={{ display: 'flex', alignItems: 'center', cursor: 'pointer' }}
                       onClick={() => { action(); setShowToolDropdown(false); }}
@@ -17941,6 +17956,7 @@ Office project scaffold created by BBARIT Terminal.
                   <div className="tool-dropdown-divider" />
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => { void guide.open({ mode: 'start' }); setShowToolDropdown(false); }}
                   >
@@ -17949,6 +17965,7 @@ Office project scaffold created by BBARIT Terminal.
                   </div>
                   <div
                     className="tool-dropdown-item"
+                    role="menuitem" tabIndex={-1}
                     data-toolbar-visible="true"
                     onClick={() => { void guide.open({ mode: 'whatsnew' }); setShowToolDropdown(false); }}
                   >
@@ -17958,6 +17975,17 @@ Office project scaffold created by BBARIT Terminal.
                 </div>
               )}
             </div>
+
+            {/* 툴바 전체 접기/펴기 — 접힌 상태에서는 이 토글만 남는다 (화면에서도 맨 끝). */}
+            <button
+              type="button"
+              data-hint="nav" className="btn-top-small toolbar-collapse-toggle"
+              onClick={toggleToolbarCollapsed}
+              title={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
+              aria-label={toolbarCollapsed ? 'Show toolbar' : 'Hide toolbar'}
+            >
+              {toolbarCollapsed ? <LucideIcons.ChevronsLeft size={13} /> : <LucideIcons.ChevronsRight size={13} />}
+            </button>
 
             {/* 빠릿 하네스 실행 버튼은 프로젝트 탭줄의 + 버튼 옆으로 이동했다 (project-tab-bbarit). */}
           </div>
@@ -18076,7 +18104,7 @@ Office project scaffold created by BBARIT Terminal.
       <div className="main-content">
         {/* 맨 왼쪽 프로젝트 패널 (Group 1 = Left 선택 시) */}
         {projectsLeftPanel && !isMonitorMode && (
-          <div ref={projectPanelRef} className="project-selector-panel" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
+          <div ref={projectPanelRef} className="project-selector-panel" data-kbd-region="projects" style={{ order: -10, flexShrink: 0, width: projectPanelWidth }}>
 	            <div className="project-selector-panel-header">
 	              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
 	                <span>{t('app.project.title' as any, 'Projects')}</span>
@@ -18234,6 +18262,7 @@ Office project scaffold created by BBARIT Terminal.
 		            <div
                   ref={fileTreeSidebarRef}
                   className="file-tree-sidebar"
+                  data-kbd-region="sidebar"
                   tabIndex={-1}
                   onMouseDownCapture={(e) => { focusFileTreeSidebarFromInteraction(e.target); }}
                   onContextMenuCapture={(e) => { focusFileTreeSidebarFromInteraction(e.target); }}
@@ -20590,7 +20619,7 @@ Office project scaffold created by BBARIT Terminal.
           {/* project-terminal 구 모드 호환: 기존 viewMode === 'project-terminal'만 이 위치에 렌더.
               projectsLeftPanel일 때는 main-content 맨 왼쪽에서 렌더됨 (아래 참조) */}
           {viewMode === 'project-terminal' && !projectsLeftPanel && (
-            <div className="project-selector-panel">
+            <div className="project-selector-panel" data-kbd-region="projects">
               <div className="project-selector-panel-header">
                 <span>{t('app.project.title' as any, 'Projects')}</span>
                 <div className="project-selector-panel-actions">
@@ -20726,7 +20755,7 @@ Office project scaffold created by BBARIT Terminal.
                   <span style={{ fontSize: 10 }}>{t('view.editor')}</span>
                 </div>
               ) : (
-              <div ref={editorAreaRef} style={{ flex: viewMode === 'side' ? 'none' : 1, width: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, maxWidth: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, height: viewMode === 'side' ? '100%' : undefined, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
+              <div ref={editorAreaRef} data-kbd-region="editor" style={{ flex: viewMode === 'side' ? 'none' : 1, width: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, maxWidth: viewMode === 'side' ? `${sideSplitRatio}%` : undefined, height: viewMode === 'side' ? '100%' : undefined, display: 'flex', flexDirection: 'column', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
                 {showTodoGantt ? (
                   <React.Suspense fallback={null}>
                     <TodoGanttPanel
@@ -21010,6 +21039,7 @@ Office project scaffold created by BBARIT Terminal.
 	          }>
 		            <div
                   className="terminals-header"
+                  data-kbd-region="terminal-header"
                   style={isMonitorMode ? { display: 'none' } : { overflow: 'visible', position: 'relative', zIndex: 2000 }}
                 >
                   {/* Broker status lives in the harness modal now (one broker per harness). */}
@@ -21061,13 +21091,15 @@ Office project scaffold created by BBARIT Terminal.
                           setShowTerminalLayoutMenu((value) => !value);
                         }}
                         title={t('app.layout.pick' as any, 'Terminal layout')}
+                        aria-haspopup="menu"
                         aria-expanded={showTerminalLayoutMenu}
+                        aria-controls="terminal-layout-menu"
                       >
                         <TerminalLayoutIcon mode={terminalSplitMode} size={14} />
                         <LucideIcons.ChevronDown size={11} />
                       </button>
                       {showTerminalLayoutMenu && (
-                        <div className="terminal-compact-menu terminal-layout-menu">
+                        <div id="terminal-layout-menu" role="menu" data-menu-nav className="terminal-compact-menu terminal-layout-menu">
                           <div className="terminal-compact-menu-title">{t('app.layout.pick' as any, 'Terminal layout')}</div>
                           {([
                             ['tabs', t('app.layout.tabs' as any), () => setTerminalSplitMode('tabs')],
@@ -21082,6 +21114,7 @@ Office project scaffold created by BBARIT Terminal.
                             <button
                               key={mode}
                               type="button"
+                              role="menuitem"
                               data-hint="nav" className={`terminal-compact-menu-item${terminalSplitMode === mode ? ' active' : ''}`}
                               onClick={() => {
                                 action();
@@ -21184,6 +21217,7 @@ Office project scaffold created by BBARIT Terminal.
                             ['claude', t('terminal.claude')],
                             ['claude-new', t('terminal.claudeNew' as any)],
                             ['codex', t('terminal.codex')],
+                            ['codex-new', t('terminal.codexNew' as any)],
                             ['cursor', t('terminal.cursor' as any)],
                             ['opencode', t('terminal.opencode')],
                             ['kimi', t('terminal.kimi')],
@@ -21193,18 +21227,19 @@ Office project scaffold created by BBARIT Terminal.
                             ['pi', t('terminal.pi' as any)],
                             ['reasonix', t('terminal.reasonix' as any)],
                             ['gajae', 'Gajae'],
-                          ] as Array<[TerminalCreateCliType | 'claude-new', string]>).map(([cliType, label]) => (
+                          ] as Array<[TerminalCreateCliType | 'claude-new' | 'codex-new', string]>).map(([cliType, label]) => (
                             <button
                               key={cliType}
                               type="button"
-                              className={`assistant-terminal-menu-item ${cliType === 'claude-new' ? 'claude' : cliType}`}
+                              className={`assistant-terminal-menu-item ${cliType === 'claude-new' ? 'claude' : cliType === 'codex-new' ? 'codex' : cliType}`}
                               onClick={() => {
                                 if (cliType === 'claude-new') addTerminal('claude', undefined, undefined, undefined, { freshClaudeSession: true });
+                                else if (cliType === 'codex-new') addTerminal('codex', undefined, undefined, undefined, { freshCodexSession: true });
                                 else addTerminal(cliType);
                                 setShowTerminalCreateMenu(false);
                               }}
                             >
-                              <CliIcon cliType={cliType === 'claude-new' ? 'claude' : cliType} className="assistant-terminal-menu-icon" size={15} />
+                              <CliIcon cliType={cliType === 'claude-new' ? 'claude' : cliType === 'codex-new' ? 'codex' : cliType} className="assistant-terminal-menu-icon" size={15} />
                               <span>{label}</span>
                             </button>
                           ))}
@@ -21269,7 +21304,7 @@ Office project scaffold created by BBARIT Terminal.
 			            </div>
             {/* Terminal Tabs (only in tabs mode) */}
             {activeProject && terminalSplitMode === 'tabs' && (
-              <div className="terminals-tabs">
+              <div className="terminals-tabs" data-kbd-region="terminal-header">
                 <div className="terminals-tabs-list">
                   {activeProject.terminals.map((terminal, tabIdx) => (
                     <div
@@ -21549,6 +21584,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
 			                            claudeSessionId={terminal.claudeSessionId}
 			                            claudeSessionSource={terminal.claudeSessionSource}
+			                            codexFreshSession={terminal.codexFreshSession}
 			                            extraFlags={
 			                              (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
 			                               terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -21937,6 +21973,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
 			                            claudeSessionId={terminal.claudeSessionId}
 			                            claudeSessionSource={terminal.claudeSessionSource}
+			                            codexFreshSession={terminal.codexFreshSession}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -22243,6 +22280,7 @@ Office project scaffold created by BBARIT Terminal.
                                     resumeLastSession={agentSettings.resumeLastSession ?? false}
                                     claudeSessionId={terminal.claudeSessionId}
                                     claudeSessionSource={terminal.claudeSessionSource}
+                                    codexFreshSession={terminal.codexFreshSession}
                                     extraFlags={
                                       (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                        terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -22524,6 +22562,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
 			                            claudeSessionId={terminal.claudeSessionId}
 			                            claudeSessionSource={terminal.claudeSessionSource}
+			                            codexFreshSession={terminal.codexFreshSession}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -22862,6 +22901,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
 			                            claudeSessionId={terminal.claudeSessionId}
 			                            claudeSessionSource={terminal.claudeSessionSource}
+			                            codexFreshSession={terminal.codexFreshSession}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -23040,6 +23080,9 @@ Office project scaffold created by BBARIT Terminal.
                     <div
                       key={terminal.id}
                       className={`terminal-wrapper ${isActiveTerminal ? 'active' : ''} ${terminal.brokerRole ? `broker-term broker-${terminal.brokerRole}` : ''}`}
+                      // Stacked (tabs) mode: the hidden panes stay mounted (PTY output keeps
+                      // rendering) but must not be reachable with Tab.
+                      inert={isHiddenStackedPane(terminalSplitMode, isActiveTerminal)}
                       style={{
                         ...posStyle,
                         display: isTerminalFiltered(terminal.id) ? 'none' : 'flex',
@@ -23171,6 +23214,7 @@ Office project scaffold created by BBARIT Terminal.
 			                            resumeLastSession={agentSettings.resumeLastSession ?? false}
 			                            claudeSessionId={terminal.claudeSessionId}
 			                            claudeSessionSource={terminal.claudeSessionSource}
+			                            codexFreshSession={terminal.codexFreshSession}
                             extraFlags={
                               (terminal.cliType === 'claude' ? agentSettings.claudeFlags :
                                terminal.cliType === 'codex' ? agentSettings.codexFlags :
@@ -23711,7 +23755,7 @@ Office project scaffold created by BBARIT Terminal.
       )}
 
       {/* Process Stats Status Bar */}
-      <div className="process-stats-bar" style={{
+      <div className="process-stats-bar" data-kbd-region="statusbar" style={{
         display: 'flex',
         alignItems: 'center',
         gap: 4,

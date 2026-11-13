@@ -9,6 +9,24 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+## [1.1.70] - 2026-11-12
+
+### Added
+
+- Move between screen regions by keyboard: F6 moves focus through the top bar, toolbar, project list, sidebar, editor, terminal header and tabs, terminal, right quick-command buttons, open panel, prompt library and bottom status bar, and Shift+F6 goes the other way. It works inside a terminal, so you can leave a terminal without the mouse, and each region puts focus back where you last were (or on the selected project or tab). Once you leave, the terminal no longer pulls focus back; clicking it, F6 back into it, a hint pick, a project/tab switch shortcut, or Enter/Space on a project or terminal tab returns to it. Tab walking the screen skips terminal inputs (Tab inside a terminal still completes in the shell). On Mac laptop keyboards you may need Fn+F6. The keys are listed in Settings > Shortcuts; while the feature is on F6 is not passed to terminal programs, and switching it off there sends F6 / Shift+F6 to the terminal as before (mc, htop, nano).
+- “Codex (new session)” in the add-AI-terminal menu and the command palette. Even with "Resume Last Session" turned on in Settings, this tab never picks up the folder's latest Codex conversation (`codex resume --last`); it always starts a new one, and tabs are named like “Codex (new session) 1”. After an app restart the tab starts a new conversation again (unlike Claude, Codex offers no way to pin a session to a tab and resume it). Codex child tabs started by the agent relay start the same way, so they no longer pick up the parent's conversation.
+
+### Fixed
+
+- After changing the terminal font size or the window size, Claude Code's status line and bottom lines could stay blank until Ctrl+L. They now redraw.
+- Starting with this version, folder access permissions (Documents, Desktop, Downloads) survive app updates. Until now macOS forgot them on every update, so terminals in `~/Documents` failed with `Operation not permitted`. The first update onto this version asks for the permission once more.
+- Hint mode: on small icon buttons (the toolbar and the terminal pane buttons) the label box now sits centred just below the button (above it when there is no room) instead of covering the icon, so you can tell which button each label belongs to.
+- AI tool tabs no longer print a false "CLI not found" message when the tool is installed but exits with an error (for example when it cannot read the current folder). The message now appears only when the tool is really not installed, and the tool's own error stays visible.
+- Hint mode: picking the terminal layout, Office or tool (☰) menu now puts keyboard focus inside it. Arrow Up/Down and Home/End move between items, Enter/Space choose, and Esc closes the menu and returns focus to the terminal you were using. Keys pressed while the menu is open no longer reach the terminal.
+- In confirmation dialogs, Enter no longer confirms while the Cancel button has focus. When a dialog opens, focus now moves to one of its buttons (Cancel for actions that cannot be undone, such as deleting; otherwise the confirm button); Enter and Space press the focused button, Tab stays inside the dialog, and Esc cancels. When the dialog closes, focus goes back to where it was (usually the terminal).
+- In the tabs view, the Tab key no longer moves into the input and buttons of terminal tabs that are not on screen. Tab now only visits the terminal you can see.
+- The Tab key now moves through the top toolbar in the order the buttons appear on screen, left to right. Before, it jumped around, starting at the hide-toolbar button on the far right. The button layout is unchanged.
+
 ## [1.1.69] - 2026-11-12
 
 ### Added
@@ -249,7 +267,8 @@ The first release of this fork, based on the original author's `v1.1.50`.
 - The built-in agent reads `.mcp.json` and `.bbarit/models.json` only in trusted projects, and `/trust no` takes precedence over the app's auto-approve run option.
 - Updated or replaced dependencies with known vulnerabilities and removed unused ones.
 
-[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...HEAD
+[Unreleased]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.70...HEAD
+[1.1.70]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.69...v1.1.70
 [1.1.69]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.68...v1.1.69
 [1.1.68]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.67...v1.1.68
 [1.1.67]: https://github.com/bluelang1/bbarit-terminal-opensource/compare/v1.1.66...v1.1.67

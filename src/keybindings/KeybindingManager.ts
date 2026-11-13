@@ -7,6 +7,23 @@
 
 import { parseKeybinding, matchesEvent, normalizeEventKeyForShortcut, type KeyBindingEntry } from './parser';
 import { isHintModeActive } from '../hints/hintModeFlag';
+import { installKbdRegions, noteTerminalNavigation, requestRegionCycle } from '../a11y/regions';
+import { getConfigSnapshot } from '../config/ConfigContext';
+
+/** Settings > Shortcuts can give F6 back to terminal programs (mc, htop, nano). */
+const regionKeysOn = (): boolean => getConfigSnapshot()?.regionKeys !== false;
+
+/** Region cycling (src/a11y/regions.ts) needs no App state, so its handlers are built in. */
+const BUILTIN_HANDLERS: Array<[string, () => boolean | void]> = [
+  // `false` = not handled: the key goes on to the terminal exactly as before.
+  ['focus.nextRegion', () => (regionKeysOn() ? requestRegionCycle(1) : false)],
+  ['focus.prevRegion', () => (regionKeysOn() ? requestRegionCycle(-1) : false)],
+];
+
+/** Shortcuts that switch terminal/project: the terminal they land on may take focus again. */
+const returnsFocusToTerminal = (id: string): boolean =>
+  id.startsWith('terminal.tab-') || id.startsWith('project.tab-') || id.startsWith('split.') ||
+  ['terminal.new', 'terminal.next', 'terminal.previous', 'project.next', 'project.previous', 'task.open-last-completed'].includes(id);
 
 export interface KeybindingHandler {
   id: string;
@@ -15,8 +32,9 @@ export interface KeybindingHandler {
 
 export class KeybindingManager {
   private bindings: KeyBindingEntry[] = [];
-  private handlers: Map<string, () => boolean | void> = new Map();
+  private handlers: Map<string, () => boolean | void> = new Map(BUILTIN_HANDLERS);
   private listener: ((e: KeyboardEvent) => void) | null = null;
+  private uninstallRegions: (() => void) | null = null;
 
   /** Default keybindings for the app. */
   static defaultBindings(): Array<{ id: string; keys: string }> {
@@ -55,6 +73,10 @@ export class KeybindingManager {
       // Hint mode (src/hints): labels on navigation targets; press again or Esc to close.
       // Not Ctrl+J off macOS: terminal programs (Claude Code among them) use it for newline.
       { id: 'hints.toggle', keys: isMac ? 'cmd+j' : 'alt+j' },
+      // Region cycling (src/a11y/regions.ts): leave the terminal / walk the screen parts.
+      // Taken before the terminal sees the key, so F6 no longer reaches the shell.
+      { id: 'focus.nextRegion', keys: 'f6' },
+      { id: 'focus.prevRegion', keys: 'shift+f6' },
       { id: 'project.new', keys: `${mod}+n` },
       { id: 'settings.open', keys: `${mod}+,` },
       { id: 'view.toggle-terminal-mode', keys: `${mod}+shift+f` },
@@ -218,12 +240,14 @@ export class KeybindingManager {
 
       if (isTyping && !allowInInputs) {
         // Still allow certain global shortcuts even in inputs
-        const globalShortcuts = ['command-palette.toggle', 'settings.open', 'file.open-document', 'view.toggle-terminal-mode', 'view.toggle-editor', 'view.toggle-sidebar', 'task.open-last-completed', 'hints.toggle'];
+        const globalShortcuts = ['command-palette.toggle', 'settings.open', 'file.open-document', 'view.toggle-terminal-mode', 'view.toggle-editor', 'view.toggle-sidebar', 'task.open-last-completed', 'hints.toggle', 'focus.nextRegion', 'focus.prevRegion'];
         for (const binding of this.bindings) {
           if (globalShortcuts.includes(binding.id) && matchesEvent(binding.binding, e)) {
-            e.preventDefault();
             const handler = this.handlers.get(binding.id);
-            if (handler) handler();
+            if (handler && returnsFocusToTerminal(binding.id)) noteTerminalNavigation();
+            const result = handler ? handler() : undefined;
+            // Region keys switched off in Settings pass through; the rest behave as before.
+            if (result !== false || !binding.id.startsWith('focus.')) e.preventDefault();
             return;
           }
         }
@@ -233,6 +257,7 @@ export class KeybindingManager {
       for (const binding of this.bindings) {
         if (matchesEvent(binding.binding, e)) {
           const handler = this.handlers.get(binding.id);
+          if (handler && returnsFocusToTerminal(binding.id)) noteTerminalNavigation();
           if (handler) {
             const result = handler();
             // If handler returns false, don't preventDefault (pass through to default behavior)
@@ -258,6 +283,7 @@ export class KeybindingManager {
     };
 
     window.addEventListener('keydown', this.listener, true);
+    this.uninstallRegions = installKbdRegions(window);
   }
 
   /**
@@ -268,6 +294,8 @@ export class KeybindingManager {
       window.removeEventListener('keydown', this.listener, true);
       this.listener = null;
     }
+    this.uninstallRegions?.();
+    this.uninstallRegions = null;
   }
 
   /**

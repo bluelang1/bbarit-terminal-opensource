@@ -33,6 +33,8 @@
 | Windows 서명 | 인증서 지문과 외부 서명 명령 없음 |
 | 빌드 자식 환경 | `APPLE_*`, `TAURI_SIGNING_*`, `WINDOWS_CERTIFICATE*` 제거 |
 
+이 포크의 릴리스 워크플로는 저장소 시크릿(`FORK_CODESIGN_P12_BASE64`, `FORK_CODESIGN_P12_PASSWORD`)이 있을 때만 ad-hoc 대신 고정된 자체 서명 인증서로 서명합니다(README "고정 코드 서명 인증서" 참고). 이것도 Apple 계정 인증이나 공증이 아닙니다.
+
 macOS ad-hoc은 Apple 계정 인증이나 공증이 아닙니다. 배포판에 적용되는 OS 신뢰·보안 안내를 우회하는 구성도 아닙니다. [Tauri ad-hoc 서명 문서](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)를 참고하세요.
 
 공식 설치 파일·기존 릴리즈 다운로드를 이 소스 배포의 설치 경로로 안내하지 않습니다. 소스 빌드 방식으로 제공합니다. 별도 `bbarit-agent-oss` 프로젝트의 릴리즈·설치 안내는 이 작업의 대상이 아닙니다.

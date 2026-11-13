@@ -143,8 +143,10 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 - **Claude 자식 = 전용 세션**: 실기에서 자식이 `claude --continue` 로 떠서 같은 폴더의 부모 대화를
   이어받았다. `agent.run` 은 Claude 자식을 "Claude (새 대화)" 경로(`freshClaudeSession`:
   `claudeSessionId` + `claudeSessionSource: 'app'`, `--session-id <uuid>` 로 시작)로 만든다
-  (`agentRunTerminalSpec`, `dedicatedClaudeSessionFields`). 탭 이름은 `--name` 또는
-  `<cliType> (agent)`.
+  (`agentRunTerminalSpec`, `dedicatedClaudeSessionFields`). Codex 자식도 같은 이유로 "Codex (새 대화)"
+  경로(`freshCodexSession` → `codexFreshSession`)로 만든다: 이어 보기 설정이 켜져 있어도
+  `codex resume --last` 대신 새 `codex` 로 시작한다(src/terminal/codexSession.ts). 탭 이름은
+  `--name` 또는 `<cliType> (agent)`.
 - **준비 판정**(`runAgentBrief`, 의존성 주입으로 테스트): 300 ms 간격, 첫 검사는 첫 sleep 뒤다.
   addTerminal 직후에는 탭이 `projectsRef` 에 아직 없으므로 2 s 동안은 "사라짐" 으로 보지 않는다.
   60 s 시계는 PTY 가 뜬 때부터 잰다(다른 프로젝트에 만든 탭은 그 프로젝트를 볼 때 마운트된다,

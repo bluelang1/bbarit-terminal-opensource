@@ -9,6 +9,15 @@ name: Fork release
 # Required repository secrets (never commit these):
 #   TAURI_SIGNING_PRIVATE_KEY           contents of the minisign private key file
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password (omit the secret if the key has none)
+#
+# Optional repository secrets for a stable macOS app signature (make them with
+# scripts/fork-codesign-cert.sh; without them the app is signed ad-hoc and the
+# run warns). A fixed self-signed certificate keeps the designated requirement
+# `identifier "com.bbarit.terminal.source" and certificate root = H"<sha1>"`
+# across versions, so macOS folder permissions survive updates. It is not an
+# Apple Developer ID and nothing is notarized.
+#   FORK_CODESIGN_P12_BASE64    base64 of the .p12 (certificate + private key)
+#   FORK_CODESIGN_P12_PASSWORD  password of the .p12
 
 # Trigger: `gh workflow run fork-release.yml --ref main -f tag=vX.Y.Z` after the
 # version bump is merged. Running on main keeps the Rust cache on
@@ -116,7 +125,54 @@ jobs:
           # TAURI_SIGNING_PRIVATE_KEY_PASSWORD secret does not match the key.
           npx tauri signer sign "$RUNNER_TEMP/sign-probe.txt" > /dev/null
           rm -f "$RUNNER_TEMP/sign-probe.txt" "$RUNNER_TEMP/sign-probe.txt.sig"
-      - name: Build the fork bundle (ad-hoc app signature, signed updater artifacts)
+      - name: Import the fork code-signing certificate
+        # A temporary keychain on the runner; the cleanup step at the end
+        # removes it. The identity is passed to the build as the certificate's
+        # SHA-1 (FORK_CODESIGN_IDENTITY, read by scripts/tauri-opensource.mjs),
+        # which Tauri hands to `codesign -s`. An untrusted self-signed identity
+        # is not listed by `find-identity -v` but codesign accepts it.
+        env:
+          FORK_CODESIGN_P12_BASE64: ${{ secrets.FORK_CODESIGN_P12_BASE64 }}
+          FORK_CODESIGN_P12_PASSWORD: ${{ secrets.FORK_CODESIGN_P12_PASSWORD }}
+        run: |
+          if [ -z "$FORK_CODESIGN_P12_BASE64" ] && [ -z "$FORK_CODESIGN_P12_PASSWORD" ]; then
+            echo "::warning::FORK_CODESIGN_P12_BASE64/FORK_CODESIGN_P12_PASSWORD are not set: the app is signed ad-hoc, so macOS drops folder permissions (Documents, Desktop, Downloads) on every update. See scripts/fork-codesign-cert.sh."
+            exit 0
+          fi
+          if [ -z "$FORK_CODESIGN_P12_BASE64" ] || [ -z "$FORK_CODESIGN_P12_PASSWORD" ]; then
+            echo "::error::Set both FORK_CODESIGN_P12_BASE64 and FORK_CODESIGN_P12_PASSWORD, or neither."
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/fork-codesign.keychain-db"
+          p12="$RUNNER_TEMP/fork-codesign.p12"
+          keychain_password="$(openssl rand -hex 24)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$FORK_CODESIGN_P12_BASE64" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -f pkcs12 -P "$FORK_CODESIGN_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$p12"
+          # Lets codesign use the key without a UI prompt.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" > /dev/null
+          # Tauri runs `codesign -s <identity>` without --keychain, so the
+          # keychain must be on the user search list (keep the existing ones).
+          existing=()
+          while IFS= read -r line; do
+            line="${line#"${line%%[![:space:]]*}"}"; line="${line%\"}"; line="${line#\"}"
+            [ -n "$line" ] && existing+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+          identities="$(security find-identity -p codesigning "$keychain" | awk '/^ *[0-9]+\) [0-9A-F]{40} / {print $2}' | sort -u)"
+          if [ "$(printf '%s\n' "$identities" | grep -c .)" != 1 ]; then
+            echo "::error::Expected exactly one code-signing identity in FORK_CODESIGN_P12_BASE64, found: ${identities:-none}"
+            security find-identity -p codesigning "$keychain"
+            exit 1
+          fi
+          echo "FORK_CODESIGN_IDENTITY=$identities" >> "$GITHUB_ENV"
+          security find-identity -p codesigning "$keychain"
+          echo "Signing the app with $identities"
+      - name: Build the fork bundle (app signed with the fork certificate or ad-hoc, signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -127,6 +183,59 @@ jobs:
         # Arguments after the second `--` go to cargo; --locked keeps CI on the
         # committed Cargo.lock like the source checks workflow.
         run: npm run tauri:build:fork -- -- --locked
+      - name: Verify the app signature
+        # The updater archive is made from the signed .app inside the build,
+        # so it is checked too. With the fork certificate configured, an
+        # ad-hoc result or a designated requirement without that certificate
+        # fails the release.
+        run: |
+          bundle=src-tauri/target/release/bundle
+          app="$(find "$bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          archive="$(find "$bundle/macos" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          if [ -z "$app" ] || [ -z "$archive" ]; then
+            echo "::error::No .app or .app.tar.gz under $bundle/macos."
+            exit 1
+          fi
+          unpacked="$RUNNER_TEMP/updater-archive"
+          mkdir -p "$unpacked"
+          tar -xzf "$archive" -C "$unpacked"
+          archived_app="$(find "$unpacked" -maxdepth 1 -name '*.app' -print -quit)"
+          for target in "$app" "$archived_app"; do
+            echo "== $target"
+            codesign --verify --deep --strict --verbose=2 "$target"
+            codesign -dv "$target" 2>&1
+            codesign -d -r- "$target" 2>&1
+          done
+          requirement="$(codesign -d -r- "$app" 2>&1 | sed -n 's/^.*designated => //p')"
+          if [ "$(codesign -d -r- "$archived_app" 2>&1 | sed -n 's/^.*designated => //p')" != "$requirement" ]; then
+            echo "::error::The updater archive's app has a different designated requirement than the built app."
+            exit 1
+          fi
+          if [ -z "${FORK_CODESIGN_IDENTITY:-}" ]; then
+            echo "::warning::App signed ad-hoc (designated requirement: $requirement); folder permissions reset on every update."
+            exit 0
+          fi
+          fingerprint="$(printf '%s' "$FORK_CODESIGN_IDENTITY" | tr 'A-F' 'a-f')"
+          case "$requirement" in
+            *'identifier "com.bbarit.terminal.source"'*"H\"$fingerprint\""*) ;;
+            *)
+              echo "::error::Designated requirement does not name the fork certificate $FORK_CODESIGN_IDENTITY: $requirement"
+              exit 1
+              ;;
+          esac
+          # Every Mach-O in the bundle (main binary, sidecars, helpers) must be
+          # signed with the certificate, not ad-hoc.
+          while IFS= read -r -d '' file; do
+            if file -b "$file" | grep -q 'Mach-O'; then
+              info="$(codesign -dv "$file" 2>&1 || true)"
+              if printf '%s\n' "$info" | grep -q 'Signature=adhoc' || ! printf '%s\n' "$info" | grep -q '^Signature size='; then
+                echo "::error::$file is not signed with the fork certificate:"
+                printf '%s\n' "$info"
+                exit 1
+              fi
+              echo "signed: ${file#"$app"/}"
+            fi
+          done < <(find "$app" -type f -print0)
       - name: Prepare release assets and latest.json
         # Besides the versioned dmg, release-out/ gets a version-free copy
         # (BBARIT-Terminal-Source_aarch64.dmg) that the README links through
@@ -162,3 +271,13 @@ jobs:
               --target "$GITHUB_SHA" --repo "$GITHUB_REPOSITORY"
           fi
           echo "Draft release $RELEASE_TAG is ready; publish it to make it the updater's latest."
+      - name: Remove the temporary signing keychain
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/fork-codesign.p12"
+          keychain="$RUNNER_TEMP/fork-codesign.keychain-db"
+          if [ -e "$keychain" ]; then
+            # delete-keychain also takes it off the user search list.
+            security delete-keychain "$keychain"
+          fi
+          security list-keychains -d user

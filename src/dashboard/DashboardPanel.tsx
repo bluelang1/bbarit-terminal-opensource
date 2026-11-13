@@ -61,6 +61,7 @@ export function DashboardPanel({ onClose, onOpenExternal, accent = '#89b4fa', bg
   return (
     <div
       className="dashboard-overlay"
+      data-kbd-region="panel"
       onMouseDown={onClose}
       style={{ position: 'fixed', inset: 0, zIndex: 100000, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
     >
