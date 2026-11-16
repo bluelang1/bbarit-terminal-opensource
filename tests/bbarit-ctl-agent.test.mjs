@@ -15,7 +15,16 @@ import {
   parseStopArgs,
   stopExitCode,
   awaitAgentRunJob,
+  parseLogArgs,
+  tailRelayLogText,
+  readRelayLogFile,
+  relayLogPath,
+  formatRelayLogLine,
+  readFileTail,
 } from '../scripts/bbarit-ctl.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const done = { terminalId: 'a', state: 'done', settled: true };
 const working = { terminalId: 'b', state: 'working', settled: false };
@@ -198,4 +207,76 @@ test('awaitAgentRunJob retries thrown fetches and treats null as pending', async
   assert.equal(calls, 3);
   const never = await awaitAgentRunJob({ first: { ok: true, pending: true, jobId: 'k' }, fetchResult: async () => { throw new Error('down'); }, timeoutMs: 1500, now: clock.now, sleep: clock.sleep });
   assert.equal(never.timedOut, true);
+});
+
+test('agent table shows a depth column once the app reports depth', () => {
+  assert.deepEqual(agentTableColumns([{ ...done, depth: 1 }]), ['terminalId', 'name', 'cliType', 'depth', 'state', 'settled', 'exited']);
+  assert.deepEqual(agentTableColumns([{ ...done, depth: 2, branch: 'agent/x' }]), ['terminalId', 'name', 'cliType', 'depth', 'state', 'settled', 'exited', 'branch']);
+});
+
+test('parseLogArgs: --tail N defaults to 20 and caps at 500', () => {
+  assert.deepEqual(parseLogArgs([]), { tail: 20 });
+  assert.deepEqual(parseLogArgs(['--tail', '5']), { tail: 5 });
+  assert.deepEqual(parseLogArgs(['--tail', '9999']), { tail: 500 });
+  assert.deepEqual(parseLogArgs(['--tail', '7.9']), { tail: 7 });
+  assert.throws(() => parseLogArgs(['--tail', '0']), /usage: agent log/);
+  assert.throws(() => parseLogArgs(['--tail', 'x']), /usage: agent log/);
+  assert.throws(() => parseLogArgs(['extra']), /usage: agent log/);
+  assert.throws(() => parseLogArgs(['--tail']), /usage: agent log/);
+  assert.throws(() => parseLogArgs(['--tail', '--json']), /usage: agent log/);
+  assert.throws(() => parseLogArgs(['--tail=']), /usage: agent log/);
+  assert.deepEqual(parseLogArgs(['--tail=5']), { tail: 5 });
+  assert.deepEqual(parseLogArgs(['--tail=900']), { tail: 500 });
+});
+
+test('readFileTail reads only the last bytes, drops the cut line, tolerates bad UTF-8', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bbarit-relay-tail-'));
+  const file = path.join(dir, 'agent-relay.log');
+  fs.writeFileSync(file, Buffer.concat([
+    Buffer.from('{"event":"first-long-line-that-gets-cut"}\n'),
+    Buffer.from([0xff, 0xfe, 0x0a]),
+    Buffer.from('{"event":"run"}\n{"event":"exit"}\n'),
+  ]));
+  assert.equal(readFileTail(file, 34), '{"event":"run"}\n{"event":"exit"}\n');
+  const all = readFileTail(file, 1 << 20);
+  assert.ok(all.includes('\ufffd'), 'invalid bytes become U+FFFD');
+  assert.ok(all.startsWith('{"event":"first-long-line'));
+  assert.deepEqual(readRelayLogFile(5, file, 34), ['{"event":"run"}', '{"event":"exit"}']);
+  assert.equal(readFileTail(path.join(dir, 'missing.log')), '');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('tailRelayLogText reaches into the rotated file only when needed', () => {
+  assert.deepEqual(tailRelayLogText('a\nb\nc\n', 'old1\nold2\n', 2), ['b', 'c']);
+  assert.deepEqual(tailRelayLogText('a\n\nb\n', 'old1\nold2\n', 3), ['old2', 'a', 'b']);
+  assert.deepEqual(tailRelayLogText('', '', 5), []);
+});
+
+test('readRelayLogFile reads the log and its .1 from disk; missing files are empty', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bbarit-relay-log-'));
+  const file = path.join(dir, 'agent-relay.log');
+  assert.deepEqual(readRelayLogFile(5, file), []);
+  fs.writeFileSync(`${file}.1`, '{"event":"run"}\n');
+  fs.writeFileSync(file, '{"event":"send"}\n{"event":"exit"}\n');
+  assert.deepEqual(readRelayLogFile(5, file), ['{"event":"run"}', '{"event":"send"}', '{"event":"exit"}']);
+  assert.deepEqual(readRelayLogFile(1, file), ['{"event":"exit"}']);
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(relayLogPath('/home/u'), path.join('/home/u', '.config', 'octo', 'agent-relay.log'));
+});
+
+test('formatRelayLogLine prints one readable line per event', () => {
+  const run = formatRelayLogLine(JSON.stringify({
+    ts: '2026-11-16T01:02:03.004Z', event: 'run', caller: { id: 't1', name: 'Claude' },
+    target: { id: 't5', name: 'reviewer', cliType: 'claude' }, depth: 1, branch: 'agent/reviewer',
+    textLen: 300, textHead: 'Review the diff',
+  }));
+  assert.equal(run, '2026-11-16T01:02:03.004Z  run          t1 Claude → t5 reviewer (claude)  depth=1  branch=agent/reviewer  "Review the diff…" (300 chars)');
+  const refused = formatRelayLogLine(JSON.stringify({
+    ts: 'T', event: 'run_refused', caller: { id: 't1' }, target: { cliType: 'codex' }, depth: 3,
+    reason: 'maxDepth', count: 2, max: 2, textLen: 2, textHead: 'go',
+  }));
+  assert.equal(refused, 'T  run_refused  t1 → (codex)  depth=3  reason=maxDepth  count=2  max=2  "go" (2 chars)');
+  const stop = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'stop', target: { id: 't2' }, by: 'button', ok: false, keys: '', closed: true }));
+  assert.equal(stop, 'T  stop         - → t2  by=button  ok=no  closed=yes');
+  assert.equal(formatRelayLogLine('not json'), 'not json');
 });

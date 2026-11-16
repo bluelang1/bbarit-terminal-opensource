@@ -206,6 +206,28 @@ replies `{ ok, pending: true, jobId }` at once and does the work in the app; the
 result (or an error saying the tab may still open). Write the name right
 after the flag and before the prompt, or as `--worktree=<name>`.
 
+**Limits** (checked before any tab, worktree or branch is created; app config
+`agents: { maxChildren, maxDepth, maxTotal }` in `~/.config/octo/config.json`, no
+Settings UI): at most `maxChildren` (default 6, 1–32) live children per caller tab, a
+new child at most `maxDepth` (default 2, 1–5) levels below a tab without a relay parent
+(depth 0 → children 1 → grandchildren 2, so by default a grandchild cannot start
+another agent), and at most `maxTotal` (default 12, 1–64) live relay agents in the app
+(callerless runs count here, and only here). "Live" means the link exists, the child
+has not exited and its tab is open; a `--worktree` run still creating its worktree
+counts too, and so does a child whose parent tab was closed (it keeps its depth). A
+stopped child still counts until its tab is closed. Runs that arrive together are
+checked one at a time (each counts as soon as it passes), so they cannot pass the limits
+together. Past a limit `agent.run` returns `{ ok: false, error, limit }` and the CLI
+prints the error and exits `1`, e.g. `child limit reached: this tab already has 6 live
+children (max 6; a stopped child still counts: close one with agent stop <id> --close, or
+raise agents.maxChildren)`. Close a finished child (`agent stop <id> --close`), do the
+work in the calling tab, or raise the limit.
+
+`maxChildren` and `maxDepth` rely on the caller id a tab reports (`BBARIT_TERMINAL_ID`
+or `--caller`); they guard against accidental fan-out, not against a process that
+leaves out or fakes the caller. `maxTotal` counts every relay agent whatever the caller
+and is the hard cap.
+
 #### `agent send <terminalId> <text…> [--force]`
 `agent.send`: type `<text>` + Enter, wrapped as `<bbarit from="<caller>">…</bbarit>` when
 a caller is known. Same gate and refusals as `term write` (`--force` to answer a
@@ -220,7 +242,8 @@ children (default) of the caller are settled. Exit code `0`, `2` if a child is b
 `agent.status` / `agent.list`: one terminal, or every child of the caller — `state`
 (7501 rollup, or `working`/`idle` from output activity), `kind`/`msg` when blocked,
 `exited`, `settled` (finished since the last message it was sent), `turn`,
-`worktree`/`branch` for `--worktree` children, and for status the last 12 lines. Children without 7501 settle only after 30 s of silence (a
+`worktree`/`branch` for `--worktree` children, `depth` (1 for a child of a tab without
+a relay parent, 2 for a grandchild), and for status the last 12 lines. Children without 7501 settle only after 30 s of silence (a
 shell also needs its prompt back); those carry `settledBy: "quiet"`, shown as
 `yes (quiet-heuristic)`.
 
@@ -242,6 +265,19 @@ while a relay child whose CLI has a known interrupt key is working — by OSC 75
 without it (checked every 2 s) — and stops every working or blocked relay child the
 same way, without notes to the parents. `agent.stop` is not on the remote secretary
 allowlist.
+
+#### `agent log [--tail N]`
+`agent.log { tail }`: the last N (default 20, max 500) lines of the relay audit log
+`~/.config/octo/agent-relay.log`, one human-readable line each (`--json`: the raw JSON
+lines). The app appends one JSON object per event — `run`, `run_refused` (with
+`reason` = the limit, `count`, `max`), `send`, `stop` (per target: `ok`, `keys`,
+`closed`, `by: "ctl" | "button"`) and `exit` — with `ts`, `caller` / `target`
+`{ id, name, cliType }` when known, `depth`, `worktree`/`branch`, and for run/send
+`textLen` and `textHead` (first 120 characters, one line). Environment, tokens and full
+prompts are never written. The file is created `0600`; when it would pass 1 MiB it is
+renamed to `agent-relay.log.1` (replacing the previous one) and a new file starts. A
+failed write never fails or delays the relay action. When the app is not running the
+CLI reads the file directly. No `agent.*` command is on the remote secretary allowlist.
 
 **Notes typed into the parent tab** (only into an agent tab — not `shell` — whose OSC 7501
 state is working/blocked/done with a report in the last 30 min; blocked, done and exit,

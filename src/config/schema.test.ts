@@ -118,3 +118,11 @@ describe('window pin', () => {
       .toEqual({ alwaysOnTop: false, followDesktops: true });
   });
 });
+
+describe('agent relay limits', () => {
+  it('defaults for old config files and clamps saved values', () => {
+    expect(validateConfig({}).agents).toEqual({ maxChildren: 6, maxDepth: 2, maxTotal: 12 });
+    expect(validateConfig({ agents: { maxChildren: 99, maxDepth: 'x', maxTotal: 3 } } as any).agents)
+      .toEqual({ maxChildren: 32, maxDepth: 2, maxTotal: 3 });
+  });
+});

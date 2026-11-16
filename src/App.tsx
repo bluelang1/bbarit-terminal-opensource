@@ -192,8 +192,10 @@ import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedR
 import { useGuideHost } from './guide/useGuideHost';
 import { Spotlight } from './guide/Spotlight';
 import { anyRelayChildWorking, effectiveAgentState, markLinkStopped, restoreStopMark, selectStopTargets, stopAgentTerminal, type AgentStopResult } from './terminal/agentRelay';
-import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { UNREPORTED_SETTLE_MS, orphanAgentLink, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
 import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from './terminal/agentWorktree';
+import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
+import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
@@ -5922,6 +5924,8 @@ Office project scaffold created by BBARIT Terminal.
   const agentNoteQueueRef = useRef<PendingNotes>(new Map());
   /** agent run --worktree jobs (git runs past one bridge request); read by agent.run.result. */
   const agentRunJobsRef = useRef<Map<string, { done: boolean; at: number; result?: Record<string, unknown> }>>(new Map());
+  /** agent.run slots taken between the limit check and the moment the child's link exists. */
+  const agentRunReservationsRef = useRef(createAgentRunReservations());
   /** Relay child state: OSC 7501 when reported, else output activity (shells, Codex, …). */
   const relayChildState = (terminalId: string): AgentTabState => effectiveAgentState(getTerminalAgentState(terminalId), isTerminalBusy(terminalId));
   /** Stop-team button: shown while a relay child is working (agent stop design). */
@@ -5962,6 +5966,18 @@ Office project scaffold created by BBARIT Terminal.
       if (term) return term;
     }
     return undefined;
+  };
+  /** Relay audit log (~/.config/octo/agent-relay.log): fire and forget, never fails the action. */
+  const logAgentRelay = (input: AgentRelayLogInput) => {
+    try {
+      void invoke('agent_relay_log_append', { entry: buildAgentRelayLogEntry(input) }).catch(() => {});
+    } catch { /* logging never fails a relay action */ }
+  };
+  /** { id, name, cliType } of a relay tab for the log (name/cliType from the tab or its link). */
+  const relayLogParty = (terminalId: string) => {
+    const term = findTerminalAnywhere(terminalId);
+    const link = agentLinksRef.current.get(terminalId);
+    return { id: terminalId, name: term?.name || link?.name, cliType: term?.cliType || link?.cliType };
   };
   // Claude Code may have Enter rebound to newline (keybindings.json "Chat"): the input gate
   // presses the configured submit key in Claude tabs. Loaded at startup and on window focus,
@@ -6070,6 +6086,16 @@ Office project scaffold created by BBARIT Terminal.
       const tid = String((ev as CustomEvent).detail?.terminalId || '');
       const link = tid ? agentLinksRef.current.get(tid) : undefined;
       if (!link) return;
+      if (!link.exited) {
+        logAgentRelay({
+          event: 'exit',
+          caller: link.parentId ? relayLogParty(link.parentId) : undefined,
+          target: relayLogParty(tid),
+          depth: agentDepth(agentLinksRef.current, tid),
+          worktree: link.worktree,
+          branch: link.branch,
+        });
+      }
       const { note, link: next } = decideExitNote(link);
       agentLinksRef.current.set(tid, next);
       if (note) void deliverAgentNote(next, note);
@@ -6104,8 +6130,19 @@ Office project scaffold created by BBARIT Terminal.
       }
       restoredAgentLinksRef.current = undefined;
     }
+    // A child whose parent tab closed keeps running: its link stays with parentId '' (no
+    // notes, nobody's child) so it still counts toward agents.maxTotal and keeps its depth.
+    const orphans: Array<[string, number]> = [];
     for (const [childId, link] of agentLinksRef.current) {
-      if (!alive.has(childId) || (link.parentId && !alive.has(link.parentId))) agentLinksRef.current.delete(childId);
+      // A link whose tab is not in `projects` yet (several runs in one tick: this effect can
+      // fire for the first tab before the others have rendered) is kept while it is pending;
+      // injectAgentBrief drops it if the tab really went away.
+      if (!alive.has(childId)) { if (!link.pending) agentLinksRef.current.delete(childId); }
+      else if (link.parentId && !alive.has(link.parentId)) orphans.push([childId, agentDepth(agentLinksRef.current, childId)]);
+    }
+    for (const [childId, depth] of orphans) {
+      const link = agentLinksRef.current.get(childId);
+      if (link) agentLinksRef.current.set(childId, orphanAgentLink(link, depth));
     }
     for (const parentId of [...agentNoteQueueRef.current.keys()]) {
       if (!alive.has(parentId)) dropParent(agentNoteQueueRef.current, parentId);
@@ -6184,12 +6221,13 @@ Office project scaffold created by BBARIT Terminal.
    * it), mark the link stopped, send the CLI's interrupt key through the gate (force, no
    * quiet wait, no Enter), then one `stopped` note to its parent unless the parent asked.
    */
-  const stopRelayAgents = async (ids: string[], opts: { close?: boolean; by?: string; caller?: string; silent?: boolean }): Promise<Array<AgentStopResult & { name: string }>> => {
+  const stopRelayAgents = async (ids: string[], opts: { close?: boolean; by?: string; caller?: string; silent?: boolean; source: 'ctl' | 'button' }): Promise<Array<AgentStopResult & { name: string }>> => {
     const results: Array<AgentStopResult & { name: string }> = [];
     for (const terminalId of ids) {
       const term = findTerminalAnywhere(terminalId);
       const link = agentLinksRef.current.get(terminalId);
       const cliType = term?.cliType || link?.cliType;
+      const depth = agentDepth(agentLinksRef.current, terminalId);
       const res = await stopAgentTerminal({
         dropQueuedInput: (id) => {
           dropQueuedAutoInput(id);
@@ -6229,6 +6267,15 @@ Office project scaffold created by BBARIT Terminal.
         close: closeTerminalAnywhere,
       }, { terminalId, cliType, close: opts.close });
       results.push({ ...res, name: term?.name || link?.name || '' });
+      logAgentRelay({
+        event: 'stop',
+        caller: opts.caller ? relayLogParty(opts.caller) : undefined,
+        target: { id: terminalId, name: term?.name || link?.name, cliType },
+        depth,
+        worktree: link?.worktree,
+        branch: link?.branch,
+        extra: { by: opts.source, ok: res.ok, keys: res.keys, closed: !!res.closed, reason: res.reason },
+      });
     }
     refreshRelayTeamWorking();
     return results;
@@ -6266,6 +6313,7 @@ Office project scaffold created by BBARIT Terminal.
       reported: reported !== undefined,
       agentRunning: isTerminalAgentRunning(terminalId),
       ...(link?.parentId ? { parentId: link.parentId } : {}),
+      depth: agentDepth(agentLinksRef.current, terminalId),
       ...(link?.worktree ? { worktree: link.worktree } : {}),
       ...(link?.branch ? { branch: link.branch } : {}),
       ...(link?.stopped ? { stopped: true } : {}),
@@ -7718,8 +7766,32 @@ Office project scaffold created by BBARIT Terminal.
         const callerProject = caller ? projects.find((p) => p.terminals.some((tt) => tt.id === caller)) : undefined;
         const projectId = callerProject?.id || activeProjectId;
         if (!projectId) return { ok: false, error: 'no active project' };
-        const requestedWorkDir = request?.workDir ? String(request.workDir).trim() : '';
         if (cliType === 'claude') await refreshClaudeSubmitKey(loadClaudeChatBindings, { force: true });
+        // Relay limits (config.agents): checked and a slot reserved in one synchronous step
+        // (no await from here until the child's link exists or the run fails), before any
+        // tab, worktree or branch exists. The slot is released once the link counts instead,
+        // or on any failure. A just-created child counts while its tab is not in
+        // projectsRef yet (pending until its prompt is typed).
+        const limitCheck = agentRunReservationsRef.current.reserve(
+          agentLinksRef.current,
+          caller,
+          (l) => !l.exited && (!!l.pending || !!findTerminalAnywhere(l.childId)),
+          normalizeAgentLimits(getConfigSnapshot().agents),
+        );
+        const callerParty = caller ? { id: caller, name: callerTerm?.name, cliType: callerTerm?.cliType } : undefined;
+        if (!limitCheck.ok) {
+          logAgentRelay({
+            event: 'run_refused',
+            caller: callerParty,
+            target: { id: '', name: request?.name ? String(request.name) : undefined, cliType },
+            depth: limitCheck.depth,
+            text: prompt,
+            extra: { reason: limitCheck.limit, count: limitCheck.count, max: limitCheck.max, error: limitCheck.error },
+          });
+          return { ok: false, error: limitCheck.error, limit: limitCheck.limit };
+        }
+        const releaseSlot = limitCheck.release;
+        const requestedWorkDir = request?.workDir ? String(request.workDir).trim() : '';
         // Claude·Codex 자식은 전용 세션 — `--continue`·`resume --last` 로 부모 대화를 이어받지 않게 한다.
         const spec = agentRunTerminalSpec(cliType, request?.name ? String(request.name) : undefined);
         const name = spec.name;
@@ -7731,7 +7803,7 @@ Office project scaffold created by BBARIT Terminal.
             freshClaudeSession: spec.freshClaudeSession,
             freshCodexSession: spec.freshCodexSession,
           });
-          if (!terminalId) return { ok: false, error: 'failed to create terminal' };
+          if (!terminalId) { releaseSlot(); return { ok: false, error: 'failed to create terminal' }; }
           // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
           agentLinksRef.current.set(terminalId, {
             childId: terminalId,
@@ -7741,9 +7813,21 @@ Office project scaffold created by BBARIT Terminal.
             createdAt: Date.now(),
             lastNotifiedTurn: -1,
             pending: true,
+            depth: limitCheck.depth,
             ...(worktree ? { worktree: worktree.path, branch: worktree.branch } : {}),
           });
+          // The link counts from here on: hand back the reserved slot.
+          releaseSlot();
           void injectAgentBrief(terminalId, cliType, prompt, caller || undefined, callerTerm?.name, worktree);
+          logAgentRelay({
+            event: 'run',
+            caller: callerParty,
+            target: { id: terminalId, name, cliType },
+            depth: limitCheck.depth,
+            worktree: worktree?.path,
+            branch: worktree?.branch,
+            text: prompt,
+          });
           return { ok: true, terminalId, ...(worktree ? { worktree: worktree.path, branch: worktree.branch } : {}), ...claudeSubmitWarning(cliType) };
         };
         // --worktree: own worktree + branch under the git top level of --workdir, else the
@@ -7751,7 +7835,9 @@ Office project scaffold created by BBARIT Terminal.
         // git can outlast one bridge request (mcp-bridge execute_js waits 5 s), so this runs as
         // a job: the reply is { pending, jobId } and ctl polls agent.run.result for the outcome.
         const worktreeReq = parseWorktreeRequest(request?.worktree);
-        if (!worktreeReq) return launch();
+        if (!worktreeReq) {
+          try { return launch(); } finally { releaseSlot(); }
+        }
         const jobId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
         const activeProj = projects.find((p) => p.id === projectId);
         agentRunJobsRef.current.set(jobId, { done: false, at: Date.now() });
@@ -7771,7 +7857,11 @@ Office project scaffold created by BBARIT Terminal.
           ? launch({ path: prepared.path, branch: prepared.branch })
           : { ok: false, error: prepared.error }))
           .catch((e): Record<string, unknown> => ({ ok: false, error: `worktree: ${String(e instanceof Error ? e.message : e)}` }))
-          .then((result) => { agentRunJobsRef.current.set(jobId, { done: true, at: Date.now(), result }); });
+          .then((result) => {
+            // Worktree failed (or launch threw): the slot is free again. Idempotent after launch.
+            releaseSlot();
+            agentRunJobsRef.current.set(jobId, { done: true, at: Date.now(), result });
+          });
         return { ok: true, pending: true, jobId };
       }
       case 'agent.run.result': {
@@ -7802,6 +7892,14 @@ Office project scaffold created by BBARIT Terminal.
           force: request?.force === true,
           submitDelayMs: gateSubmitDelayFor(target.cliType),
           fallbackWrite: terminalWritersRef.current[terminalId] || agentPtyFallbackWrite(terminalId),
+        });
+        logAgentRelay({
+          event: 'send',
+          caller: caller ? { id: caller, name: callerTerm?.name, cliType: callerTerm?.cliType } : undefined,
+          target: { id: terminalId, name: target.name, cliType: target.cliType },
+          depth: agentDepth(agentLinksRef.current, terminalId),
+          text,
+          extra: { ok: result.ok, reason: result.ok ? undefined : result.reason, force: request?.force === true ? true : undefined },
         });
         if (!result.ok) {
           const error = result.reason === 'blocked'
@@ -7836,8 +7934,14 @@ Office project scaffold created by BBARIT Terminal.
           close: request?.close === true,
           caller: caller || undefined,
           by: caller ? (callerTerm?.name ? `${caller} ${callerTerm.name}` : caller) : 'bbarit-ctl',
+          source: 'ctl',
         });
         return { ok: true, stopped };
+      }
+      case 'agent.log': {
+        const tail = Math.max(1, Math.min(500, Math.trunc(Number(request?.tail)) || 20));
+        const lines = await invoke<string[]>('agent_relay_log_tail', { lines: tail });
+        return { ok: true, lines };
       }
       case 'agent.status':
       case 'agent.list': {
@@ -17495,7 +17599,7 @@ Office project scaffold created by BBARIT Terminal.
                         return st === 'working' || st === 'blocked';
                       },
                     });
-                    if (targets.ok) void stopRelayAgents(targets.ids, { silent: true });
+                    if (targets.ok) void stopRelayAgents(targets.ids, { silent: true, source: 'button' });
                   }}
                   title={locale === 'ko'
                     ? '에이전트 팀 멈춤: 작업 중인 릴레이 자식 에이전트를 중단합니다 (Claude·bbarit 는 Esc, 셸·ollama 는 Ctrl+C. 중단 키를 모르는 CLI 는 건드리지 않음. 탭과 출력은 남음)'

@@ -238,6 +238,7 @@ Options  --port <n>     target port (dev app auto-scan 9323–9422 / installed 9
   agent status [terminalId]       state + last 12 lines (children of this tab by default)
   agent list                      child agents of this tab
   agent stop [<id> | --children] [--close]   interrupt a child / all children of this tab
+  agent log [--tail N]            relay audit log: who started / told / stopped whom (default 20)
 
 ■ Editor & files
   open <path>                     open a file in the built-in editor (xlsx/pptx/docx too)
@@ -344,6 +345,16 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
       Put the name right after the flag before the prompt, or use --worktree=<name>.
       Creating the worktree runs in the background in the app; this command polls for the
       result for up to 120 s (then: error, the tab may still open — check agent list).
+      Limits (app config agents { maxChildren, maxDepth, maxTotal }, defaults 6 / 2 / 12):
+      at most 6 live children per tab, a child at most 2 levels below a tab without a relay
+      parent (a grandchild cannot start another agent), at most 12 live relay agents in the
+      app. Past a limit nothing is created and the run fails (exit code 1) with e.g.
+        child limit reached: this tab already has 6 live children (max 6; a stopped child
+        still counts: close one with agent stop <id> --close, or raise agents.maxChildren)
+      A stopped child still counts until its tab is closed: close a finished child
+      (agent stop <id> --close), do the work yourself, or ask the user to raise the limit.
+      maxChildren/maxDepth trust the caller id this tab reports (a guard against
+      accidents, not a security boundary); maxTotal counts every relay agent.
   agent send <terminalId> <text…> [--force]
       Type <text> + Enter into an agent tab, wrapped as <bbarit from="<this tab>">…</bbarit>.
       Waits while the user is typing; refused while that agent waits for approval or an
@@ -371,9 +382,16 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
       stop. --close also closes the tab (its worktree and branch stay). Exit code 1 if a
       child was not interrupted. The app's stop-team button stops working/blocked relay
       children the same way, without notes to their parents.
+  agent log [--tail N=20]
+      The last N (max 500) lines of the relay audit log ~/.config/octo/agent-relay.log:
+      one line per run, refused run, send, stop and exit — time, event, caller → target,
+      depth, branch, and for run/send the first 120 characters of the text. --json prints
+      the raw JSON lines. Read straight from the file when the app is not running.
 
 Caller  BBARIT_TERMINAL_ID (set in every BBARIT tab) is sent as the caller; outside a tab
         pass --caller <terminalId>. Children link to their caller's tab.
+Depth   0 for a tab without a relay parent, 1 for its children, 2 for grandchildren
+        (status/list show it).
 
 Notes from children (typed into this tab automatically — only agent tabs whose agent
 reported OSC 7501 working/blocked/done in the last 30 min, e.g. Claude Code; plain shells
@@ -548,8 +566,110 @@ export function agentRow(a) {
 
 /** The status/list table; the branch column appears once a child runs in its own worktree. */
 export function agentTableColumns(agents) {
-  const cols = ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited'];
-  return (agents || []).some((a) => a && a.branch) ? [...cols, 'branch'] : cols;
+  const list = agents || [];
+  const withDepth = list.some((a) => a && typeof a.depth === 'number');
+  const cols = ['terminalId', 'name', 'cliType', ...(withDepth ? ['depth'] : []), 'state', 'settled', 'exited'];
+  return list.some((a) => a && a.branch) ? [...cols, 'branch'] : cols;
+}
+
+// ── Relay audit log (agent log) ──────────────────────────────────────────
+export const AGENT_LOG_DEFAULT_TAIL = 20;
+export const AGENT_LOG_MAX_TAIL = 500;
+
+/** `agent log [--tail N | --tail=N]` → { tail } (1..500, default 20). */
+export function parseLogArgs(list) {
+  const usage = 'usage: agent log [--tail N] [--json]';
+  let raw;
+  let seen = false;
+  for (let i = 0; i < list.length; i++) {
+    const a = String(list[i]);
+    if (a.startsWith('--tail=')) { raw = a.slice('--tail='.length); }
+    else if (a === '--tail') {
+      raw = list[i + 1];
+      if (raw === undefined || String(raw).startsWith('-')) throw new Error(usage);
+      i += 1;
+    } else throw new Error(usage);
+    if (seen) throw new Error(usage);
+    seen = true;
+  }
+  if (!seen) return { tail: AGENT_LOG_DEFAULT_TAIL };
+  const n = Number(raw);
+  if (String(raw).trim() === '' || !Number.isFinite(n) || n < 1) throw new Error(usage);
+  return { tail: Math.min(AGENT_LOG_MAX_TAIL, Math.trunc(n)) };
+}
+
+/** Read at most this many bytes from the end of each log file (the app rotates at 1 MiB). */
+export const RELAY_LOG_READ_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The last `maxBytes` of a file as text (invalid UTF-8 replaced). When the read starts
+ * mid-file the first, partial line is dropped. Missing / unreadable file → ''.
+ */
+export function readFileTail(file, maxBytes = RELAY_LOG_READ_MAX_BYTES) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - maxBytes);
+    const buf = Buffer.alloc(size - start);
+    let off = 0;
+    while (off < buf.length) {
+      const n = fs.readSync(fd, buf, off, buf.length - off, start + off);
+      if (n <= 0) break;
+      off += n;
+    }
+    const text = buf.subarray(0, off).toString('utf8');
+    if (start === 0) return text;
+    const nl = text.indexOf('\n');
+    return nl < 0 ? '' : text.slice(nl + 1);
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  }
+}
+
+/** ~/.config/octo/agent-relay.log (written by the app). */
+export function relayLogPath(home = os.homedir()) {
+  return path.join(home, '.config', 'octo', 'agent-relay.log');
+}
+
+/** Last n non-empty lines across the rotated file (older) and the current one. */
+export function tailRelayLogText(current, rotated, n) {
+  const lines = (t) => String(t || '').split('\n').map((l) => l.trimEnd()).filter(Boolean);
+  const cur = lines(current);
+  const all = cur.length < n ? [...lines(rotated), ...cur] : cur;
+  return all.slice(Math.max(0, all.length - n));
+}
+
+/** The log read straight from disk (app not running). Missing files → []. */
+export function readRelayLogFile(n, file = relayLogPath(), maxBytes = RELAY_LOG_READ_MAX_BYTES) {
+  return tailRelayLogText(readFileTail(file, maxBytes), readFileTail(`${file}.1`, maxBytes), n);
+}
+
+function logParty(p) {
+  if (!p || typeof p !== 'object') return '-';
+  return [p.id, p.name, p.cliType ? `(${p.cliType})` : ''].filter(Boolean).join(' ') || '-';
+}
+
+/** One log line, human-readable: time, event, caller → target, depth, branch, details, text head. */
+export function formatRelayLogLine(line) {
+  let e;
+  try { e = JSON.parse(line); } catch { return String(line); }
+  if (!e || typeof e !== 'object' || Array.isArray(e)) return String(line);
+  const parts = [String(e.ts || '-'), String(e.event || '?').padEnd(11), `${logParty(e.caller)} → ${logParty(e.target)}`];
+  if (typeof e.depth === 'number') parts.push(`depth=${e.depth}`);
+  if (e.branch) parts.push(`branch=${e.branch}`);
+  for (const k of ['by', 'ok', 'keys', 'closed', 'force', 'reason', 'count', 'max']) {
+    const v = e[k];
+    if (v === undefined || v === '') continue;
+    parts.push(`${k}=${typeof v === 'boolean' ? (v ? 'yes' : 'no') : v}`);
+  }
+  if (typeof e.textLen === 'number') {
+    const head = String(e.textHead ?? '');
+    parts.push(`"${head}${e.textLen > Array.from(head).length ? '…' : ''}" (${e.textLen} chars)`);
+  }
+  return parts.join('  ');
 }
 
 function printAgents(agents, withLines) {
@@ -602,7 +722,8 @@ async function agentCommand(list) {
       first: parsed,
       fetchResult: async (jobId) => (await dispatch({ cmd: 'agent.run.result', jobId })).parsed,
     });
-    if (parsed.ok === false) return out(parsed);
+    // Refused (relay limits) or failed: print the error and exit 1, also with --json.
+    if (parsed.ok === false) { out(parsed); process.exitCode = 1; return; }
     if (parsed.warning && !flags.json) console.error(`⚠ ${parsed.warning}`);
     if (bg) {
       if (flags.json) return out(parsed);
@@ -675,7 +796,30 @@ async function agentCommand(list) {
     return table(rows.map((r) => ({ ...r, ok: r.ok ? 'yes' : `no (${r.reason || 'refused'})`, closed: r.closed ? 'yes' : '-' })), ['terminalId', 'name', 'keys', 'ok', 'closed']);
   }
 
-  throw new Error(`unknown agent subcommand: ${sub} (run|send|wait|status|list|stop, agent --help)`);
+  if (sub === 'log') {
+    const { tail } = parseLogArgs(list);
+    let lines;
+    try {
+      const { parsed } = await dispatch({ cmd: 'agent.log', tail });
+      if (parsed.ok === false) {
+        // An app without agent.log: the file is still readable directly.
+        if (!/unknown|unsupported/i.test(String(parsed.error || ''))) return out(parsed);
+        lines = readRelayLogFile(tail);
+      } else {
+        lines = Array.isArray(parsed.lines) ? parsed.lines : [];
+      }
+    } catch (e) {
+      if (!isAppUnreachable(e)) throw e;
+      if (!flags.json) console.error(`… app not reachable; reading ${relayLogPath()} directly`);
+      lines = readRelayLogFile(tail);
+    }
+    if (flags.json) { for (const l of lines) console.log(l); return; }
+    if (!lines.length) return console.log('(agent relay log is empty)');
+    for (const l of lines) console.log(formatRelayLogLine(l));
+    return;
+  }
+
+  throw new Error(`unknown agent subcommand: ${sub} (run|send|wait|status|list|stop|log, agent --help)`);
 }
 
 // ── Command routing ──────────────────────────────────────────────────────

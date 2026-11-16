@@ -37,6 +37,12 @@ export interface AgentLink {
    */
   stopped?: boolean;
   stopTurn?: number;
+  /**
+   * Relay depth recorded when the child was created (src/terminal/agentLimits.ts): kept
+   * when the parent tab closes (the link stays with parentId '' so the child still counts
+   * toward agents.maxTotal and keeps its depth).
+   */
+  depth?: number;
 }
 
 export type AgentNoteState = 'blocked' | 'done' | 'exited' | 'stopped';
@@ -637,15 +643,18 @@ export interface PersistedAgentLink {
   lastSendTurn?: number;
   worktree?: string;
   branch?: string;
+  depth?: number;
 }
 
 export function serializeAgentLinks(links: Iterable<AgentLink>): PersistedAgentLink[] {
   const out: PersistedAgentLink[] = [];
   for (const l of links) {
-    if (!l?.childId || !l.parentId || l.exited) continue;
+    // Callerless and orphaned links (parentId '') are kept too: they count toward the
+    // relay total after a restart, and never get notes or show up as anyone's child.
+    if (!l?.childId || l.exited) continue;
     out.push({
       childId: l.childId,
-      parentId: l.parentId,
+      parentId: l.parentId || '',
       name: l.name || undefined,
       cliType: l.cliType || undefined,
       createdAt: l.createdAt,
@@ -654,13 +663,16 @@ export function serializeAgentLinks(links: Iterable<AgentLink>): PersistedAgentL
       lastSendTurn: l.lastSendTurn,
       worktree: l.worktree || undefined,
       branch: l.branch || undefined,
+      ...(typeof l.depth === 'number' ? { depth: l.depth } : {}),
     });
   }
   return out;
 }
 
 /**
- * Saved links whose child and parent tabs still exist (others are pruned). Turn numbers are
+ * Saved links whose child tab still exists (others are pruned). A link whose parent tab is
+ * gone comes back orphaned (parentId '', its depth kept): no notes, nobody's child, but
+ * still counted toward the relay total (orphanAgentLink). Turn numbers are
  * not restored: the OSC 7501 turn counter restarts at 0 every app run, so a saved
  * lastNotifiedTurn/lastSendTurn would drop (equal number) or repeat notes. A replay resyncs
  * them (resyncLinkAfterReplay).
@@ -670,17 +682,29 @@ export function restoreAgentLinks(raw: unknown, aliveIds: ReadonlySet<string>, n
   const out: AgentLink[] = [];
   for (const r of raw) {
     if (!r || typeof r.childId !== 'string' || typeof r.parentId !== 'string') continue;
-    if (!aliveIds.has(r.childId) || !aliveIds.has(r.parentId)) continue;
+    if (!aliveIds.has(r.childId)) continue;
+    const orphaned = !!r.parentId && !aliveIds.has(r.parentId);
+    const depth = Number.isFinite(r.depth) && r.depth >= 0 ? Math.trunc(r.depth) : (orphaned ? 1 : undefined);
     out.push({
       childId: r.childId,
-      parentId: r.parentId,
+      parentId: orphaned ? '' : r.parentId,
       name: typeof r.name === 'string' ? r.name : undefined,
       cliType: typeof r.cliType === 'string' ? r.cliType : undefined,
       createdAt: Number.isFinite(r.createdAt) ? r.createdAt : now,
       lastNotifiedTurn: -1,
       ...(typeof r.worktree === 'string' && r.worktree ? { worktree: r.worktree } : {}),
       ...(typeof r.branch === 'string' && r.branch ? { branch: r.branch } : {}),
+      ...(depth !== undefined ? { depth } : {}),
     });
   }
   return out;
+}
+
+/**
+ * The parent tab closed while the child runs on: keep the link (it still counts toward
+ * agents.maxTotal) with parentId '' — no notes go anywhere, it is nobody's child for
+ * list/stop/the stop-team button — and pin its depth so the chain below it keeps its depth.
+ */
+export function orphanAgentLink(link: AgentLink, depth: number): AgentLink {
+  return { ...link, parentId: '', depth: typeof link.depth === 'number' ? link.depth : depth };
 }

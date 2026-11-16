@@ -265,7 +265,57 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   `/`, 또는 마지막 단어가 `@` 로 시작)이면 첫 누름은 메뉴만 닫으므로 300 ms(`SUBMIT_REPEAT_GAP_MS`)
   뒤 한 번 더 누른다. 키는 누르는 순간에 고른다(devreview 제출도 빈 텍스트 + submit 으로 같은 경로). 시작 때와 창 포커스 때(2 s 안 중복은 건너뜀), `agent run claude`·`agent send` 직전에 다시 읽는다.
 
+- **릴레이 제한**(설계 [2026-11-16-agent-limits-and-log-design.md](superpowers/specs/2026-11-16-agent-limits-and-log-design.md)):
+  자식이 다시 `agent run` 을 부를 수 있어 팬아웃이 끝없이 커질 수 있다. `agent.run` 은 caller·프롬프트 검사 바로
+  뒤(마지막 await 다음), 탭·워크트리·브랜치를 만들기 전에 `createAgentRunReservations().reserve`
+  (`src/terminal/agentLimits.ts`, 안에서 순수 함수 `checkAgentRunLimits`)로 검사와 자리 잡기를 한 동기 단계에서 한다.
+  설정은 앱 설정 `agents: { maxChildren, maxDepth, maxTotal }`(`~/.config/octo/config.json`, 설정 화면 없음)이고
+  `normalizeAgentLimits` 가 정수로 자르고 범위로 묶는다(maxChildren 1..32 기본 6, maxDepth 1..5 기본 2,
+  maxTotal 1..64 기본 12, 숫자가 아니면 기본값). 순서: ① depth — 새 자식의 깊이(`agentDepth`: 릴레이 부모가 없는
+  탭 0, 그 자식 1, 손자 2. parentId 사슬을 따라가며 이미 본 id 를 만나면 멈춘다)가 maxDepth 를 넘으면 거부
+  (기본값이면 깊이 2 탭은 자식을 못 만든다) ② children — caller 를 부모로 둔 살아 있는 링크 수 ③ total — 앱 전체의
+  살아 있는 링크 수(caller 없는 run 과 부모가 닫힌 자식의 `parentId: ''` 링크 포함). "살아 있음" = 링크가 있고
+  exited 가 아니고 탭이 아직 있거나 `pending`(새 탭은 렌더 뒤에야 `projectsRef` 에 보이므로). 멈춘 자식도 탭이
+  닫힐 때까지 센다. 예약(reserve 가 잡은 자리)은 그 caller 의 자식처럼 세다가 링크를 넣은 직후(그때부터 링크가
+  센다) 또는 실패(워크트리 에러, 터미널 생성 실패) 때 돌려준다 — 동시에 온 `agent run --bg` 여러 개나 git 을 돌리는
+  `--worktree` 잡이 함께 제한을 넘지 못한다. 링크에는 만들 때의 `depth` 를 적어 둔다. caller 없는 run 은 total 만
+  본다. **부모 탭이 닫히면** 자식 링크를 지우지 않고 `parentId: ''` + 적어 둔 깊이로 남긴다(`orphanAgentLink`):
+  total 에 계속 들고 깊이도 유지하지만 노트는 없고 누구의 자식도 아니다(list·stop·팀 멈춤 버튼 대상 아님, 예전에
+  링크를 지우던 것과 같은 동작). caller 없는·고아 링크도 프로젝트와 함께 저장되고, 복원 때 부모가 없으면 고아로
+  돌아온다. 거부는 `{ ok: false, error, limit }` 이고 문구에 제한 이름·현재 수·최대·해결 방법이
+  있다: `child limit reached: this tab already has 6 live children (max 6; a stopped child still counts: close one
+  with agent stop <id> --close, or raise agents.maxChildren)`, `depth limit reached: this tab is at depth 2 of the agent chain and a child would be at
+  depth 3 (max 2; do the work in this tab, or raise agents.maxDepth)`, `total agent limit reached: the app already
+  has 12 live relay agents (max 12; a stopped agent still counts: close some with agent stop <id> --close, or raise
+  agents.maxTotal)`. ctl 은 `✗ <error>` 를 찍고
+  종료 코드 1(`--json` 도 1). `agent.status/list` 행에 `depth` 가 붙고 ctl 표에 depth 열이 생긴다(보고하는 앱일 때).
+- **감사 로그**(같은 설계 문서): `~/.config/octo/agent-relay.log` 에 이벤트마다 JSON 한 줄. 항목은 프런트가
+  `buildAgentRelayLogEntry`(`src/terminal/agentRelayLog.ts`)로 만들고 Rust `agent_relay_log_append`
+  (`src-tauri/src/agent_relay_log.rs`, async, `main.rs` 에 등록. 디렉터리는 `config_file_path()` 의 부모)가
+  붙인다. App 은 `invoke(...).catch(() => {})` 로 기다리지 않고(fire and forget) 실패를 버린다. 이벤트:
+  `run`(탭을 만든 뒤, 워크트리 run 은 워크트리를 만든 뒤), `run_refused`(`reason` = 제한 이름, `count`, `max`,
+  `error`), `send`(게이트 결과 `ok`/`reason`, `force`), `stop`(대상마다 `ok`/`keys`/`closed`/`reason`,
+  `by: "ctl" | "button"`), `exit`(링크가 처음 exited 가 될 때, caller = 부모). 공통 필드 `ts`(ISO), `event`,
+  알 때만 `caller`/`target` `{ id, name, cliType }`, `depth`(run 은 새 자식, 나머지는 대상의 깊이),
+  `worktree`/`branch`, run/send 는 `textLen`(전체 글자 수)과 `textHead`(`oneLine` 으로 한 줄로 만든 뒤 앞 120 자).
+  환경 변수·토큰·전체 프롬프트는 쓰지 않는다. 파일은 unix 에서 0600 으로 만들고(더 넓으면 0600 으로 고친다),
+  붙이면 1 MiB 를 넘게 될 때 `agent-relay.log.1` 로 이름을 바꾸고(이전 .1 은 덮어씀) 새로 시작한다. 한 항목이
+  8 KiB 를 넘으면 버린다. 쓰기는 프로세스 안 뮤텍스로 줄 세운다. 읽기는 `agent_relay_log_tail { lines }`(기본 20,
+  최대 500, 모자라면 .1 에서 더 읽음)와 UI 커맨드 `agent.log { tail }` → `{ ok, lines }`(원본 JSON 문자열).
+  ctl `agent log [--tail N] [--json]` 은 한 줄씩 사람이 읽는 모양(`ts  event  caller → target  depth=…
+  branch=… by=… ok=… "textHead…" (N chars)`)으로, `--json` 이면 원본 줄을 찍는다. 앱에 닿지 않거나 앱에
+  `agent.log` 가 없으면(`unknown cmd`) 파일을 직접 읽는다. 읽기는 Rust·ctl 모두 각 파일의 마지막 1 MiB 까지만
+  보고(잘린 첫 줄은 버림), 깨진 UTF-8 은 대체 문자로 읽는다. `--tail` 은 값이 있어야 하고 `--tail=N` 도 된다. `agent.*` 는 전부 `SECRETARY_ALLOWED_CMDS` 밖이고
+  `secretary_commands_deny_shell_reach` 가 `agent.` 로 시작하는 허용 항목이 없음을 고정한다.
+
 ### 알려진 한계
+
+- 제한은 링크 기준이다. 사용자가 손으로 연 탭이나 `term create` 로 만든 탭은 세지 않는다. 앱을 다시 켜면 링크는
+  저장본에서 복원되므로 제한도 이어진다.
+- **maxDepth·maxChildren 은 보안 경계가 아니다.** 탭이 알려 주는 caller id(ctl 이 보낸 `BBARIT_TERMINAL_ID` 또는
+  `--caller`, 토큰 없음)를 그대로 믿으므로 사고(끝없는 팬아웃)를 막는 장치일 뿐이다. 프로세스가 caller 를 빼거나
+  다른 탭인 척하면 그 값으로 계산된다. 하드 상한은 caller 와 무관하게 모든 링크를 세는 maxTotal 이다.
+- 감사 로그는 앱이 남기는 기록이다. 같은 사용자 권한의 프로세스는 파일을 고치거나 지울 수 있어 변조 방지 기록은 아니다.
 
 - caller 가 활성 프로젝트가 아닌 프로젝트에 있으면 자식은 그 프로젝트를 화면에 띄울 때까지
   시작되지 않는다(터미널은 활성 프로젝트 것만 마운트된다). 10 분이 지나면 `agent not ready`.

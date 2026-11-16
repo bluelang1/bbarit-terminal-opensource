@@ -17,6 +17,7 @@ macro_rules! safe_eprintln {
 }
 
 mod agent_gateway;
+mod agent_relay_log;
 mod browser_bridge;
 mod chrome_import;
 mod claude_design;
@@ -10504,6 +10505,8 @@ fn main() {
             claude_hook_settings_path,
             read_env_var,
             claude_chat_keybindings,
+            agent_relay_log::agent_relay_log_append,
+            agent_relay_log::agent_relay_log_tail,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,
