@@ -119,6 +119,11 @@ impl PtySelection {
         &self.chosen.get_or_init(|| self.choose()).backend
     }
 
+    /// The backend has been chosen (PTY liveness is meaningful from here on).
+    pub fn is_resolved(&self) -> bool {
+        self.chosen.get().is_some()
+    }
+
     fn resolved(&self) -> Option<&Arc<dyn PtyBackend>> {
         self.chosen.get().map(|c| &c.backend)
     }

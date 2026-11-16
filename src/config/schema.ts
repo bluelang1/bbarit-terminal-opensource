@@ -7,6 +7,10 @@
 
 import { DEFAULT_WINDOW_PIN, readWindowPin, type WindowPinState } from '../window/windowPin';
 import { DEFAULT_AGENT_LIMITS, normalizeAgentLimits, type AgentLimits } from '../terminal/agentLimits';
+import { DEFAULT_AGENT_BOARD_CONFIG, normalizeAgentBoardConfig, type AgentBoardConfig } from '../terminal/agentTasks';
+
+/** config.agents: relay limits plus `board` (team board lease timing, src/terminal/agentTasks.ts). */
+export type AgentsConfig = AgentLimits & { board: AgentBoardConfig & Record<string, unknown> };
 
 // ───────────────────────── Sub-types ─────────────────────────
 
@@ -395,8 +399,9 @@ export interface OctoConfig {
   regionKeys: boolean;
   /** Window pin: always on top (main + the app's other windows, not the pet) / main follows the active desktop (src/window/windowPin.ts). */
   window: WindowPinState;
-  /** Agent relay limits for `agent run` (src/terminal/agentLimits.ts; no Settings UI yet). */
-  agents: AgentLimits;
+  /** Agent relay limits for `agent run` (src/terminal/agentLimits.ts) and team-board timing
+   *  `agents.board` (src/terminal/agentTasks.ts); no Settings UI yet. */
+  agents: AgentsConfig;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -546,7 +551,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   hints: { ...DEFAULT_HINTS_CONFIG },
   regionKeys: true,
   window: { ...DEFAULT_WINDOW_PIN },
-  agents: { ...DEFAULT_AGENT_LIMITS },
+  agents: { ...DEFAULT_AGENT_LIMITS, board: { ...DEFAULT_AGENT_BOARD_CONFIG } },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -637,7 +642,10 @@ export function validateConfig(raw: unknown): OctoConfig {
     hints: normalizeHintsConfig(input.hints),
     regionKeys: input.regionKeys !== false,
     window: readWindowPin(input.window),
-    agents: normalizeAgentLimits(input.agents),
+    agents: {
+      ...normalizeAgentLimits(input.agents),
+      board: normalizeAgentBoardConfig((input.agents as { board?: unknown } | undefined)?.board),
+    },
   };
 }
 

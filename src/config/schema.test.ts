@@ -121,8 +121,14 @@ describe('window pin', () => {
 
 describe('agent relay limits', () => {
   it('defaults for old config files and clamps saved values', () => {
-    expect(validateConfig({}).agents).toEqual({ maxChildren: 6, maxDepth: 2, maxTotal: 12 });
+    const board = { leaseSeconds: 300, renewSeconds: 60, staleMinutes: 30 };
+    expect(validateConfig({}).agents).toEqual({ maxChildren: 6, maxDepth: 2, maxTotal: 12, board });
     expect(validateConfig({ agents: { maxChildren: 99, maxDepth: 'x', maxTotal: 3 } } as any).agents)
-      .toEqual({ maxChildren: 32, maxDepth: 2, maxTotal: 3 });
+      .toEqual({ maxChildren: 32, maxDepth: 2, maxTotal: 3, board });
+  });
+
+  it('keeps team-board timing (agents.board) clamped, renewal at most half the lease', () => {
+    const agents = validateConfig({ agents: { board: { leaseSeconds: 100, renewSeconds: 90, staleMinutes: 2, backend: 'sqlite' } } } as any).agents;
+    expect(agents.board).toEqual({ leaseSeconds: 100, renewSeconds: 50, staleMinutes: 5, backend: 'sqlite' });
   });
 });

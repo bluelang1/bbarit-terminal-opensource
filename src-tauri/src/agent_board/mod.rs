@@ -1,0 +1,304 @@
+//! Agent team board: a shared, pull-only board per relay team — notes (`agent board
+//! post|read|teams|clear`) and tasks (`agent task …`: add, claim, block, done, review,
+//! retry, dependencies, history). A team is the root tab of a relay chain plus all its
+//! descendants; the team id is the root tab id (resolved by the frontend,
+//! src/terminal/agentBoard.ts, which also decides who the caller is and whether it is the
+//! team's root tab). Nothing here ever types into a tab.
+//!
+//! Layout:
+//! - `model`: limits, text cleaning, request types, actors and the task state machine
+//!   (engine independent);
+//! - `store`: `BoardStore`, the one async interface every operation goes through;
+//! - `sqlite`: the SQLite engine (all SQL for it), file `~/.config/octo/agent-board[.dev].db`.
+//!
+//! This file holds the Tauri commands (no SQL here), the store selection and the
+//! per-process facts every write records: this machine's host name and this app instance's
+//! id (random per start; leases and auto-release are scoped by it).
+//! Design: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md
+
+pub mod model;
+pub mod sqlite;
+pub mod store;
+#[cfg(test)]
+mod tests;
+
+pub use model::*;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+pub use store::BoardStore;
+
+pub const DB_FILE: &str = if cfg!(debug_assertions) { "agent-board.dev.db" } else { "agent-board.db" };
+
+/// `~/.config/octo/agent-board[.dev].db` (directory of `config_file_path()`).
+fn db_path() -> Result<PathBuf, String> {
+    let config = crate::config_file_path().map_err(unavailable)?;
+    let dir = config.parent().ok_or_else(|| unavailable("no config directory"))?;
+    Ok(dir.join(DB_FILE))
+}
+
+/// This app instance: random per start, kept in memory only.
+pub fn instance_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| format!("i{}-{:08x}", now_ms(), rand::random::<u32>()))
+}
+
+/// This machine's stable host id (`*_host`, `origin_host`, `home_host`): `BBARIT_BOARD_HOST`
+/// when set, else the host name (model::host_id).
+pub fn board_host() -> &'static str {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(|| host_id(std::env::var("BBARIT_BOARD_HOST").ok().as_deref(), &raw_host_name()))
+}
+
+#[cfg(unix)]
+fn raw_host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes into the buffer we own.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+fn raw_host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+fn ctx() -> Ctx {
+    Ctx { now: now_ms(), host: Some(board_host().to_string()), instance: instance_id().to_string() }
+}
+
+/// The selected store, created on first use (the SQLite file is opened lazily by the store).
+/// Stage 3 replaces the cached store when the backend setting changes.
+pub fn current_store() -> Result<Arc<BoardStore>, String> {
+    static STORE: Mutex<Option<Arc<BoardStore>>> = Mutex::new(None);
+    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = guard.as_ref() {
+        return Ok(s.clone());
+    }
+    let store = Arc::new(BoardStore::Sqlite(sqlite::SqliteStore::new(db_path()?)));
+    *guard = Some(store.clone());
+    Ok(store)
+}
+
+/// App start: drop teams idle for 30 days. Never creates the database.
+pub fn prune_on_start() {
+    let Ok(path) = db_path() else { return };
+    if !path.exists() {
+        return;
+    }
+    if let Ok(store) = current_store() {
+        let _ = tauri::async_runtime::block_on(store.prune_stale(now_ms(), STALE_AFTER_MS));
+    }
+}
+
+// ── Commands (notes) ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, String> {
+    current_store()?.post(team.trim().to_string(), post, ctx()).await
+}
+
+#[tauri::command]
+pub async fn agent_board_read(team: String, query: Option<ReadQuery>) -> Result<Value, String> {
+    current_store()?.read(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await
+}
+
+#[tauri::command]
+pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
+    current_store()?.teams().await
+}
+
+#[tauri::command]
+pub async fn agent_board_clear(team: String) -> Result<Value, String> {
+    current_store()?.clear(team.trim().to_string(), ctx()).await
+}
+
+/// This instance id, host name and backend (the App plans leases with them).
+#[tauri::command]
+pub async fn agent_board_info() -> Result<Value, String> {
+    let store = current_store()?;
+    Ok(json!({
+        "instance": instance_id(),
+        "host": board_host(),
+        "backend": store.backend(),
+        "schemaVersion": store.schema_version(),
+    }))
+}
+
+// ── Lease worker (runs in the host, not the webview) ────────────────────
+
+/// Set once a claim/unblock/adopt went through this instance; the worker touches the
+/// database only while it is set (idle otherwise) and clears it when nothing is held.
+static HOLDING: AtomicBool = AtomicBool::new(false);
+/// The app is exiting (quit, update handover): the worker stops before PTYs look dead.
+static EXITING: AtomicBool = AtomicBool::new(false);
+static PTY: OnceLock<Arc<dyn crate::pty_backend::PtyBackend>> = OnceLock::new();
+static PTY_READY: OnceLock<Box<dyn Fn() -> bool + Send + Sync>> = OnceLock::new();
+
+pub fn note_holding() {
+    HOLDING.store(true, Ordering::SeqCst);
+}
+
+/// Called first thing on RunEvent::Exit and on the update relaunch.
+pub fn mark_exiting() {
+    EXITING.store(true, Ordering::SeqCst);
+}
+
+fn pty_ready() -> bool {
+    PTY_READY.get().is_some_and(|f| f())
+}
+
+fn pty_alive(id: &str) -> bool {
+    PTY.get().is_some_and(|p| p.alive(id))
+}
+
+/// Relay audit-log lines for tasks the app handed back (`owner`, no caller).
+fn audit_released(released: &Value, event: &str, reason: &str) {
+    for r in released.get("released").and_then(Value::as_array).into_iter().flatten() {
+        crate::agent_relay_log::agent_relay_log_append(json!({
+            "ts": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            "event": event,
+            "team": r.get("team"),
+            "task": r.get("seq"),
+            "from": r.get("from"),
+            "to": "open",
+            "owner": r.get("ownerId"),
+            "reason": reason,
+            "by": "app",
+        }));
+    }
+}
+
+/// One worker tick: renew the leases of this instance's tasks whose owner tab has a live
+/// PTY (the PTY backend in this process knows that, also while the webview is reloading,
+/// hidden or occluded), release those whose PTY is gone. A failed release keeps the holder
+/// listed, so the next tick tries again and never renews it.
+async fn lease_worker_tick(lease_ms: i64) -> Result<(), String> {
+    let store = current_store()?;
+    let instance = instance_id().to_string();
+    let holders = store.lease_holders(instance.clone()).await?;
+    if holders.is_empty() {
+        HOLDING.store(false, Ordering::SeqCst);
+        return Ok(());
+    }
+    let plan = plan_lease_tick(&holders, EXITING.load(Ordering::SeqCst), pty_ready(), pty_alive);
+    if !plan.renew.is_empty() {
+        store.lease_tick(instance.clone(), plan.renew, now_ms(), lease_ms).await?;
+    }
+    let mut failed = None;
+    for owner in plan.release {
+        if EXITING.load(Ordering::SeqCst) {
+            break;
+        }
+        let reason = "owner tab is gone".to_string();
+        match store.release_owner(instance.clone(), owner, now_ms(), Some(board_host().to_string()), reason.clone()).await {
+            Ok(v) => audit_released(&v, "task_auto_release", &reason),
+            Err(e) => failed = Some(e),
+        }
+    }
+    failed.map_or(Ok(()), Err)
+}
+
+/// Start the lease worker (app setup). `ready`: the PTY backend has been chosen. Timing comes
+/// from `agents.board` in config.json on every tick. No overlap (one loop), backs off on
+/// failure below half the lease, stops when the app exits.
+pub fn start_lease_worker(
+    pty: Arc<dyn crate::pty_backend::PtyBackend>,
+    ready: Box<dyn Fn() -> bool + Send + Sync>,
+    timing: fn() -> (i64, i64),
+) {
+    let _ = PTY.set(pty);
+    let _ = PTY_READY.set(ready);
+    tauri::async_runtime::spawn(async move {
+        let mut failures = 0u32;
+        loop {
+            let (lease, renew) = timing();
+            tokio::time::sleep(std::time::Duration::from_millis(next_tick_delay(renew, lease, failures) as u64)).await;
+            if EXITING.load(Ordering::SeqCst) {
+                break;
+            }
+            if !HOLDING.load(Ordering::SeqCst) {
+                failures = 0;
+                continue;
+            }
+            match lease_worker_tick(lease).await {
+                Ok(()) => failures = 0,
+                Err(_) => failures = failures.saturating_add(1),
+            }
+        }
+    });
+}
+
+// ── Commands (tasks) ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) -> Result<Value, String> {
+    let c = ctx();
+    let actor = Actor::from_input(&actor, c.host.as_deref())?;
+    let res = current_store()?.task_write(team.trim().to_string(), op, actor, c).await?;
+    if matches!(res["task"]["state"].as_str(), Some("claimed" | "blocked")) {
+        note_holding();
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+pub async fn agent_task_list(team: String, query: Option<TaskListQuery>) -> Result<Value, String> {
+    current_store()?.task_list(team.trim().to_string(), query.unwrap_or_default(), ctx()).await
+}
+
+#[tauri::command]
+pub async fn agent_task_show(team: String, task: i64, history: Option<bool>, stale_ms: Option<i64>) -> Result<Value, String> {
+    current_store()?
+        .task_show(team.trim().to_string(), task, history.unwrap_or(false), stale_ms, ctx())
+        .await
+}
+
+/// A tab closed: hand back what it holds through this instance — only when its PTY is really
+/// gone (a still-running PTY is left to the lease worker) and never while the app exits.
+#[tauri::command]
+pub async fn agent_task_release_owner(owner_id: String, reason: Option<String>) -> Result<Value, String> {
+    if !HOLDING.load(Ordering::SeqCst) || EXITING.load(Ordering::SeqCst) || !pty_ready() || pty_alive(&owner_id) {
+        return Ok(json!({ "released": [] }));
+    }
+    let reason = clean_label(reason.as_deref(), 200).unwrap_or_else(|| "owner tab closed".to_string());
+    let res = current_store()?
+        .release_owner(instance_id().to_string(), owner_id, now_ms(), Some(board_host().to_string()), reason.clone())
+        .await?;
+    audit_released(&res, "task_auto_release", &reason);
+    Ok(res)
+}
+
+/// Tasks held by tabs on this machine (any instance), for the startup decision. Never
+/// creates the database (an app start must not leave a board file behind).
+#[tauri::command]
+pub async fn agent_task_held_on_host() -> Result<Vec<Value>, String> {
+    if !db_path()?.exists() {
+        return Ok(Vec::new());
+    }
+    current_store()?.held_on_host(board_host().to_string()).await
+}
+
+#[tauri::command]
+pub async fn agent_task_lease_apply(adopt: Vec<LeaseItem>, release: Vec<LeaseItem>, lease_ms: Option<i64>) -> Result<Value, String> {
+    let res = current_store()?
+        .lease_apply(
+            instance_id().to_string(),
+            adopt,
+            release,
+            now_ms(),
+            model::lease_ms(lease_ms),
+            Some(board_host().to_string()),
+        )
+        .await?;
+    if res["adopted"].as_u64().unwrap_or(0) > 0 {
+        note_holding();
+    }
+    audit_released(&res, "task_auto_release", "owner tab did not come back after the app restarted");
+    Ok(res)
+}
