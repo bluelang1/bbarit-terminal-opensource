@@ -30,8 +30,9 @@ herdr-core 의 모델을 따른다.
   (`tauri-dev-screen.mjs` 와 같은 방식. ctl 은 `ws` 없이 Node 22 내장 WebSocket 으로 돈다).
 - 에이전트는 `node "$BBARIT_CTL" agent …` 로 부른다. `node` 가 없는 환경은 지원하지 않는다
   (Claude Code 사용자 환경에는 사실상 있다). 문서에 적는다.
-- ctl 은 `BBARIT_TERMINAL_ID` 가 있으면 그것을 **호출자(caller)** 로 모든 agent 커맨드에
-  실어 보낸다. `BBARIT_BRIDGE_PORT` 가 있으면 포트 스캔 없이 그 앱의 mcp-bridge 포트
+- ctl 은 `BBARIT_TERMINAL_ID` 가 있으면 그것을 **호출자(caller)** 로, `BBARIT_TERM_TOKEN` 을
+  `callerToken` 으로 모든 agent 커맨드에 실어 보낸다. 앱은 토큰이 그 caller 의 것일 때만 caller 로
+  인정한다(아래 "호출자 확인" 메모). `BBARIT_BRIDGE_PORT` 가 있으면 포트 스캔 없이 그 앱의 mcp-bridge 포트
   (19980→9223, 19981→9323)를 쓴다.
 
 ### 2. 데이터 모델 (`src/App.tsx` 상태, 영속 안 함)
@@ -69,8 +70,9 @@ herdr-core 의 모델을 따른다.
   `--bg` 면 terminalId 만 찍고 바로 끝난다.
 - `wait` 는 조건을 만족하는 순간의 상태 목록을 JSON(`--json`) 또는 표로 찍는다. `any` 는
   하나라도 `done|blocked|exited`, `all` 은 전부.
-- 모든 agent 커맨드는 `BBARIT_TERMINAL_ID` 를 `caller` 로 보낸다. 없으면 `--caller <id>` 로
-  줄 수 있다.
+- 모든 agent 커맨드는 `BBARIT_TERMINAL_ID` 를 `caller` 로, `BBARIT_TERM_TOKEN` 을 `callerToken` 으로
+  보낸다. `--caller <id>` 는 그 탭의 토큰(`--caller-token <t>` 또는 환경 변수)이 함께 있을 때만
+  통한다 — 다른 탭인 척하는 방법이 아니다.
 
 ### 5. 자식 → 부모 노트 (App, 자동)
 
@@ -308,13 +310,47 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   보고(잘린 첫 줄은 버림), 깨진 UTF-8 은 대체 문자로 읽는다. `--tail` 은 값이 있어야 하고 `--tail=N` 도 된다. `agent.*` 는 전부 `SECRETARY_ALLOWED_CMDS` 밖이고
   `secretary_commands_deny_shell_reach` 가 `agent.` 로 시작하는 허용 항목이 없음을 고정한다.
 
+- **호출자 확인**(설계 [2026-11-16-agent-caller-verification-design.md](superpowers/specs/2026-11-16-agent-caller-verification-design.md)):
+  모든 탭 PTY 에 `BBARIT_TERM_TOKEN` = HMAC-SHA256(키, terminal id) 앞 16 바이트(16진 32 자)를 넣는다
+  (`apply_bbarit_terminal_env`, 순수 `build_shell_command` 의 주입 값 `ShellEnvDeps::term_token`. 물려받은 값은
+  먼저 지운다). terminal id 만으로 정해지므로 앱 재시작·PTY 홀더 재부착에도 그대로이고 저장해 둘 표가 없다.
+  키는 `~/.config/octo/agent-relay.key`(debug 빌드는 `agent-relay.dev.key` — PTY 홀더의 `.dev` 처럼 나눠 개발 앱이
+  설치 앱의 키·키 시각을 건드리지 않는다)이고 두 줄이다: 32 바이트를 16진 64 자로, 그리고 만든 시각(unix ms, 0 = 모름).
+  unix 0600. 없으면 잠금 파일(`.<키 파일>.lock`, 배타 생성, 10 s 넘은 잠금은 죽은 인스턴스 것으로 보고 가져온다)을
+  잡고 다시 읽은 뒤 만들고(임시 파일 → rename), 쓴 뒤 디스크에서 다시 읽은 값을 쓴다. 그래서 두 인스턴스가 동시에
+  만들어도 같은 키를 갖는다. 맞는 키는 다시 쓰지 않고, 깨진 파일만 같은 잠금 안에서 만든 시각 0 으로 바꾼다(시각을
+  모르면 legacy 가 없다). 앱 실행 동안 메모리에 둔다. 로그에 쓰지 않고 어떤 커맨드도 키·토큰을 돌려주지 않는다. 확인은 Rust
+  `agent_caller_verify { terminalId, token } -> bool`(`src-tauri/src/agent_caller.rs`, async,
+  `verify_truncated_left` 로 상수 시간 비교). 앱 규칙은 순수 함수 `decideCaller`(`src/terminal/agentCaller.ts`)이고
+  App 의 `checkAgentCaller` 가 `agent.run/send/stop/status/list` 모두에서 쓴다: caller 없음 → 예전대로,
+  caller + 맞는 토큰 → 통과(`callerVerified: true`), caller + 틀린 토큰 → `{ ok: false, error: "caller not verified:
+  <id> (the token does not match this tab)", callerRefused: "wrong_token" }`, caller + 토큰 없음 → 거부
+  (`missing_token`, 그 탭 안에서 실행하고 업데이트 전에 연 탭이면 새로 열라는 문구) — 단 그 탭 PTY 가 이번 실행에서
+  PTY 홀더로부터 복구됐고 아직 살아 있으며 키가 생기기 전에 시작됐으면(`recoveredPtyFor`, 0 보다 큰 홀더
+  `started_at` < Rust `agent_caller_key_info` 의 `sinceMs` = 키 파일에 적힌 만든 시각, `predatesCallerTokens`. 예전 앱이
+  띄운 셸이라 env 가 없다) `callerVerified: "legacy"` 로 받는다. 홀더 클라이언트는 이번 실행이 띄운 셸을 `started_at: 0`
+  으로 돌려주므로(웹뷰 새로고침) 0 은 legacy 가 아니다. 키 시각을 모르면(0) 역시 legacy 가 없다. 키가 생긴 뒤에 시작된
+  셸은 토큰이 있으므로 토큰을 빼면 앱을 다시 켜도 통과하지 못한다. 키를 읽거나 만들 수 없으면 caller 가 있는 요청은
+  모두 `callerRefused: "key_unavailable"`, `caller verification unavailable: cannot read the relay key …` 로 거부한다
+  (legacy 도 없다. caller 없는 요청은 그대로). `agent.run` 에서 확인(await)은 프롬프트 검사 바로 뒤, 제한 검사·자리 잡기
+  앞이라 그 둘은 여전히 마지막 await 뒤의 한 동기 단계다. 거부는 감사 로그에 `caller_refused`(`reason`, `cmd`)로,
+  통과한 run/run_refused/send/ctl stop 항목에는 `callerVerified` 가 남는다(토큰은 쓰지 않는다). 팀 멈춤 버튼 등
+  앱 안의 경로는 caller 가 없어 그대로다. 자식 브리프와 `bbarit-agents` 스킬은 `--caller` 를 쓰라고 하지 않는다
+  (자식 탭에는 자기 id·토큰이 있다).
+
 ### 알려진 한계
 
 - 제한은 링크 기준이다. 사용자가 손으로 연 탭이나 `term create` 로 만든 탭은 세지 않는다. 앱을 다시 켜면 링크는
   저장본에서 복원되므로 제한도 이어진다.
-- **maxDepth·maxChildren 은 보안 경계가 아니다.** 탭이 알려 주는 caller id(ctl 이 보낸 `BBARIT_TERMINAL_ID` 또는
-  `--caller`, 토큰 없음)를 그대로 믿으므로 사고(끝없는 팬아웃)를 막는 장치일 뿐이다. 프로세스가 caller 를 빼거나
-  다른 탭인 척하면 그 값으로 계산된다. 하드 상한은 caller 와 무관하게 모든 링크를 세는 maxTotal 이다.
+- **호출자 확인과 maxDepth·maxChildren 은 보안 경계가 아니다.** 탭이 플래그나 환경 변수로 다른 탭인 척하는 것은
+  막지만(토큰이 맞아야 한다), 로컬 브리지는 어떤 로컬 클라이언트든 받고, 키 파일과 다른 프로세스의 환경 변수는
+  같은 사용자가 읽을 수 있어 악성 로컬 프로세스는 토큰을 만들거나 베낄 수 있다. caller 를 빼는 요청도 예전처럼
+  받는다(누구의 자식도 아니고 maxTotal 에만 든다). caller 없는 `agent stop <자식 id>` 는 지금도 어느 릴레이 자식이든
+  멈춘다 — 막는 것은 "다른 탭의 id 를 대서 그 탭으로 행세하기" 다. 그래서 이것들은 사고(끝없는 팬아웃, 엉뚱한 탭의
+  자식으로 계산)를 막는 장치다. 하드 상한은 caller 와 무관하게 모든 링크를 세는 maxTotal 이다.
+- 예전 앱이 띄운 홀더 셸은 그 셸이 살아 있는 동안 토큰 없이 `legacy` 로 받으므로, 그동안은 누구든 토큰을 빼고 그 탭
+  id 를 댈 수 있다. 오래된 탭을 새로 열면 사라진다. 키 파일을 지우면 새 키(새 시각)가 생겨 그 전의 셸은 토큰이 틀리고,
+  토큰을 빼면 legacy 로 보일 수 있다 — 키 파일을 지울 수 있는 프로세스는 이미 경계 밖이다.
 - 감사 로그는 앱이 남기는 기록이다. 같은 사용자 권한의 프로세스는 파일을 고치거나 지울 수 있어 변조 방지 기록은 아니다.
 
 - caller 가 활성 프로젝트가 아닌 프로젝트에 있으면 자식은 그 프로젝트를 화면에 띄울 때까지

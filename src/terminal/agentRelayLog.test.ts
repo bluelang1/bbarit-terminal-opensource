@@ -62,4 +62,15 @@ describe('buildAgentRelayLogEntry', () => {
     }, at);
     expect(e).toMatchObject({ event: 'run_refused', reason: 'maxDepth', depth: 3, target: { cliType: 'claude' }, textLen: 2, textHead: 'go' });
   });
+
+  it('records how the caller was verified, and caller_refused with its reason', () => {
+    const ok = buildAgentRelayLogEntry({ event: 'send', caller: { id: 't1' }, callerVerified: true, target: { id: 't2' } }, at);
+    expect(ok).toMatchObject({ caller: { id: 't1' }, callerVerified: true });
+    const legacy = buildAgentRelayLogEntry({ event: 'run', caller: { id: 't1' }, callerVerified: 'legacy' }, at);
+    expect(legacy.callerVerified).toBe('legacy');
+    // No caller → no callerVerified.
+    expect('callerVerified' in buildAgentRelayLogEntry({ event: 'run', callerVerified: true }, at)).toBe(false);
+    const refused = buildAgentRelayLogEntry({ event: 'caller_refused', caller: { id: 't1', name: 'Claude' }, extra: { reason: 'wrong_token', cmd: 'agent.run' } }, at);
+    expect(refused).toEqual({ ts: '2026-11-16T01:02:03.004Z', event: 'caller_refused', caller: { id: 't1', name: 'Claude' }, reason: 'wrong_token', cmd: 'agent.run' });
+  });
 });

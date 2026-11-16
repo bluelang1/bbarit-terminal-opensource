@@ -17,6 +17,7 @@ which listed child/depth caps as later work.
 ## Non-goals
 - No Settings UI for the limits (config file only for now).
 - No caller identity tokens: the caller is still the `BBARIT_TERMINAL_ID` the CLI sends.
+  (Later added: [2026-11-16-agent-caller-verification-design.md](2026-11-16-agent-caller-verification-design.md).)
 - No tamper-proof log (same-user processes can edit it), no log shipping.
 - No limits on tabs opened by hand or with `term create`.
 
@@ -51,8 +52,11 @@ which listed child/depth caps as later work.
   nobody's child for list/stop/the stop-team button. Callerless and orphaned links are
   saved with the projects and restored the same way (parent gone → orphaned).
 - **Not a security boundary**: `maxChildren`/`maxDepth` use the caller id the tab
-  reports; a process can omit or fake it. They stop accidents (runaway fan-out).
-  `maxTotal` counts every link whatever the caller and is the hard cap.
+  reports; a process can omit it. They stop accidents (runaway fan-out).
+  `maxTotal` counts every link whatever the caller and is the hard cap. Since the caller
+  verification change the id must come with that tab's token, so a tab can no longer
+  claim another tab's id ([2026-11-16-agent-caller-verification-design.md](2026-11-16-agent-caller-verification-design.md));
+  a same-user process that reads the key file still can.
 - **Log file**: `~/.config/octo/agent-relay.log` (directory from the existing
   `config_file_path()` helper), one JSON object per line, written by the async Rust
   command `agent_relay_log_append` in `src-tauri/src/agent_relay_log.rs`; read by
@@ -81,8 +85,9 @@ which listed child/depth caps as later work.
 ## Left out
 - Settings UI for `agents.*` (edit `~/.config/octo/config.json` or `config set
   agents.maxChildren 8`).
-- Caller identity tokens: a process inside a tab can still claim another tab with
-  `--caller`; the per-tab counts follow that claim, `maxTotal` still holds.
+- Caller identity tokens: a process inside a tab could still claim another tab with
+  `--caller`; the per-tab counts followed that claim, `maxTotal` still held. Done since in
+  [2026-11-16-agent-caller-verification-design.md](2026-11-16-agent-caller-verification-design.md).
 
 ## Verification
 - vitest: `agentLimits.test.ts` (normalize, depth with cycles, each limit, pending

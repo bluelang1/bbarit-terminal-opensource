@@ -537,7 +537,7 @@ export function selectStopTargets(
       ids: live.filter((l) => !!l.parentId && interruptKeysFor(l.cliType) !== null && (!req.isActive || req.isActive(l.childId))).map((l) => l.childId),
     };
   }
-  if (!caller) return { ok: false, error: 'no caller: run inside a BBARIT tab, pass --caller <id>, or name a terminalId' };
+  if (!caller) return { ok: false, error: 'no caller: run inside a BBARIT tab, or name a terminalId' };
   return { ok: true, ids: live.filter((l) => l.parentId === caller).map((l) => l.childId) };
 }
 

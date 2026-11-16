@@ -89,8 +89,11 @@ continues, in order.
   (exit code 1) with a message naming the limit, e.g. `child limit reached: this tab
   already has 6 live children (…)`. A stopped child still counts until its tab is
   closed: close a finished child (`agent stop <id> --close`), do the work yourself, or
-  tell the user — do not loop retrying, and do not ask a child (or pass another
-  `--caller`) to get around the cap.
+  tell the user — do not loop retrying, and do not ask a child to get around the cap.
+- Never pass `--caller`: the CLI already sends this tab's id with its token
+  (`BBARIT_TERM_TOKEN`), and the app refuses another tab's id ("caller not verified").
+  If you see `caller not verified … no caller token`, this tab was opened before an app
+  update: tell the user to open a new tab.
 - `node "$BBARIT_CTL" agent log [--tail N]` shows the relay audit log (who started,
   messaged and stopped whom, refused runs) — useful to explain what happened.
 - Children open in the active project of the app window.

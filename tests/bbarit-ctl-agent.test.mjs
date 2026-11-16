@@ -21,6 +21,7 @@ import {
   relayLogPath,
   formatRelayLogLine,
   readFileTail,
+  agentCallerFields,
 } from '../scripts/bbarit-ctl.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -279,4 +280,41 @@ test('formatRelayLogLine prints one readable line per event', () => {
   const stop = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'stop', target: { id: 't2' }, by: 'button', ok: false, keys: '', closed: true }));
   assert.equal(stop, 'T  stop         - → t2  by=button  ok=no  closed=yes');
   assert.equal(formatRelayLogLine('not json'), 'not json');
+});
+
+test('agentCallerFields: a real tab sends its id with its token', () => {
+  const tab = { BBARIT_TERMINAL_ID: 't1', BBARIT_TERM_TOKEN: 'tok-of-t1' };
+  const list = ['claude', 'review it'];
+  assert.deepEqual(agentCallerFields(list, tab), { caller: 't1', callerToken: 'tok-of-t1' });
+  assert.deepEqual(list, ['claude', 'review it'], 'nothing else is taken from the arguments');
+});
+
+test('agentCallerFields: --caller alone carries this tab\'s token (the app refuses it for another tab)', () => {
+  const tab = { BBARIT_TERMINAL_ID: 't1', BBARIT_TERM_TOKEN: 'tok-of-t1' };
+  const list = ['--caller', 't9', 'x'];
+  // The env token belongs to t1, so the app sees a wrong token for t9 (caller not verified).
+  assert.deepEqual(agentCallerFields(list, tab), { caller: 't9', callerToken: 'tok-of-t1' });
+  assert.deepEqual(list, ['x']);
+  const withToken = ['--caller', 't9', '--caller-token', 'tok-of-t9', 'x'];
+  assert.deepEqual(agentCallerFields(withToken, tab), { caller: 't9', callerToken: 'tok-of-t9' });
+  assert.deepEqual(withToken, ['x']);
+});
+
+test('agentCallerFields: missing token, and no caller at all', () => {
+  // An old tab (no BBARIT_TERM_TOKEN) or --caller outside a tab: sent without a token; the app
+  // accepts it only for a tab recovered from the PTY holder.
+  assert.deepEqual(agentCallerFields([], { BBARIT_TERMINAL_ID: 't1' }), { caller: 't1' });
+  assert.deepEqual(agentCallerFields(['--caller', 't2'], {}), { caller: 't2' });
+  assert.deepEqual(agentCallerFields(['--caller-token', 'tok'], {}), {}, 'a token without a caller is not sent');
+  assert.deepEqual(agentCallerFields([], {}), {});
+  assert.deepEqual(agentCallerFields([], { BBARIT_TERMINAL_ID: '  ', BBARIT_TERM_TOKEN: 'tok' }), {});
+});
+
+test('formatRelayLogLine shows caller verification and refusals (never a token)', () => {
+  const refused = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'caller_refused', caller: { id: 't9' }, reason: 'wrong_token', cmd: 'agent.run' }));
+  assert.equal(refused, 'T  caller_refused  t9 → -  reason=wrong_token  cmd=agent.run');
+  const legacy = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'send', caller: { id: 't1' }, target: { id: 't2' }, callerVerified: 'legacy', ok: true }));
+  assert.equal(legacy, 'T  send         t1 → t2  ok=yes  callerVerified=legacy');
+  const verified = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'stop', caller: { id: 't1' }, target: { id: 't2' }, callerVerified: true }));
+  assert.equal(verified, 'T  stop         t1 → t2  callerVerified=yes');
 });
