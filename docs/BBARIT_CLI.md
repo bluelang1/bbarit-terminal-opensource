@@ -166,9 +166,11 @@ the result back — design in [AGENT_RELAY.md](AGENT_RELAY.md). Every PTY gets
 `BBARIT_CTL` (absolute path of this CLI: `scripts/bbarit-ctl.mjs` in a dev build, the
 bundled resource in an installed build), so inside a tab call it as
 `node "$BBARIT_CTL" agent …` (requires `node`). `BBARIT_TERMINAL_ID` (the calling tab,
-sent as `caller`) and `BBARIT_BRIDGE_PORT` (19980 installed → mcp-bridge 9223, 19981
-dev → 9323, tried before the port scan) are read when present; outside a tab pass
-`--caller <terminalId>`. For `agent run`/`agent wait`, `--timeout` is the total wait in
+sent as `caller`), `BBARIT_TERM_TOKEN` (that tab's caller token, sent as `callerToken`) and
+`BBARIT_BRIDGE_PORT` (19980 installed → mcp-bridge 9223, 19981 dev → 9323, tried before
+the port scan) are read when present. The app accepts a caller only with its token
+(see **Caller check** below); `--caller <terminalId>` works only together with that tab's
+token (`--caller-token <t>` or the env), so it is not a way to act as another tab. For `agent run`/`agent wait`, `--timeout` is the total wait in
 **seconds** (default 600); each request keeps the 20 s response timeout.
 `node "$BBARIT_CTL" agent --help` prints the full guide; the bundled Claude skill
 `bbarit-agents` (installed to `~/.claude/skills`) teaches the same to Claude Code.
@@ -223,10 +225,36 @@ children (max 6; a stopped child still counts: close one with agent stop <id> --
 raise agents.maxChildren)`. Close a finished child (`agent stop <id> --close`), do the
 work in the calling tab, or raise the limit.
 
-`maxChildren` and `maxDepth` rely on the caller id a tab reports (`BBARIT_TERMINAL_ID`
-or `--caller`); they guard against accidental fan-out, not against a process that
-leaves out or fakes the caller. `maxTotal` counts every relay agent whatever the caller
-and is the hard cap.
+`maxChildren` and `maxDepth` count by the caller id, which must come with that tab's
+token (**Caller check**), so one tab cannot count as another. They guard against
+accidental fan-out, not against a process that leaves out the caller or reads the key
+file. `maxTotal` counts every relay agent whatever the caller and is the hard cap.
+
+**Caller check** (design
+[2026-11-16-agent-caller-verification-design.md](superpowers/specs/2026-11-16-agent-caller-verification-design.md)):
+every tab gets `BBARIT_TERM_TOKEN` = HMAC-SHA256 of its terminal id under a per-user key
+(`~/.config/octo/agent-relay.key`, `agent-relay.dev.key` for a dev build; 0600, created on
+first use, holding the key and its creation time), cut to 32 hex characters;
+it stays the same across app restarts and PTY-holder reattach. `agent.run`, `agent.send`,
+`agent.stop`, `agent.status` and `agent.list` with a `caller` need a matching
+`callerToken`: a wrong token gives `{ ok: false, error: "caller not verified: <id> (the
+token does not match this tab)", callerRefused: "wrong_token" }`; no token gives
+`callerRefused: "missing_token"` (run the command inside that tab; reopen a tab opened
+before this update) — except for a tab whose shell still runs in the PTY holder and was
+started by an older app (its holder start time is known and earlier than the key's
+creation time), which is accepted as `legacy`. If the key cannot be read or created,
+every request with a caller is refused with `callerRefused: "key_unavailable"` (`caller
+verification unavailable: cannot read the relay key …`). Requests without a caller behave
+as before — a caller-less `agent stop <childId>` still stops any relay child; what the
+check prevents is one tab acting as another tab by passing that tab's id. Refusals are logged as `caller_refused`
+(`reason`, `cmd`); other entries with a caller carry `callerVerified: true | "legacy"`.
+The key and tokens are never logged or returned by any command. This stops a tab from
+claiming to be another tab by flag or env; it is **not** a boundary against a hostile
+local process: the local bridge accepts any local client, the key file and other
+processes' environments are readable by the same user, and a caller-less request is
+still accepted. `--caller-token <t>` is as visible as the env var: it shows in the
+process argv (`ps`) the way `BBARIT_TERM_TOKEN` shows in `ps eww`; prefer running inside
+the tab, where the CLI reads the env.
 
 #### `agent send <terminalId> <text…> [--force]`
 `agent.send`: type `<text>` + Enter, wrapped as `<bbarit from="<caller>">…</bbarit>` when
@@ -271,7 +299,8 @@ allowlist.
 `~/.config/octo/agent-relay.log`, one human-readable line each (`--json`: the raw JSON
 lines). The app appends one JSON object per event — `run`, `run_refused` (with
 `reason` = the limit, `count`, `max`), `send`, `stop` (per target: `ok`, `keys`,
-`closed`, `by: "ctl" | "button"`) and `exit` — with `ts`, `caller` / `target`
+`closed`, `by: "ctl" | "button"`), `exit` and `caller_refused` (`reason` =
+`wrong_token` | `missing_token`, `cmd`) — with `callerVerified` when a caller was checked, `ts`, `caller` / `target`
 `{ id, name, cliType }` when known, `depth`, `worktree`/`branch`, and for run/send
 `textLen` and `textHead` (first 120 characters, one line). Environment, tokens and full
 prompts are never written. The file is created `0600`; when it would pass 1 MiB it is

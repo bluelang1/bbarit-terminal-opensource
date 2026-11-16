@@ -786,6 +786,8 @@ pub struct ShellEnvDeps {
     pub claude_hook: Option<String>,
     /// Bundled `bbarit-ctl.mjs` path, if resolved.
     pub ctl_path: Option<String>,
+    /// `BBARIT_TERM_TOKEN` (agent_caller::term_token), if the key could be read or created.
+    pub term_token: Option<String>,
     /// `id -un` (falling back to $USER, then "unknown").
     #[cfg(not(target_os = "windows"))]
     pub username: String,
@@ -893,7 +895,13 @@ pub fn build_shell_command(
 fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &ShellEnvDeps, term: &str) {
     // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
     // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
-    crate::apply_bbarit_terminal_env(cmd, &spec.terminal_id, deps.claude_hook.as_deref());
+    // Also the agent relay caller token (BBARIT_TERM_TOKEN, agent_caller.rs).
+    crate::apply_bbarit_terminal_env(
+        cmd,
+        &spec.terminal_id,
+        deps.claude_hook.as_deref(),
+        deps.term_token.as_deref(),
+    );
     // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("COLOR");
@@ -972,6 +980,7 @@ mod tests {
 
     const HOOK: &str = "/res/claude-hooks/session-start.sh";
     const CTL: &str = "/res/bbarit-ctl.mjs";
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     fn spec() -> ShellSpawnSpec {
         ShellSpawnSpec {
@@ -987,6 +996,7 @@ mod tests {
             shell_work_dir: "/work/proj".into(),
             claude_hook: Some(HOOK.into()),
             ctl_path: Some(CTL.into()),
+            term_token: Some(TOKEN.into()),
             username: "alice".into(),
             home: "/Users/alice".into(),
             nvm_node_bin: "/Users/alice/.nvm/versions/node/v22.1.0/bin".into(),
@@ -1025,6 +1035,7 @@ mod tests {
         let mut m: BTreeMap<String, String> = [
             ("BBARIT_TERMINAL_ID", "term-1".to_string()),
             ("BBARIT_BRIDGE_PORT", crate::browser_bridge::BRIDGE_PORT.to_string()),
+            ("BBARIT_TERM_TOKEN", TOKEN.to_string()),
             ("BBARIT_CLAUDE_HOOK", HOOK.to_string()),
             ("PAGER", "cat".into()),
             ("GIT_PAGER", "cat".into()),
@@ -1116,12 +1127,14 @@ mod tests {
         let mut d = deps(false);
         d.claude_hook = None;
         d.ctl_path = None;
+        d.term_token = None;
         d.env_file = None;
         let mut cmd = CommandBuilder::new("/bin/zsh");
         cmd.env_clear();
+        cmd.env("BBARIT_TERM_TOKEN", "inherited");
         apply_shell_env(&mut cmd, &spec(), &d, "xterm-256color");
         let env = env_map(&cmd);
-        for key in ["BBARIT_CLAUDE_HOOK", "BBARIT_CTL", "OPENAI_API_KEY", "GH_TOKEN"] {
+        for key in ["BBARIT_CLAUDE_HOOK", "BBARIT_CTL", "BBARIT_TERM_TOKEN", "OPENAI_API_KEY", "GH_TOKEN"] {
             assert!(!env.contains_key(key), "{key}");
         }
         assert_eq!(env.get("BBARIT_TERMINAL_ID").map(String::as_str), Some("term-1"));

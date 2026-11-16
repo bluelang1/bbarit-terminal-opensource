@@ -146,7 +146,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, getPtyRecovery, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, getPtyRecovery, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, recoveredPtyFor, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -196,6 +196,7 @@ import { UNREPORTED_SETTLE_MS, orphanAgentLink, agentRunTerminalSpec, agentSettl
 import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from './terminal/agentWorktree';
 import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
+import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
@@ -5979,6 +5980,24 @@ Office project scaffold created by BBARIT Terminal.
     const link = agentLinksRef.current.get(terminalId);
     return { id: terminalId, name: term?.name || link?.name, cliType: term?.cliType || link?.cliType };
   };
+  /**
+   * Caller check shared by every agent.* command that reads `caller` (src/terminal/agentCaller.ts):
+   * the ctl's BBARIT_TERM_TOKEN must match the caller id (Rust agent_caller_verify); without a
+   * token only a PTY-holder shell started by an older app (holder started_at before the key's
+   * creation time) passes, as `legacy`; an unreadable key refuses every caller. Refusals go to
+   * the relay log (never the token). Callerless requests pass as before.
+   */
+  const checkAgentCaller = async (request: any, cmd: string): Promise<CallerDecision> => {
+    const decision = await verifyAgentCaller(request, {
+      keyInfo: () => invoke<CallerKeyInfo>('agent_caller_key_info'),
+      verify: (terminalId, token) => invoke<boolean>('agent_caller_verify', { terminalId, token }),
+      recoveredEntry: (terminalId) => recoveredPtyFor(terminalId),
+    });
+    if (!decision.ok) {
+      logAgentRelay({ event: 'caller_refused', caller: relayLogParty(decision.caller), extra: { reason: decision.reason, cmd } });
+    }
+    return decision;
+  };
   // Claude Code may have Enter rebound to newline (keybindings.json "Chat"): the input gate
   // presses the configured submit key in Claude tabs. Loaded at startup and on window focus,
   // and again before agent run/send (cached, no polling).
@@ -6221,7 +6240,7 @@ Office project scaffold created by BBARIT Terminal.
    * it), mark the link stopped, send the CLI's interrupt key through the gate (force, no
    * quiet wait, no Enter), then one `stopped` note to its parent unless the parent asked.
    */
-  const stopRelayAgents = async (ids: string[], opts: { close?: boolean; by?: string; caller?: string; silent?: boolean; source: 'ctl' | 'button' }): Promise<Array<AgentStopResult & { name: string }>> => {
+  const stopRelayAgents = async (ids: string[], opts: { close?: boolean; by?: string; caller?: string; callerVerified?: true | 'legacy'; silent?: boolean; source: 'ctl' | 'button' }): Promise<Array<AgentStopResult & { name: string }>> => {
     const results: Array<AgentStopResult & { name: string }> = [];
     for (const terminalId of ids) {
       const term = findTerminalAnywhere(terminalId);
@@ -6270,6 +6289,7 @@ Office project scaffold created by BBARIT Terminal.
       logAgentRelay({
         event: 'stop',
         caller: opts.caller ? relayLogParty(opts.caller) : undefined,
+        callerVerified: opts.callerVerified,
         target: { id: terminalId, name: term?.name || link?.name, cliType },
         depth,
         worktree: link?.worktree,
@@ -7758,7 +7778,12 @@ Office project scaffold created by BBARIT Terminal.
         if (!allowed.includes(cliType)) return { ok: false, error: `invalid cliType: ${cliType} (${allowed.join('/')})` };
         const prompt = String(request?.prompt ?? '').trim();
         if (!prompt) return { ok: false, error: 'prompt required' };
-        const caller = String(request?.caller || '').trim();
+        // Caller token check (agentCaller.ts) — before the limit check below, never between
+        // that check and the slot reservation.
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const callerVerified = callerCheck.verified;
         const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
         if (caller && !callerTerm) return { ok: false, error: `caller not found: ${caller}` };
         // 자식은 caller 의 프로젝트에, cwd = workDir || caller 의 마지막 cwd || 그 프로젝트 폴더.
@@ -7783,6 +7808,7 @@ Office project scaffold created by BBARIT Terminal.
           logAgentRelay({
             event: 'run_refused',
             caller: callerParty,
+            callerVerified,
             target: { id: '', name: request?.name ? String(request.name) : undefined, cliType },
             depth: limitCheck.depth,
             text: prompt,
@@ -7822,6 +7848,7 @@ Office project scaffold created by BBARIT Terminal.
           logAgentRelay({
             event: 'run',
             caller: callerParty,
+            callerVerified,
             target: { id: terminalId, name, cliType },
             depth: limitCheck.depth,
             worktree: worktree?.path,
@@ -7875,12 +7902,14 @@ Office project scaffold created by BBARIT Terminal.
       }
       case 'agent.send': {
         pruneAgentRunJobs();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
         const terminalId = String(request?.terminalId || '').trim();
         const target = terminalId ? findTerminalAnywhere(terminalId) : undefined;
         if (!target) return { ok: false, error: `terminal not found: ${terminalId || '(none)'}` };
         const text = String(request?.text ?? '');
         if (!text.trim()) return { ok: false, error: 'text required' };
-        const caller = String(request?.caller || '').trim();
+        const caller = callerCheck.caller;
         const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
         const wrapped = wrapAgentMessage(text, caller || undefined, callerTerm?.name);
         if (target.cliType === 'claude') await refreshClaudeSubmitKey(loadClaudeChatBindings);
@@ -7896,6 +7925,7 @@ Office project scaffold created by BBARIT Terminal.
         logAgentRelay({
           event: 'send',
           caller: caller ? { id: caller, name: callerTerm?.name, cliType: callerTerm?.cliType } : undefined,
+          callerVerified: callerCheck.verified,
           target: { id: terminalId, name: target.name, cliType: target.cliType },
           depth: agentDepth(agentLinksRef.current, terminalId),
           text,
@@ -7923,7 +7953,9 @@ Office project scaffold created by BBARIT Terminal.
       }
       case 'agent.stop': {
         pruneAgentRunJobs();
-        const caller = String(request?.caller || '').trim();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
         const targets = selectStopTargets(agentLinksRef.current, {
           terminalId: request?.terminalId ? String(request.terminalId) : undefined,
           caller: caller || undefined,
@@ -7933,6 +7965,7 @@ Office project scaffold created by BBARIT Terminal.
         const stopped = await stopRelayAgents(targets.ids, {
           close: request?.close === true,
           caller: caller || undefined,
+          callerVerified: callerCheck.verified,
           by: caller ? (callerTerm?.name ? `${caller} ${callerTerm.name}` : caller) : 'bbarit-ctl',
           source: 'ctl',
         });
@@ -7946,8 +7979,10 @@ Office project scaffold created by BBARIT Terminal.
       case 'agent.status':
       case 'agent.list': {
         pruneAgentRunJobs();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
         const terminalId = String(request?.terminalId || '').trim();
-        const caller = String(request?.caller || '').trim();
+        const caller = callerCheck.caller;
         const ids = terminalId
           ? [terminalId]
           : [...agentLinksRef.current.values()]

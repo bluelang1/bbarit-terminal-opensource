@@ -16,6 +16,7 @@ macro_rules! safe_eprintln {
     }};
 }
 
+mod agent_caller;
 mod agent_gateway;
 mod agent_relay_log;
 mod browser_bridge;
@@ -3241,6 +3242,8 @@ fn create_shell(
     let shell_work_dir = resolve_shell_work_dir(&work_dir);
     let claude_hook = claude_hook_file(&app, "session-start.sh");
     let ctl_path = bbarit_ctl_path().map(str::to_string);
+    // Agent relay caller token (agent_caller.rs): deterministic per terminal id.
+    let term_token = agent_caller::term_token(&terminal_id);
 
     #[cfg(not(target_os = "windows"))]
     let deps = {
@@ -3280,6 +3283,7 @@ fn create_shell(
             shell_work_dir,
             claude_hook,
             ctl_path,
+            term_token,
             username,
             home,
             nvm_node_bin,
@@ -3288,7 +3292,7 @@ fn create_shell(
         }
     };
     #[cfg(target_os = "windows")]
-    let deps = pty_backend::ShellEnvDeps { shell_work_dir, claude_hook, ctl_path };
+    let deps = pty_backend::ShellEnvDeps { shell_work_dir, claude_hook, ctl_path, term_token };
 
     // Per-terminal scope token; close_pty sweeps every process that still carries it.
     let scope_token = new_scope_token();
@@ -3436,24 +3440,40 @@ fn claude_hook_file(app: &AppHandle, name: &str) -> Option<String> {
         .map(|dir| strip_extended_length_prefix(dir.join(name).to_string_lossy().to_string()))
 }
 
-/// Env every tab PTY gets so the hook can say which tab it ran in and where the bridge is.
-fn bbarit_terminal_env(terminal_id: &str, hook_script: Option<&str>) -> Vec<(&'static str, String)> {
+/// Env every tab PTY gets so the hook can say which tab it ran in and where the bridge is,
+/// plus the tab's agent relay caller token (`BBARIT_TERM_TOKEN`, agent_caller.rs) when the
+/// key could be read.
+fn bbarit_terminal_env(
+    terminal_id: &str,
+    hook_script: Option<&str>,
+    term_token: Option<&str>,
+) -> Vec<(&'static str, String)> {
     let mut env = vec![
         ("BBARIT_TERMINAL_ID", terminal_id.to_string()),
         ("BBARIT_BRIDGE_PORT", browser_bridge::BRIDGE_PORT.to_string()),
     ];
+    if let Some(token) = term_token {
+        env.push((agent_caller::TOKEN_ENV, token.to_string()));
+    }
     if let Some(hook) = hook_script {
         env.push(("BBARIT_CLAUDE_HOOK", hook.to_string()));
     }
     env
 }
 
-/// Used by build_shell_command: drop inherited Claude markers, add the hook env.
-fn apply_bbarit_terminal_env(cmd: &mut CommandBuilder, terminal_id: &str, hook_script: Option<&str>) {
+/// Used by build_shell_command: drop inherited Claude markers (and an inherited caller token:
+/// the app was started from another tab), add the hook env and this tab's token.
+fn apply_bbarit_terminal_env(
+    cmd: &mut CommandBuilder,
+    terminal_id: &str,
+    hook_script: Option<&str>,
+    term_token: Option<&str>,
+) {
     for key in INHERITED_CLAUDE_MARKERS {
         cmd.env_remove(key);
     }
-    for (key, value) in bbarit_terminal_env(terminal_id, hook_script) {
+    cmd.env_remove(agent_caller::TOKEN_ENV);
+    for (key, value) in bbarit_terminal_env(terminal_id, hook_script, term_token) {
         cmd.env(key, value);
     }
 }
@@ -3603,17 +3623,20 @@ mod claude_hook_env_tests {
 
     #[test]
     fn tab_env_names_terminal_bridge_and_hook() {
-        let env = bbarit_terminal_env("term-1", Some("/res/claude-hooks/session-start.sh"));
+        let env = bbarit_terminal_env("term-1", Some("/res/claude-hooks/session-start.sh"), Some("ab12"));
         assert_eq!(
             env,
             vec![
                 ("BBARIT_TERMINAL_ID", "term-1".to_string()),
                 ("BBARIT_BRIDGE_PORT", crate::browser_bridge::BRIDGE_PORT.to_string()),
+                ("BBARIT_TERM_TOKEN", "ab12".to_string()),
                 ("BBARIT_CLAUDE_HOOK", "/res/claude-hooks/session-start.sh".to_string()),
             ]
         );
         // A missing resource leaves the hook var out; the bundled settings then no-op.
-        assert!(bbarit_terminal_env("t", None).iter().all(|(k, _)| *k != "BBARIT_CLAUDE_HOOK"));
+        assert!(bbarit_terminal_env("t", None, None).iter().all(|(k, _)| *k != "BBARIT_CLAUDE_HOOK"));
+        // No key → no token var (agent.* calls with a caller from that tab are refused).
+        assert!(bbarit_terminal_env("t", None, None).iter().all(|(k, _)| *k != "BBARIT_TERM_TOKEN"));
     }
 
     #[test]
@@ -3622,8 +3645,9 @@ mod claude_hook_env_tests {
         for key in INHERITED_CLAUDE_MARKERS {
             cmd.env(key, "1");
         }
-        apply_bbarit_terminal_env(&mut cmd, "t", Some("/h.sh"));
-        for key in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT"] {
+        cmd.env("BBARIT_TERM_TOKEN", "inherited-from-another-tab");
+        apply_bbarit_terminal_env(&mut cmd, "t", Some("/h.sh"), None);
+        for key in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "BBARIT_TERM_TOKEN"] {
             assert!(cmd.get_env(key).is_none(), "{key} should be removed");
         }
         assert_eq!(cmd.get_env("BBARIT_TERMINAL_ID").and_then(|v| v.to_str()), Some("t"));
@@ -10507,6 +10531,8 @@ fn main() {
             claude_chat_keybindings,
             agent_relay_log::agent_relay_log_append,
             agent_relay_log::agent_relay_log_tail,
+            agent_caller::agent_caller_verify,
+            agent_caller::agent_caller_key_info,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,

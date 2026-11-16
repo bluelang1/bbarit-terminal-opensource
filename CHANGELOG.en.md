@@ -19,6 +19,10 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 - When Claude Code's Enter is rebound to newline (`chat:newline` in `keybindings.json`), agent relay briefs, `agent send`, notes and other automatic input were only pasted into the input box and never submitted. Claude tabs now get the submit key configured in Claude Code (Shift+Enter or Cmd+Enter). When that key also dismisses the autocomplete menu, input that starts with `/` or ends with an `@` mention gets a second press so it really runs. If submit is bound only to a key the app cannot send, `agent run` and `agent send` show a warning.
 
+### Security
+
+- The agent relay now checks which tab is calling: every tab gets its own token (`BBARIT_TERM_TOKEN`), and `agent run`, `send`, `wait`, `status`, `list` and `stop` accept a caller tab only when its token matches. One tab can therefore no longer act as another tab by passing that tab's id with `--caller` or an environment variable (so the agents it starts are not linked to that tab or counted against that tab's limits), and `--caller <id>` alone no longer works (that tab's token is needed too). Requests sent without a caller (for example `agent stop <childId>`) work as before. Tabs opened before the update keep working while they still run in the PTY holder; otherwise open the tab again. Refused calls are written to the audit log. This does not stop a malicious program running as the same user.
+
 ## [1.1.71] - 2026-11-13
 
 ### Added

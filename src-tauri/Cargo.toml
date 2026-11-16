@@ -40,6 +40,8 @@ axum = { version = "0.8", features = ["ws"] }
 uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 sha2 = "0.10"
+# Agent relay caller tokens (src/agent_caller.rs); already in the tree via pbkdf2.
+hmac = "0.12"
 # Chrome/Chromium 프로필 임포트: macOS는 AES-128-CBC(Keychain 키), Windows는 AES-256-GCM(DPAPI 키).
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }

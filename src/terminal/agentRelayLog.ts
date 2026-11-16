@@ -5,7 +5,7 @@
 // Design: docs/superpowers/specs/2026-11-16-agent-limits-and-log-design.md
 import { oneLine } from './agentRelay';
 
-export type AgentRelayLogEvent = 'run' | 'run_refused' | 'send' | 'stop' | 'exit';
+export type AgentRelayLogEvent = 'run' | 'run_refused' | 'send' | 'stop' | 'exit' | 'caller_refused';
 
 export const AGENT_LOG_TEXT_HEAD = 120;
 
@@ -14,6 +14,9 @@ export interface AgentLogParty { id: string; name?: string; cliType?: string }
 export interface AgentRelayLogInput {
   event: AgentRelayLogEvent;
   caller?: AgentLogParty;
+  /** How the caller id was checked (src/terminal/agentCaller.ts): token match, or `legacy`
+   *  (a PTY-holder tab started by an older app, no token). Left out without a caller. */
+  callerVerified?: true | 'legacy';
   target?: AgentLogParty;
   depth?: number;
   worktree?: string;
@@ -43,6 +46,7 @@ export function buildAgentRelayLogEntry(input: AgentRelayLogInput, now: Date = n
   const caller = party(input.caller);
   const target = party(input.target);
   if (caller) entry.caller = caller;
+  if (caller && (input.callerVerified === true || input.callerVerified === 'legacy')) entry.callerVerified = input.callerVerified;
   if (target) entry.target = target;
   if (typeof input.depth === 'number' && Number.isFinite(input.depth)) entry.depth = input.depth;
   if (input.worktree) entry.worktree = input.worktree;
