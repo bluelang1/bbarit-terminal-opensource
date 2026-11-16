@@ -19,6 +19,7 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ### Fixed
 
+- Agent tab status dot: right after a program such as Claude Code starts in a tab and before it reports its state, screen repaints alone no longer turn the dot green (working). The app also keeps the last 30 status events per tab for troubleshooting.
 - When Claude Code's Enter is rebound to newline (`chat:newline` in `keybindings.json`), agent relay briefs, `agent send`, notes and other automatic input were only pasted into the input box and never submitted. Claude tabs now get the submit key configured in Claude Code (Shift+Enter or Cmd+Enter). When that key also dismisses the autocomplete menu, input that starts with `/` or ends with an `@` mention gets a second press so it really runs. If submit is bound only to a key the app cannot send, `agent run` and `agent send` show a warning.
 
 ### Security

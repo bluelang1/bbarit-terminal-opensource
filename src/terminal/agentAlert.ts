@@ -73,8 +73,56 @@ export interface AgentStatusEventDetail {
   looking: boolean;
   /** 레코드가 모두 지워져 7501 상태가 없어졌다(기존 I/O 기반 표시로 돌아감). */
   cleared?: boolean;
+  /**
+   * cleared 인데, 프로그램이 7501 지원을 새로 물어서(시작 질의) 비운 경우. 곧 자기 상태를 보고할
+   * 프로그램이므로 그때까지 출력 유무로 "작업 중"을 추정하지 않는다.
+   */
+  reset?: boolean;
   /** 저장된 출력을 재생하다 나온 보고(과거 것). 에이전트 노트를 만들지 않는다. */
   replaying?: boolean;
 }
 
 export const AGENT_STATUS_EVENT = 'octo-agent-status';
+
+/**
+ * 지워진(cleared) 상태를 탭 표시에서 어떻게 둘지 정한다. 'idle' = 7501 을 쓰는 프로그램이 방금
+ * 시작 질의를 보낸 것이라 자리를 idle 로 남긴다(화면 출력만으로 초록 "작업 중"이 되지 않게).
+ * 'drop' = 항목을 지우고 기존 I/O 기반 표시로 돌아간다(프로그램 종료, 낡은 상태 정리 등).
+ */
+export function clearedStatusDisplay(d: Pick<AgentStatusEventDetail, 'cleared' | 'reset'>): 'idle' | 'drop' | null {
+  if (!d.cleared) return null;
+  return d.reset ? 'idle' : 'drop';
+}
+
+/** 진단용: 탭별 최근 상태 이벤트(최대 30개). `window.__bbaritAgentStatusLog(terminalId)` 로 읽는다. */
+export interface AgentStatusLogEntry { at: number; state: AgentTabState; kind?: string; turn: number; cleared: boolean; reset: boolean; replaying: boolean }
+const STATUS_LOG_MAX = 30;
+const statusLog = new Map<string, AgentStatusLogEntry[]>();
+export function recordAgentStatusLog(d: AgentStatusEventDetail, now: number = Date.now()): void {
+  const list = statusLog.get(d.terminalId) ?? [];
+  list.push({ at: now, state: d.state, kind: d.kind, turn: d.turn, cleared: !!d.cleared, reset: !!d.reset, replaying: !!d.replaying });
+  if (list.length > STATUS_LOG_MAX) list.splice(0, list.length - STATUS_LOG_MAX);
+  statusLog.set(d.terminalId, list);
+}
+export function readAgentStatusLog(terminalId?: string): Record<string, AgentStatusLogEntry[]> | AgentStatusLogEntry[] {
+  if (terminalId) return [...(statusLog.get(terminalId) ?? [])];
+  return Object.fromEntries([...statusLog].map(([k, v]) => [k, [...v]]));
+}
+
+/** 시작 질의 뒤 이 시간 안에 보고가 없으면 7501 을 쓰지 않는 프로그램으로 보고 I/O 기반 표시로 돌아간다. */
+export const RESET_PLACEHOLDER_MS = 10_000;
+
+/**
+ * 탭에 보일 상태. 7501 항목이 있으면 그것을 따르고(본 done 은 idle), 없으면 출력 활동으로 추정한다.
+ * `resetAt` 이 있는 항목은 시작 질의 직후의 자리 표시라 RESET_PLACEHOLDER_MS 동안만 idle 로 본다.
+ */
+export function displayAgentState(
+  entry: { state: AgentTabState; turn: number; seenTurn: number; resetAt?: number } | undefined,
+  busy: boolean,
+  now: number = Date.now(),
+): AgentTabState {
+  if (entry && !(entry.resetAt !== undefined && now - entry.resetAt > RESET_PLACEHOLDER_MS)) {
+    return entry.state === 'done' && entry.seenTurn >= entry.turn ? 'idle' : entry.state;
+  }
+  return busy ? 'working' : 'idle';
+}
