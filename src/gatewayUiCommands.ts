@@ -30,9 +30,11 @@ export const GATEWAY_UI_COMMAND_DOCS: GatewayUiCommandDoc[] = [
   { group: 'Terminals', cmd: 'terminal.activate', args: 'terminalId', desc: 'Focus a terminal tab' },
   { group: 'Terminals', cmd: 'terminal.close', args: 'terminalId', desc: 'Close a terminal (no confirm)' },
 
-  { group: 'Agents', cmd: 'agent.run', args: 'cliType=claude|codex|shell|…, prompt, caller?, workDir?, name?', desc: 'Start an agent in a new terminal and hand it the prompt once it is ready (returns terminalId at once). With caller, the child is told how to report back and its blocked/done/exit notes are typed into the caller' },
+  { group: 'Agents', cmd: 'agent.run', args: 'cliType=claude|codex|shell|…, prompt, caller?, workDir?, name?, worktree?=true|name', desc: 'Start an agent in a new terminal and hand it the prompt once it is ready (returns terminalId at once). With caller, the child is told how to report back and its blocked/done/exit notes are typed into the caller. With worktree, the child gets its own git worktree <repo>/.bbarit/worktrees/<slug> on branch agent/<slug> (replies { pending, jobId } at once; poll agent.run.result. Error and no tab outside a git repo)' },
   { group: 'Agents', cmd: 'agent.send', args: 'terminalId, text, caller?, force?=false', desc: 'Type a message into an agent terminal (wrapped as <bbarit from="caller"> when caller is set); same gate as terminal.write' },
   { group: 'Agents', cmd: 'agent.status', args: 'caller?, terminalId?', desc: 'One terminal, or every child of caller: state (OSC 7501 or activity), kind, exited, settled, last 12 lines' },
+  { group: 'Agents', cmd: 'agent.run.result', args: 'jobId', desc: 'Outcome of an agent.run with worktree (it replies { pending, jobId } while git works): { pending } or the agent.run result' },
+  { group: 'Agents', cmd: 'agent.stop', args: 'terminalId?, caller?, close?=false', desc: 'Interrupt one child agent, or every child of caller: drop its queued automatic input, then send its interrupt key (Esc for claude/bbarit, Ctrl+C for shell/ollama; other CLIs: not interrupted, reported, unless close). The tab stays unless close' },
   { group: 'Agents', cmd: 'agent.list', args: 'caller?', desc: 'Like agent.status without the last lines' },
 
   { group: 'Editor', cmd: 'editor.open', args: 'path', desc: 'Open a file in the built-in editor (office files included)' },

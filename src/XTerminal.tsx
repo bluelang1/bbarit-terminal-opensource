@@ -24,6 +24,7 @@ import { decodeOsc52Payload } from './terminal/osc52';
 import { writePasteChunked } from './terminal/pasteChunks';
 import { disposeInputGate, setInputGateHost, writeHumanInput } from './terminal/inputGate';
 import {
+  agentProgramRunning,
   createProgramStatusStore,
   dropTransientProgramStatus,
   rollupAgentState,
@@ -518,6 +519,9 @@ export const getTerminalAgentState = (terminalId: string) => {
   const store = terminalStates.get(terminalId)?.programStatus;
   return store?.reported ? rollupAgentState(store) : undefined;
 };
+
+/** Claude Code (or another 7501 agent) is running in this tab now — see agentProgramRunning. */
+export const isTerminalAgentRunning = (terminalId: string) => agentProgramRunning(terminalStates.get(terminalId)?.programStatus);
 
 /** 이 터미널의 PTY 가 만들어졌는가(마운트돼 셸이 떴다). */
 export const isTerminalPtyStarted = (terminalId: string) => !!terminalStates.get(terminalId)?.ptyCreated;

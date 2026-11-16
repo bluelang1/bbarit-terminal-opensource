@@ -3478,6 +3478,123 @@ fn read_env_var(name: String) -> Option<String> {
     get_env_value(&name).map(|v| v.trim().to_string())
 }
 
+/// Claude Code's keybindings file: `$CLAUDE_CONFIG_DIR/keybindings.json` when that variable
+/// is visible to the app (env or ~/.config/octo/.env, as `read_env_var`), else
+/// `~/.claude/keybindings.json`.
+fn claude_keybindings_path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = get_env_value("CLAUDE_CONFIG_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir).join("keybindings.json"));
+        }
+    }
+    dirs::home_dir().map(|home| home.join(".claude").join("keybindings.json"))
+}
+
+/// One context's bindings (key → action string, or null = unbound); later blocks override
+/// earlier ones. Anything else in the file is dropped. Invalid JSON → empty.
+fn claude_context_bindings_from(text: &str, context: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(text) else {
+        return out;
+    };
+    let Some(blocks) = root.get("bindings").and_then(|b| b.as_array()) else {
+        return out;
+    };
+    for block in blocks {
+        if block.get("context").and_then(|c| c.as_str()) != Some(context) {
+            continue;
+        }
+        let Some(map) = block.get("bindings").and_then(|b| b.as_object()) else {
+            continue;
+        };
+        for (key, action) in map {
+            if key.len() > 64 {
+                continue;
+            }
+            match action {
+                serde_json::Value::String(a) if a.len() <= 64 => {
+                    out.insert(key.clone(), serde_json::Value::String(a.clone()));
+                }
+                serde_json::Value::Null => {
+                    out.insert(key.clone(), serde_json::Value::Null);
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// `{ chat, autocomplete }`: only those two contexts of Claude Code's keybindings.
+fn claude_keybindings_from(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chat": claude_context_bindings_from(text, "Chat"),
+        "autocomplete": claude_context_bindings_from(text, "Autocomplete"),
+    })
+}
+
+/// Larger keybindings files are ignored (defaults).
+const CLAUDE_KEYBINDINGS_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Claude Code's Chat and Autocomplete keybindings, so automatic input can press the
+/// configured submit key (src/terminal/claudeSubmitKey.ts). Missing, oversized or invalid
+/// file → empty maps (defaults).
+#[tauri::command(async)]
+fn claude_chat_keybindings() -> serde_json::Value {
+    let text = claude_keybindings_path()
+        .filter(|path| {
+            std::fs::metadata(path)
+                .map(|m| m.is_file() && m.len() <= CLAUDE_KEYBINDINGS_MAX_BYTES)
+                .unwrap_or(false)
+        })
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    claude_keybindings_from(&text)
+}
+
+#[cfg(test)]
+mod claude_keybindings_tests {
+    use super::{claude_context_bindings_from, claude_keybindings_from};
+
+    #[test]
+    fn keeps_only_chat_and_autocomplete_strings_and_nulls() {
+        let text = r#"{
+          "$schema": "x",
+          "bindings": [
+            { "context": "Global", "bindings": { "ctrl+t": "app:toggleTodos" } },
+            { "context": "Chat", "bindings": { "enter": "chat:newline", "shift+enter": "chat:submit", "ctrl+x": null, "bad": 3 } },
+            { "context": "Autocomplete", "bindings": { "shift+enter": "autocomplete:dismiss" } },
+            { "context": "Chat", "bindings": { "cmd+enter": "chat:submit", "enter": "chat:newline" } }
+          ],
+          "secret": "never"
+        }"#;
+        let map = claude_context_bindings_from(text, "Chat");
+        assert_eq!(map.len(), 4);
+        assert_eq!(map["enter"], "chat:newline");
+        assert_eq!(map["shift+enter"], "chat:submit");
+        assert_eq!(map["cmd+enter"], "chat:submit");
+        assert!(map["ctrl+x"].is_null());
+        assert!(!map.contains_key("ctrl+t"));
+        assert!(!map.contains_key("bad"));
+        let both = claude_keybindings_from(text);
+        assert_eq!(both["autocomplete"]["shift+enter"], "autocomplete:dismiss");
+        assert_eq!(both.as_object().unwrap().len(), 2);
+        assert!(!both.to_string().contains("never"));
+        assert!(!both.to_string().contains("toggleTodos"));
+    }
+
+    #[test]
+    fn invalid_or_unexpected_files_give_defaults() {
+        assert!(claude_context_bindings_from("not json", "Chat").is_empty());
+        assert!(claude_context_bindings_from("[]", "Chat").is_empty());
+        assert!(claude_context_bindings_from(r#"{"bindings": {"Chat": 1}}"#, "Chat").is_empty());
+        let empty = claude_keybindings_from("");
+        assert!(empty["chat"].as_object().unwrap().is_empty());
+        assert!(empty["autocomplete"].as_object().unwrap().is_empty());
+    }
+}
+
 #[cfg(test)]
 mod claude_hook_env_tests {
     use super::{apply_bbarit_terminal_env, bbarit_terminal_env, read_env_var, INHERITED_CLAUDE_MARKERS};
@@ -10386,6 +10503,7 @@ fn main() {
             resolve_browser_cli,
             claude_hook_settings_path,
             read_env_var,
+            claude_chat_keybindings,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,

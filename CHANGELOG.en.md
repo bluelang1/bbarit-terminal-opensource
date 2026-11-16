@@ -9,6 +9,15 @@ A PR with a user-visible change adds a Korean line to CHANGELOG.md and the same 
 
 ## [Unreleased]
 
+### Added
+
+- Agent relay `agent run --worktree [name]`: a child agent works in its own git worktree (`<repo>/.bbarit/worktrees/<name>`) on a new branch `agent/<name>`, so several children no longer overwrite each other's edits in one folder, and the child is told to only commit on that branch and not to push, merge or switch branches. `agent status`, `agent list` and the notes typed into the parent show the branch, and the worktree folder is kept out of `git status` through the repo's `.git/info/exclude` (`.gitignore` is not touched). Outside a git repository no tab is opened and an error is returned; worktrees and branches are never deleted automatically.
+- Agent relay `agent stop [terminalId | --children] [--close]` and a stop-team button in the top bar: interrupt one child agent or all of your children with the interrupt key a person would press (Esc for Claude and bbarit, Ctrl+C for shells and ollama). CLIs whose interrupt key is not confirmed (Codex, Gemini, …) get no key and the result says so; only `--close` stops them by closing the tab. Automatic input queued for that tab is dropped first, so a waiting note cannot set the child going again, and the tab and its output stay so you can continue with `agent send` (`--close` also closes the tab). The red stop-team button appears next to the bell and window-pin buttons only while a relay child it can interrupt is working; it stops every relay child that is working or waiting for input the same way and types nothing into the parent tabs. `agent run --worktree` now creates the worktree in the background in the app while `bbarit-ctl` waits up to 120 s.
+
+### Fixed
+
+- When Claude Code's Enter is rebound to newline (`chat:newline` in `keybindings.json`), agent relay briefs, `agent send`, notes and other automatic input were only pasted into the input box and never submitted. Claude tabs now get the submit key configured in Claude Code (Shift+Enter or Cmd+Enter). When that key also dismisses the autocomplete menu, input that starts with `/` or ends with an `@` mention gets a second press so it really runs. If submit is bound only to a key the app cannot send, `agent run` and `agent send` show a warning.
+
 ## [1.1.71] - 2026-11-13
 
 ### Added

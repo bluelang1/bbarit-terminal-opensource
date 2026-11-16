@@ -47,20 +47,22 @@ herdr-core 의 모델을 따른다.
 
 | 커맨드 | 파라미터 | 동작 / 반환 |
 |---|---|---|
-| `agent.run` | `cliType` (claude·codex·shell…), `prompt`, `caller?`, `workDir?`, `name?` | 현재 프로젝트에 터미널을 만들고 `agentLinks` 에 `{child, parent: caller}` 를 넣는다. 에이전트가 준비되면(7501 `idle` 보고 또는 기존 `looksLikeAgentUiReady`, 최대 60 s) 3 절의 첫 메시지를 게이트로 넣는다. 즉시 `{ ok, terminalId }` 를 돌려준다(비동기 주입). `caller` 없으면 링크 없이 터미널만 만든다. |
+| `agent.run` | `cliType` (claude·codex·shell…), `prompt`, `caller?`, `workDir?`, `name?`, `worktree?` (`true`·이름) | 현재 프로젝트에 터미널을 만들고 `agentLinks` 에 `{child, parent: caller}` 를 넣는다. 에이전트가 준비되면(7501 `idle` 보고 또는 기존 `looksLikeAgentUiReady`, 최대 60 s) 3 절의 첫 메시지를 게이트로 넣는다. 즉시 `{ ok, terminalId }` 를 돌려준다(비동기 주입). `caller` 없으면 링크 없이 터미널만 만든다. |
 | `agent.send` | `terminalId`, `text`, `caller?`, `force?` | `queueAutoInput(terminalId, wrapped, { source: 'agent', submit: true, force })`. `caller` 가 있으면 `<bbarit from="<callerName>">text</bbarit>` 로 감싼다. 거부 사유는 `terminal.write` 와 같다. |
 | `agent.status` | `caller?`, `terminalId?` | `terminalId` 가 있으면 그 하나, 없으면 `caller` 의 자식 전부: `{ terminalId, name, cliType, state (7501 rollup 또는 busy 폴백), kind?, exited, lastLines (12줄) }`. |
 | `agent.list` | `caller?` | `agent.status` 와 같되 `lastLines` 없음. |
+| `agent.stop` | `terminalId?`, `caller?`, `close?` | `terminalId` 하나(caller 가 있으면 그 caller 의 자식이어야 함) 또는 caller 의 자식 전부(손자 제외)를 멈춘다: 쌓인 자동 입력을 버린 뒤 인터럽트 키를 보낸다. `{ ok, stopped: [{ terminalId, name, ok, keys, reason?, closed? }] }`. |
 
 `agent.wait` 는 서버 쪽 커맨드가 **아니다**. 게이트웨이 30 s 타임아웃과 ctl 20 s 기본 타임아웃을
 넘기지 않기 위해 ctl 이 `agent.status` 를 2 s 간격으로 폴링한다.
 
 ### 4. ctl 서브커맨드 (`scripts/bbarit-ctl.mjs`)
 
-    agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]
+    agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--worktree [name]] [--timeout <s>]
     agent send <terminalId> <text…> [--force]
     agent wait [--id <terminalId> | --children any|all] [--timeout <s>=600]
     agent status [terminalId] | agent list
+    agent stop [<terminalId> | --children] [--close]
 
 - `run` 은 기본으로 **기다린다**: 자식이 `done`/`blocked`/종료가 될 때까지 폴링한 뒤
   `agent.status` 결과(상태 + 마지막 12줄)를 출력하고, blocked 면 종료 코드 2, 타임아웃은 3.
@@ -109,7 +111,8 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 - 기존 `term create/write/read`. `agent.*` 는 그 위의 얇은 층이다.
 - 입력 게이트 규칙. 노트도 게이트를 탄다(사람이 치는 중이면 기다리고, blocked 면 대기열).
 - 7501 상태 모델. `agent.status` 는 읽기만 한다.
-- 워크트리 생성. `--workdir` 는 있는 디렉터리를 받을 뿐이다. 작업별 워크트리 자동 생성은 후속.
+- 워크트리 생성. `--workdir` 는 있는 디렉터리를 받을 뿐이다. 작업별 워크트리는 아래
+  "자식별 워크트리" 메모(`--worktree`)로 추가됐다.
 
 ## 검증
 
@@ -195,10 +198,98 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   (`tests/bbarit-ctl-agent.test.mjs`, `npm run test:source-build` 에 포함).
 - **설정 → Control CLI**: 예시 매핑(`CLI_EXAMPLES`)에 `agent.*` 네 개를 추가했다.
 
+- **자식별 워크트리**(`agent run --worktree [name]`, 설계
+  [2026-11-16-agent-worktree-and-stop-design.md](superpowers/specs/2026-11-16-agent-worktree-and-stop-design.md)):
+  `agent.run` 의 `worktree: true | "<name>"`. 순수 로직은 `src/terminal/agentWorktree.ts`
+  (+ 실제 git 으로 도는 `agentWorktree.test.ts`). 기준 폴더 = `agentWorktreeBaseDir`: `workDir` || caller cwd
+  (`lastWorkDir`, 일반 run 과 같은 순서 — 연결된 워크트리 안의 caller 는 자기 브랜치 HEAD 에서 딴다)
+  || caller 프로젝트 폴더 || 활성 프로젝트 폴더의 git top-level. git 이 브리지 요청 한 번(mcp-bridge
+  `execute_js` 5 s)보다 오래 걸릴 수 있어 `agent.run` 은 `{ ok, pending, jobId }` 를 바로 돌려주고 앱이
+  워크트리를 만든 뒤 탭을 연다. ctl 은 `agent.run.result { jobId }` 를 0.5 s 마다 최대 120 s 폴링한다
+  (끝난 결과는 한 번 읽으면 지우고, 안 읽힌 것은 10 분 뒤 버린다). 위치는 `<repo>/.bbarit/worktrees/<slug>`,
+  브랜치는 그 repo HEAD 에서 새로 딴 `agent/<slug>`. Orchestra(브로커) 워크트리
+  `.octo-tmp/broker-wt-*` 는 브랜치 없는 detached 이고 `git_cleanup_broker_worktrees` 가 지우므로
+  자리는 쓰지 않고 Rust 커맨드 `git_worktree_add` 만 재사용한다. slug 는 이름(없으면 `--name`,
+  그다음 cliType)을 소문자 ASCII·`-` 로 줄인 것(최대 40 자, 한글만이면 cliType)이고, 이미 있는
+  `agent/*` 브랜치나 폴더와 겹치면 `-2`, `-3`… 을 붙인다(대소문자 무시). `git rev-parse --git-path
+  info/exclude`(연결된 워크트리에서도 공용 git 디렉터리)에 `/.bbarit/worktrees/` 를 한 번만 넣는다.
+  `.gitignore` 는 건드리지 않는다. git repo 가 아니거나 커밋이 없으면 에러를 돌려주고 탭을 만들지
+  않는다. git 명령은 `run_cli_oneshot`(login 아님)으로 돈다. 자식 cwd 는 워크트리, 첫 메시지에
+  `<bbarit worktree="…" branch="…">` 블록(이 폴더에서만 일하고 이 브랜치에 커밋, push·merge·브랜치
+  전환 금지)을 붙인다(caller 없는 에이전트 자식도, 셸 자식은 프롬프트만). 링크에 `worktree`·
+  `branch` 를 저장(`PersistedAgentLink`, 예전 저장본도 그대로 읽힌다)하고 `agent.status/list` 행과
+  노트(`branch="agent/<slug>"`)에 싣는다. 자동 삭제는 없다(탭을 닫아도 워크트리·브랜치는 남는다).
+
+- **멈춤**(`agent stop`, 팀 멈춤 버튼, 같은 설계 문서): 순수 로직 `selectStopTargets`·
+  `stopAgentTerminal`·`markLinkStopped`·`interruptKeysFor`·`anyRelayChildWorking`·`effectiveAgentState`(agentRelay.ts).
+  순서: ① 입력 게이트 `dropQueuedAutoInput`(inputGate.ts 에 추가 — 요청마다 epoch 를 잡아 두고,
+  올린 뒤에는 아직 쓰지 않은 요청이 `cancelled` 로 끝나며 쓰는 중이면 남은 Enter 를 안 보낸다)과
+  그 자식 앞으로 쌓인 손자 노트 버리기 ② 링크 `stopped`/`stopTurn`(working 이면 turn+1) ③ 게이트로
+  인터럽트 키(`force`, `quietMs: 0`, `submit: false` — PTY 직접 쓰기 아님). 키가 거부되면(no-writer 등)
+  ②를 이전 값(`stopped`·`stopTurn`·노트 기록)으로 되돌리고(`restoreStopMark`) 결과에 `interrupt key not sent: <사유>` 를 싣는다 ④ ctl 로 다른 탭이 멈췄을 때만 부모에게
+  `state="stopped"` 노트 한 번(부모 자신이 멈췄거나 버튼으로 멈췄으면 보내지 않는다) ⑤ `--close` 면 탭
+  닫기(다른 프로젝트 탭도 `closeTerminalAnywhere`). 키는 이 리포에 근거가 있는 것만: `claude` Esc
+  (main.rs READY_REFS 의 Claude 화면 문구 "esc to interrupt", 설치된 2.1.325 바이너리), `bbarit`·
+  `bbarit-oss` Esc(bbarit-agent `tui.rs` 의 턴 중 Esc 취소·"(Esc to cancel)", XTerminal 의
+  `isBbaritAgentCli` 가 둘을 같은 에이전트로 다룬다), `shell`·`ollama` Ctrl+C. 그 밖의 CLI(codex,
+  gemini, qwen, opencode, cursor, kimi, pi, reasonix, gajae)는 키를 보내지 않고 `ok: false` +
+  `no known interrupt key for <cliType> (use --close)` 를 돌려준다(`--close` 면 입력을 버리고 탭만
+  닫는다). 에이전트에 Ctrl+C 를 쓰지 않는 이유: 두 번째 Ctrl+C 는 CLI 를 끝낸다. 멈춘 링크는 다음 turn 에 working 이 될 때까지
+  done/blocked/exit 노트를 보내지 않고, 그 자식에게 쌓인 노트도 넣지 않는다(`agent send` 성공 시
+  해제). 브리프 주입 전에 멈추면 프롬프트를 넣지 않는다(`error: stopped before the prompt was typed`).
+  팀 멈춤 버튼은 위쪽 막대의 종·창 고정 버튼 오른쪽(빨간 `OctagonX`)에 있고, 부모가 있고 중단 키를
+  아는 CLI(`interruptKeysFor` 가 null 이 아닌) 릴레이 자식 중 working 이 하나라도 있을 때만 보이며,
+  그런 자식만 멈춘다. 상태는 7501 이 있으면 그것, 없으면 최근 3 s 출력
+  (`isTerminalBusy`, `describeAgentTerminal` 과 같은 폴백)이고, 7501 이벤트·탭 변경 때와 릴레이 자식이
+  있는 동안 2 s 마다(자식 id 문자열을 키로 한 effect) 다시 계산한다. 누르면 working/blocked 인 릴레이
+  자식을 모두 멈추고 부모에게 노트를 넣지 않는다. `agent.stop` 은 `SECRETARY_ALLOWED_CMDS` 에 없고 `secretary_commands_deny_shell_reach` 가 고정한다.
+
+- **Claude 제출 키**: Claude Code 의 `keybindings.json`("Chat" 맥락)에서 Enter 를 `chat:newline` 으로
+  바꾸면 게이트의 `\r` 은 줄바꿈이라 브리프·`agent send`·노트가 입력창에 남고 자식이 시작하지 않았다
+  (1.1.71 에도 있던 문제). Rust `claude_chat_keybindings`(async)가 `$CLAUDE_CONFIG_DIR/keybindings.json`
+  (`read_env_var` 와 같은 방식으로 보이는 경우) 또는 `~/.claude/keybindings.json` 에서 Chat 바인딩만
+  돌려주고(`{ chat, autocomplete }` — Chat·Autocomplete 맥락만, 1 MiB 넘거나 없거나 깨진 파일은 빈 값), `src/terminal/claudeSubmitKey.ts` 가 제출 키를 고른다: Enter 가
+  그대로 제출이면 `\r`, 아니면 `chat:submit` 에 묶인 shift+enter(`\x1b[13;2u`) → cmd+enter(`\x1b[13;9u`)
+  순(사람 키 입력과 같은 CSI-u 바이트 — 사람 경로도 이 둘은 `csiUKeys` 설정과 무관하게 보낸다). 보낼 수
+  있는 키가 없으면 `\r` 을 유지하고 `agent run/send` 결과에 `warning`("Claude submit key is not Enter
+  and cannot be sent")을 싣는다. 앱이 게이트에 `setInputGateSubmitKeyResolver` 를 등록해 Claude 탭에서
+  게이트가 Enter 를 누를 때(`queueAutoInput`·`queueButtonInput`·브리프·노트·ctl `term write`·devreview
+  제출) 그 키를 쓴다. Claude Code 가 지금 실행 중인 Claude 탭에서만 쓴다(`agentProgramRunning`: 7501
+  레코드가 남아 있음). 실측: Claude 는 시작 때 `7501;?` 질의 뒤 `state=idle:app=claude-code` 를 보내고,
+  `/exit` 때 `7501;state=clear` 를 세 번 보낸 뒤 "Resume this session with:" 를 찍는다. clear 는 레코드를
+  비우지만 `reported` 는 남아 롤업이 idle 로 읽히므로 idle/done 만으로는 zsh 프롬프트와 구별되지 않았다
+  (zsh 에 `;2u` 가 붙던 원인). 같은 탭에서 다시 `claude` 를 치면 새 질의가 저장소를 비우고 보고가 다시
+  레코드를 채운다. 재부착 재생도 같은 파서를 지나 같은 값이 된다. 그 밖(보고 전, 종료 뒤)은 `\r`. 브리프는 준비 판정이 환영 화면일 수 있어 `submitKey` 로 설정 키를 직접
+  넘긴다. blocked(권한·질문 대화상자, Chat 맥락이 아님)이면 `\r`. 셸·다른 CLI 는 그대로 `\r`.
+  고른 제출 키가 Autocomplete 맥락에서 `autocomplete:dismiss` 이고 텍스트가 메뉴를 여는 모양(첫 글자
+  `/`, 또는 마지막 단어가 `@` 로 시작)이면 첫 누름은 메뉴만 닫으므로 300 ms(`SUBMIT_REPEAT_GAP_MS`)
+  뒤 한 번 더 누른다. 키는 누르는 순간에 고른다(devreview 제출도 빈 텍스트 + submit 으로 같은 경로). 시작 때와 창 포커스 때(2 s 안 중복은 건너뜀), `agent run claude`·`agent send` 직전에 다시 읽는다.
+
 ### 알려진 한계
 
 - caller 가 활성 프로젝트가 아닌 프로젝트에 있으면 자식은 그 프로젝트를 화면에 띄울 때까지
   시작되지 않는다(터미널은 활성 프로젝트 것만 마운트된다). 10 분이 지나면 `agent not ready`.
 - 7501 없는 자식의 끝남은 30 s 무출력 추정이라 긴 무출력 작업을 오판할 수 있다.
+- `--worktree` 워크트리와 `agent/<slug>` 브랜치는 저절로 지워지지 않는다. 검토 뒤 사람이
+  `git worktree remove` / `git branch -d` 로 정리한다. 워크트리를 만든 뒤 탭 생성이 실패해도 남는다.
+  동시에 같은 이름으로 두 자식을 띄우면 둘째는 `git worktree add` 에러로 실패할 수 있다.
+- 인터럽트 키를 모르는 CLI(codex, gemini, qwen, opencode, cursor, kimi, pi, reasonix, gajae)는
+  `agent stop` 으로 멈추지 못한다(`--close` 로 탭을 닫는 것만 된다). 키가 확인되면 `interruptKeysFor`
+  에 근거와 함께 넣는다. Claude·bbarit·셸·ollama 도 실제로 멈추는지는 개발 앱에서 확인하지 않았다.
+- 7501 을 보고하지 않는 오래된 Claude Code 탭에는 `agent send`·노트도 `\r` 로 간다(브리프만 설정 키).
+  Claude 가 clear 없이 죽으면(강제 종료 등) 레코드가 남아 zsh 에 CSI-u 가 갈 수 있다(PTY 가 끝나면
+  working/blocked 만 버린다). 다른 후보(DEC 1004·2031·1049, 마우스 모드)도 시작 때 켜지고 종료 때
+  꺼지지만 fullscreen 설정에 따라 달라 쓰지 않았다.
+- 제출 키는 Chat 맥락의 enter·shift+enter·cmd+enter 만 본다. ctrl/alt+enter 나 다른 키에만 묶인
+  제출은 보낼 수 없다(`warning`). 메신저의 명시적 `enter` 키 명령, XTerminal 내부의 스킬 가로채기·
+  시작 명령은 그대로 `\r` 이다.
+- Claude 가 한 번도 신뢰하지 않은 폴더에서 뜬 자식은 "trust this folder" 확인에서 멈추고 브리프가
+  들어가지 않는다(`agent not ready`). 이미 신뢰한 폴더를 쓴다. 신뢰한 저장소 안의 `--worktree`
+  워크트리는 실기에서 확인을 묻지 않았다.
+- 출력 폴백은 "최근 3 s 출력" 이라 스피너 없이 조용히 일하는 자식은 working 으로 보이지 않을 수 있다.
+- mcp-bridge `execute_js` 는 5 s 에서 끊는다. 게이트 대기가 긴 `agent send`·`term write` 는 ctl 이
+  40 s 를 기다려도 5 s 에 `Script execution timeout` 을 받을 수 있다(이번 변경 밖, 기존 동작).
+- `--worktree <name>` 의 이름은 플래그 바로 뒤, 프롬프트 앞에 쓴다(`--worktree=<name>` 도 된다).
+  뒤에 cliType 과 프롬프트 단어가 남지 않으면 다음 단어를 이름으로 보지 않는다.
 - 실기 확인(macOS 개발 빌드)은 하지 않았다. 단위 테스트, build, lint, `--audit`,
   `check:bundled-scripts`, `cargo test` 만 통과.
