@@ -231,11 +231,13 @@ Options  --port <n>     target port (dev app auto-scan 9323–9422 / installed 9
   (target a specific terminal: add --id <terminalId> to write/read)
 
 ■ Agents (one agent delegates to another — details: agent --help)
-  agent run <cliType> <prompt…>   new agent tab + prompt; waits for done/blocked (--bg: don't wait)
+  agent run <cliType> <prompt…>   new agent tab + prompt; waits for done/blocked (--bg: don't wait,
+                                  --worktree [name]: own git worktree + agent/<name> branch)
   agent send <terminalId> <text…> type a message into an agent tab
   agent wait [--id <id> | --children any|all]   wait for child agents
   agent status [terminalId]       state + last 12 lines (children of this tab by default)
   agent list                      child agents of this tab
+  agent stop [<id> | --children] [--close]   interrupt a child / all children of this tab
 
 ■ Editor & files
   open <path>                     open a file in the built-in editor (xlsx/pptx/docx too)
@@ -322,7 +324,7 @@ bbarit-ctl agent — delegate work to another agent tab and get the result back
 ════════════════════════════════════════════════════════════════════════
 Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs node)
 
-  agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>=600]
+  agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--worktree [name]] [--timeout <s>=600]
       Open a background tab running <cliType> (claude|codex|gemini|…|shell) in this
       tab's project (cwd: --workdir, else this tab's cwd) and type <prompt> once the agent
       is ready (if it is not ready within 60 s the prompt is NOT typed: error "agent not
@@ -331,6 +333,17 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
       is done, blocked or exited, then prints its state and last 12 lines.
       Exit code: 0 done/exited · 2 blocked (child needs an answer) · 3 timed out · 1 error.
       --bg prints the new terminalId and returns at once.
+      --worktree [name] gives the child its own git worktree <repo>/.bbarit/worktrees/<slug>
+      on a new branch agent/<slug> from the repo's HEAD (<repo> = git top level of --workdir,
+      else this tab's cwd, else its project folder; slug from [name], else --name, else <cliType>,
+      made unique with -2, -3…). The folder is kept out of git status via the repo's
+      .git/info/exclude. The child is told to work and commit only there and not to push,
+      merge or switch branches; status/list and its notes show the branch. Not a git repo
+      (or no commit yet) → error, no tab. Nothing is deleted automatically: review the
+      branch, then \`git worktree remove <path>\` and \`git branch -d agent/<slug>\` yourself.
+      Put the name right after the flag before the prompt, or use --worktree=<name>.
+      Creating the worktree runs in the background in the app; this command polls for the
+      result for up to 120 s (then: error, the tab may still open — check agent list).
   agent send <terminalId> <text…> [--force]
       Type <text> + Enter into an agent tab, wrapped as <bbarit from="<this tab>">…</bbarit>.
       Waits while the user is typing; refused while that agent waits for approval or an
@@ -346,6 +359,18 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
       for <terminalId>, or every child of this tab.
   agent list
       Child agents of this tab (same fields, no lines).
+  agent stop [<terminalId> | --children] [--close]
+      Interrupt one child of this tab, or (no id / --children) every child of this tab
+      (not grandchildren). Queued automatic input for the child is dropped first, then the
+      interrupt key is sent without waiting for quiet: Esc for claude, bbarit, bbarit-oss;
+      Ctrl+C for shell and ollama. Other CLIs (codex, gemini, opencode, …) have no known
+      key here: nothing is sent and the row says so (ok = no) unless --close closes the
+      tab. A refused key leaves the child unmarked and is reported. The tab and its output
+      stay; resume with agent send. Until the child starts a new turn no done/blocked note
+      comes from it; a "stopped" note goes to its parent unless the parent asked for the
+      stop. --close also closes the tab (its worktree and branch stay). Exit code 1 if a
+      child was not interrupted. The app's stop-team button stops working/blocked relay
+      children the same way, without notes to their parents.
 
 Caller  BBARIT_TERMINAL_ID (set in every BBARIT tab) is sent as the caller; outside a tab
         pass --caller <terminalId>. Children link to their caller's tab.
@@ -356,6 +381,7 @@ get none, use agent wait). Shell metacharacters in note bodies are replaced by l
   <bbarit from="<id> <name>" state="done" turn="2">last lines… — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
   <bbarit from="<id> <name>" state="blocked" kind="question">question… — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>
   <bbarit from="<id> <name>" state="exited">last lines… — 전체: …</bbarit>
+  <bbarit from="<id> <name>" state="stopped">stopped by … — 이어 가기: node "$BBARIT_CTL" agent send <id> "…" · 출력: …</bbarit>
 A blocked child is waiting for permission or an answer: read the question, then
   node "$BBARIT_CTL" agent send <id> "<answer>" --force
 (or tell the user, for permission prompts they must approve in that tab).
@@ -363,6 +389,7 @@ Notes for a tab that is itself blocked are held and delivered once it continues.
 
 Examples
   node "$BBARIT_CTL" agent run claude "Review the diff on this branch and list bugs."
+  node "$BBARIT_CTL" agent run claude --worktree fix-login "Fix the login test and commit" --bg
   id=$(node "$BBARIT_CTL" agent run codex "Run the tests and fix failures" --bg)
   node "$BBARIT_CTL" agent wait --children all --timeout 900
 ════════════════════════════════════════════════════════════════════════`;
@@ -437,6 +464,77 @@ function pickBoolFrom(list, name) {
   return true;
 }
 
+/**
+ * `agent run … --worktree [name]` (removed from `list`). Returns undefined (no flag), true
+ * (name derived from the child) or the name. `--worktree=<name>` always works; a bare word
+ * after `--worktree` is the name only while <cliType> and a prompt word still remain.
+ */
+export function takeWorktreeFlag(list) {
+  const i = list.findIndex((a) => a === '--worktree' || String(a).startsWith('--worktree='));
+  if (i < 0) return undefined;
+  const flag = String(list[i]);
+  if (flag.startsWith('--worktree=')) {
+    list.splice(i, 1);
+    return flag.slice('--worktree='.length).trim() || true;
+  }
+  const next = list[i + 1];
+  if (next !== undefined && !String(next).startsWith('-') && list.length - 2 >= 2) {
+    list.splice(i, 2);
+    return String(next);
+  }
+  list.splice(i, 1);
+  return true;
+}
+
+export const WORKTREE_RUN_TIMEOUT_S = 120;
+
+/**
+ * agent.run with a worktree replies { pending, jobId } at once (git may take longer than one
+ * bridge request); poll agent.run.result until it has the real result or timeoutMs passes.
+ */
+export async function awaitAgentRunJob({
+  first,
+  fetchResult,
+  timeoutMs = WORKTREE_RUN_TIMEOUT_S * 1000,
+  intervalMs = 500,
+  now = Date.now,
+  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+}) {
+  if (!first || first.ok === false || !first.pending || !first.jobId) return first;
+  const startedAt = now();
+  for (;;) {
+    if (now() - startedAt >= timeoutMs) {
+      return { ok: false, timedOut: true, jobId: first.jobId, error: `worktree still being created after ${Math.round(timeoutMs / 1000)} s; the tab may still open — check: agent list` };
+    }
+    await sleep(intervalMs);
+    let res;
+    try {
+      res = await fetchResult(first.jobId);
+    } catch {
+      continue; // app reloading or a dropped connection: keep polling until the timeout
+    }
+    if (res && (res.ok === false || !res.pending)) return res; // null → still pending
+  }
+}
+
+/** `agent stop [<terminalId> | --children] [--close]` (no id means --children). */
+export function parseStopArgs(list) {
+  const rest = [...list];
+  const close = pickBoolFrom(rest, '--close');
+  const childrenFlag = pickBoolFrom(rest, '--children');
+  const usage = 'usage: agent stop [<terminalId> | --children] [--close]';
+  if (rest.some((a) => String(a).startsWith('-')) || rest.length > 1) throw new Error(usage);
+  const terminalId = rest[0];
+  if (terminalId && childrenFlag) throw new Error(usage);
+  return terminalId ? { terminalId, children: false, close } : { children: true, close };
+}
+
+/** 1 when agent.stop failed or any target could not be interrupted. */
+export function stopExitCode(parsed) {
+  if (!parsed || parsed.ok === false) return 1;
+  return (parsed.stopped || []).every((r) => r && r.ok) ? 0 : 1;
+}
+
 /** Table row for one agent. A settle guessed from 30 s of silence (no OSC 7501) is marked. */
 export function agentRow(a) {
   return {
@@ -444,15 +542,23 @@ export function agentRow(a) {
     state: a.state === 'blocked' && a.kind ? `blocked:${a.kind}` : a.state,
     exited: a.exited ? 'yes' : '-',
     settled: a.settled ? (a.settledBy === 'quiet' ? 'yes (quiet-heuristic)' : 'yes') : '-',
+    branch: a.branch || '-',
   };
+}
+
+/** The status/list table; the branch column appears once a child runs in its own worktree. */
+export function agentTableColumns(agents) {
+  const cols = ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited'];
+  return (agents || []).some((a) => a && a.branch) ? [...cols, 'branch'] : cols;
 }
 
 function printAgents(agents, withLines) {
   if (flags.json) { console.log(JSON.stringify(agents, null, 2)); return; }
   if (!agents.length) { console.log('(no child agents)'); return; }
-  table(agents.map(agentRow), ['terminalId', 'name', 'cliType', 'state', 'settled', 'exited']);
+  table(agents.map(agentRow), agentTableColumns(agents));
   for (const a of agents) {
     if (a.error) console.log(`\n✗ ${a.terminalId}: ${a.error}`);
+    if (withLines && a.worktree) console.log(`\n⎇ ${a.terminalId}: branch ${a.branch || '?'} in ${a.worktree}`);
     if (a.state === 'blocked' && a.msg) console.log(`\n? ${a.terminalId} asks: ${a.msg}`);
     if (withLines && Array.isArray(a.lastLines) && a.lastLines.length) {
       console.log(`\n── ${a.terminalId}${a.name ? ` ${a.name}` : ''} (last ${a.lastLines.length} lines)`);
@@ -485,16 +591,25 @@ async function agentCommand(list) {
     const bg = pickBoolFrom(list, '--bg');
     const workDir = pickFlagFrom(list, '--workdir');
     const name = pickFlagFrom(list, '--name');
+    const worktree = takeWorktreeFlag(list);
     const cliType = list.shift();
     const prompt = list.join(' ');
-    if (!cliType || !prompt.trim()) throw new Error('usage: agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]');
-    const { parsed } = await dispatch({ cmd: 'agent.run', cliType, prompt, caller, workDir, name });
+    if (!cliType || !prompt.trim()) throw new Error('usage: agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--worktree [name]] [--timeout <s>]');
+    const payload = { cmd: 'agent.run', cliType, prompt, caller, workDir, name };
+    if (worktree !== undefined) payload.worktree = worktree;
+    let { parsed } = await dispatch(payload);
+    parsed = await awaitAgentRunJob({
+      first: parsed,
+      fetchResult: async (jobId) => (await dispatch({ cmd: 'agent.run.result', jobId })).parsed,
+    });
     if (parsed.ok === false) return out(parsed);
+    if (parsed.warning && !flags.json) console.error(`⚠ ${parsed.warning}`);
     if (bg) {
       if (flags.json) return out(parsed);
+      if (parsed.branch) console.error(`⎇ ${parsed.branch} in ${parsed.worktree}`);
       return console.log(parsed.terminalId);
     }
-    if (!flags.json) console.error(`… started ${parsed.terminalId} (${cliType}); waiting up to ${waitSeconds}s (Ctrl-C stops waiting, the agent keeps running)`);
+    if (!flags.json) console.error(`… started ${parsed.terminalId} (${cliType})${parsed.branch ? ` on ${parsed.branch} in ${parsed.worktree}` : ''}; waiting up to ${waitSeconds}s (Ctrl-C stops waiting, the agent keeps running)`);
     const result = await waitForAgents({
       fetchAgents: () => statusOf({ terminalId: parsed.terminalId }),
       mode: 'all',
@@ -546,7 +661,21 @@ async function agentCommand(list) {
     return printAgents(parsed.agents || [], false);
   }
 
-  throw new Error(`unknown agent subcommand: ${sub} (run|send|wait|status|list, agent --help)`);
+  if (sub === 'stop') {
+    const opts = parseStopArgs(list);
+    if (!opts.terminalId && !caller) throw new Error('agent stop without a terminalId stops this tab\'s children: run inside a BBARIT tab or pass --caller <id>');
+    const payload = { cmd: 'agent.stop', caller };
+    if (opts.terminalId) payload.terminalId = opts.terminalId;
+    if (opts.close) payload.close = true;
+    const { parsed } = await dispatch(payload);
+    process.exitCode = stopExitCode(parsed);
+    if (flags.json || parsed.ok === false) return out(parsed);
+    const rows = parsed.stopped || [];
+    if (!rows.length) return console.log('(no running child agents to stop)');
+    return table(rows.map((r) => ({ ...r, ok: r.ok ? 'yes' : `no (${r.reason || 'refused'})`, closed: r.closed ? 'yes' : '-' })), ['terminalId', 'name', 'keys', 'ok', 'closed']);
+  }
+
+  throw new Error(`unknown agent subcommand: ${sub} (run|send|wait|status|list|stop, agent --help)`);
 }
 
 // ── Command routing ──────────────────────────────────────────────────────

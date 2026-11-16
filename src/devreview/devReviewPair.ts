@@ -376,7 +376,9 @@ function submitTerminalInput(id: string): void {
   // Enter, so the relayed briefing stayed in its input box unsubmitted (Codex still
   // submitted, hence the dev/reviewer asymmetry). A bare "\r" submits for Claude
   // Code, Codex, and shells alike — verified live.
-  void queueAutoInput(id, '\r', { source: 'devreview', submit: false, fallbackWrite: ptyWriter(id) });
+  // Empty text + submit: the gate picks the terminal's submit key when it presses it (CR, or
+  // Claude Code's chat:submit key when Enter is rebound).
+  void queueAutoInput(id, '', { source: 'devreview', submit: true, submitDelayMs: 0, fallbackWrite: ptyWriter(id) });
 }
 
 // Throw input into a terminal by id. The gate sends the text and, after

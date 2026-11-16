@@ -647,6 +647,7 @@ mod tests {
             "terminal.activate",
             "agent.run",
             "agent.send",
+            "agent.stop",
             "config.patch",
             "palette.run",
         ] {

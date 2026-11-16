@@ -173,7 +173,7 @@ dev → 9323, tried before the port scan) are read when present; outside a tab p
 `node "$BBARIT_CTL" agent --help` prints the full guide; the bundled Claude skill
 `bbarit-agents` (installed to `~/.claude/skills`) teaches the same to Claude Code.
 
-#### `agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--timeout <s>]`
+#### `agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--worktree [name]] [--timeout <s>]`
 `agent.run`: new background tab (focus stays on the caller; named `--name` or
 `<cliType> (agent)`; Claude children start a dedicated session with `--session-id`, never
 `--continue` into the caller's conversation) in the caller's project
@@ -188,6 +188,24 @@ get the prompt alone, also after the timeout. Waits by default — polls
 state and last 12 lines. Exit code `0` done/exited, `2` blocked, `3` timeout, `1`
 error. `--bg` prints the terminalId and returns.
 
+`--worktree [name]` (`agent.run` param `worktree: true | "<name>"`): the child starts in
+its own git worktree `<repo>/.bbarit/worktrees/<slug>` on a new branch `agent/<slug>`
+cut from the repo's HEAD. `<repo>` is the git top level of `--workdir`, else of the
+caller's cwd (as for a plain run), else of its project folder; `<slug>` comes from `[name]`, else `--name`, else `<cliType>`
+(lowercase ASCII, made unique with `-2`, `-3`, …). `/.bbarit/worktrees/` is added once to
+the repo's `.git/info/exclude` (the shared one, also from a linked worktree) so the
+folder stays out of `git status`; `.gitignore` is never edited. Not a git repo or no
+commit yet → error and no tab. The child's first message tells it to work and commit
+only there and not to push, merge or switch branches; `agent status/list` rows carry
+`worktree` and `branch`, and its notes carry `branch="agent/<slug>"`. Nothing is removed
+automatically (closing the tab keeps both): review the branch, then
+`git worktree remove <path>` and `git branch -d agent/<slug>`. Because git can take longer
+than one bridge request (mcp-bridge `execute_js` waits 5 s), `agent.run` with a worktree
+replies `{ ok, pending: true, jobId }` at once and does the work in the app; the CLI polls
+`agent.run.result { jobId }` every 0.5 s for up to 120 s and then prints the usual
+result (or an error saying the tab may still open). Write the name right
+after the flag and before the prompt, or as `--worktree=<name>`.
+
 #### `agent send <terminalId> <text…> [--force]`
 `agent.send`: type `<text>` + Enter, wrapped as `<bbarit from="<caller>">…</bbarit>` when
 a caller is known. Same gate and refusals as `term write` (`--force` to answer a
@@ -201,10 +219,29 @@ children (default) of the caller are settled. Exit code `0`, `2` if a child is b
 #### `agent status [terminalId]` / `agent list`
 `agent.status` / `agent.list`: one terminal, or every child of the caller — `state`
 (7501 rollup, or `working`/`idle` from output activity), `kind`/`msg` when blocked,
-`exited`, `settled` (finished since the last message it was sent), `turn`, and for
-status the last 12 lines. Children without 7501 settle only after 30 s of silence (a
+`exited`, `settled` (finished since the last message it was sent), `turn`,
+`worktree`/`branch` for `--worktree` children, and for status the last 12 lines. Children without 7501 settle only after 30 s of silence (a
 shell also needs its prompt back); those carry `settledBy: "quiet"`, shown as
 `yes (quiet-heuristic)`.
+
+#### `agent stop [<terminalId> | --children] [--close]`
+`agent.stop`: interrupt one child of the caller, or (no id / `--children`) every child
+of the caller (grandchildren are not included). For each: the terminal's queued
+automatic input (input gate, and notes waiting for it) is dropped first, then the
+interrupt key is sent through the gate without waiting for quiet: Esc for `claude`,
+`bbarit`, `bbarit-oss`; Ctrl+C for `shell` and `ollama`. Other CLIs (codex, gemini,
+qwen, opencode, cursor, kimi, pi, reasonix, gajae) have no interrupt key known to this
+app: nothing is sent and the row reports it, unless `--close` closes the tab. A refused
+key (`no-writer`, …) is reported and the child is not marked stopped. The tab and its
+output stay; resume with `agent send`. No done/blocked/exit note comes from a stopped
+child until it starts a new turn; its parent gets one `state="stopped"` note unless the
+parent itself asked. `--close` also closes the tab (a worktree and branch stay). Prints
+`terminalId / name / keys / ok / closed`; exit code `1` if a child was not interrupted.
+The app's stop-team button (top bar, right of the bell and window-pin buttons) shows
+while a relay child whose CLI has a known interrupt key is working — by OSC 7501, or by output in the last 3 s for children
+without it (checked every 2 s) — and stops every working or blocked relay child the
+same way, without notes to the parents. `agent.stop` is not on the remote secretary
+allowlist.
 
 **Notes typed into the parent tab** (only into an agent tab — not `shell` — whose OSC 7501
 state is working/blocked/done with a report in the last 30 min; blocked, done and exit,
@@ -215,7 +252,9 @@ once per turn, no done note for a turn in which the child already reported with
 <bbarit from="<id> <name>" state="done" turn="2">last 3 lines — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
 <bbarit from="<id> <name>" state="blocked" kind="question">question — 답하기: node "$BBARIT_CTL" agent send <id> "…"</bbarit>
 <bbarit from="<id> <name>" state="exited">last 3 lines — 전체: node "$BBARIT_CTL" term read 60 --id <id></bbarit>
+<bbarit from="<id> <name>" state="stopped">stopped by … — 이어 가기: … agent send <id> "…" · 출력: … term read 60 --id <id></bbarit>
 ```
+A `--worktree` child's notes add `branch="agent/<slug>"` after the state (and kind/turn).
 
 **Example — parallel reviewers from a Claude tab:**
 ```bash

@@ -9,7 +9,11 @@ import {
   isHumanTyping,
   isNonTypingInput,
   isWriting,
+  dropQueuedAutoInput,
   noteHumanInput,
+  setInputGateSubmitKeyResolver,
+  submitKeyFor,
+  SUBMIT_REPEAT_GAP_MS,
   queueAutoInput,
   resetInputGate,
   setInputGateFallbackWriter,
@@ -333,5 +337,112 @@ describe('queueAutoInput', () => {
     await vi.advanceTimersByTimeAsync(6000);
     expect(await p).toEqual({ ok: false, reason: 'disposed' });
     expect(isWriting(T)).toBe(false);
+  });
+});
+
+describe('dropQueuedAutoInput (agent stop)', () => {
+  it('cancels a request waiting for quiet and the ones queued behind it; later requests still run', async () => {
+    const t = fakeTerminal();
+    noteHumanInput(T);
+    const waiting = queueAutoInput(T, 'note one', { source: 'agent' });
+    const behind = queueAutoInput(T, 'note two', { source: 'agent' });
+    await vi.advanceTimersByTimeAsync(500);
+    dropQueuedAutoInput(T);
+    const key = queueAutoInput(T, '\x1b', { source: 'agent', submit: false, force: true, quietMs: 0 });
+    await vi.advanceTimersByTimeAsync(300);
+    expect(await waiting).toEqual({ ok: false, reason: 'cancelled' });
+    expect(await behind).toEqual({ ok: false, reason: 'cancelled' });
+    expect((await key).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['\x1b']);
+  });
+
+  it('cancels a request still waiting for its writer', async () => {
+    const t = fakeTerminal();
+    t.env.attached = false;
+    const p = queueAutoInput(T, 'hello', { source: 'agent' });
+    await vi.advanceTimersByTimeAsync(200);
+    dropQueuedAutoInput(T);
+    t.env.attached = true;
+    await vi.advanceTimersByTimeAsync(200);
+    expect(await p).toEqual({ ok: false, reason: 'cancelled' });
+    expect(t.writes).toHaveLength(0);
+  });
+
+  it('keeps the Enter of a request that is mid-write from being sent', async () => {
+    const t = fakeTerminal();
+    const p = queueAutoInput(T, 'continue the task', { source: 'agent', submitDelayMs: 1000 });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(t.writes.map((w) => w.data)).toEqual(['continue the task']);
+    dropQueuedAutoInput(T);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(await p).toEqual({ ok: false, reason: 'cancelled' });
+    expect(t.writes.map((w) => w.data)).toEqual(['continue the task']);
+  });
+
+  it('is a no-op for an unknown terminal', () => {
+    expect(() => dropQueuedAutoInput('nobody')).not.toThrow();
+  });
+});
+
+describe('submit key (Claude Code with Enter rebound to newline)', () => {
+  it('presses the resolved submit key instead of CR, and only for the terminals it names', async () => {
+    const t = fakeTerminal();
+    setInputGateSubmitKeyResolver((id) => (id === T ? '\x1b[13;9u' : undefined));
+    expect(submitKeyFor(T)).toEqual({ key: '\x1b[13;9u', presses: 1 });
+    expect(submitKeyFor('other')).toEqual({ key: '\r', presses: 1 });
+    const p = queueAutoInput(T, 'review the diff', { source: 'agent', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['review the diff', '\x1b[13;9u']);
+  });
+
+  it('an explicit submitKey wins; without a resolver it stays CR', async () => {
+    const t = fakeTerminal();
+    const a = queueAutoInput(T, 'x', { source: 'ctl', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await a).ok).toBe(true);
+    setInputGateSubmitKeyResolver(() => '\x1b[13;2u');
+    const b = queueAutoInput(T, 'y', { source: 'button', force: true, quietMs: 0, submitDelayMs: 200, submitKey: '\r' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect((await b).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['x', '\r', 'y', '\r']);
+  });
+
+  it('reads the key when Enter is pressed (a dialog that opened meanwhile gets CR)', async () => {
+    const t = fakeTerminal({ state: 'working' });
+    setInputGateSubmitKeyResolver(() => (t.env.state === 'blocked' ? '\r' : '\x1b[13;2u'));
+    const p = queueAutoInput(T, 'go', { source: 'agent', force: true, submitDelayMs: 1000 });
+    await vi.advanceTimersByTimeAsync(100);
+    t.env.state = 'blocked';
+    await vi.advanceTimersByTimeAsync(1500);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['go', '\r']);
+  });
+
+  it('presses twice, 300 ms apart, when the resolver says the first press only closes a menu', async () => {
+    const t = fakeTerminal();
+    const seen: string[] = [];
+    setInputGateSubmitKeyResolver((_id, text) => { seen.push(text); return text.startsWith('/') ? { key: '\x1b[13;2u', presses: 2 } : '\x1b[13;2u'; });
+    const p = queueAutoInput(T, '/cost', { source: 'ctl', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await p).ok).toBe(true);
+    expect(t.writes.map((w) => w.data)).toEqual(['/cost', '\x1b[13;2u', '\x1b[13;2u']);
+    expect(t.writes[2].at - t.writes[1].at).toBe(SUBMIT_REPEAT_GAP_MS);
+    expect(seen).toEqual(['/cost']);
+    const q = queueAutoInput(T, 'hello', { source: 'ctl', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect((await q).ok).toBe(true);
+    expect(t.writes.slice(3).map((w) => w.data)).toEqual(['hello', '\x1b[13;2u']);
+  });
+
+  it('a Ctrl-C between the two presses cancels the second', async () => {
+    const t = fakeTerminal();
+    setInputGateSubmitKeyResolver(() => ({ key: '\x1b[13;2u', presses: 2 }));
+    const p = queueAutoInput(T, '/cost', { source: 'ctl', submitDelayMs: 200 });
+    await vi.advanceTimersByTimeAsync(250);
+    writeHumanInput(T, '\x03', t.write);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await p).toEqual({ ok: false, reason: 'cancelled' });
+    expect(t.writes.map((w) => w.data)).toEqual(['/cost', '\x1b[13;2u', '\x03']);
   });
 });

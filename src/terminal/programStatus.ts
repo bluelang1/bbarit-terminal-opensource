@@ -195,6 +195,17 @@ export function applyProgramStatusReport(store: ProgramStatusStore, report: Prog
   updateTurn(store);
 }
 
+/**
+ * Whether a status-reporting agent is running in the tab right now: it has reported and still
+ * holds a record. Claude Code ends with `OSC 7501;state=clear` (measured: three times before its
+ * "Resume this session with:" banner), which empties the records while `reported` stays true and
+ * the rollup reads idle — so idle/done alone cannot tell a waiting agent from a zsh prompt.
+ * A restart in the same tab sends a new query (store reset) and reports again.
+ */
+export function agentProgramRunning(store: Pick<ProgramStatusStore, 'reported' | 'root' | 'children'> | null | undefined): boolean {
+  return !!store?.reported && (store.root !== null || store.children.size > 0);
+}
+
 /** 프로세스 종료 시: working/blocked 레코드는 버리고 done/error 는 남긴다. */
 export function dropTransientProgramStatus(store: ProgramStatusStore): void {
   const transient = (r: ProgramStatusRecord) => r.state === 'working' || r.state === 'blocked';
