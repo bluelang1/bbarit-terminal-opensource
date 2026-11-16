@@ -823,6 +823,10 @@ pub fn shell_path(nvm_node_bin: &str, home: &str) -> String {
 /// (CommandBuilder inherits it) with the removals and overrides below, applied
 /// in this order — later steps (the ~/.config/octo/.env file, the GitHub
 /// account) can override earlier ones. Errs only for a malformed Windows ssh:// dir.
+/// Keys of `~/.config/octo/.env` (and the app's own environment) that only the app may use:
+/// an agent's `env` must never show them.
+pub const HIDDEN_FROM_TERMINALS: [&str; 1] = ["BBARIT_BOARD_DATABASE_URL"];
+
 pub fn build_shell_command(
     spec: &ShellSpawnSpec,
     deps: &ShellEnvDeps,
@@ -955,6 +959,9 @@ fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &Shell
                 }
                 if let Some(eq_pos) = line.find('=') {
                     let key = line[..eq_pos].trim();
+                    if HIDDEN_FROM_TERMINALS.contains(&key) {
+                        continue;
+                    }
                     let mut value = line[eq_pos + 1..].trim();
                     // strip quotes
                     if (value.starts_with('"') && value.ends_with('"'))
@@ -965,6 +972,12 @@ fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &Shell
                     cmd.env(key, value);
                 }
             }
+        }
+
+        // App-only secrets (the team board's database URL) never reach a terminal, even
+        // when the app itself inherited them.
+        for key in HIDDEN_FROM_TERMINALS {
+            cmd.env_remove(key);
         }
 
         if !deps.github_env.is_empty() {
@@ -1006,7 +1019,7 @@ mod tests {
             home: "/Users/alice".into(),
             nvm_node_bin: "/Users/alice/.nvm/versions/node/v22.1.0/bin".into(),
             env_file: Some(
-                "# comment\n\nOPENAI_API_KEY=\"sk-quoted\"\n  EXTRA_SINGLE = 'x y' \nNOT_A_PAIR\n"
+                "# comment\n\nOPENAI_API_KEY=\"sk-quoted\"\n  EXTRA_SINGLE = 'x y' \nNOT_A_PAIR\nBBARIT_BOARD_DATABASE_URL=postgres://u:test@db/x\n"
                     .into(),
             ),
             github_env: if github {
@@ -1022,7 +1035,8 @@ mod tests {
 
     /// Keys the old inline create_shell removed from the inherited app env (macOS/Linux).
     /// GITHUB_TOKEN only when a GitHub account was resolved.
-    const REMOVED_KEYS: [&str; 8] = [
+    const REMOVED_KEYS: [&str; 9] = [
+        "BBARIT_BOARD_DATABASE_URL",
         "CLAUDECODE",
         "CLAUDE_CODE_CHILD_SESSION",
         "CLAUDE_CODE_ENTRYPOINT",

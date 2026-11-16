@@ -417,11 +417,54 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 
 ### 팀 할 일과 보드 저장소 (스키마 2, 외부에서 읽는 사람용)
 
-Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관),
-`store.rs`(`BoardStore` — 모든 연산이 지나는 async 인터페이스, 지금은 `Sqlite` 변형 하나; 3 단계 `PgStore` 는 변형을
-더하면 커맨드 층은 그대로다), `sqlite.rs`(SQLite 의 SQL 전부), `mod.rs`(Tauri 커맨드, SQL 없음), `tests.rs`(
-`BoardStore` 만 쓰는 동작 테스트 묶음 — 3 단계가 PostgreSQL 에 그대로 돌린다). 커맨드: `agent_board_post|read|teams|
-clear|info`, `agent_task_write|list|show`, `agent_task_lease_tick|release_owner|held_on_host|lease_apply`.
+Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관), `common.rs`(두 엔진이
+같이 쓰는 할 일 행·JSON·입력 검사), `store.rs`(`BoardStore` — 모든 연산이 지나는 async 인터페이스, `Sqlite`·`Pg` 두 변형),
+`sqlite.rs`·`pg.rs`(엔진별 SQL 전부), `config.rs`(사용 유형·연결 칸·비밀번호 파일·가림), `copy.rs`(데이터 복사),
+`admin.rs`(설정 화면 커맨드), `mod.rs`(게시판 커맨드와 저장소 고르기, SQL 없음), `tests.rs`(`BoardStore` 만 쓰는 동작
+테스트 묶음 — SQLite 에는 늘, `BBARIT_TEST_PG_URL` 이 있으면 PostgreSQL 에도 같은 테스트를 돌린다). 커맨드:
+`agent_board_post|read|teams|clear|info`, `agent_task_write|list|show`, `agent_task_lease_tick|release_owner|held_on_host|
+lease_apply`, 설정용 `agent_board_settings_status|pg_test|pg_migrate|copy|pg_cleanup|secret_save|secret_clear`.
+
+#### 저장소 고르기 (SQLite / PostgreSQL)
+
+- `config.json` → `agents.board.mode`: `sqlite`(기본), `sync`(3b 단계 동기화 작업자가 들어오기 전까지는 SQLite 와 같다),
+  `postgres`. 예전 키 `backend: "sqlite" | "postgres"` 도 같은 이름의 mode 로 읽는다. 모르는 값은 SQLite(서버로 몰래 바꾸지
+  않음) + 설정 화면 경고. 연결 칸은 `agents.board.postgres.{host, port, database, user, sslMode, schema}`(기본 스키마
+  `bbarit_board`). 저장소는 명령마다 설정·환경·비밀번호 파일을 다시 읽어 고르므로 바꾸면 다음 명령부터 적용된다. 자동 복사는 없다.
+- 비밀번호는 config.json 에 넣지 않는다: `~/.config/octo/agent-board.secret`(debug `agent-board.dev.secret`), 0600,
+  무작위 이름의 임시 파일에 쓰고 rename. 둘째 줄에 그 비밀번호의 서버(`user@host:port/database`)를 함께 적고, 연결 칸이
+  다른 서버를 가리키면 쓰지 않고 "re-enter the password for this server" 로 거부한다. 쓰기 전용 커맨드로만 저장하고,
+  웹뷰는 "저장됐는가, 어느 서버용인가"만 안다. `BBARIT_BOARD_DATABASE_URL` 은 터미널 환경에서 빠진다
+  (`pty_backend::HIDDEN_FROM_TERMINALS`). `BBARIT_BOARD_DATABASE_URL`(프로세스
+  환경 또는 `~/.config/octo/.env`)이 있으면 연결 칸과 비밀번호 대신 그 URL 을 쓴다(스키마는 설정값). 오류 문자열은 모두
+  비밀번호·URL 사용자 정보·`password=` 를 가린다(`config::redact`; sqlx 오류에 URL 이 섞일 수 있다).
+- PostgreSQL 이 골라졌는데 닿지 않거나 설정이 비었으면 게시판 명령만 `team board unavailable: …` 로 실패한다. run/send/stop
+  은 그대로다. 표는 앱이 저절로 만들지 않는다: 설정의 "표 만들기 / 올리기" 만 마이그레이션을 실행한다(먼저 실행할 문장을
+  보여 준다, advisory lock 안에서 버전을 다시 읽는다). 데이터베이스가 앱보다 새 버전이면 명령도 마이그레이션도 거부한다.
+- 연결: sqlx `PgPool` 최대 5 개, 연결 5 초 제한, 세션마다 `statement_timeout` 5 초, TLS 는 `sslMode`(rustls). 스키마 이름은
+  `[a-z_][a-z0-9_]{0,62}`(pg_… 와 information_schema 제외)만 받고 SQL 에서는 늘 따옴표로 감싼다. 값은 모두 바인딩.
+- PostgreSQL 엔진의 차이: 쓰기는 먼저 팀 행을 `FOR UPDATE` 로 잠근다(번호·상한·전이 검사가 SQLite 와 같게 동작하고, 잠금
+  순서가 늘 팀 → 할 일이라 교착이 없다). 바꾸는 할 일은 `FOR UPDATE`, `claim --next` 와 임대 만료는 `FOR UPDATE SKIP LOCKED`,
+  `--new` 읽기는 팀 행 `FOR SHARE`, 일반 읽기는 REPEATABLE READ 스냅숏 하나. 검색은 `ILIKE`. 교착·직렬화 실패는 세 번까지
+  다시 한다. 로컬 변경 기록(`changes`, `sync_state`)은 없고, 대신 동기화될 표(teams, posts, tasks, task_deps, task_events)의
+  모든 insert/update 가 트리거로 `board_server_seq` 에서 새 `server_seq` 를 받는다(3b 의 pull 기준). `posts.arrival` 은
+  팀 잠금 안에서 `board_arrival_seq` 로 받는다. 서버 전용 `hosts(host, instance_id, first_seen, last_seen, app_version)` 표도
+  미리 만든다. 30 일 팀 정리는 PostgreSQL 에서 자동으로 돌지 않고 "오래된 팀 정리" 버튼으로만 돈다(먼저 몇 개인지 세어
+  보여 주고 확인을 받는다). PostgreSQL 저장소 호출은 모두 15 초 제한이 있다.
+- 데이터 복사: 살아 있는 팀의 teams·posts·tasks·task_deps·task_events·cursors 를 다른 저장소로 넣는다(사용 유형이 쓰는
+  쪽으로). 대상에 팀이 하나라도 있으면 거부하고, "대상에 없는 팀만 합치기" 를 켜면 같은 uid 나 같은 (team, home_host) 팀은
+  건너뛴다. id·번호·row_version·시각은 그대로, `arrival` 은 대상이 새로 주고 읽기 커서는 그 순서로 바꾼다. 원본은 바꾸지
+  않는다. 방향은 사람이 고른다. 글은 읽은 순서(`team_uid, arrival`)로 내보내고 넣는다(PostgreSQL 은 300 행씩
+  묶어 넣는다). 대상의 묘비 팀은 "비어 있지 않음"으로 치지 않고, 복사할 팀과 겹치면 먼저 완전히 지운다. SQLite 로
+  들어간 행은 변경 기록에 남는다.
+- 공유 서버에서는 데이터베이스 계정이 곧 신뢰 경계다: 그 계정을 가진 누구나 어떤 팀이든 쓸 수 있다. 호출자 확인은 각 앱
+  안에서만 한다. 설정 커맨드는 `agent.*` UI 커맨드가 아니고, `config get|set`(`config.get`/`config.patch`)은
+  `agents.board.mode|backend|postgres` 를 보여 주지도 바꾸지도 않는다(부모 경로를 바꿔도 그 값은 그대로) — 다만 로컬
+  브리지처럼 같은 사용자의 프로세스가 Tauri 커맨드를 직접 부르는 것은 막지 못한다(아래 "알려진 한계").
+- 테스트용 PostgreSQL: `docker run -d --name bbarit-board-pg-test -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16`
+  뒤 `BBARIT_TEST_PG_URL=postgres://postgres:test@127.0.0.1:55432/postgres cargo test --manifest-path src-tauri/Cargo.toml
+  agent_board`(픽스처마다 스키마를 따로 만들고 지운다; `BBARIT_TEST_PG_REQUIRED=1` 이면 URL 이 없을 때 건너뛰지 않고
+  실패), 끝나면 `docker rm -f bbarit-board-pg-test`.
 
 파일 `~/.config/octo/agent-board.db`(debug 빌드 `agent-board.dev.db`), 0600(db·`-wal`·`-shm`), WAL, busy_timeout
 5 s, 연결 하나를 뮤텍스 뒤에 두고 블로킹 풀에서 돌린다. 모든 쓰기는 `BEGIN IMMEDIATE`, 모든 SQL 은 바인딩 파라미터.

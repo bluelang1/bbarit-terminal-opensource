@@ -198,6 +198,7 @@ import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
 import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
+import { isProtectedConfigPath, keepProtectedConfig, redactProtectedConfig } from './terminal/agentBoardStorage';
 import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
@@ -7758,12 +7759,16 @@ Office project scaffold created by BBARIT Terminal.
       case 'config.get': {
         const path = request?.path ? String(request.path) : '';
         const snap = getConfigSnapshot();
-        return { ok: true, value: path ? getByPath(snap, path) : snap };
+        // Team board storage (usage type, connection) is Settings-only (agentBoardStorage.ts).
+        return { ok: true, value: redactProtectedConfig(path ? getByPath(snap, path) : snap, path) };
       }
       case 'config.patch': {
         const path = String(request?.path || '').trim();
         if (!path) return { ok: false, error: 'path required' };
-        updateConfig((prev) => setByPath(prev, path, request?.value));
+        if (isProtectedConfigPath(path)) {
+          return { ok: false, error: 'the team board storage settings can only be changed in Settings → Agent team board' };
+        }
+        updateConfig((prev) => keepProtectedConfig(prev, setByPath(prev, path, request?.value)));
         return { ok: true };
       }
       case 'image.generate': {

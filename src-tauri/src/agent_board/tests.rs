@@ -4,8 +4,11 @@
 //! from a stage-1 database, file modes, WAL, a corrupt file).
 
 use super::model::*;
+use super::config::PgTarget;
+use super::pg::PgStore;
 use super::sqlite::{SqliteStore, SCHEMA_VERSION};
 use super::store::BoardStore;
+use sqlx::Connection;
 use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -14,26 +17,67 @@ fn run<T>(f: impl Future<Output = T>) -> T {
     tauri::async_runtime::block_on(f)
 }
 
-/// A fresh board. `store()` opens a new store (its own connection) on the same board, the
-/// way two app windows or two machines would.
+/// Which engine a shared test runs on. PostgreSQL runs only when `BBARIT_TEST_PG_URL` is set
+/// (a throwaway server; every fixture gets its own schema, removed afterwards).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Sqlite,
+    Pg,
+}
+
+fn pg_url() -> Option<String> {
+    std::env::var("BBARIT_TEST_PG_URL").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+}
+
+/// `BBARIT_TEST_PG_REQUIRED=1`: a missing URL fails the PostgreSQL tests instead of skipping
+/// them (an unreachable server fails them anyway).
+fn pg_required() -> bool {
+    std::env::var("BBARIT_TEST_PG_REQUIRED").is_ok_and(|v| v.trim() == "1")
+}
+
+/// Should a PostgreSQL test run? Skips (passing, with a note) without a URL unless required.
+fn pg_enabled() -> bool {
+    if pg_url().is_some() {
+        return true;
+    }
+    assert!(!pg_required(), "BBARIT_TEST_PG_REQUIRED=1 but BBARIT_TEST_PG_URL is not set");
+    eprintln!("skipped: set BBARIT_TEST_PG_URL to run the PostgreSQL store tests");
+    false
+}
+
+static FIXTURE_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A fresh board. `store()` opens a new store (its own connection or pool) on the same board,
+/// the way two app windows or two machines would.
 struct Fixture {
     dir: PathBuf,
     limits: Limits,
+    engine: Engine,
+    pg: Option<PgTarget>,
 }
 
 impl Fixture {
-    fn new(tag: &str) -> Fixture {
-        Self::with_limits(tag, Limits::default())
+    fn new(e: Engine, tag: &str) -> Fixture {
+        Self::with_limits(e, tag, Limits::default())
     }
 
-    fn with_limits(tag: &str, limits: Limits) -> Fixture {
+    fn with_limits(e: Engine, tag: &str, limits: Limits) -> Fixture {
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
-            "bbarit-board-{tag}-{}-{}",
+            "bbarit-board-{tag}-{}-{}-{n}",
             std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        Fixture { dir, limits }
+        let pg = match e {
+            Engine::Sqlite => None,
+            Engine::Pg => {
+                let target = pg_test_target(&test_schema(tag, n));
+                run(PgStore::with_limits(target.clone(), limits).migrate(true)).expect("create the test schema");
+                Some(target)
+            }
+        };
+        Fixture { dir, limits, engine: e, pg }
     }
 
     fn db(&self) -> PathBuf {
@@ -41,14 +85,105 @@ impl Fixture {
     }
 
     fn store(&self) -> B {
-        B(BoardStore::Sqlite(SqliteStore::with_limits(self.db(), self.limits)))
+        match self.engine {
+            Engine::Sqlite => B(BoardStore::Sqlite(SqliteStore::with_limits(self.db(), self.limits))),
+            Engine::Pg => B(BoardStore::Pg(PgStore::with_limits(self.pg.clone().expect("pg target"), self.limits))),
+        }
+    }
+
+    /// Run `sql` on the raw board (no app rules) and return the first column of every row.
+    fn raw_strings(&self, sql: &str) -> Vec<String> {
+        match &self.pg {
+            None => {
+                let c = rusqlite::Connection::open(self.db()).unwrap();
+                let mut stmt = c.prepare(sql).unwrap();
+                let rows: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+                rows
+            }
+            Some(t) => run(async {
+                let mut c = pg_raw(t).await;
+                sqlx::query_scalar::<_, String>(sql).fetch_all(&mut c).await.unwrap()
+            }),
+        }
+    }
+
+    fn raw_count(&self, sql: &str) -> i64 {
+        match &self.pg {
+            None => rusqlite::Connection::open(self.db()).unwrap().query_row(sql, [], |r| r.get(0)).unwrap(),
+            Some(t) => run(async {
+                let mut c = pg_raw(t).await;
+                sqlx::query_scalar::<_, i64>(sql).fetch_one(&mut c).await.unwrap()
+            }),
+        }
+    }
+
+    fn raw_exec(&self, sql: &str) {
+        match &self.pg {
+            None => {
+                rusqlite::Connection::open(self.db()).unwrap().execute_batch(sql).unwrap();
+            }
+            Some(t) => run(async {
+                let mut c = pg_raw(t).await;
+                sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+            }),
+        }
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.dir);
+        if let Some(t) = &self.pg {
+            remove_test_schema(t);
+        }
     }
+}
+
+/// `bbt_<pid>_<n>_<tag>`: unique per fixture and run, a valid schema name.
+fn test_schema(tag: &str, n: usize) -> String {
+    let clean: String = tag.chars().filter(|c| c.is_ascii_alphanumeric()).take(20).collect::<String>().to_ascii_lowercase();
+    format!("bbt_{}_{n}_{clean}", std::process::id())
+}
+
+fn remove_test_schema(t: &PgTarget) {
+    let statement = format!("DROP SCHEMA IF EXISTS {} CASCADE", super::config::quote_ident(&t.schema));
+    run(async {
+        if let Ok(mut c) = sqlx::PgConnection::connect_with(&t.opts).await {
+            let _ = sqlx::query(&statement).execute(&mut c).await;
+            let _ = c.close().await;
+        }
+    });
+}
+
+/// The test server with `schema` as the board schema.
+fn pg_test_target(schema: &str) -> PgTarget {
+    let url = pg_url().expect("BBARIT_TEST_PG_URL");
+    let settings = super::config::PgSettings { schema: schema.to_string(), ..Default::default() };
+    super::config::pg_target(&settings, Some(&url), None).unwrap()
+}
+
+/// A plain connection whose search_path is the fixture's schema (for raw checks).
+async fn pg_raw(t: &PgTarget) -> sqlx::PgConnection {
+    let mut c = sqlx::PgConnection::connect_with(&t.opts).await.unwrap();
+    sqlx::query(&format!("SET search_path TO {}", super::config::quote_ident(&t.schema))).execute(&mut c).await.unwrap();
+    c
+}
+
+/// Every shared test once per engine: `on_sqlite::<name>` always, `on_postgres::<name>` when
+/// `BBARIT_TEST_PG_URL` is set (otherwise it passes after printing that it was skipped).
+macro_rules! shared_tests {
+    ($($name:ident),* $(,)?) => {
+        mod on_sqlite {
+            $( #[test] fn $name() { super::$name(super::Engine::Sqlite) } )*
+        }
+        mod on_postgres {
+            $( #[test] fn $name() {
+                if super::pg_enabled() {
+                    super::$name(super::Engine::Pg)
+                }
+            } )*
+        }
+    };
 }
 
 /// This machine's host id (what the app records, and what a migrated team's home is).
@@ -155,9 +290,8 @@ fn dev_build_uses_the_dev_database() {
     assert_eq!(super::DB_FILE, "agent-board.dev.db", "tests are debug builds");
 }
 
-#[test]
-fn posts_get_increasing_seqs_and_read_back_in_order() {
-    let fx = Fixture::new("basic");
+fn posts_get_increasing_seqs_and_read_back_in_order(e: Engine) {
+    let fx = Fixture::new(e, "basic");
     let s = fx.store();
     let a = s.post("root1", input("t1", "note", "first"), 1_000).unwrap();
     let b = s.post("root1", input("t2", "finding", "second\nline two"), 2_000).unwrap();
@@ -176,9 +310,8 @@ fn posts_get_increasing_seqs_and_read_back_in_order() {
     assert_eq!(r["total"], 2);
 }
 
-#[test]
-fn concurrent_posts_never_share_a_seq() {
-    let fx = Fixture::new("concurrent");
+fn concurrent_posts_never_share_a_seq(e: Engine) {
+    let fx = Fixture::new(e, "concurrent");
     fx.store().post("team-x", input("t0", "note", "first"), 1).unwrap();
     let handles: Vec<_> = (0..8)
         .map(|i| {
@@ -195,9 +328,8 @@ fn concurrent_posts_never_share_a_seq() {
     assert_eq!(all, (2..=41).collect::<Vec<_>>());
 }
 
-#[test]
-fn refuses_bad_team_ids_kinds_and_text() {
-    let fx = Fixture::new("refuse");
+fn refuses_bad_team_ids_kinds_and_text(e: Engine) {
+    let fx = Fixture::new(e, "refuse");
     let s = fx.store();
     for bad in ["", "../x", "a/b", "a b", ".", "t1;drop", &"x".repeat(129)] {
         assert!(s.post(bad, input("t1", "note", "hi"), 1).is_err(), "{bad:?}");
@@ -220,9 +352,8 @@ fn refuses_bad_team_ids_kinds_and_text() {
     assert_eq!(p["kind"], "note");
 }
 
-#[test]
-fn keeps_only_the_newest_posts_per_team() {
-    let fx = Fixture::with_limits("cap", Limits { posts: 5, ..Limits::default() });
+fn keeps_only_the_newest_posts_per_team(e: Engine) {
+    let fx = Fixture::with_limits(e, "cap", Limits { posts: 5, ..Limits::default() });
     let s = fx.store();
     for i in 1..=5 {
         s.post("cap", input("t1", "note", &format!("p{i}")), i).unwrap();
@@ -235,9 +366,8 @@ fn keeps_only_the_newest_posts_per_team() {
     assert_eq!(s.read("other", ReadQuery::default()).unwrap()["total"], 1);
 }
 
-#[test]
-fn read_filters_since_limit_kind_author_and_search() {
-    let fx = Fixture::new("filters");
+fn read_filters_since_limit_kind_author_and_search(e: Engine) {
+    let fx = Fixture::new(e, "filters");
     let s = fx.store();
     s.post("f", input("t1", "note", "build is green"), 1).unwrap();
     s.post("f", input("t2", "finding", "100% of tests pass"), 2).unwrap();
@@ -268,9 +398,8 @@ fn read_filters_since_limit_kind_author_and_search() {
     assert!(empty["posts"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn cursors_move_on_new_reads_skip_own_posts_and_survive_a_reopen() {
-    let fx = Fixture::new("cursor");
+fn cursors_move_on_new_reads_skip_own_posts_and_survive_a_reopen(e: Engine) {
+    let fx = Fixture::new(e, "cursor");
     let newq = || ReadQuery { cursor_tab: Some("t1".into()), exclude_author: Some("t1".into()), ..Default::default() };
     {
         let s = fx.store();
@@ -291,9 +420,8 @@ fn cursors_move_on_new_reads_skip_own_posts_and_survive_a_reopen() {
     assert!(again["cursor"].as_i64().unwrap() > 0, "the cursor survived the reopen");
 }
 
-#[test]
-fn new_reads_page_oldest_first_and_never_skip_unread_posts() {
-    let fx = Fixture::new("paging");
+fn new_reads_page_oldest_first_and_never_skip_unread_posts(e: Engine) {
+    let fx = Fixture::new(e, "paging");
     let s = fx.store();
     for seq in 1..=40 {
         let author = if seq % 2 == 1 { "t2" } else { "t1" };
@@ -311,9 +439,8 @@ fn new_reads_page_oldest_first_and_never_skip_unread_posts() {
     assert!(seqs(&third).is_empty());
 }
 
-#[test]
-fn new_reads_refuse_filters_and_leave_the_cursor_alone() {
-    let fx = Fixture::new("newfilter");
+fn new_reads_refuse_filters_and_leave_the_cursor_alone(e: Engine) {
+    let fx = Fixture::new(e, "newfilter");
     let s = fx.store();
     s.post("n", input("t2", "finding", "a finding"), 1).unwrap();
     s.post("n", input("t2", "decision", "a decision"), 2).unwrap();
@@ -329,9 +456,8 @@ fn new_reads_refuse_filters_and_leave_the_cursor_alone() {
     assert_eq!(seqs(&s.read("n", base).unwrap()), vec![1, 2]);
 }
 
-#[test]
-fn format_characters_are_removed_from_text_and_names() {
-    let fx = Fixture::new("format");
+fn format_characters_are_removed_from_text_and_names(e: Engine) {
+    let fx = Fixture::new(e, "format");
     let s = fx.store();
     let mut i = input("t1", "note", "<\u{200B}bbarit from=x>\u{202E}evil\u{FEFF}\u{2066}ok\u{E0041}");
     i.author_name = Some("na\u{200D}me\u{202E}".into());
@@ -342,9 +468,8 @@ fn format_characters_are_removed_from_text_and_names() {
     assert_eq!(clean_text("\u{200B}\u{200C}").unwrap_err(), "text required");
 }
 
-#[test]
-fn clear_keeps_the_seq_counter_so_cursors_stay_valid() {
-    let fx = Fixture::new("clear");
+fn clear_keeps_the_seq_counter_so_cursors_stay_valid(e: Engine) {
+    let fx = Fixture::new(e, "clear");
     let s = fx.store();
     s.post("k", input("t1", "note", "a"), 1).unwrap();
     s.post("k", input("t1", "note", "b"), 2).unwrap();
@@ -359,9 +484,8 @@ fn clear_keeps_the_seq_counter_so_cursors_stay_valid() {
     assert_eq!(s.clear("never-posted", 5).unwrap()["removed"], 0);
 }
 
-#[test]
-fn teams_report_counts_members_times_and_live_tasks() {
-    let fx = Fixture::new("teams");
+fn teams_report_counts_members_times_and_live_tasks(e: Engine) {
+    let fx = Fixture::new(e, "teams");
     let s = fx.store();
     s.post("old", input("t1", "note", "a"), 100).unwrap();
     s.post("new", input("t5", "note", "a"), 200).unwrap();
@@ -384,9 +508,8 @@ fn teams_report_counts_members_times_and_live_tasks() {
     assert!(old["lastTs"].is_null());
 }
 
-#[test]
-fn prunes_teams_idle_for_thirty_days_with_their_tasks() {
-    let fx = Fixture::new("prune");
+fn prunes_teams_idle_for_thirty_days_with_their_tasks(e: Engine) {
+    let fx = Fixture::new(e, "prune");
     let s = fx.store();
     let day = 24 * 60 * 60 * 1000;
     let now = 100 * day;
@@ -405,9 +528,8 @@ fn prunes_teams_idle_for_thirty_days_with_their_tasks() {
     assert_eq!(s.read("fresh", ReadQuery::default()).unwrap()["total"], 2, "a live board keeps old posts");
 }
 
-#[test]
-fn announcements_are_root_only_and_pinned_first() {
-    let fx = Fixture::new("announce");
+fn announcements_are_root_only_and_pinned_first(e: Engine) {
+    let fx = Fixture::new(e, "announce");
     let s = fx.store();
     assert!(s.post("a", input("c1", "announce", "plan"), 1).unwrap_err().contains("only the team's root tab"));
     s.post("a", PostInput { root: true, ..input("root", "announce", "the plan: split by module") }, 1).unwrap();
@@ -422,9 +544,8 @@ fn announcements_are_root_only_and_pinned_first() {
     assert_eq!(seqs(&s.read("a", ReadQuery { kind: Some("announce".into()), ..Default::default() }).unwrap()), vec![1]);
 }
 
-#[test]
-fn posts_link_to_a_task_of_the_same_team() {
-    let fx = Fixture::new("link");
+fn posts_link_to_a_task_of_the_same_team(e: Engine) {
+    let fx = Fixture::new(e, "link");
     let s = fx.store();
     let t = s.add("l", "write docs", &member("c1"), 1);
     let p = s.post("l", PostInput { task: Some(t), ..input("c1", "finding", "docs need a schema section") }, 2).unwrap();
@@ -436,9 +557,8 @@ fn posts_link_to_a_task_of_the_same_team() {
 
 // ── Tasks: transitions ───────────────────────────────────────────────────
 
-#[test]
-fn add_list_and_show_a_task() {
-    let fx = Fixture::new("add");
+fn add_list_and_show_a_task(e: Engine) {
+    let fx = Fixture::new(e, "add");
     let s = fx.store();
     let o = TaskOpInput {
         title: Some("  Fix the login test ".into()),
@@ -488,9 +608,8 @@ fn add_list_and_show_a_task() {
     assert!(s.w("t", op("claim"), &member("lead"), cx(13)).unwrap_err().contains("task number required"));
 }
 
-#[test]
-fn claim_block_unblock_done_writes_history_and_a_done_note() {
-    let fx = Fixture::new("flow");
+fn claim_block_unblock_done_writes_history_and_a_done_note(e: Engine) {
+    let fx = Fixture::new(e, "flow");
     let s = fx.store();
     let t = s.add("f", "build the parser", &member("lead"), 1);
     let c = s.w("f", TaskOpInput { lease_ms: Some(60_000), ..on("claim", t) }, &member("c1"), cx(100)).unwrap();
@@ -554,9 +673,8 @@ fn claim_block_unblock_done_writes_history_and_a_done_note() {
     assert_eq!(ev["actor"]["id"], "c1");
 }
 
-#[test]
-fn refusals_name_the_current_state_and_owner() {
-    let fx = Fixture::new("refusals");
+fn refusals_name_the_current_state_and_owner(e: Engine) {
+    let fx = Fixture::new(e, "refusals");
     let s = fx.store();
     let t = s.add("r", "a task", &member("lead"), 1);
     s.w("r", on("claim", t), &member("b2"), cx(2)).unwrap();
@@ -582,9 +700,8 @@ fn refusals_name_the_current_state_and_owner() {
     assert!(s.w("r", on("claim", t), &member("c3"), cx(8)).unwrap_err().contains("nothing to claim"));
 }
 
-#[test]
-fn cancel_by_creator_root_or_person_but_never_done() {
-    let fx = Fixture::new("cancel");
+fn cancel_by_creator_root_or_person_but_never_done(e: Engine) {
+    let fx = Fixture::new(e, "cancel");
     let s = fx.store();
     let a = s.add("c", "a", &member("c1"), 1);
     let b = s.add("c", "b", &member("c1"), 1);
@@ -600,9 +717,8 @@ fn cancel_by_creator_root_or_person_but_never_done() {
     assert_eq!(ev["action"], "cancel");
 }
 
-#[test]
-fn eight_claimers_on_one_task_exactly_one_wins() {
-    let fx = Fixture::new("race");
+fn eight_claimers_on_one_task_exactly_one_wins(e: Engine) {
+    let fx = Fixture::new(e, "race");
     let t = fx.store().add("race", "only one", &member("lead"), 1);
     let handles: Vec<_> = (0..8)
         .map(|i| {
@@ -621,9 +737,8 @@ fn eight_claimers_on_one_task_exactly_one_wins() {
     assert_eq!(events, 1);
 }
 
-#[test]
-fn eight_next_claimers_over_eight_tasks_all_get_different_ones() {
-    let fx = Fixture::new("next");
+fn eight_next_claimers_over_eight_tasks_all_get_different_ones(e: Engine) {
+    let fx = Fixture::new(e, "next");
     let s = fx.store();
     for i in 1..=8 {
         s.add("n", &format!("task {i}"), &member("lead"), i);
@@ -644,9 +759,8 @@ fn eight_next_claimers_over_eight_tasks_all_get_different_ones() {
     assert_eq!(none["none"], "no open task to claim");
 }
 
-#[test]
-fn next_picks_priority_then_number_and_skips_waiting_tasks() {
-    let fx = Fixture::new("order");
+fn next_picks_priority_then_number_and_skips_waiting_tasks(e: Engine) {
+    let fx = Fixture::new(e, "order");
     let s = fx.store();
     let low = s.add("o", "low", &member("lead"), 1);
     let first = s.add("o", "first", &member("lead"), 1);
@@ -667,9 +781,8 @@ fn next_picks_priority_then_number_and_skips_waiting_tasks() {
     assert_eq!(next("d"), Some(waiting), "ready once its dependency is done");
 }
 
-#[test]
-fn dependencies_gate_claims_and_cycles_are_refused() {
-    let fx = Fixture::new("deps");
+fn dependencies_gate_claims_and_cycles_are_refused(e: Engine) {
+    let fx = Fixture::new(e, "deps");
     let s = fx.store();
     let a = s.add("d", "a", &member("lead"), 1);
     let b = s.add("d", "b", &member("lead"), 1);
@@ -698,9 +811,8 @@ fn dependencies_gate_claims_and_cycles_are_refused() {
     assert!(dep(c, a, "dep_add").unwrap_err().contains("dependencies change only"));
 }
 
-#[test]
-fn a_dependency_chain_deeper_than_the_bound_is_refused() {
-    let fx = Fixture::new("depth");
+fn a_dependency_chain_deeper_than_the_bound_is_refused(e: Engine) {
+    let fx = Fixture::new(e, "depth");
     let s = fx.store();
     // `add --after` runs the same bounded walk as `dep add`: a chain longer than the bound stops.
     let mut last = 0;
@@ -725,9 +837,8 @@ fn a_dependency_chain_deeper_than_the_bound_is_refused() {
     assert!(s.w("z", TaskOpInput { on: Some(extra), ..on("dep_add", 1) }, &member("lead"), cx(3)).is_ok());
 }
 
-#[test]
-fn retries_are_limited_for_members_but_not_for_root() {
-    let fx = Fixture::new("retry");
+fn retries_are_limited_for_members_but_not_for_root(e: Engine) {
+    let fx = Fixture::new(e, "retry");
     let s = fx.store();
     let t = s.add("r", "flaky", &member("lead"), 1);
     let fail = |n: i64| {
@@ -750,9 +861,8 @@ fn retries_are_limited_for_members_but_not_for_root() {
     assert_eq!(retries[0]["data"]["previousError"], "boom 1");
 }
 
-#[test]
-fn review_flow_submit_approve_reject() {
-    let fx = Fixture::new("review");
+fn review_flow_submit_approve_reject(e: Engine) {
+    let fx = Fixture::new(e, "review");
     let s = fx.store();
     let t = s.w("v", TaskOpInput { title: Some("risky change".into()), review: Some(true), ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
     s.w("v", on("claim", t), &member("c1"), cx(2)).unwrap();
@@ -786,9 +896,8 @@ fn review_flow_submit_approve_reject() {
     assert_eq!(ro["task"]["finishedAt"], Value::Null);
 }
 
-#[test]
-fn edit_changes_fields_checks_permissions_and_versions() {
-    let fx = Fixture::new("edit");
+fn edit_changes_fields_checks_permissions_and_versions(e: Engine) {
+    let fx = Fixture::new(e, "edit");
     let s = fx.store();
     let t = s.add("e", "old title", &member("lead"), 1);
     let v1 = s.show("e", t, 2)["task"]["version"].as_i64().unwrap();
@@ -817,9 +926,8 @@ fn edit_changes_fields_checks_permissions_and_versions() {
     assert_eq!(cleared["task"]["body"], Value::Null);
 }
 
-#[test]
-fn list_filters_states_mine_search_stale_and_all() {
-    let fx = Fixture::new("list");
+fn list_filters_states_mine_search_stale_and_all(e: Engine) {
+    let fx = Fixture::new(e, "list");
     let s = fx.store();
     let a = s.add("l", "Write the parser", &member("lead"), 1);
     let b = s.add("l", "Write docs", &member("lead"), 1);
@@ -850,9 +958,8 @@ fn list_filters_states_mine_search_stale_and_all() {
 
 // ── Leases ───────────────────────────────────────────────────────────────
 
-#[test]
-fn leases_expire_lazily_and_an_owner_write_renews_its_own() {
-    let fx = Fixture::new("lease");
+fn leases_expire_lazily_and_an_owner_write_renews_its_own(e: Engine) {
+    let fx = Fixture::new(e, "lease");
     let s = fx.store();
     let a = s.add("l", "a", &member("lead"), 1);
     let b = s.add("l", "b", &member("lead"), 1);
@@ -879,9 +986,8 @@ fn leases_expire_lazily_and_an_owner_write_renews_its_own() {
     assert_eq!(s.state("l", b, 200_000), "open");
 }
 
-#[test]
-fn lease_tick_renews_only_alive_owners_of_this_instance() {
-    let fx = Fixture::new("tick");
+fn lease_tick_renews_only_alive_owners_of_this_instance(e: Engine) {
+    let fx = Fixture::new(e, "tick");
     let s = fx.store();
     for i in 1..=3 {
         s.add("k", &format!("t{i}"), &member("lead"), 1);
@@ -912,9 +1018,8 @@ fn lease_tick_renews_only_alive_owners_of_this_instance() {
     assert!(r["holders"].as_array().unwrap().is_empty());
 }
 
-#[test]
-fn startup_adopts_recovered_owners_and_releases_the_rest() {
-    let fx = Fixture::new("adopt");
+fn startup_adopts_recovered_owners_and_releases_the_rest(e: Engine) {
+    let fx = Fixture::new(e, "adopt");
     let s = fx.store();
     for i in 1..=3 {
         s.add("s", &format!("t{i}"), &member("lead"), 1);
@@ -942,9 +1047,8 @@ fn startup_adopts_recovered_owners_and_releases_the_rest() {
 
 // ── Caps ─────────────────────────────────────────────────────────────────
 
-#[test]
-fn task_cap_prunes_oldest_finished_and_never_live_tasks() {
-    let fx = Fixture::with_limits("taskcap", Limits { tasks: 4, ..Limits::default() });
+fn task_cap_prunes_oldest_finished_and_never_live_tasks(e: Engine) {
+    let fx = Fixture::with_limits(e, "taskcap", Limits { tasks: 4, ..Limits::default() });
     let s = fx.store();
     let finish = |seq: i64, now: i64| {
         s.w("c", on("claim", seq), &member("w"), cx(now)).unwrap();
@@ -971,9 +1075,8 @@ fn task_cap_prunes_oldest_finished_and_never_live_tasks() {
     assert_eq!(s.add("c2", "other team is separate", &member("lead"), 15), 1);
 }
 
-#[test]
-fn event_cap_drops_whole_finished_tasks_first() {
-    let fx = Fixture::with_limits("eventcap", Limits { events: 12, ..Limits::default() });
+fn event_cap_drops_whole_finished_tasks_first(e: Engine) {
+    let fx = Fixture::with_limits(e, "eventcap", Limits { events: 12, ..Limits::default() });
     let s = fx.store();
     let old = s.add("e", "old", &member("lead"), 1); // 1 event
     s.w("e", on("claim", old), &member("w"), cx(2)).unwrap(); // 2
@@ -995,9 +1098,8 @@ fn event_cap_drops_whole_finished_tasks_first() {
 
 // ── Review fixes ─────────────────────────────────────────────────────────
 
-#[test]
-fn an_owner_cannot_skip_review_by_editing_it_away() {
-    let fx = Fixture::new("bypass");
+fn an_owner_cannot_skip_review_by_editing_it_away(e: Engine) {
+    let fx = Fixture::new(e, "bypass");
     let s = fx.store();
     let t = s.w("b", TaskOpInput { title: Some("risky".into()), review: Some(true), ..op("add") }, &member("c1"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
     s.w("b", on("claim", t), &member("c1"), cx(2)).unwrap();
@@ -1016,9 +1118,8 @@ fn an_owner_cannot_skip_review_by_editing_it_away() {
     assert_eq!(s.w("b", on("approve", r), &human(), cx(11)).unwrap()["to"], "done");
 }
 
-#[test]
-fn a_cancelled_dependency_counts_as_met_and_is_flagged() {
-    let fx = Fixture::new("canceldep");
+fn a_cancelled_dependency_counts_as_met_and_is_flagged(e: Engine) {
+    let fx = Fixture::new(e, "canceldep");
     let s = fx.store();
     let a = s.add("c", "a", &member("lead"), 1);
     let f = s.add("c", "f", &member("lead"), 1);
@@ -1037,9 +1138,8 @@ fn a_cancelled_dependency_counts_as_met_and_is_flagged() {
     assert!(s.w("c", TaskOpInput { title: Some("e".into()), after: vec![a], ..op("add") }, &member("lead"), cx(9)).unwrap_err().contains("cancelled"));
 }
 
-#[test]
-fn dependency_changes_follow_the_edit_permission() {
-    let fx = Fixture::new("depperm");
+fn dependency_changes_follow_the_edit_permission(e: Engine) {
+    let fx = Fixture::new(e, "depperm");
     let s = fx.store();
     let a = s.add("p", "a", &member("lead"), 1);
     let b = s.add("p", "b", &member("lead"), 1);
@@ -1050,9 +1150,8 @@ fn dependency_changes_follow_the_edit_permission() {
     add(&root("root"), "dep_remove").unwrap();
 }
 
-#[test]
-fn a_person_cannot_claim_or_work_on_a_task() {
-    let fx = Fixture::new("person");
+fn a_person_cannot_claim_or_work_on_a_task(e: Engine) {
+    let fx = Fixture::new(e, "person");
     let s = fx.store();
     let t = s.add("h", "t", &human(), 1);
     assert!(s.w("h", on("claim", t), &human(), cx(2)).unwrap_err().starts_with("a person cannot claim"));
@@ -1060,9 +1159,8 @@ fn a_person_cannot_claim_or_work_on_a_task() {
     assert_eq!(s.w("h", on("cancel", t), &human(), cx(3)).unwrap()["to"], "cancelled");
 }
 
-#[test]
-fn another_member_claims_after_a_lease_expired() {
-    let fx = Fixture::new("reclaim");
+fn another_member_claims_after_a_lease_expired(e: Engine) {
+    let fx = Fixture::new(e, "reclaim");
     let s = fx.store();
     let t = s.add("r", "t", &member("lead"), 1);
     s.w("r", TaskOpInput { lease_ms: Some(60_000), ..on("claim", t) }, &member("c1"), cx(1_000)).unwrap();
@@ -1074,9 +1172,8 @@ fn another_member_claims_after_a_lease_expired() {
     assert!(s.w("r", done_op(t, "x"), &member("c1"), cx(61_002)).unwrap_err().contains("only its owner"));
 }
 
-#[test]
-fn block_moves_the_claim_to_the_acting_instance() {
-    let fx = Fixture::new("blockinst");
+fn block_moves_the_claim_to_the_acting_instance(e: Engine) {
+    let fx = Fixture::new(e, "blockinst");
     let s = fx.store();
     let t = s.add("i", "t", &member("lead"), 1);
     s.w("i", on("claim", t), &member("c1"), cx(1)).unwrap();
@@ -1085,9 +1182,8 @@ fn block_moves_the_claim_to_the_acting_instance() {
     assert_eq!(b["task"]["owner"]["instance"], "inst-z");
 }
 
-#[test]
-fn live_history_over_the_event_cap_does_not_wipe_finished_tasks() {
-    let fx = Fixture::with_limits("livecap", Limits { events: 5, ..Limits::default() });
+fn live_history_over_the_event_cap_does_not_wipe_finished_tasks(e: Engine) {
+    let fx = Fixture::with_limits(e, "livecap", Limits { events: 5, ..Limits::default() });
     let s = fx.store();
     let live = s.add("e", "live", &member("lead"), 1);
     s.w("e", on("claim", live), &member("w"), cx(2)).unwrap();
@@ -1106,7 +1202,7 @@ fn live_history_over_the_event_cap_does_not_wipe_finished_tasks() {
 
 #[test]
 fn tombstones_are_kept_while_a_sync_consumer_exists() {
-    let fx = Fixture::new("purgeguard");
+    let fx = Fixture::new(Engine::Sqlite, "purgeguard");
     let s = fx.store();
     let day = 24 * 60 * 60 * 1000;
     s.post("g", input("t1", "note", "x"), 1).unwrap();
@@ -1121,9 +1217,8 @@ fn tombstones_are_kept_while_a_sync_consumer_exists() {
     assert_eq!(count(&c, "SELECT count(*) FROM posts"), 1);
 }
 
-#[test]
-fn read_refuses_a_malformed_cursor_tab() {
-    let fx = Fixture::new("cursorid");
+fn read_refuses_a_malformed_cursor_tab(e: Engine) {
+    let fx = Fixture::new(e, "cursorid");
     let s = fx.store();
     let e = s.read("g", ReadQuery { cursor_tab: Some("x".repeat(129)), ..Default::default() }).unwrap_err();
     assert!(e.starts_with("invalid read cursor tab id"), "{e}");
@@ -1139,24 +1234,21 @@ fn count(c: &rusqlite::Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).unwrap()
 }
 
-#[test]
-fn row_ids_are_uuid_v7_in_creation_order() {
-    let fx = Fixture::new("ids");
+fn row_ids_are_uuid_v7_in_creation_order(e: Engine) {
+    let fx = Fixture::new(e, "ids");
     let s = fx.store();
     for i in 0..5 {
         s.post("u", input("t1", "note", &format!("p{i}")), i).unwrap();
     }
     let t = s.add("u", "task", &member("t1"), 10);
     s.w("u", on("claim", t), &member("t1"), cx(11)).unwrap();
-    let c = raw(&fx);
     for (sql, n) in [
         ("SELECT id FROM posts ORDER BY seq", 5),
         ("SELECT id FROM task_events ORDER BY seq", 2),
         ("SELECT id FROM tasks", 1),
         ("SELECT uid FROM teams", 1),
     ] {
-        let mut stmt = c.prepare(sql).unwrap();
-        let ids: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        let ids = fx.raw_strings(sql);
         assert_eq!(ids.len(), n, "{sql}");
         for id in &ids {
             assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 7, "{id}");
@@ -1165,16 +1257,14 @@ fn row_ids_are_uuid_v7_in_creation_order() {
         sorted.sort();
         assert_eq!(sorted, ids, "ids sort by creation: {sql}");
     }
-    let (home, origin): (String, String) = c.query_row("SELECT home_host, origin_host FROM teams", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-    assert_eq!((home, origin), (here(), here()));
-    let task_team: String = c.query_row("SELECT team_uid FROM tasks", [], |r| r.get(0)).unwrap();
-    let uid: String = c.query_row("SELECT uid FROM teams", [], |r| r.get(0)).unwrap();
-    assert_eq!(task_team, uid, "rows reference the team uid");
+    assert_eq!(fx.raw_strings("SELECT home_host FROM teams"), vec![here()]);
+    assert_eq!(fx.raw_strings("SELECT origin_host FROM teams"), vec![here()]);
+    assert_eq!(fx.raw_strings("SELECT team_uid FROM tasks"), fx.raw_strings("SELECT uid FROM teams"), "rows reference the team uid");
 }
 
 #[test]
 fn every_write_path_appends_to_the_change_log() {
-    let fx = Fixture::new("changes");
+    let fx = Fixture::new(Engine::Sqlite, "changes");
     let s = fx.store();
     s.post("w", input("t1", "note", "first"), 0).unwrap();
     let c = raw(&fx);
@@ -1209,7 +1299,7 @@ fn every_write_path_appends_to_the_change_log() {
 
 #[test]
 fn the_change_log_stays_bounded_without_a_consumer() {
-    let fx = Fixture::with_limits("changecap", Limits { changes: 10, ..Limits::default() });
+    let fx = Fixture::with_limits(Engine::Sqlite, "changecap", Limits { changes: 10, ..Limits::default() });
     let s = fx.store();
     for i in 0..20 {
         s.post("b", input("t1", "note", &format!("p{i}")), i).unwrap();
@@ -1223,33 +1313,31 @@ fn the_change_log_stays_bounded_without_a_consumer() {
     assert!(count(&c, "SELECT count(*) FROM changes") > 30, "a consumer keeps the log");
 }
 
-#[test]
-fn tombstones_hide_rows_and_are_purged_after_thirty_days() {
-    let fx = Fixture::with_limits("tomb", Limits { posts: 3, ..Limits::default() });
+fn tombstones_hide_rows_and_are_purged_after_thirty_days(e: Engine) {
+    let fx = Fixture::with_limits(e, "tomb", Limits { posts: 3, ..Limits::default() });
     let s = fx.store();
     let day = 24 * 60 * 60 * 1000;
     for i in 1..=4 {
         s.post("t", input("t1", "note", &format!("p{i}")), i).unwrap();
     }
-    let c = raw(&fx);
-    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 4, "the cap tombstones, it does not delete");
-    assert_eq!(count(&c, "SELECT count(*) FROM posts WHERE deleted_at IS NOT NULL"), 1);
+    assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 4, "the cap tombstones, it does not delete");
+    assert_eq!(fx.raw_count("SELECT count(*) FROM posts WHERE deleted_at IS NOT NULL"), 1);
     assert_eq!(seqs(&s.read("t", ReadQuery::default()).unwrap()), vec![2, 3, 4]);
     s.clear("t", 10).unwrap();
     assert!(seqs(&s.read("t", ReadQuery::default()).unwrap()).is_empty());
-    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 4);
+    assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 4);
     // Still active: nothing purged before 30 days; afterwards the tombstones go for good.
     s.post("t", input("t1", "note", "later"), 20 * day).unwrap();
     run(s.0.prune_stale(20 * day + 1, STALE_AFTER_MS)).unwrap();
-    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 5);
+    assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 5);
     run(s.0.prune_stale(45 * day, STALE_AFTER_MS)).unwrap();
-    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 1, "only the live post is left");
+    assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 1, "only the live post is left");
     assert_eq!(seqs(&s.read("t", ReadQuery::default()).unwrap()), vec![5]);
 }
 
 #[test]
 fn new_reads_follow_local_arrival_so_a_late_row_is_not_skipped() {
-    let fx = Fixture::new("arrival");
+    let fx = Fixture::new(Engine::Sqlite, "arrival");
     let s = fx.store();
     s.post("a", input("t2", "note", "one"), 1).unwrap();
     s.post("a", input("t2", "note", "two"), 2).unwrap();
@@ -1302,7 +1390,7 @@ mod sqlite_only {
 
     #[test]
     fn a_stage1_database_migrates_forward_without_losing_data() {
-        let fx = Fixture::new("migrate");
+        let fx = Fixture::new(Engine::Sqlite, "migrate");
         write_stage1_db(&fx.db());
         let s = fx.store();
         let r = s.read("r1", ReadQuery { limit: Some(50), ..Default::default() }).unwrap();
@@ -1339,7 +1427,7 @@ mod sqlite_only {
 
     #[test]
     fn opening_needs_no_write_lock_and_refuses_a_newer_schema() {
-        let fx = Fixture::new("version");
+        let fx = Fixture::new(Engine::Sqlite, "version");
         drop(super::super::sqlite::open_db(&fx.db()).unwrap());
         let mut holder = Connection::open(fx.db()).unwrap();
         let tx = holder.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
@@ -1362,7 +1450,7 @@ mod sqlite_only {
     #[test]
     fn database_and_wal_files_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
-        let fx = Fixture::new("mode");
+        let fx = Fixture::new(Engine::Sqlite, "mode");
         let s = fx.store();
         s.post("m", input("t1", "note", "x"), 1).unwrap();
         s.add("m", "a task", &member("t1"), 1);
@@ -1382,10 +1470,364 @@ mod sqlite_only {
 
     #[test]
     fn a_corrupt_database_reports_unavailable() {
-        let fx = Fixture::new("corrupt");
+        let fx = Fixture::new(Engine::Sqlite, "corrupt");
         std::fs::create_dir_all(&fx.dir).unwrap();
         std::fs::write(fx.db(), b"this is not a sqlite database, just bytes........................................................").unwrap();
         let err = super::super::sqlite::open_db(&fx.db()).err().expect("must fail");
         assert!(err.starts_with("team board unavailable:"), "{err}");
+    }
+}
+
+shared_tests!(
+    posts_get_increasing_seqs_and_read_back_in_order,
+    concurrent_posts_never_share_a_seq,
+    refuses_bad_team_ids_kinds_and_text,
+    keeps_only_the_newest_posts_per_team,
+    read_filters_since_limit_kind_author_and_search,
+    cursors_move_on_new_reads_skip_own_posts_and_survive_a_reopen,
+    new_reads_page_oldest_first_and_never_skip_unread_posts,
+    new_reads_refuse_filters_and_leave_the_cursor_alone,
+    format_characters_are_removed_from_text_and_names,
+    clear_keeps_the_seq_counter_so_cursors_stay_valid,
+    teams_report_counts_members_times_and_live_tasks,
+    prunes_teams_idle_for_thirty_days_with_their_tasks,
+    announcements_are_root_only_and_pinned_first,
+    posts_link_to_a_task_of_the_same_team,
+    add_list_and_show_a_task,
+    claim_block_unblock_done_writes_history_and_a_done_note,
+    refusals_name_the_current_state_and_owner,
+    cancel_by_creator_root_or_person_but_never_done,
+    eight_claimers_on_one_task_exactly_one_wins,
+    eight_next_claimers_over_eight_tasks_all_get_different_ones,
+    next_picks_priority_then_number_and_skips_waiting_tasks,
+    dependencies_gate_claims_and_cycles_are_refused,
+    a_dependency_chain_deeper_than_the_bound_is_refused,
+    retries_are_limited_for_members_but_not_for_root,
+    review_flow_submit_approve_reject,
+    edit_changes_fields_checks_permissions_and_versions,
+    list_filters_states_mine_search_stale_and_all,
+    leases_expire_lazily_and_an_owner_write_renews_its_own,
+    lease_tick_renews_only_alive_owners_of_this_instance,
+    startup_adopts_recovered_owners_and_releases_the_rest,
+    task_cap_prunes_oldest_finished_and_never_live_tasks,
+    event_cap_drops_whole_finished_tasks_first,
+    an_owner_cannot_skip_review_by_editing_it_away,
+    a_cancelled_dependency_counts_as_met_and_is_flagged,
+    dependency_changes_follow_the_edit_permission,
+    a_person_cannot_claim_or_work_on_a_task,
+    another_member_claims_after_a_lease_expired,
+    block_moves_the_claim_to_the_acting_instance,
+    live_history_over_the_event_cap_does_not_wipe_finished_tasks,
+    read_refuses_a_malformed_cursor_tab,
+    row_ids_are_uuid_v7_in_creation_order,
+    tombstones_hide_rows_and_are_purged_after_thirty_days,
+    copy_data_moves_every_team_and_refuses_or_merges_into_a_board_with_data,
+    many_writers_create_one_new_team_at_once,
+    copy_keeps_read_cursors_when_posts_are_stored_out_of_read_order,
+    copy_ignores_cleaned_up_teams_in_the_target,
+);
+
+fn many_writers_create_one_new_team_at_once(e: Engine) {
+    let fx = Fixture::new(e, "newteam");
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let s = fx.store();
+            std::thread::spawn(move || {
+                if i % 2 == 0 {
+                    s.post("brand-new", input(&format!("t{i}"), "note", "hello"), 1_000).map(|v| v["seq"].as_i64().unwrap())
+                } else {
+                    s.w("brand-new", TaskOpInput { title: Some(format!("task {i}")), ..op("add") }, &member(&format!("t{i}")), cx(1_000))
+                        .map(|v| v["task"]["seq"].as_i64().unwrap())
+                }
+            })
+        })
+        .collect();
+    let results: Vec<Result<i64, String>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().all(Result::is_ok), "{results:?}");
+    let s = fx.store();
+    assert_eq!(s.teams().len(), 1, "one team row");
+    assert_eq!(fx.raw_count("SELECT count(*) FROM teams"), 1);
+    let mut posts = seqs(&s.read("brand-new", ReadQuery::default()).unwrap());
+    posts.sort_unstable();
+    assert_eq!(posts, vec![1, 2, 3, 4]);
+    let mut tasks = task_seqs(&s.list("brand-new", TaskListQuery::default(), 2_000));
+    tasks.sort_unstable();
+    assert_eq!(tasks, vec![1, 2, 3, 4]);
+}
+
+/// A board whose post rows are stored in another order than they were read: "early" was
+/// read before p2 and p3 but sits last in the table. c9 has read up to p1.
+fn out_of_order_board(e: Engine, tag: &str) -> (Fixture, B) {
+    let fx = Fixture::new(e, tag);
+    let s = fx.store();
+    s.post("o", input("t1", "note", "p1"), 1).unwrap();
+    s.read("o", ReadQuery { cursor_tab: Some("c9".into()), ..Default::default() }).unwrap();
+    s.post("o", input("t1", "note", "p2"), 2).unwrap();
+    s.post("o", input("t1", "note", "p3"), 3).unwrap();
+    fx.raw_exec(
+        "INSERT INTO posts (id, team_uid, seq, ts, author_id, kind, text, arrival, origin_host, updated_at)
+         SELECT 'early-row', team_uid, 99, 0, 't9', 'note', 'early', min(arrival) - 1, 'host-b', 0 FROM posts GROUP BY team_uid",
+    );
+    (fx, s)
+}
+
+fn unread_texts(s: &B) -> Vec<String> {
+    let r = s.read("o", ReadQuery { cursor_tab: Some("c9".into()), ..Default::default() }).unwrap();
+    r["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect()
+}
+
+fn copy_keeps_read_cursors_when_posts_are_stored_out_of_read_order(e: Engine) {
+    // From the engine under test into a fresh SQLite file…
+    let (_src, a) = out_of_order_board(e, "oosrc");
+    let dst = Fixture::new(Engine::Sqlite, "oodst");
+    let b = dst.store();
+    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    assert_eq!(unread_texts(&b), vec!["p2", "p3"], "the cursor did not jump past unread posts");
+    // …and from an out-of-order SQLite file into the engine under test.
+    let (_src2, a2) = out_of_order_board(Engine::Sqlite, "oosrc2");
+    let dst2 = Fixture::new(e, "oodst2");
+    let b2 = dst2.store();
+    run(super::admin::copy_between(&a2.0, &b2.0, false)).unwrap();
+    assert_eq!(unread_texts(&b2), vec!["p2", "p3"]);
+}
+
+fn copy_ignores_cleaned_up_teams_in_the_target(e: Engine) {
+    let day = 24 * 60 * 60 * 1000;
+    let src = Fixture::new(Engine::Sqlite, "deadsrc");
+    let a = src.store();
+    a.post("r1", input("t1", "note", "copied"), 100 * day).unwrap();
+    // The target once had the same team (copied earlier), then cleaned it up.
+    let dst = Fixture::new(e, "deaddst");
+    let b = dst.store();
+    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    if let BoardStore::Pg(p) = &b.0 {
+        assert_eq!(run(p.stale_count(200 * day, STALE_AFTER_MS)).unwrap(), 1, "the dry run counts what cleanup retires");
+    }
+    assert_eq!(run(b.0.prune_stale(200 * day, STALE_AFTER_MS)).unwrap(), 1);
+    assert!(b.teams().is_empty());
+    // A cleaned-up team does not make the target "not empty" and does not block the copy.
+    let r = run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    assert_eq!(r["teams"], 1);
+    assert_eq!(b.read("r1", ReadQuery::default()).unwrap()["total"], 1);
+    assert_eq!(dst.raw_count("SELECT count(*) FROM teams"), 1, "the tombstone was replaced");
+}
+
+// ── Copy data (Settings) ─────────────────────────────────────────────────
+
+/// A board with a bit of everything: notes, an announcement, tasks with a dependency, a
+/// review, history and a read cursor.
+fn fill_for_copy(s: &B) {
+    s.post("r1", PostInput { root: true, ..input("lead", "announce", "the plan") }, 1).unwrap();
+    s.post("r1", input("t2", "finding", "a finding"), 2).unwrap();
+    let a = s.add("r1", "first", &member("lead"), 3);
+    let b = s.w("r1", TaskOpInput { title: Some("second".into()), after: vec![a], review: Some(true), ..op("add") }, &member("lead"), cx(4)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("r1", on("claim", a), &member("c1"), cx(5)).unwrap();
+    s.w("r1", done_op(a, "did it"), &member("c1"), cx(6)).unwrap();
+    s.w("r1", on("claim", b), &member("c2"), cx(7)).unwrap();
+    s.read("r1", ReadQuery { cursor_tab: Some("c9".into()), ..Default::default() }).unwrap();
+    s.post("r1", input("t3", "note", "unread by c9"), 8).unwrap();
+    s.post("r2", input("x", "note", "another team"), 9).unwrap();
+}
+
+/// What a reader sees (ids, numbers, states, history), for comparing two boards.
+fn snapshot(s: &B) -> Value {
+    let teams = s.teams();
+    let mut out = Vec::new();
+    for t in &teams {
+        let team = t["team"].as_str().unwrap();
+        let tasks = s.list(team, TaskListQuery { all: true, ..Default::default() }, 100);
+        let shows: Vec<Value> = task_seqs(&tasks).iter().map(|n| s.show(team, *n, 100)).collect();
+        out.push(serde_json::json!({
+            "team": t,
+            "read": s.read(team, ReadQuery { limit: Some(500), ..Default::default() }).unwrap(),
+            "tasks": tasks,
+            "shows": shows,
+        }));
+    }
+    Value::Array(out)
+}
+
+fn copy_data_moves_every_team_and_refuses_or_merges_into_a_board_with_data(e: Engine) {
+    let src = Fixture::new(Engine::Sqlite, "copysrc");
+    let a = src.store();
+    fill_for_copy(&a);
+    // SQLite → the engine under test → a fresh SQLite file: what readers see is the same.
+    let mid = Fixture::new(e, "copymid");
+    let m = mid.store();
+    let res = run(super::admin::copy_between(&a.0, &m.0, false)).unwrap();
+    assert_eq!(res["teams"], 2);
+    assert_eq!(res["posts"], 5, "r1: 3 notes and the done note; r2: one note");
+    assert_eq!(res["tasks"], 2);
+    assert_eq!(res["deps"], 1);
+    assert_eq!(res["cursors"], 1);
+    assert_eq!(snapshot(&m), snapshot(&a));
+    // The cursor kept its meaning: c9 has read everything up to "unread by c9" only.
+    let unread = m.read("r1", ReadQuery { cursor_tab: Some("c9".into()), ..Default::default() }).unwrap();
+    assert_eq!(unread["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap()).collect::<Vec<_>>(), vec!["unread by c9"]);
+    // Counters continue on the copy.
+    assert_eq!(m.post("r1", input("t2", "note", "after the copy"), 50).unwrap()["seq"], 5);
+    assert_eq!(m.add("r1", "third", &member("lead"), 50), 3);
+    // A board with data refuses a plain copy and skips existing teams on merge.
+    let err = run(super::admin::copy_between(&a.0, &m.0, false)).unwrap_err();
+    assert!(err.starts_with("the target board is not empty (2 teams)"), "{err}");
+    a.post("r3", input("y", "note", "new team on the source"), 60).unwrap();
+    let merged = run(super::admin::copy_between(&a.0, &m.0, true)).unwrap();
+    assert_eq!(merged["teams"], 1);
+    assert_eq!(merged["skippedTeams"], serde_json::json!(["r1", "r2"]));
+    assert_eq!(m.read("r3", ReadQuery::default()).unwrap()["total"], 1);
+    // Back into a fresh SQLite file.
+    let back = Fixture::new(Engine::Sqlite, "copyback");
+    let k = back.store();
+    run(super::admin::copy_between(&m.0, &k.0, false)).unwrap();
+    assert_eq!(snapshot(&k), snapshot(&m));
+    // The source never changes.
+    assert_eq!(a.read("r1", ReadQuery { limit: Some(500), ..Default::default() }).unwrap()["total"], 4);
+}
+
+#[test]
+fn a_copied_sqlite_board_logs_every_row_for_a_later_sync() {
+    let src = Fixture::new(Engine::Sqlite, "copylog1");
+    let a = src.store();
+    fill_for_copy(&a);
+    let dst = Fixture::new(Engine::Sqlite, "copylog2");
+    let b = dst.store();
+    b.teams(); // opens (creates) the file
+    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    let logged = |tbl: &str| dst.raw_count(&format!("SELECT count(DISTINCT row_id) FROM changes WHERE tbl = '{tbl}'"));
+    let live = |sql: &str| dst.raw_count(sql);
+    assert_eq!(logged("teams"), live("SELECT count(*) FROM teams"));
+    assert_eq!(logged("posts"), live("SELECT count(*) FROM posts"));
+    assert_eq!(logged("tasks"), live("SELECT count(*) FROM tasks"));
+    assert_eq!(logged("task_deps"), live("SELECT count(*) FROM task_deps"));
+    assert_eq!(logged("task_events"), live("SELECT count(*) FROM task_events"));
+}
+
+// ── PostgreSQL specifics (only with BBARIT_TEST_PG_URL) ──────────────────
+
+mod pg_only {
+    use super::*;
+
+    fn pg() -> bool {
+        pg_enabled()
+    }
+
+    /// A schema with no tables yet (removed afterwards).
+    struct Bare(PgTarget);
+
+    impl Bare {
+        fn new(tag: &str) -> Bare {
+            let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Bare(pg_test_target(&test_schema(tag, n)))
+        }
+    }
+
+    impl Drop for Bare {
+        fn drop(&mut self) {
+            remove_test_schema(&self.0);
+        }
+    }
+
+    #[test]
+    fn tables_are_created_only_on_request_and_a_newer_schema_is_refused() {
+        if !pg() {
+            return;
+        }
+        let bare = Bare::new("migrate");
+        let store = PgStore::new(bare.0.clone());
+        // Nothing exists: commands fail clearly, nothing is created by them.
+        let e = run(store.post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
+        assert!(e.starts_with("team board unavailable: no board tables in PostgreSQL schema"), "{e}");
+        assert_eq!(run(store.stored_schema_version()).unwrap(), None);
+        // A dry run shows the statements, quoted schema included, and changes nothing.
+        let plan = run(store.migrate(false)).unwrap();
+        assert_eq!(plan["applied"], false);
+        assert_eq!(plan["from"], Value::Null);
+        let sql: Vec<String> = plan["steps"][0]["sql"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(sql[0].starts_with(&format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", bare.0.schema)));
+        assert_eq!(run(store.stored_schema_version()).unwrap(), None);
+        let done = run(store.migrate(true)).unwrap();
+        assert_eq!(done["applied"], true);
+        assert_eq!(run(store.migrate(true)).unwrap()["upToDate"], true, "running it again is a no-op");
+        let s = B(BoardStore::Pg(PgStore::new(bare.0.clone())));
+        assert_eq!(s.post("t", input("t1", "note", "works"), 2).unwrap()["seq"], 1);
+        // Every write stamps server_seq for a later sync; an update stamps a newer one.
+        let f = Fixture { dir: std::env::temp_dir(), limits: Limits::default(), engine: Engine::Pg, pg: Some(bare.0.clone()) };
+        let first = f.raw_count("SELECT server_seq FROM teams");
+        assert!(first > 0);
+        s.post("t", input("t1", "note", "again"), 3).unwrap();
+        assert!(f.raw_count("SELECT server_seq FROM teams") > first);
+        assert!(f.raw_count("SELECT min(server_seq) FROM posts") > 0);
+        assert_eq!(f.raw_count("SELECT count(*) FROM hosts"), 0, "the hosts table exists for stage 3b");
+        // A schema from a newer app: refused by commands and by the migration.
+        f.raw_exec(&format!("UPDATE board_meta SET value = '{}' WHERE key = 'schema_version'", super::super::pg::SCHEMA_VERSION + 1));
+        std::mem::forget(f); // the Bare guard removes the schema
+        let fresh = PgStore::new(bare.0.clone());
+        let e = run(fresh.post("t".into(), input("t1", "note", "x"), cx(4))).unwrap_err();
+        assert!(e.contains("database is from a newer app version (schema 3, this app knows 2)"), "{e}");
+        let e = run(fresh.migrate(true)).unwrap_err();
+        assert!(e.starts_with("database is from a newer app version"), "{e}");
+    }
+
+    #[test]
+    fn a_schema_with_someone_elses_tables_is_refused() {
+        if !pg() {
+            return;
+        }
+        let bare = Bare::new("foreign");
+        let q = super::super::config::quote_ident(&bare.0.schema);
+        run(async {
+            let mut c = sqlx::PgConnection::connect_with(&bare.0.opts).await.unwrap();
+            sqlx::raw_sql(&format!("CREATE SCHEMA {q}; CREATE TABLE {q}.tasks (id int, what text)")).execute(&mut c).await.unwrap();
+        });
+        let store = PgStore::new(bare.0.clone());
+        let e = run(store.migrate(false)).unwrap_err();
+        assert_eq!(e, format!("schema {} already contains tables named tasks that the board did not create: choose an empty schema", bare.0.schema));
+        assert!(run(store.migrate(true)).is_err());
+        let d = run(PgStore::diagnose(&bare.0));
+        assert_eq!(d["foreignTables"], serde_json::json!(["tasks"]));
+        assert!(d["next"].as_str().unwrap().contains("choose an empty schema"), "{d}");
+    }
+
+    #[test]
+    fn test_connection_reports_a_ready_board_and_hides_a_wrong_password() {
+        if !pg() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "diag");
+        let t = fx.pg.clone().unwrap();
+        let d = run(PgStore::diagnose(&t));
+        assert_eq!(d["reachable"], true, "{d}");
+        assert!(d["serverVersion"].as_str().is_some_and(|v| !v.is_empty()));
+        assert_eq!(d["schemaExists"], true);
+        assert_eq!(d["schemaVersion"], 2);
+        assert_eq!(d["canReadWrite"], true);
+        assert!(d["tls"].is_boolean());
+        assert!(d["next"].as_str().unwrap().starts_with("ready"), "{d}");
+        // A schema that does not exist yet.
+        let bare = Bare::new("diagbare");
+        let d = run(PgStore::diagnose(&bare.0));
+        assert_eq!(d["schemaExists"], false);
+        assert_eq!(d["schemaVersion"], Value::Null);
+        assert!(d["next"].as_str().unwrap().contains("Create / upgrade tables"), "{d}");
+        // A wrong password: unreachable, and the password never appears in the answer.
+        let url = pg_url().unwrap();
+        let wrong = super::super::config::url_password(&url).map(|p| url.replacen(&format!(":{p}@"), ":wrong-pass-x@", 1)).unwrap_or(url);
+        let settings = super::super::config::PgSettings { schema: "bbarit_board".into(), ..Default::default() };
+        let bad = super::super::config::pg_target(&settings, Some(&wrong), None).unwrap();
+        let d = run(PgStore::diagnose(&bad));
+        assert_eq!(d["reachable"], false, "{d}");
+        assert!(!d.to_string().contains("wrong-pass-x"), "{d}");
+        let e = run(PgStore::new(bad).teams()).unwrap_err();
+        assert!(e.starts_with("team board unavailable:") && !e.contains("wrong-pass-x"), "{e}");
+    }
+
+    #[test]
+    fn an_unreachable_server_fails_board_commands_clearly() {
+        // Needs no server: nothing listens on port 1.
+        let settings = super::super::config::PgSettings { host: "127.0.0.1".into(), port: 1, database: "x".into(), user: "u".into(), ..Default::default() };
+        let sec = super::super::config::Secret { password: "test".into(), label: Some(settings.label()) };
+        let t = super::super::config::pg_target(&settings, None, Some(&sec)).unwrap();
+        let e = run(PgStore::new(t).post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
+        assert!(e.starts_with("team board unavailable:"), "{e}");
     }
 }
