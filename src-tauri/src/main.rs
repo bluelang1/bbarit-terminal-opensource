@@ -16,6 +16,7 @@ macro_rules! safe_eprintln {
     }};
 }
 
+mod agent_board;
 mod agent_caller;
 mod agent_gateway;
 mod agent_relay_log;
@@ -4148,6 +4149,8 @@ const RELAUNCH_WATCHDOG: Duration = Duration::from_secs(8);
 /// `RELAUNCH_WATCHDOG`, respawn and exit directly.
 #[tauri::command(async)]
 fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
+    // Held tabs survive the handover: no task lease may be released from here on.
+    agent_board::mark_exiting();
     HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
     RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
     state.pty_selection.on_app_exit(exit_reason_now());
@@ -10426,6 +10429,20 @@ fn main() {
                 // BBARIT_CTL for every PTY (agent relay, docs/AGENT_RELAY.md).
                 init_bbarit_ctl_path(app.handle());
 
+                // Agent team boards idle for 30 days are deleted (agent_board.rs); off the main thread.
+                std::thread::spawn(agent_board::prune_on_start);
+                // Team-task leases are renewed / released by the host from PTY liveness, so a
+                // webview reload or a hidden window never lets a live claim expire.
+                {
+                    let selection = app.state::<AppState>().pty_selection.clone();
+                    let ready_sel = selection.clone();
+                    agent_board::start_lease_worker(
+                        selection,
+                        Box::new(move || ready_sel.is_resolved()),
+                        || agent_board::board_timing(read_octo_config_json().as_ref()),
+                    );
+                }
+
                 if std::env::var_os("BBARIT_DISABLE_BUNDLED_SKILLS_INSTALL").is_none() {
                     // Ship bundled SEO/GEO skills to this user's ~/.claude/skills (every installed copy).
                     let skills_handle = app.handle().clone();
@@ -10533,6 +10550,17 @@ fn main() {
             agent_relay_log::agent_relay_log_tail,
             agent_caller::agent_caller_verify,
             agent_caller::agent_caller_key_info,
+            agent_board::agent_board_post,
+            agent_board::agent_board_read,
+            agent_board::agent_board_teams,
+            agent_board::agent_board_clear,
+            agent_board::agent_board_info,
+            agent_board::agent_task_write,
+            agent_board::agent_task_list,
+            agent_board::agent_task_show,
+            agent_board::agent_task_release_owner,
+            agent_board::agent_task_held_on_host,
+            agent_board::agent_task_lease_apply,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,
@@ -10802,6 +10830,8 @@ fn main() {
             // which never goes through CloseRequested (prevent_close) above. Reap
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
+                // Before PTYs disconnect: the team-task lease worker must not see them as dead.
+                agent_board::mark_exiting();
                 // Decide the update relaunch first, so a watchdog firing meanwhile backs off.
                 let restart = exit_restart_action(
                     RELAUNCH_REQUESTED.load(Ordering::SeqCst),

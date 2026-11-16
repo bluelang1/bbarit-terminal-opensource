@@ -73,4 +73,15 @@ describe('buildAgentRelayLogEntry', () => {
     const refused = buildAgentRelayLogEntry({ event: 'caller_refused', caller: { id: 't1', name: 'Claude' }, extra: { reason: 'wrong_token', cmd: 'agent.run' } }, at);
     expect(refused).toEqual({ ts: '2026-11-16T01:02:03.004Z', event: 'caller_refused', caller: { id: 't1', name: 'Claude' }, reason: 'wrong_token', cmd: 'agent.run' });
   });
+
+  it('board_post keeps the team, kind, length and a one-line head, never the full text', () => {
+    const text = `${'line one\n'.repeat(30)}secret tail`;
+    const e = buildAgentRelayLogEntry({ event: 'board_post', caller: { id: 't2', name: 'rev' }, callerVerified: true, text, extra: { team: 'root1', kind: 'finding', seq: 4 } }, at);
+    expect(e).toMatchObject({ event: 'board_post', team: 'root1', kind: 'finding', seq: 4, textLen: Array.from(text).length });
+    expect(String(e.textHead)).not.toContain('\n');
+    expect(Array.from(String(e.textHead)).length).toBe(120);
+    expect(JSON.stringify(e)).not.toContain('secret tail');
+    const clear = buildAgentRelayLogEntry({ event: 'board_clear', extra: { team: 'root1', removed: 3 } }, at);
+    expect(clear).toEqual({ ts: '2026-11-16T01:02:03.004Z', event: 'board_clear', team: 'root1', removed: 3 });
+  });
 });

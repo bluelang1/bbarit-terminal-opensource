@@ -197,6 +197,8 @@ import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from
 import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
+import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
+import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
@@ -5980,6 +5982,115 @@ Office project scaffold created by BBARIT Terminal.
     const link = agentLinksRef.current.get(terminalId);
     return { id: terminalId, name: term?.name || link?.name, cliType: term?.cliType || link?.cliType };
   };
+  /** Agent board: the team root tab's name (open tab, else its relay link) or ''. */
+  const boardTeamName = (team: string): string => findTerminalAnywhere(team)?.name || agentLinksRef.current.get(team)?.name || '';
+  /** Rust agent_board_* errors (team board unavailable: …) as a plain message. */
+  const boardError = (e: unknown): string => String(e instanceof Error ? e.message : e) || 'team board unavailable';
+  /**
+   * Clear a team board, log it and notify viewers. Permission is the caller's job: the
+   * agent.board.clear command checks canClearBoard first; the stage-2 in-app viewer (a person
+   * pressing a button, no ctl caller) calls this directly. Not reachable through ctl.
+   */
+  const clearAgentBoard = async (team: string, by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' }): Promise<{ ok: true; removed: number } | { ok: false; error: string }> => {
+    if (!isValidTeamId(team)) return { ok: false, error: `invalid team id: ${team}` };
+    let res: { removed?: number };
+    try {
+      res = await invoke('agent_board_clear', { team });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    const removed = res?.removed ?? 0;
+    logAgentRelay({
+      event: 'board_clear',
+      caller: by.caller ? relayLogParty(by.caller) : undefined,
+      callerVerified: by.callerVerified,
+      extra: { team, removed, by: by.source },
+    });
+    emitAgentBoardEvent({ team, action: 'clear', removed });
+    return { ok: true, removed };
+  };
+  // ── Team tasks (src/terminal/agentTasks.ts, Rust agent_board/) ── leases: a claim holds a task
+  // for agents.board.leaseSeconds. The host renews / releases them from PTY liveness
+  // (agent_board::start_lease_worker), so a webview reload or a hidden window changes nothing.
+  // The webview only hands a closed tab's tasks back at once (the host checks the PTY is really
+  // gone) and, once per load, sorts out the previous instance's claims (planStartupLeases).
+  const boardConfig = () => normalizeAgentBoardConfig(getConfigSnapshot().agents?.board);
+  const boardLeaseStartupRef = useRef(false);
+  /** Tab ids seen in the last projects pass (a vanished id is a closed tab). */
+  const boardKnownTabsRef = useRef<Set<string>>(new Set());
+  /** Log and announce a task change (audit log `task_<action>`, viewer event). */
+  const reportTaskChange = (team: string, op: Pick<TaskOp, 'op' | 'title' | 'reason' | 'error' | 'result'>, res: TaskWriteResult, by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' | 'app' }) => {
+    if (res.task) {
+      const audit = taskAuditFields(team, op, res);
+      logAgentRelay({ event: audit.event, caller: by.caller ? relayLogParty(by.caller) : undefined, callerVerified: by.callerVerified, text: audit.text, extra: { ...audit.extra, by: by.source } });
+    }
+    if (res.task) emitAgentBoardEvent({ team, action: 'task', task: res.task.seq, taskAction: String(res.action || op.op), state: res.task.state, authorId: by.caller });
+    if (typeof res.post === 'number') emitAgentBoardEvent({ team, action: 'post', seq: res.post, kind: 'done', authorId: by.caller });
+    for (const e of res.expired || []) {
+      // The app released it: the owner is recorded as `owner`, there is no caller.
+      logAgentRelay({ event: 'task_lease_expired', extra: { team, task: e.seq, from: (e as { from?: string }).from, to: 'open', owner: e.ownerId, by: 'app' } });
+      emitAgentBoardEvent({ team, action: 'task', task: e.seq, taskAction: 'lease_expired', state: 'open' });
+    }
+  };
+  /** Tasks the host handed back (it writes their audit lines): tell viewers. */
+  const announceReleased = (released: Array<{ team: string; seq: number }> | undefined) => {
+    for (const r of released || []) emitAgentBoardEvent({ team: r.team, action: 'task', task: r.seq, taskAction: 'auto_release', state: 'open' });
+  };
+  /** A tab closed: hand back its tasks now (the host refuses while its PTY still runs). */
+  const releaseBoardTasksOf = async (tabId: string, reason: string) => {
+    try {
+      const res = await invoke<{ released?: Array<{ team: string; seq: number }> }>('agent_task_release_owner', { ownerId: tabId, reason });
+      announceReleased(res?.released);
+    } catch { /* the host's lease worker retries */ }
+  };
+  /** App start (and every webview load): re-adopt claims whose tab the PTY holder kept running, release stale ones. */
+  const reconcileBoardLeasesOnStart = async (alive: ReadonlySet<string>) => {
+    try {
+      const held = await invoke<HeldTask[]>('agent_task_held_on_host');
+      if (!Array.isArray(held) || held.length === 0) return;
+      const info = await invoke<{ instance: string }>('agent_board_info');
+      const recovered = new Set(getPtyRecovery().recovered.filter((r) => !r.exited).map((r) => r.id));
+      const plan = planStartupLeases(held, { instance: info.instance, alive, recovered, now: Date.now(), renewMs: boardConfig().renewSeconds * 1000 });
+      if (plan.adopt.length || plan.release.length) {
+        const res = await invoke<{ released?: Array<{ team: string; seq: number }> }>('agent_task_lease_apply', {
+          adopt: plan.adopt, release: plan.release, leaseMs: boardConfig().leaseSeconds * 1000,
+        });
+        announceReleased(res?.released);
+      }
+    } catch { /* leases expire on their own */ }
+  };
+  /**
+   * One task write through the store, then log, viewer event and lease tracking. Permission is
+   * the caller's job (agent.task.* checks planTaskWrite; the stage-4 viewer uses
+   * humanTaskAction). Returns the store result or an error.
+   */
+  const runAgentTaskWrite = async (
+    team: string,
+    op: TaskOp,
+    actor: { id: string; name?: string; cli?: string; root: boolean; human: boolean },
+    by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' },
+  ): Promise<{ ok: true; res: TaskWriteResult } | { ok: false; error: string }> => {
+    let res: TaskWriteResult;
+    try {
+      res = await invoke<TaskWriteResult>('agent_task_write', { team, actor, op });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    reportTaskChange(team, op, res, by);
+    return { ok: true, res };
+  };
+  /**
+   * Human task actions for the stage-4 viewer (a person pressing a button; author "user"): add,
+   * edit, cancel, reopen, retry, approve, reject, dependencies. Not reachable through ctl or a
+   * UI command.
+   */
+  const humanTaskAction = async (team: string, sub: string, request: Record<string, unknown>) => {
+    if (!isValidTeamId(team)) return { ok: false as const, error: `invalid team id: ${team}` };
+    const built = buildTaskOp(sub, request, { teamName: boardTeamName(team) || undefined });
+    if (!built.ok) return built;
+    return runAgentTaskWrite(team, built.value, { id: 'user', name: 'user', root: false, human: true }, { source: 'viewer' });
+  };
+  void humanTaskAction;
   /**
    * Caller check shared by every agent.* command that reads `caller` (src/terminal/agentCaller.ts):
    * the ctl's BBARIT_TERM_TOKEN must match the caller id (Rust agent_caller_verify); without a
@@ -6103,6 +6214,8 @@ Office project scaffold created by BBARIT Terminal.
     // PTY 종료는 XTerminal 이 read_from_pty 의 'PTY disconnected' 로 알아채 보낸다.
     const onPtyExited = (ev: Event) => {
       const tid = String((ev as CustomEvent).detail?.terminalId || '');
+      // Task leases: the host releases an exited owner's tasks itself (agent_board lease worker);
+      // a "PTY disconnected" seen here may be the app quitting with the PTY holder keeping the tab.
       const link = tid ? agentLinksRef.current.get(tid) : undefined;
       if (!link) return;
       if (!link.exited) {
@@ -6171,6 +6284,18 @@ Office project scaffold created by BBARIT Terminal.
     }
     for (const tid of [...agentReplayedTurnRef.current.keys()]) {
       if (!alive.has(tid)) agentReplayedTurnRef.current.delete(tid);
+    }
+    if (projectsLoadedRef.current) {
+      // Team tasks: a closed owner tab hands its tasks back; once per start, the previous
+      // instance's claims are re-adopted (tab recovered by the PTY holder) or released.
+      for (const id of boardKnownTabsRef.current) {
+        if (!alive.has(id)) void releaseBoardTasksOf(id, 'owner tab closed');
+      }
+      boardKnownTabsRef.current = new Set(alive);
+      if (!boardLeaseStartupRef.current) {
+        boardLeaseStartupRef.current = true;
+        void reconcileBoardLeasesOnStart(alive);
+      }
     }
     refreshRelayTeamWorking();
   }, [projects]);
@@ -7840,6 +7965,8 @@ Office project scaffold created by BBARIT Terminal.
             lastNotifiedTurn: -1,
             pending: true,
             depth: limitCheck.depth,
+            // Agent board team: the caller's team root, kept if the parent tab closes.
+            ...(caller ? { teamId: teamRootOf(agentLinksRef.current, caller) } : {}),
             ...(worktree ? { worktree: worktree.path, branch: worktree.branch } : {}),
           });
           // The link counts from here on: hand back the reserved slot.
@@ -7975,6 +8102,180 @@ Office project scaffold created by BBARIT Terminal.
         const tail = Math.max(1, Math.min(500, Math.trunc(Number(request?.tail)) || 20));
         const lines = await invoke<string[]>('agent_relay_log_tail', { lines: tail });
         return { ok: true, lines };
+      }
+      // ── Agent team board (src/terminal/agentBoard.ts, Rust agent_board.rs) ── pull only: a post
+      // never types into any tab; viewers listen for AGENT_BOARD_EVENT.
+      case 'agent.board.post': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const postTeam = boardPostTeam(agentLinksRef.current, caller);
+        if (!postTeam.ok) return { ok: false, error: postTeam.error };
+        const team = postTeam.value;
+        const callerTerm = findTerminalAnywhere(caller);
+        if (!callerTerm) return { ok: false, error: `caller not found: ${caller}` };
+        const kind = parseBoardKind(request?.kind);
+        if (!kind.ok) return { ok: false, error: kind.error };
+        const isRoot = team === caller;
+        const allowedKind = canPostKind(kind.value, isRoot);
+        if (!allowedKind.ok) return { ok: false, error: allowedKind.error };
+        const text = sanitizeBoardText(request?.text);
+        if (!text.ok) return { ok: false, error: text.error };
+        let taskLink: number | undefined;
+        if (request?.task !== undefined && request?.task !== null && request?.task !== '') {
+          const n = parseTaskNumber(request.task);
+          if (!n.ok) return { ok: false, error: n.error };
+          taskLink = n.value;
+        }
+        let stored: BoardPost;
+        try {
+          stored = await invoke<BoardPost>('agent_board_post', {
+            team,
+            post: { teamName: boardTeamName(team) || undefined, authorId: caller, authorName: callerTerm.name, authorCli: callerTerm.cliType, kind: kind.value, text: text.value, task: taskLink, root: isRoot },
+          });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        logAgentRelay({
+          event: 'board_post',
+          caller: relayLogParty(caller),
+          callerVerified: callerCheck.verified,
+          text: text.value,
+          extra: { team, kind: kind.value, seq: stored.seq, task: taskLink },
+        });
+        emitAgentBoardEvent({ team, action: 'post', seq: stored.seq, kind: kind.value, authorId: caller, ...(taskLink ? { task: taskLink } : {}) });
+        return { ok: true, team, seq: stored.seq, ts: stored.ts, ...(taskLink ? { task: taskLink } : {}) };
+      }
+      case 'agent.board.read': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const parsed = parseBoardReadRequest(request);
+        if (!parsed.ok) return { ok: false, error: parsed.error };
+        const plan = planBoardRead(agentLinksRef.current, caller, parsed.value);
+        if (!plan.ok) return { ok: false, error: plan.error };
+        const { team, query } = plan.value;
+        let res: { posts?: BoardPost[]; announcements?: BoardPost[]; lastSeq?: number; total?: number; matched?: number; more?: number; teamName?: string; cursor?: number; nextCursor?: number };
+        try {
+          res = await invoke('agent_board_read', { team, query });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        const posts = Array.isArray(res?.posts) ? res.posts : [];
+        const announcements = Array.isArray(res?.announcements) ? res.announcements : [];
+        const teamName = boardTeamName(team) || res?.teamName || '';
+        const more = res?.more ?? 0;
+        return {
+          ok: true,
+          team,
+          teamName,
+          posts,
+          ...(announcements.length ? { announcements } : {}),
+          lastSeq: res?.lastSeq ?? 0,
+          total: res?.total ?? posts.length,
+          matched: res?.matched ?? posts.length,
+          more,
+          ...(parsed.value.newOnly ? { cursor: res?.cursor ?? 0, nextCursor: res?.nextCursor ?? 0 } : {}),
+          text: formatBoardRead({ teamId: team, teamName, posts, announcements, more, newOnly: parsed.value.newOnly }),
+        };
+      }
+      case 'agent.board.teams': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const mine = callerCheck.caller ? teamRootOf(agentLinksRef.current, callerCheck.caller) : '';
+        let rows: Array<Record<string, unknown> & { team: string; teamName?: string }>;
+        try {
+          rows = await invoke('agent_board_teams');
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        const teams = (Array.isArray(rows) ? rows : []).map((t) => ({
+          ...t,
+          teamName: boardTeamName(t.team) || t.teamName || '',
+          open: !!findTerminalAnywhere(t.team),
+          mine: !!mine && t.team === mine,
+        }));
+        return { ok: true, teams };
+      }
+      case 'agent.board.clear': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        // Only a verified caller that is its team's root tab (canClearBoard); never callerless.
+        const allowed = canClearBoard(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!allowed.ok) return { ok: false, error: allowed.error };
+        const res = await clearAgentBoard(allowed.value, { caller, callerVerified: callerCheck.verified, source: 'ctl' });
+        return res.ok ? { ok: true, team: allowed.value, removed: res.removed } : res;
+      }
+      // ── Team tasks (src/terminal/agentTasks.ts) ── reads may name any team (--team); writes need a
+      // verified caller and go to its own team. All through checkAgentCaller like agent.board.*.
+      case 'agent.task.list':
+      case 'agent.task.show': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const planned = planTaskRead(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!planned.ok) return { ok: false, error: planned.error };
+        const team = planned.value;
+        const staleMs = boardConfig().staleMinutes * 60 * 1000;
+        if (cmd === 'agent.task.list') {
+          const parsed = parseTaskListRequest(request, caller, staleMs);
+          if (!parsed.ok) return { ok: false, error: parsed.error };
+          let res: { tasks?: any[]; counts?: Record<string, number>; matched?: number; more?: number; teamName?: string; expired?: TaskWriteResult['expired'] };
+          try {
+            res = await invoke('agent_task_list', { team, query: parsed.value.query });
+          } catch (e) {
+            return { ok: false, error: boardError(e) };
+          }
+          if (res?.expired?.length) reportTaskChange(team, { op: 'list' }, { expired: res.expired }, { source: 'app' });
+          const tasks = Array.isArray(res?.tasks) ? res.tasks : [];
+          const teamName = boardTeamName(team) || res?.teamName || '';
+          return {
+            ok: true, team, teamName, tasks, counts: res?.counts || {}, matched: res?.matched ?? tasks.length, more: res?.more ?? 0,
+            text: formatTaskList({ teamId: team, teamName, tasks, counts: res?.counts, more: res?.more, tree: parsed.value.tree }),
+          };
+        }
+        const n = parseTaskNumber(request?.task);
+        if (!n.ok) return { ok: false, error: `${n.error}: agent task show <#>` };
+        let res: any;
+        try {
+          res = await invoke('agent_task_show', { team, task: n.value, history: request?.history === true, staleMs });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        if (res?.expired?.length) reportTaskChange(team, { op: 'show' }, { expired: res.expired }, { source: 'app' });
+        const teamName = boardTeamName(team) || '';
+        return {
+          ok: true, ...res, teamName,
+          text: formatTaskShow({ teamId: team, teamName, task: res.task, deps: res.deps, dependents: res.dependents, children: res.children, parentTask: res.parentTask, events: res.events }),
+        };
+      }
+      case 'agent.task.add': case 'agent.task.claim': case 'agent.task.block': case 'agent.task.unblock':
+      case 'agent.task.release': case 'agent.task.done': case 'agent.task.submit': case 'agent.task.approve':
+      case 'agent.task.reject': case 'agent.task.fail': case 'agent.task.retry': case 'agent.task.reopen':
+      case 'agent.task.cancel': case 'agent.task.edit': case 'agent.task.dep': {
+        const sub = cmd.slice('agent.task.'.length);
+        if (!(TASK_WRITE_SUBS as readonly string[]).includes(sub)) return { ok: false, error: `unknown task command: ${sub}` };
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const planned = planTaskWrite(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!planned.ok) return { ok: false, error: planned.error };
+        const { team, root } = planned.value;
+        const callerTerm = findTerminalAnywhere(caller);
+        if (!callerTerm) return { ok: false, error: `caller not found: ${caller}` };
+        const callerLink = agentLinksRef.current.get(caller);
+        const built = buildTaskOp(sub, request, {
+          worktree: callerLink?.worktree,
+          branch: callerLink?.branch,
+          leaseMs: boardConfig().leaseSeconds * 1000,
+          teamName: boardTeamName(team) || undefined,
+        });
+        if (!built.ok) return { ok: false, error: built.error };
+        const done = await runAgentTaskWrite(team, built.value, { id: caller, name: callerTerm.name, cli: callerTerm.cliType, root, human: false }, { caller, callerVerified: callerCheck.verified, source: 'ctl' });
+        if (!done.ok) return done;
+        const res = done.res;
+        return { ok: true, team, ...res, ...(res.task === null ? { nothing: true } : {}), text: formatTaskWrite(res) };
       }
       case 'agent.status':
       case 'agent.list': {

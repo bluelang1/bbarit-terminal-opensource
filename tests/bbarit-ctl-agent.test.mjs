@@ -22,8 +22,15 @@ import {
   formatRelayLogLine,
   readFileTail,
   agentCallerFields,
+  parseBoardArgs,
+  boardTeamRows,
+  parseTaskArgs,
+  taskExitCode,
+  taskNumber,
+  TASK_SUBS,
 } from '../scripts/bbarit-ctl.mjs';
 import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -318,3 +325,160 @@ test('formatRelayLogLine shows caller verification and refusals (never a token)'
   const verified = formatRelayLogLine(JSON.stringify({ ts: 'T', event: 'stop', caller: { id: 't1' }, target: { id: 't2' }, callerVerified: true }));
   assert.equal(verified, 'T  stop         t1 → t2  callerVerified=yes');
 });
+
+test('parseBoardArgs post: text words and --kind', () => {
+  assert.deepEqual(parseBoardArgs('post', ['found', 'the', 'bug']), { text: 'found the bug' });
+  assert.deepEqual(parseBoardArgs('post', ['--kind', 'Finding', 'auth.ts:40']), { text: 'auth.ts:40', kind: 'finding' });
+  assert.deepEqual(parseBoardArgs('post', ['all done', '--kind=done']), { text: 'all done', kind: 'done' });
+  assert.deepEqual(parseBoardArgs('post', ['- item one\n- item two']), { text: '- item one\n- item two' });
+  assert.throws(() => parseBoardArgs('post', []), /usage: agent board post/);
+  assert.throws(() => parseBoardArgs('post', ['--kind']), /usage/);
+  assert.throws(() => parseBoardArgs('post', ['x', '--kind', 'loud']), /invalid kind: loud/);
+  // Unknown options are an error, not text; `--` ends options.
+  assert.throws(() => parseBoardArgs('post', ['use', '--verbose']), /unknown option for agent board post: --verbose/);
+  assert.deepEqual(parseBoardArgs('post', ['--kind', 'note', '--', 'run', 'with', '--json', '--kind', 'x']), { text: 'run with --json --kind x', kind: 'note' });
+  assert.deepEqual(parseBoardArgs('post', ['--', '--port', '9223', 'is', 'dev']), { text: '--port 9223 is dev' });
+  assert.throws(() => parseBoardArgs('post', ['--']), /usage/);
+  // Announcements and task links.
+  assert.deepEqual(parseBoardArgs('post', ['--kind', 'announce', 'plan']), { text: 'plan', kind: 'announce' });
+  assert.deepEqual(parseBoardArgs('post', ['--task', '#3', 'found it']), { text: 'found it', task: 3 });
+  assert.throws(() => parseBoardArgs('post', ['--task', 'x', 'y']), /invalid task number/);
+});
+
+test('parseTaskArgs add: title words, options before --, repeatable labels and deps', () => {
+  assert.deepEqual(parseTaskArgs('add', ['Fix', 'the', 'login', 'test']), { title: 'Fix the login test' });
+  assert.deepEqual(
+    parseTaskArgs('add', ['--priority', '2', '--after', '1,#2', '--after=3', '--label', 'ui', '--label', 'auth', '--review', '--parent', '#5', '--body', 'steps', '--max-attempts', '5', 'Ship', 'it']),
+    { title: 'Ship it', priority: 2, after: [1, 2, 3], labels: ['ui', 'auth'], review: true, parent: 5, body: 'steps', maxAttempts: 5 },
+  );
+  assert.deepEqual(parseTaskArgs('add', ['--', '--json', 'is', 'a', 'flag']), { title: '--json is a flag' });
+  assert.deepEqual(parseTaskArgs('add', ['--body', '-', 'title']), { title: 'title', body: '-' });
+  assert.throws(() => parseTaskArgs('add', []), /usage: agent task add/);
+  assert.throws(() => parseTaskArgs('add', ['x', '--priority', '9']), /priority must be 0-3/);
+  assert.throws(() => parseTaskArgs('add', ['x', '--after', 'a']), /invalid task number/);
+  assert.throws(() => parseTaskArgs('add', ['x', '--verbose']), /unknown option for agent task add: --verbose/);
+});
+
+test('parseTaskArgs list / show / claim', () => {
+  assert.deepEqual(parseTaskArgs('list', []), {});
+  assert.deepEqual(
+    parseTaskArgs('list', ['--state', 'claimed,Waiting', '--state', 'review', '--mine', '--ready', '--tree', '--all', '--search', 'login', '--team', 'r1', '--limit', '10']),
+    { states: ['claimed', 'waiting', 'review'], mine: true, ready: true, tree: true, all: true, search: 'login', team: 'r1', limit: 10 },
+  );
+  assert.throws(() => parseTaskArgs('list', ['extra']), /usage: agent task list/);
+  assert.deepEqual(parseTaskArgs('show', ['#4', '--history']), { task: 4, history: true });
+  assert.deepEqual(parseTaskArgs('show', ['4', '--team', 'r1']), { task: 4, team: 'r1' });
+  assert.throws(() => parseTaskArgs('show', []), /usage: agent task show/);
+  assert.deepEqual(parseTaskArgs('claim', ['--next']), { next: true });
+  assert.deepEqual(parseTaskArgs('claim', ['#7']), { task: 7 });
+  assert.throws(() => parseTaskArgs('claim', ['--next', '7']), /usage: agent task claim/);
+  assert.throws(() => parseTaskArgs('claim', ['1', '2']), /usage/);
+});
+
+test('parseTaskArgs transitions need their reason / error / summary', () => {
+  assert.deepEqual(parseTaskArgs('block', ['3', '--reason', 'needs a key']), { task: 3, reason: 'needs a key' });
+  assert.throws(() => parseTaskArgs('block', ['3']), /usage: agent task block/);
+  assert.throws(() => parseTaskArgs('reject', ['3']), /usage: agent task reject/);
+  assert.deepEqual(parseTaskArgs('fail', ['3', '--error=tests fail']), { task: 3, error: 'tests fail' });
+  assert.throws(() => parseTaskArgs('fail', ['3']), /usage/);
+  for (const sub of ['unblock', 'release', 'retry']) assert.deepEqual(parseTaskArgs(sub, ['#2']), { task: 2 });
+  assert.deepEqual(parseTaskArgs('cancel', ['2', '--reason', 'dup']), { task: 2, reason: 'dup' });
+  assert.deepEqual(parseTaskArgs('approve', ['2']), { task: 2 });
+  assert.deepEqual(
+    parseTaskArgs('done', ['5', '--summary', 'parser done', '--branch', 'agent/p', '--commit', 'abc1234', '--checks', 'PASSED', '--artifact', 'pr=https://example.invalid/pr/1', '--artifact', 'log=out.txt', '--body', '-']),
+    { task: 5, summary: 'parser done', branch: 'agent/p', commit: 'abc1234', checks: 'passed', artifacts: { pr: 'https://example.invalid/pr/1', log: 'out.txt' }, resultBody: '-' },
+  );
+  assert.throws(() => parseTaskArgs('done', ['5']), /usage: agent task done/);
+  assert.throws(() => parseTaskArgs('done', ['5', '--summary', 's', '--checks', 'maybe']), /invalid --checks/);
+  assert.throws(() => parseTaskArgs('submit', ['5', '--summary', 's', '--artifact', 'novalue']), /invalid --artifact/);
+});
+
+test('parseTaskArgs edit / dep / unknown', () => {
+  assert.deepEqual(parseTaskArgs('edit', ['2', '--title', 'new', '--priority', '0', '--label', 'x', '--no-review']), { task: 2, title: 'new', priority: 0, labels: ['x'], review: false });
+  assert.throws(() => parseTaskArgs('edit', ['2']), /nothing to edit/);
+  assert.deepEqual(parseTaskArgs('dep', ['add', '#3', '1']), { action: 'add', task: 3, on: 1 });
+  assert.deepEqual(parseTaskArgs('dep', ['rm', '3', '#1']), { action: 'rm', task: 3, on: 1 });
+  assert.throws(() => parseTaskArgs('dep', ['move', '3', '1']), /usage: agent task dep/);
+  assert.throws(() => parseTaskArgs('dep', ['add', '3']), /usage/);
+  assert.throws(() => parseTaskArgs('bogus', []), /usage: agent task add\|list/);
+  assert.throws(() => parseTaskArgs(undefined, []), /usage/);
+  assert.equal(TASK_SUBS.length, 17);
+  assert.equal(taskNumber('#12', 'u'), 12);
+  assert.throws(() => taskNumber('0', 'u'), /invalid task number/);
+});
+
+test('a flag value may start with -- ; an artifact key may be given once', () => {
+  assert.deepEqual(parseTaskArgs('block', ['3', '--reason', '--force broke it']), { task: 3, reason: '--force broke it' });
+  assert.deepEqual(parseTaskArgs('fail', ['3', '--error', '--json']), { task: 3, error: '--json' });
+  assert.throws(() => parseTaskArgs('done', ['3', '--summary', 's', '--artifact', 'pr=a', '--artifact', 'pr=b']), /--artifact pr given twice/);
+  assert.throws(() => parseTaskArgs('block', ['3', '--reason']), /usage: agent task block/);
+});
+
+test('taskExitCode: 0 ok, 1 error, 4 when claim found nothing ready', () => {
+  assert.equal(taskExitCode('claim', { ok: true, task: { seq: 1 } }), 0);
+  assert.equal(taskExitCode('claim', { ok: true, task: null }), 4);
+  assert.equal(taskExitCode('list', { ok: true }), 0);
+  assert.equal(taskExitCode('done', { ok: false, error: 'x' }), 1);
+});
+
+test('formatRelayLogLine shows task events with the state change', () => {
+  const line = formatRelayLogLine(JSON.stringify({ ts: 't', event: 'task_claim', caller: { id: 'c1' }, team: 'r1', task: 3, from: 'open', to: 'claimed', textLen: 4, textHead: 'demo' }));
+  assert.match(line, /task_claim/);
+  assert.match(line, /team=r1  task=3  from=open  to=claimed/);
+});
+
+test('parseBoardArgs read / teams / clear', () => {
+  assert.deepEqual(parseBoardArgs('read', []), {});
+  assert.deepEqual(
+    parseBoardArgs('read', ['--new', '--since', '4', '--tail=500', '--kind', 'done', '--author', 't2', '--search', '100%', '--team', 'root1']),
+    { new: true, since: 4, tail: 200, kind: 'done', author: 't2', search: '100%', team: 'root1' },
+  );
+  assert.deepEqual(parseBoardArgs('read', ['--since', '0']), { since: 0 });
+  assert.throws(() => parseBoardArgs('read', ['--tail', '0']), /usage/);
+  assert.throws(() => parseBoardArgs('read', ['--tail']), /usage/);
+  assert.throws(() => parseBoardArgs('read', ['--bogus']), /usage/);
+  assert.throws(() => parseBoardArgs('read', ['extra']), /usage/);
+  assert.throws(() => parseBoardArgs('read', ['--kind', 'x']), /invalid kind/);
+  assert.deepEqual(parseBoardArgs('teams', []), {});
+  assert.throws(() => parseBoardArgs('teams', ['x']), /usage/);
+  assert.deepEqual(parseBoardArgs('clear', []), {});
+  // No caller-less clear of another team: --team is not an option of clear.
+  assert.throws(() => parseBoardArgs('clear', ['--team', 'root1']), /usage: agent board clear/);
+  assert.throws(() => parseBoardArgs('clear', ['root1']), /usage/);
+  assert.throws(() => parseBoardArgs(undefined, []), /post\|read\|teams\|clear/);
+});
+
+test('boardTeamRows marks this tab\'s team and closed roots', () => {
+  const now = new Date(2026, 10, 16, 15, 0).getTime();
+  const rows = boardTeamRows([
+    { team: 'r1', teamName: 'lead', posts: 3, members: 2, lastTs: new Date(2026, 10, 16, 14, 5).getTime(), open: true, mine: true },
+    { team: 'r2', posts: 0, members: 0, lastTs: null, open: false },
+  ], now);
+  assert.deepEqual(rows, [
+    { team: 'r1 *', name: 'lead', posts: 3, members: 2, last: '14:05', root: 'open' },
+    { team: 'r2', name: '-', posts: 0, members: 0, last: '-', root: 'closed' },
+  ]);
+});
+
+test('formatRelayLogLine shows board events without the full text', () => {
+  const line = formatRelayLogLine(JSON.stringify({ ts: 't', event: 'board_post', caller: { id: 't2' }, team: 'r1', kind: 'finding', seq: 4, textLen: 300, textHead: 'bug in auth' }));
+  assert.match(line, /board_post/);
+  assert.match(line, /team=r1  kind=finding  seq=4/);
+  assert.match(line, /"bug in auth…" \(300 chars\)/);
+  assert.match(formatRelayLogLine(JSON.stringify({ ts: 't', event: 'board_clear', team: 'r1', removed: 2 })), /team=r1  removed=2/);
+});
+
+test('global options stop at -- (words after it reach the subcommand verbatim)', () => {
+  const ctl = new URL('../scripts/bbarit-ctl.mjs', import.meta.url).pathname;
+  // `agent board post` with no app reachable fails, but parsing happens first: an unknown
+  // option before -- is refused locally, and -- keeps --json out of the global flags.
+  const bad = spawnSync(process.execPath, [ctl, 'agent', 'board', 'post', 'x', '--verbose'], { encoding: 'utf8', env: { ...process.env, BBARIT_TERMINAL_ID: '' } });
+  assert.match(bad.stderr + bad.stdout, /unknown option for agent board post: --verbose/);
+  const help = spawnSync(process.execPath, [ctl, 'agent', '--help'], { encoding: 'utf8' });
+  assert.match(help.stdout, /agent board post \[--kind <kind>\] \[--task <#>\] \[--\] <text…>/);
+  assert.match(help.stdout, /claim <#> \| --next/);
+  const badTask = spawnSync(process.execPath, [ctl, 'agent', 'task', 'claim', '3', '--verbose'], { encoding: 'utf8', env: { ...process.env, BBARIT_TERMINAL_ID: '' } });
+  assert.match(badTask.stderr + badTask.stdout, /unknown option for agent task claim: --verbose/);
+  assert.doesNotMatch(help.stdout, /agent board clear \[--team/);
+});
+

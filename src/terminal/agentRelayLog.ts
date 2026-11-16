@@ -5,7 +5,8 @@
 // Design: docs/superpowers/specs/2026-11-16-agent-limits-and-log-design.md
 import { oneLine } from './agentRelay';
 
-export type AgentRelayLogEvent = 'run' | 'run_refused' | 'send' | 'stop' | 'exit' | 'caller_refused';
+/** `task_<action>`: a team-board task change (agentTasks.ts taskAuditFields). */
+export type AgentRelayLogEvent = 'run' | 'run_refused' | 'send' | 'stop' | 'exit' | 'caller_refused' | 'board_post' | 'board_clear' | `task_${string}`;
 
 export const AGENT_LOG_TEXT_HEAD = 120;
 

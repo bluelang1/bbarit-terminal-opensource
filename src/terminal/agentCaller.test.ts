@@ -135,7 +135,7 @@ describe('App wiring', () => {
       expect(start).toBeGreaterThan(0);
       return app.slice(start, app.indexOf('\n      case ', start + 10));
     };
-    for (const name of ['agent.run', 'agent.send', 'agent.stop', 'agent.list']) {
+    for (const name of ['agent.run', 'agent.send', 'agent.stop', 'agent.list', 'agent.board.post', 'agent.board.read', 'agent.board.teams', 'agent.board.clear']) {
       expect(caseBody(name)).toContain('await checkAgentCaller(request, cmd)');
     }
     // agent.status falls through to agent.list's body.

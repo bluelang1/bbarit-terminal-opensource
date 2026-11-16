@@ -338,6 +338,125 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   앱 안의 경로는 caller 가 없어 그대로다. 자식 브리프와 `bbarit-agents` 스킬은 `--caller` 를 쓰라고 하지 않는다
   (자식 탭에는 자기 id·토큰이 있다).
 
+- **팀 보드**(설계 [2026-11-16-agent-team-board-design.md](superpowers/specs/2026-11-16-agent-team-board-design.md)):
+  릴레이 팀(관계 사슬의 루트 탭 + 그 아래 모든 자손, 팀 id = 루트 탭 id)마다 게시판 하나. **당겨 읽기만** 한다:
+  글이 올라와도 어떤 탭에도 아무것도 타이핑하지 않는다(노트·`queueAutoInput` 없음). 팀은 순수 함수
+  `teamRootOf(links, tabId)`(`src/terminal/agentBoard.ts`)가 정한다: 링크에 적힌 `teamId` 가 있으면 그것, 없으면
+  parentId 사슬을 올라가 릴레이 부모가 없는 탭(이미 본 id 를 만나거나 64 단계면 멈춤). `agent.run` 이 링크를 만들 때
+  caller 의 팀 루트를 `teamId` 로 적고 저장·복원한다(`PersistedAgentLink.teamId`) — 부모 탭이 닫혀 고아가 된 자식도
+  만들어진 팀에 남는다. caller 없는 run 의 자식과 링크 없는 탭은 자기 자신이 루트다. UI 커맨드 `agent.board.post|read|teams|clear`
+  는 모두 `checkAgentCaller` 를 거친다. post 는 확인된 caller 가 필요하고(legacy 포함), 본문은 `sanitizeBoardText`
+  (이스케이프 시퀀스·제어 문자 제거, 줄바꿈 유지, `<bbarit` 위조 무력화, 최대 2000 자·40 줄 — 넘으면 자르지 않고 에러).
+  read 는 caller 의 팀 또는 `team`(다른 팀 탭에서도 읽기는 허용, caller 가 없으면 `team` 필수). `--new` 는 caller
+  자기 팀에서만, `--since/--kind/--author/--search` 없이 쓴다(`planBoardRead`·`parseBoardReadRequest`, Rust 도 거부):
+  탭별 커서 뒤의 안 읽은 글(자기 글 제외)을 오래된 것부터 `--tail` 개 돌려주고, 남은 글이 있으면(`more`) 커서를 보여 준
+  마지막 글까지만, 없으면 최신 글까지 옮긴다 — 안 읽은 동료 글을 건너뛰지 않는다. clear 는 확인된 caller 가 그 팀의
+  루트 탭일 때만(`canClearBoard`; caller 없는 clear 는 거부). 2 단계 보기 패널의 사람용 지우기는 App 내부 함수
+  `clearAgentBoard` 를 부르며 ctl·UI 커맨드로는 닿지 않는다. 표시할 때 글의 둘째 줄부터는 `    | ` 를 붙여 다른 글이나
+  머리글처럼 보이지 않게 하고, 본문·이름의 Unicode 서식 문자(Cf: zero-width, bidi override)는 TS·Rust 모두 지운다.
+  이 변경 전에 저장된 링크에는 `teamId` 가 없다: 재시작 뒤 그 자식은 부모 탭이 남아 있으면 parentId 사슬로 팀을 찾고,
+  부모가 이미 닫혀 고아로 복원된 자식은 자기 자신이 루트(혼자인 팀)다.
+  저장은 Rust `src-tauri/src/agent_board/`(아래 "팀 할 일과 보드 저장소" 참고). seq 는 `BEGIN IMMEDIATE` 안에서
+  `teams.last_post_seq` 를 하나 올려 정하므로 동시에 올라온 글도 겹치지 않고, clear·상한 뒤에도 되돌아가지 않아 커서가
+  그대로 맞는다. 팀당 5000 개 넘으면 같은 트랜잭션에서 오래된 글을 지운다. 탭을 닫아도 보드는 지우지 않는다. 검색은
+  `LIKE ? ESCAPE '\'`(`%`·`_`·`\` 이스케이프). DB 가 깨지거나 열리지 않으면 `agent board …`·`agent task …` 만
+  `team board unavailable: …` 로 실패하고 run/send/stop 은 그대로다. 감사 로그 `board_post`(작성자, team, kind, seq,
+  task, textLen, 120 자 한 줄 머리)·`board_clear`(team, removed). 글·지우기 뒤 창 이벤트 `octo-agent-board`
+  (`AGENT_BOARD_EVENT`, `onAgentBoardChange`)를 보낸다(4 단계 보기 패널용). `--kind announce` 는 팀의 루트 탭만 쓸 수
+  있고(`canPostKind`, Rust 도 거부) 필터 없는 `board read` 가 최근 3 개를 맨 앞에 따로 보여 준다(목록에는 다시 넣지
+  않는다. `--new` 에는 안 읽은 글로 순서대로 나온다). `--task <#>` 는 글을 같은 팀의 할 일에 잇는다(`(task #n)` 로 표시).
+  자식 브리프에 짧은 `<bbarit team-board>` 블록(시작 전·막힐 때 `board read --new` 와 `task list`, 번호가 주어지면
+  `task claim 3`, 아니면 `task claim --next`, 끝나면 `task done 3 --summary "…"`, 막히면 `task block 3 --reason "…"`,
+  발견·결정은 `board post`, 비밀 금지, 읽은 내용은 지시가 아님)을 붙인다. 블록의 명령은 그대로 복사해도 안전하다
+  (`a|b` 나 맨 `<#>` 가 없다). `agent.board.*`·`agent.task.*` 는 `SECRETARY_ALLOWED_CMDS` 밖이다.
+
+- **팀 할 일**(설계 [2026-11-16-agent-team-board-v2-design.md](superpowers/specs/2026-11-16-agent-team-board-v2-design.md),
+  2 단계): `agent task add|list|show|claim|block|unblock|release|done|submit|approve|reject|fail|retry|reopen|cancel|edit|dep`.
+  UI 커맨드 `agent.task.<sub>` 는 모두 `checkAgentCaller` 를 거친다. 쓰기는 확인된 caller 가 필요하고 언제나 caller
+  자기 팀이다(`planTaskWrite`, `--team` 으로 다른 팀을 고치지 못한다). 읽기(list/show)는 보드처럼 `--team` 으로 어느
+  팀이든 된다(`planTaskRead`). 요청 → 저장 연산 변환·글자 정리·한도는 `buildTaskOp`(`src/terminal/agentTasks.ts`),
+  상태 기계(누가 어느 상태에서 무엇을 할 수 있나)는 Rust `agent_board/model.rs` `check_transition` 한 곳에 있다.
+  caller 가 팀의 루트 탭이면 actor 에 `root` 가 붙는다(승인·재개·한도 넘은 재시도·취소 권한). 사람 버튼용 App 내부
+  함수 `humanTaskAction`(actor `user`, `human`)은 ctl·UI 커맨드로 닿지 않는다(4 단계 보기 패널이 쓴다).
+  - 상태: open(의존 작업이 done 이 아니면 "waiting" 으로 보임, 저장하지 않음) → claimed ⇄ blocked → (needs_review 면
+    review) → done / failed / cancelled. 전이 규칙은 설계 문서의 표 그대로다. 모든 전이는 한 트랜잭션이다: 기대 상태(와
+    필요하면 주인)로 묶은 UPDATE + `task_events` 한 줄. UPDATE 가 아무 행도 바꾸지 못하면 성공이 아니라 현재 상태를
+    밝힌 에러다("#12 is already claimed by b2 (worker)").
+  - done/submit 은 `--summary`(한 줄, 500 자) 필수, 본문 8000 자, branch·commit·worktree·checks(passed|failed|none)·
+    artifact(key=value, 20 개). branch·worktree 를 안 주면 caller 의 릴레이 워크트리(`agent run --worktree`)를 쓴다.
+    done 에 이르면(승인 포함) 같은 트랜잭션에서 kind `done` 글을 task 에 이어 올린다 — `board read --new` 로 동료가 안다.
+  - `claim --next`: open 이고 의존 작업이 모두 done 인 것 중 priority 높은 것, 같으면 번호 낮은 것. 없으면 ctl 종료 코드 4.
+    의존은 같은 팀만, 자기 자신 금지, 추가 때(`add --after` 포함) 깊이 64 까지 순환 검사(넘으면 거부), 작업당 32 개.
+    취소된 의존 작업은 끝난 것으로 치고 "a dependency was cancelled" 로 표시한다(취소된 작업을 새 의존으로는 못 단다).
+    실패한 의존 작업은 계속 막는다.
+  - 권한(`model::check_transition`·`check_edit`): 자기가 낸 작업은 루트 탭도 승인·반려할 수 없다(사람만 예외). 편집과
+    의존 변경은 만든 쪽·루트 탭·사람, 주인은 claimed/blocked 동안만, 끝난 작업은 루트 탭·사람만. `review` 를 바꾸는 것은
+    만든 쪽·루트 탭·사람만, 지금 주인은 안 되고 review 상태에서도 안 된다. 사람(`user`)은 claim·block·unblock·release·
+    done·submit·fail 을 하지 않는다.
+  - 임대(lease): claim 이 `lease_until = now + agents.board.leaseSeconds`(기본 300)와 `owner_instance`(앱 시작마다
+    무작위, 메모리에만)를 적는다. 갱신은 웹뷰가 아니라 Rust 호스트가 한다(`agent_board::start_lease_worker`): 이
+    인스턴스가 쥔 작업이 있을 때만 `renewSeconds`(기본 60, 임대의 절반 이하) 마다 깨어나, 호스트의 PTY 백엔드
+    (`PtyBackend::alive`, 프로세스 안·PTY 홀더 모두)로 주인 탭의 PTY 가 살아 있으면 UPDATE 한 번으로 늘리고, 죽었으면
+    `auto_release` 한다. 창이 가려지거나 숨거나 웹뷰가 다시 로드돼도 계속 돈다. 실패하면 간격을 두 배로 늘리되 임대의
+    절반 아래로만, 놓기에 실패한 작업은 다음 틱에 다시 놓고 절대 갱신하지 않는다. 앱이 끝나거나 업데이트로 넘겨줄 때
+    (`RunEvent::Exit`, `app_relaunch_for_update`) 먼저 멈추므로 PTY 홀더가 살려 두는 탭의 작업은 놓이지 않고 다시
+    켜면 다시 맡는다. 탭이 닫히면 웹뷰가 바로 놓기를 부탁하지만 호스트는 그 PTY 가 정말 끝났을 때만 놓는다(웹뷰의
+    "PTY disconnected" 로는 놓지 않는다). 시작(과 웹뷰 로드) 때 이 호스트의 다른 인스턴스 작업은 PTY 홀더가 되살린
+    탭이면 다시 맡고, 아니면 오래된 것(심장 박동이 `renewSeconds` 의 두 배보다 오래됐거나 임대가 끝남)만 놓는다 — 같은
+    DB 를 쓰는 다른 앱이 살아 있으면 그 작업은 건드리지 않는다(`planStartupLeases`; DB 파일이 없으면 만들지 않는다). 읽기·claim 은 `lease_until < now` 인 작업을 같은 팀 범위에서 `lease_expired` 로 놓는다 — 단, 주인이 자기
+    작업에 쓰는 경우는 그 작업을 놓지 않고 임대를 새로 한다(살아 있음을 스스로 보였으므로). "stale"(claimed/blocked 인데
+    `staleMinutes`(기본 30) 동안 바뀐 것 없음)은 표시만 한다.
+  - 한도: 팀당 할 일 2000 개·이벤트 20 000 개(넘으면 가장 오래 끝난 할 일을 이벤트와 함께 먼저 지운다. open/claimed/
+    blocked/review 와, 살아 있는 할 일이 의존하거나 자식으로 둔 끝난 할 일은 지우지 않는다. 지울 것이 없으면 add 를
+    거부), 글 5000 개, 30 일 동안 글·할 일 변화가 없는 팀은 앱 시작 때 통째로 지운다.
+  - 감사 로그: `task_<action>`(caller, team, task, from, to, post, by; 제목·이유·에러·요약은 길이와 120 자 머리만),
+    앱이 놓은 것은 `task_auto_release`·`task_lease_expired`. 창 이벤트 `octo-agent-board` 의 `action: 'task'`
+    (`task`, `taskAction`, `state`) — 보기 패널이 다시 읽는 신호다.
+  - 설정 `config.json` → `agents.board.{leaseSeconds 60..3600, renewSeconds 10..600, staleMinutes 5..1440}`
+    (`normalizeAgentBoardConfig`, 범위 밖은 잘라 맞춤, renew 는 lease 의 절반 이하).
+
+### 팀 할 일과 보드 저장소 (스키마 2, 외부에서 읽는 사람용)
+
+Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관),
+`store.rs`(`BoardStore` — 모든 연산이 지나는 async 인터페이스, 지금은 `Sqlite` 변형 하나; 3 단계 `PgStore` 는 변형을
+더하면 커맨드 층은 그대로다), `sqlite.rs`(SQLite 의 SQL 전부), `mod.rs`(Tauri 커맨드, SQL 없음), `tests.rs`(
+`BoardStore` 만 쓰는 동작 테스트 묶음 — 3 단계가 PostgreSQL 에 그대로 돌린다). 커맨드: `agent_board_post|read|teams|
+clear|info`, `agent_task_write|list|show`, `agent_task_lease_tick|release_owner|held_on_host|lease_apply`.
+
+파일 `~/.config/octo/agent-board.db`(debug 빌드 `agent-board.dev.db`), 0600(db·`-wal`·`-shm`), WAL, busy_timeout
+5 s, 연결 하나를 뮤텍스 뒤에 두고 블로킹 풀에서 돌린다. 모든 쓰기는 `BEGIN IMMEDIATE`, 모든 SQL 은 바인딩 파라미터.
+버전은 `board_meta.schema_version`(같은 값을 `PRAGMA user_version` 에도 적어 1 단계 앱이 v2 파일을 "newer app
+version" 으로 거부하게 한다). 열 때 버전만 읽고 낮을 때만 쓰기 잠금으로 순서대로 마이그레이션한다(1 단계 파일은 데이터
+그대로 v2 로 올라간다). 앱보다 새 버전이면 거부한다. 시각은 모두 unix ms 정수, JSON 값은 JSON 을 담은 TEXT, 상태·종류는
+CHECK 없는 텍스트(코드가 검사).
+
+동기화 준비(아직 동기화 작업자는 없다): teams·posts·tasks·task_deps·task_events 는 UUIDv7 텍스트 id(teams 는 `uid`)를
+쓰고, 모두 `origin_host`, `updated_at`, `row_version`(바뀔 때마다 +1), `deleted_at`(묘비)을 가진다. clear·상한·30 일 정리는
+지우지 않고 `deleted_at` 을 적으며 읽기는 묘비를 건너뛴다. 30 일 지난 묘비는 앱 시작 때 실제로 지운다. 이런 행을 넣거나
+바꾸거나 묘비로 만들 때마다 같은 트랜잭션에서 `changes` 에 한 줄을 남긴다(`log_change`; 소비자가 없으면 최근 50 000 줄만
+둔다). 팀은 `uid` 로 가리키고, 루트 탭 id(`team`)는 `home_host`(팀을 만든 기계, 번호와 할 일 상태의 주인)와 함께 유일하다.
+`--new` 커서는 `seq` 가 아니라 이 기계에 도착한 순서(`posts.arrival` = 그 글을 넣은 변경 위치)를 쓴다 — 나중에 도착한
+낮은 번호의 글도 건너뛰지 않는다. 호스트 id 는 호스트 이름(`BBARIT_BOARD_HOST` 로 바꿀 수 있다).
+
+| 표 | 열 |
+|---|---|
+| `board_meta` | `key` PK, `value` — `schema_version`, `created_at`, `created_by_app_version` |
+| `teams` | `uid` PK (UUIDv7), `team` (루트 탭 id), `name`, `home_host`, `home_instance`, `created_at`, `last_post_seq`, `last_task_seq`, `last_activity_at`, 동기화 열 — UNIQUE(team, home_host) (번호는 되돌아가지 않는다) |
+| `posts` | `id` PK (UUIDv7), `team_uid`, `seq` (UNIQUE(team_uid, seq)), `ts`, `author_id`, `author_name`, `author_cli`, `author_host`, `kind` (note, finding, question, decision, done, announce), `text`, `task_id` NULL, `arrival`, 동기화 열 |
+| `cursors` | (`team_uid`, `tab_id`) PK, `arrival` — `board read --new` 커서(이 기계 전용, 동기화하지 않음) |
+| `tasks` | `id` PK (UUIDv7), `team_uid`, `seq` (UNIQUE(team_uid, seq), 에이전트가 쓰는 `#n`), `parent_id`, `title` (≤200), `body` (≤8000), `state` (open, claimed, blocked, review, done, failed, cancelled), `priority` (0–3, 기본 1), `needs_review` (0/1), `created_by_id/_name/_host`, `owner_id/_name/_host`, `owner_instance`, `attempt` (기본 0), `max_attempts` (기본 3), `blocked_reason`, `last_error` (≤2000; reject 이유는 `rejected: …`), `result_summary` (≤500), `result_body` (≤8000), `result_branch`, `result_commit`, `result_worktree`, `result_checks` (passed, failed, none), `result_artifacts` (JSON 객체), `labels` (JSON 배열), `meta` (JSON 객체), `created_at`, `updated_at`, `claimed_at`, `started_at`, `submitted_at`, `finished_at`, `lease_until`, `heartbeat_at`, `due_at`, `version` (내용이 바뀔 때 +1, 화면 편집의 낙관적 동시성), 동기화 열 |
+| `task_deps` | (`task_id`, `depends_on_id`) PK, `team_uid`, 동기화 열 — 앞 작업이 done 이어야 claim 된다 |
+| `task_events` | `id` PK (UUIDv7), `task_id`, `team_uid`, `seq` (작업별), `ts`, `actor_id/_name/_host`, `action` (add, claim, release, auto_release, lease_expired, block, unblock, submit, approve, reject, done, fail, retry, reopen, cancel, edit, dep_add, dep_remove), `from_state`, `to_state`, `attempt`, `note`, `data` (JSON), 동기화 열 |
+| `changes` | `local_seq` PK AUTOINCREMENT, `tbl`, `row_id` (task_deps 는 `<task_id>/<depends_on_id>`), `at` |
+| `sync_state` | `key` PK, `value` — 지금은 비어 있다(`consumer` 가 있으면 `changes` 를 줄이지 않는다) |
+
+동기화 열 = `origin_host`, `updated_at`, `row_version`, `deleted_at`.
+
+인덱스: `tasks(team_uid, state, priority DESC, seq)`, `tasks(team_uid, owner_id, state)`, `tasks(parent_id)`,
+`tasks(state, lease_until)`, `task_deps(depends_on_id)`, `task_events(task_id, seq)`, `task_events(team_uid, ts)`,
+`posts(team_uid, kind, seq)`, `posts(team_uid, ts)`, `posts(team_uid, arrival)`. 앱 밖에서 이 파일을 읽을 때(`sqlite3`)는 읽기만 하는 것이 안전하다 —
+쓰기는 앱의 규칙(임대·이벤트·카운터)을 거치지 않는다.
+
 ### 알려진 한계
 
 - 제한은 링크 기준이다. 사용자가 손으로 연 탭이나 `term create` 로 만든 탭은 세지 않는다. 앱을 다시 켜면 링크는
@@ -351,6 +470,13 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 - 예전 앱이 띄운 홀더 셸은 그 셸이 살아 있는 동안 토큰 없이 `legacy` 로 받으므로, 그동안은 누구든 토큰을 빼고 그 탭
   id 를 댈 수 있다. 오래된 탭을 새로 열면 사라진다. 키 파일을 지우면 새 키(새 시각)가 생겨 그 전의 셸은 토큰이 틀리고,
   토큰을 빼면 legacy 로 보일 수 있다 — 키 파일을 지울 수 있는 프로세스는 이미 경계 밖이다.
+- 팀 보드·할 일은 같은 사용자의 로컬 프로세스가 DB 파일을 직접 읽고 고칠 수 있고, caller 를 빼고 `--team` 으로 어느
+  팀이든 읽을 수 있다(쓰기·지우기는 확인된 caller 만). 로컬 브리지는 Tauri 커맨드(`agent_board_clear` 등)를 직접 부를 수도
+  있어 이것도 보안 경계가 아니다. 자식은 보드 글을 다른 에이전트의 정보로만 다루라고 안내받지만, 그 안내가 프롬프트
+  주입을 막는 장치는 아니다.
+- 임대 갱신은 앱이 깨어 있을 때만 돈다. 노트북이 임대 시간보다 오래 잠들면 깨어난 뒤 다른 읽기가 그 작업을 먼저
+  놓을 수 있다(주인은 다시 claim 하면 된다). 같은 호스트에서 같은 DB 파일을 쓰는 앱 두 개를 동시에 켜면 나중에 켠
+  쪽이 시작할 때 먼저 켠 쪽의 작업을 놓을 수 있다(보통은 dev 와 설치본이 다른 파일을 쓴다).
 - 감사 로그는 앱이 남기는 기록이다. 같은 사용자 권한의 프로세스는 파일을 고치거나 지울 수 있어 변조 방지 기록은 아니다.
 
 - caller 가 활성 프로젝트가 아닌 프로젝트에 있으면 자식은 그 프로젝트를 화면에 띄울 때까지

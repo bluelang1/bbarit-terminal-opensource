@@ -1,0 +1,1391 @@
+//! Behavior suite for the team board, written against `BoardStore` only (no SQL), so stage 3
+//! can run the same tests against PostgreSQL by giving `Fixture` a PostgreSQL variant. The
+//! `sqlite_only` module at the bottom covers what is specific to the SQLite file (migration
+//! from a stage-1 database, file modes, WAL, a corrupt file).
+
+use super::model::*;
+use super::sqlite::{SqliteStore, SCHEMA_VERSION};
+use super::store::BoardStore;
+use serde_json::Value;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+
+fn run<T>(f: impl Future<Output = T>) -> T {
+    tauri::async_runtime::block_on(f)
+}
+
+/// A fresh board. `store()` opens a new store (its own connection) on the same board, the
+/// way two app windows or two machines would.
+struct Fixture {
+    dir: PathBuf,
+    limits: Limits,
+}
+
+impl Fixture {
+    fn new(tag: &str) -> Fixture {
+        Self::with_limits(tag, Limits::default())
+    }
+
+    fn with_limits(tag: &str, limits: Limits) -> Fixture {
+        let dir = std::env::temp_dir().join(format!(
+            "bbarit-board-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Fixture { dir, limits }
+    }
+
+    fn db(&self) -> PathBuf {
+        self.dir.join(super::DB_FILE)
+    }
+
+    fn store(&self) -> B {
+        B(BoardStore::Sqlite(SqliteStore::with_limits(self.db(), self.limits)))
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// This machine's host id (what the app records, and what a migrated team's home is).
+fn here() -> String {
+    super::board_host().to_string()
+}
+
+fn cx(now: i64) -> Ctx {
+    Ctx { now, host: Some(here()), instance: "inst-a".into() }
+}
+
+fn cx_other(now: i64) -> Ctx {
+    Ctx { now, host: Some("host-b".into()), instance: "inst-b".into() }
+}
+
+fn member(id: &str) -> Actor {
+    Actor { id: id.into(), name: Some(format!("{id} name")), cli: Some("claude".into()), host: Some(here()), root: false, human: false }
+}
+
+/// A tab on another machine.
+fn remote(id: &str) -> Actor {
+    Actor { host: Some("host-b".into()), ..member(id) }
+}
+
+fn root(id: &str) -> Actor {
+    Actor { root: true, ..member(id) }
+}
+
+fn human() -> Actor {
+    Actor { id: "user".into(), name: Some("user".into()), cli: None, host: Some(here()), root: false, human: true }
+}
+
+fn op(name: &str) -> TaskOpInput {
+    TaskOpInput { op: name.into(), ..Default::default() }
+}
+
+fn on(name: &str, task: i64) -> TaskOpInput {
+    TaskOpInput { op: name.into(), task: Some(task), ..Default::default() }
+}
+
+fn done_op(task: i64, summary: &str) -> TaskOpInput {
+    TaskOpInput { result: Some(ResultInput { summary: Some(summary.into()), ..Default::default() }), ..on("done", task) }
+}
+
+fn input(author: &str, kind: &str, text: &str) -> PostInput {
+    PostInput {
+        team_name: Some("lead".into()),
+        author_id: author.into(),
+        author_name: Some(format!("{author} name")),
+        author_cli: Some("claude".into()),
+        kind: kind.into(),
+        text: text.into(),
+        task: None,
+        root: false,
+    }
+}
+
+fn seqs(v: &Value) -> Vec<i64> {
+    v["posts"].as_array().unwrap().iter().map(|p| p["seq"].as_i64().unwrap()).collect()
+}
+
+fn task_seqs(v: &Value) -> Vec<i64> {
+    v["tasks"].as_array().unwrap().iter().map(|t| t["seq"].as_i64().unwrap()).collect()
+}
+
+/// Synchronous wrappers over the async interface (tests only).
+struct B(BoardStore);
+
+impl B {
+    fn post(&self, team: &str, p: PostInput, now: i64) -> Result<Value, String> {
+        run(self.0.post(team.into(), p, cx(now)))
+    }
+    fn read(&self, team: &str, q: ReadQuery) -> Result<Value, String> {
+        run(self.0.read(team.into(), q, Some(here())))
+    }
+    fn teams(&self) -> Vec<Value> {
+        run(self.0.teams()).unwrap()
+    }
+    fn clear(&self, team: &str, now: i64) -> Result<Value, String> {
+        run(self.0.clear(team.into(), cx(now)))
+    }
+    fn w(&self, team: &str, o: TaskOpInput, a: &Actor, c: Ctx) -> Result<Value, String> {
+        run(self.0.task_write(team.into(), o, a.clone(), c))
+    }
+    fn add(&self, team: &str, title: &str, a: &Actor, now: i64) -> i64 {
+        let o = TaskOpInput { title: Some(title.into()), ..op("add") };
+        self.w(team, o, a, cx(now)).unwrap()["task"]["seq"].as_i64().unwrap()
+    }
+    fn list(&self, team: &str, q: TaskListQuery, now: i64) -> Value {
+        run(self.0.task_list(team.into(), q, cx(now))).unwrap()
+    }
+    fn show(&self, team: &str, seq: i64, now: i64) -> Value {
+        run(self.0.task_show(team.into(), seq, true, None, cx(now))).unwrap()
+    }
+    fn state(&self, team: &str, seq: i64, now: i64) -> String {
+        self.show(team, seq, now)["task"]["state"].as_str().unwrap().to_string()
+    }
+}
+
+// ── Notes ────────────────────────────────────────────────────────────────
+
+#[test]
+fn dev_build_uses_the_dev_database() {
+    assert_eq!(super::DB_FILE, "agent-board.dev.db", "tests are debug builds");
+}
+
+#[test]
+fn posts_get_increasing_seqs_and_read_back_in_order() {
+    let fx = Fixture::new("basic");
+    let s = fx.store();
+    let a = s.post("root1", input("t1", "note", "first"), 1_000).unwrap();
+    let b = s.post("root1", input("t2", "finding", "second\nline two"), 2_000).unwrap();
+    let other = s.post("root2", input("t9", "note", "elsewhere"), 3_000).unwrap();
+    assert_eq!(a["seq"], 1);
+    assert_eq!(b["seq"], 2);
+    assert_eq!(other["seq"], 1, "seq is per team");
+    assert_eq!(b["author"]["id"], "t2");
+    assert_eq!(b["author"]["cliType"], "claude");
+    assert_eq!(b["author"]["host"], here());
+    let r = s.read("root1", ReadQuery::default()).unwrap();
+    assert_eq!(seqs(&r), vec![1, 2]);
+    assert_eq!(r["posts"][1]["text"], "second\nline two");
+    assert_eq!(r["teamName"], "lead");
+    assert_eq!(r["lastSeq"], 2);
+    assert_eq!(r["total"], 2);
+}
+
+#[test]
+fn concurrent_posts_never_share_a_seq() {
+    let fx = Fixture::new("concurrent");
+    fx.store().post("team-x", input("t0", "note", "first"), 1).unwrap();
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let s = fx.store();
+            std::thread::spawn(move || {
+                (0..5)
+                    .map(|j| s.post("team-x", input(&format!("t{i}"), "note", &format!("p{i}-{j}")), 1_000).unwrap()["seq"].as_i64().unwrap())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let mut all: Vec<i64> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
+    all.sort_unstable();
+    assert_eq!(all, (2..=41).collect::<Vec<_>>());
+}
+
+#[test]
+fn refuses_bad_team_ids_kinds_and_text() {
+    let fx = Fixture::new("refuse");
+    let s = fx.store();
+    for bad in ["", "../x", "a/b", "a b", ".", "t1;drop", &"x".repeat(129)] {
+        assert!(s.post(bad, input("t1", "note", "hi"), 1).is_err(), "{bad:?}");
+        assert!(s.read(bad, ReadQuery::default()).is_err(), "{bad:?}");
+        assert!(s.clear(bad, 1).is_err(), "{bad:?}");
+        assert!(s.w(bad, TaskOpInput { title: Some("x".into()), ..op("add") }, &member("t1"), cx(1)).is_err(), "{bad:?}");
+    }
+    assert!(valid_team_id("1731000000000abc_DEF-9"));
+    assert!(s.post("t", input("t1", "shout", "hi"), 1).unwrap_err().contains("invalid kind"));
+    assert_eq!(s.post("t", input("t1", "note", " \n\t "), 1).unwrap_err(), "text required");
+    let long = "y".repeat(MAX_TEXT_CHARS + 1);
+    assert!(s.post("t", input("t1", "note", &long), 1).unwrap_err().contains("too long"));
+    let many = vec!["l"; MAX_TEXT_LINES + 1].join("\n");
+    assert!(s.post("t", input("t1", "note", &many), 1).unwrap_err().contains("too many lines"));
+    assert!(s.post("t", input(" ", "note", "x"), 1).is_err(), "author required");
+    let max = "z".repeat(MAX_TEXT_CHARS);
+    assert!(s.post("t", input("t1", "note", &max), 1).is_ok());
+    let p = s.post("t", input("t1", "NOTE", "a\u{1b}[31mb\r\nc\u{7}\td"), 1).unwrap();
+    assert_eq!(p["text"], "a[31mb\nc d");
+    assert_eq!(p["kind"], "note");
+}
+
+#[test]
+fn keeps_only_the_newest_posts_per_team() {
+    let fx = Fixture::with_limits("cap", Limits { posts: 5, ..Limits::default() });
+    let s = fx.store();
+    for i in 1..=5 {
+        s.post("cap", input("t1", "note", &format!("p{i}")), i).unwrap();
+    }
+    s.post("other", input("t2", "note", "untouched"), 2).unwrap();
+    let p = s.post("cap", input("t1", "done", "newest"), 9).unwrap();
+    assert_eq!(p["seq"], 6);
+    let r = s.read("cap", ReadQuery { limit: Some(500), ..Default::default() }).unwrap();
+    assert_eq!(seqs(&r), vec![2, 3, 4, 5, 6], "the oldest post was dropped");
+    assert_eq!(s.read("other", ReadQuery::default()).unwrap()["total"], 1);
+}
+
+#[test]
+fn read_filters_since_limit_kind_author_and_search() {
+    let fx = Fixture::new("filters");
+    let s = fx.store();
+    s.post("f", input("t1", "note", "build is green"), 1).unwrap();
+    s.post("f", input("t2", "finding", "100% of tests pass"), 2).unwrap();
+    s.post("f", input("t2", "decision", "use snake_case names"), 3).unwrap();
+    s.post("f", input("t3", "done", "ALL DONE"), 4).unwrap();
+    s.post("f", input("t1", "note", "path C:\\tmp\\x"), 5).unwrap();
+    let r = |rq: ReadQuery| seqs(&s.read("f", ReadQuery { limit: Some(500), ..rq }).unwrap());
+    assert_eq!(r(ReadQuery { since: Some(3), ..Default::default() }), vec![4, 5]);
+    assert_eq!(r(ReadQuery { kind: Some("Finding".into()), ..Default::default() }), vec![2]);
+    assert_eq!(r(ReadQuery { author: Some("t2".into()), ..Default::default() }), vec![2, 3]);
+    assert_eq!(r(ReadQuery { author: Some("T3 NAME".into()), ..Default::default() }), vec![4], "names match without case");
+    assert_eq!(r(ReadQuery { search: Some("done".into()), ..Default::default() }), vec![4], "ASCII case-insensitive");
+    assert_eq!(r(ReadQuery { search: Some("100%".into()), ..Default::default() }), vec![2]);
+    assert_eq!(r(ReadQuery { search: Some("%".into()), ..Default::default() }), vec![2]);
+    assert_eq!(r(ReadQuery { search: Some("e_c".into()), ..Default::default() }), vec![3]);
+    assert_eq!(r(ReadQuery { search: Some("_".into()), ..Default::default() }), vec![3]);
+    assert_eq!(r(ReadQuery { search: Some("C:\\tmp".into()), ..Default::default() }), vec![5]);
+    assert!(r(ReadQuery { search: Some("' OR 1=1 --".into()), ..Default::default() }).is_empty());
+    assert_eq!(r(ReadQuery { exclude_author: Some("t1".into()), ..Default::default() }), vec![2, 3, 4]);
+    let tail = s.read("f", ReadQuery { limit: Some(2), ..Default::default() }).unwrap();
+    assert_eq!(seqs(&tail), vec![4, 5], "limit keeps the newest");
+    assert_eq!(tail["matched"], 5);
+    assert_eq!(tail["more"], 3);
+    assert!(s.read("f", ReadQuery { kind: Some("bad".into()), ..Default::default() }).is_err());
+    assert_eq!(like_pattern("a%b_c\\"), "%a\\%b\\_c\\\\%");
+    let empty = s.read("nothing", ReadQuery::default()).unwrap();
+    assert_eq!(empty["lastSeq"], 0);
+    assert!(empty["posts"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn cursors_move_on_new_reads_skip_own_posts_and_survive_a_reopen() {
+    let fx = Fixture::new("cursor");
+    let newq = || ReadQuery { cursor_tab: Some("t1".into()), exclude_author: Some("t1".into()), ..Default::default() };
+    {
+        let s = fx.store();
+        s.post("c", input("t1", "note", "mine"), 1).unwrap();
+        s.post("c", input("t2", "note", "theirs"), 2).unwrap();
+        let first = s.read("c", newq()).unwrap();
+        assert_eq!(seqs(&first), vec![2]);
+        assert_eq!(first["cursor"], 0);
+        assert!(first["nextCursor"].as_i64().unwrap() > 0);
+        assert!(seqs(&s.read("c", newq()).unwrap()).is_empty(), "nothing new");
+        s.post("c", input("t3", "note", "later"), 3).unwrap();
+        assert_eq!(seqs(&s.read("c", ReadQuery::default()).unwrap()), vec![1, 2, 3]);
+    }
+    // App restart: a fresh store still knows t1 has read up to seq 2.
+    let s = fx.store();
+    let again = s.read("c", newq()).unwrap();
+    assert_eq!(seqs(&again), vec![3]);
+    assert!(again["cursor"].as_i64().unwrap() > 0, "the cursor survived the reopen");
+}
+
+#[test]
+fn new_reads_page_oldest_first_and_never_skip_unread_posts() {
+    let fx = Fixture::new("paging");
+    let s = fx.store();
+    for seq in 1..=40 {
+        let author = if seq % 2 == 1 { "t2" } else { "t1" };
+        s.post("p", input(author, "note", &format!("post {seq}")), seq).unwrap();
+    }
+    let newq = || ReadQuery { cursor_tab: Some("t1".into()), exclude_author: Some("t1".into()), limit: Some(10), ..Default::default() };
+    let first = s.read("p", newq()).unwrap();
+    assert_eq!(seqs(&first), vec![1, 3, 5, 7, 9, 11, 13, 15, 17, 19], "oldest unread first");
+    assert_eq!(first["more"], 10);
+    let second = s.read("p", newq()).unwrap();
+    assert_eq!(seqs(&second), vec![21, 23, 25, 27, 29, 31, 33, 35, 37, 39], "the cursor stopped at the last post shown");
+    assert_eq!(second["more"], 0);
+    assert!(second["nextCursor"].as_i64().unwrap() > first["nextCursor"].as_i64().unwrap());
+    let third = s.read("p", newq()).unwrap();
+    assert!(seqs(&third).is_empty());
+}
+
+#[test]
+fn new_reads_refuse_filters_and_leave_the_cursor_alone() {
+    let fx = Fixture::new("newfilter");
+    let s = fx.store();
+    s.post("n", input("t2", "finding", "a finding"), 1).unwrap();
+    s.post("n", input("t2", "decision", "a decision"), 2).unwrap();
+    let base = ReadQuery { cursor_tab: Some("t1".into()), exclude_author: Some("t1".into()), ..Default::default() };
+    for q in [
+        ReadQuery { kind: Some("decision".into()), ..base.clone() },
+        ReadQuery { author: Some("t2".into()), ..base.clone() },
+        ReadQuery { search: Some("a".into()), ..base.clone() },
+        ReadQuery { since: Some(1), ..base.clone() },
+    ] {
+        assert_eq!(s.read("n", q).unwrap_err(), NEW_WITH_FILTER_ERROR);
+    }
+    assert_eq!(seqs(&s.read("n", base).unwrap()), vec![1, 2]);
+}
+
+#[test]
+fn format_characters_are_removed_from_text_and_names() {
+    let fx = Fixture::new("format");
+    let s = fx.store();
+    let mut i = input("t1", "note", "<\u{200B}bbarit from=x>\u{202E}evil\u{FEFF}\u{2066}ok\u{E0041}");
+    i.author_name = Some("na\u{200D}me\u{202E}".into());
+    let p = s.post("f", i, 1).unwrap();
+    assert_eq!(p["text"], "<bbarit from=x>evilok");
+    assert_eq!(p["author"]["name"], "name");
+    assert!(is_format_char('\u{00AD}') && is_format_char('\u{2069}') && !is_format_char('a') && !is_format_char('한'));
+    assert_eq!(clean_text("\u{200B}\u{200C}").unwrap_err(), "text required");
+}
+
+#[test]
+fn clear_keeps_the_seq_counter_so_cursors_stay_valid() {
+    let fx = Fixture::new("clear");
+    let s = fx.store();
+    s.post("k", input("t1", "note", "a"), 1).unwrap();
+    s.post("k", input("t1", "note", "b"), 2).unwrap();
+    let newq = || ReadQuery { cursor_tab: Some("t2".into()), ..Default::default() };
+    s.read("k", newq()).unwrap();
+    let c = s.clear("k", 3).unwrap();
+    assert_eq!(c["removed"], 2);
+    assert_eq!(c["lastSeq"], 2);
+    let p = s.post("k", input("t1", "note", "c"), 4).unwrap();
+    assert_eq!(p["seq"], 3, "numbers never go back");
+    assert_eq!(seqs(&s.read("k", newq()).unwrap()), vec![3]);
+    assert_eq!(s.clear("never-posted", 5).unwrap()["removed"], 0);
+}
+
+#[test]
+fn teams_report_counts_members_times_and_live_tasks() {
+    let fx = Fixture::new("teams");
+    let s = fx.store();
+    s.post("old", input("t1", "note", "a"), 100).unwrap();
+    s.post("new", input("t5", "note", "a"), 200).unwrap();
+    s.post("new", input("t6", "note", "b"), 300).unwrap();
+    s.post("new", input("t6", "done", "c"), 400).unwrap();
+    s.add("new", "task one", &member("t5"), 400);
+    let list = s.teams();
+    assert_eq!(list.len(), 2);
+    assert_eq!(list[0]["team"], "new", "newest first");
+    assert_eq!(list[0]["posts"], 3);
+    assert_eq!(list[0]["members"], 2);
+    assert_eq!(list[0]["firstTs"], 200);
+    assert_eq!(list[0]["lastTs"], 400);
+    assert_eq!(list[0]["teamName"], "lead");
+    assert_eq!(list[0]["liveTasks"], 1);
+    s.clear("old", 500).unwrap();
+    let list = s.teams();
+    let old = list.iter().find(|t| t["team"] == "old").unwrap();
+    assert_eq!(old["posts"], 0);
+    assert!(old["lastTs"].is_null());
+}
+
+#[test]
+fn prunes_teams_idle_for_thirty_days_with_their_tasks() {
+    let fx = Fixture::new("prune");
+    let s = fx.store();
+    let day = 24 * 60 * 60 * 1000;
+    let now = 100 * day;
+    s.post("stale", input("t1", "note", "old"), now - 31 * day).unwrap();
+    let t = s.add("stale", "old task", &member("t1"), now - 31 * day);
+    s.w("stale", on("claim", t), &member("t1"), cx(now - 31 * day)).unwrap();
+    s.post("fresh", input("t2", "note", "old"), now - 40 * day).unwrap();
+    s.post("fresh", input("t2", "note", "recent"), now - day).unwrap();
+    s.add("busy", "a task added recently", &member("t3"), now - day);
+    s.read("stale", ReadQuery { cursor_tab: Some("t9".into()), ..Default::default() }).unwrap();
+    assert_eq!(run(s.0.prune_stale(now, STALE_AFTER_MS)).unwrap(), 1);
+    let mut names: Vec<String> = s.teams().iter().map(|t| t["team"].as_str().unwrap().to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["busy", "fresh"]);
+    assert!(task_seqs(&s.list("stale", TaskListQuery { all: true, ..Default::default() }, now)).is_empty());
+    assert_eq!(s.read("fresh", ReadQuery::default()).unwrap()["total"], 2, "a live board keeps old posts");
+}
+
+#[test]
+fn announcements_are_root_only_and_pinned_first() {
+    let fx = Fixture::new("announce");
+    let s = fx.store();
+    assert!(s.post("a", input("c1", "announce", "plan"), 1).unwrap_err().contains("only the team's root tab"));
+    s.post("a", PostInput { root: true, ..input("root", "announce", "the plan: split by module") }, 1).unwrap();
+    s.post("a", input("c1", "note", "started"), 2).unwrap();
+    let r = s.read("a", ReadQuery::default()).unwrap();
+    assert_eq!(seqs(&r), vec![2], "announcements are not repeated in the list");
+    assert_eq!(r["announcements"][0]["text"], "the plan: split by module");
+    // --new shows them in order like any unread post.
+    let n = s.read("a", ReadQuery { cursor_tab: Some("c2".into()), exclude_author: Some("c2".into()), ..Default::default() }).unwrap();
+    assert_eq!(seqs(&n), vec![1, 2]);
+    // A kind filter shows them as plain posts.
+    assert_eq!(seqs(&s.read("a", ReadQuery { kind: Some("announce".into()), ..Default::default() }).unwrap()), vec![1]);
+}
+
+#[test]
+fn posts_link_to_a_task_of_the_same_team() {
+    let fx = Fixture::new("link");
+    let s = fx.store();
+    let t = s.add("l", "write docs", &member("c1"), 1);
+    let p = s.post("l", PostInput { task: Some(t), ..input("c1", "finding", "docs need a schema section") }, 2).unwrap();
+    assert_eq!(p["task"], t);
+    assert_eq!(s.read("l", ReadQuery::default()).unwrap()["posts"][0]["task"], t);
+    assert_eq!(s.post("l", PostInput { task: Some(99), ..input("c1", "note", "x") }, 3).unwrap_err(), "no task #99 in team l");
+    assert!(s.post("other", PostInput { task: Some(t), ..input("c1", "note", "x") }, 3).is_err(), "same team only");
+}
+
+// ── Tasks: transitions ───────────────────────────────────────────────────
+
+#[test]
+fn add_list_and_show_a_task() {
+    let fx = Fixture::new("add");
+    let s = fx.store();
+    let o = TaskOpInput {
+        title: Some("  Fix the login test ".into()),
+        body: Some("steps:\n1. run it\n2. fix it".into()),
+        priority: Some(2),
+        labels: Some(vec!["tests".into(), "tests".into(), "auth".into()]),
+        team_name: Some("lead".into()),
+        ..op("add")
+    };
+    let r = s.w("t", o, &member("lead"), cx(10)).unwrap();
+    assert_eq!(r["action"], "add");
+    assert_eq!(r["to"], "open");
+    let t = &r["task"];
+    assert_eq!(t["seq"], 1);
+    assert_eq!(t["title"], "Fix the login test");
+    assert_eq!(t["body"], "steps:\n1. run it\n2. fix it");
+    assert_eq!(t["priority"], 2);
+    assert_eq!(t["labels"], serde_json::json!(["tests", "auth"]));
+    assert_eq!(t["createdBy"]["id"], "lead");
+    assert_eq!(t["createdBy"]["host"], here());
+    assert_eq!(t["owner"], Value::Null);
+    assert_eq!(t["attempt"], 0);
+    assert_eq!(t["maxAttempts"], 3);
+    assert_eq!(s.add("t", "second", &member("lead"), 11), 2);
+    assert_eq!(s.add("u", "other team", &member("x"), 11), 1, "numbers are per team");
+    let l = s.list("t", TaskListQuery::default(), 12);
+    assert_eq!(task_seqs(&l), vec![1, 2], "priority first");
+    assert_eq!(l["counts"]["open"], 2);
+    assert_eq!(l["teamName"], "lead");
+    let shown = s.show("t", 1, 12);
+    assert_eq!(shown["events"][0]["action"], "add");
+    assert_eq!(shown["events"][0]["to"], "open");
+    // Refused inputs.
+    for (o, msg) in [
+        (op("add"), "title required"),
+        (TaskOpInput { title: Some("x".repeat(201)), ..op("add") }, "title too long"),
+        (TaskOpInput { title: Some("x".into()), priority: Some(4), ..op("add") }, "priority must be 0-3"),
+        (TaskOpInput { title: Some("x".into()), parent: Some(9), ..op("add") }, "no task #9 in team t"),
+        (TaskOpInput { title: Some("x".into()), after: vec![7], ..op("add") }, "no task #7 in team t"),
+        (TaskOpInput { title: Some("x".into()), body: Some("y".repeat(MAX_BODY_CHARS + 1)), ..op("add") }, "body too long"),
+    ] {
+        let e = s.w("t", o, &member("lead"), cx(13)).unwrap_err();
+        assert!(e.contains(msg), "{e}");
+    }
+    assert!(s.w("t", on("frobnicate", 1), &member("lead"), cx(13)).unwrap_err().contains("unknown task operation"));
+    assert_eq!(s.w("t", on("claim", 42), &member("lead"), cx(13)).unwrap_err(), "no task #42 in team t");
+    assert!(s.w("t", op("claim"), &member("lead"), cx(13)).unwrap_err().contains("task number required"));
+}
+
+#[test]
+fn claim_block_unblock_done_writes_history_and_a_done_note() {
+    let fx = Fixture::new("flow");
+    let s = fx.store();
+    let t = s.add("f", "build the parser", &member("lead"), 1);
+    let c = s.w("f", TaskOpInput { lease_ms: Some(60_000), ..on("claim", t) }, &member("c1"), cx(100)).unwrap();
+    assert_eq!((c["from"].as_str(), c["to"].as_str()), (Some("open"), Some("claimed")));
+    let task = &c["task"];
+    assert_eq!(task["owner"]["id"], "c1");
+    assert_eq!(task["owner"]["instance"], "inst-a");
+    assert_eq!(task["owner"]["host"], here());
+    assert_eq!(task["leaseUntil"], 60_100);
+    assert_eq!(task["claimedAt"], 100);
+    assert_eq!(task["startedAt"], 100);
+    let e = s.w("f", on("block", t), &member("c1"), cx(110)).unwrap_err();
+    assert!(e.starts_with("reason required"), "{e}");
+    let b = s.w("f", TaskOpInput { reason: Some("needs the API key from the user".into()), ..on("block", t) }, &member("c1"), cx(120)).unwrap();
+    assert_eq!(b["task"]["state"], "blocked");
+    assert_eq!(b["task"]["blockedReason"], "needs the API key from the user");
+    assert!(s.w("f", done_op(t, "x"), &member("c1"), cx(125)).unwrap_err().contains("unblock it first"));
+    s.w("f", on("unblock", t), &member("c1"), cx(130)).unwrap();
+    assert!(s.w("f", on("done", t), &member("c1"), cx(135)).unwrap_err().starts_with("summary required"));
+    let d = s
+        .w(
+            "f",
+            TaskOpInput {
+                result: Some(ResultInput {
+                    summary: Some("parser done, 12 tests".into()),
+                    body: Some("details\nmore".into()),
+                    branch: Some("agent/parser".into()),
+                    commit: Some("abc1234".into()),
+                    worktree: Some("/repo/.bbarit/worktrees/parser".into()),
+                    checks: Some("passed".into()),
+                    artifacts: [("pr".to_string(), "https://example.invalid/pr/7".to_string())].into_iter().collect(),
+                }),
+                ..on("done", t)
+            },
+            &member("c1"),
+            cx(140),
+        )
+        .unwrap();
+    assert_eq!(d["to"], "done");
+    let r = &d["task"]["result"];
+    assert_eq!(r["summary"], "parser done, 12 tests");
+    assert_eq!(r["branch"], "agent/parser");
+    assert_eq!(r["checks"], "passed");
+    assert_eq!(r["artifacts"]["pr"], "https://example.invalid/pr/7");
+    assert_eq!(d["task"]["finishedAt"], 140);
+    assert_eq!(d["task"]["leaseUntil"], Value::Null);
+    // The linked done note.
+    let post_seq = d["post"].as_i64().unwrap();
+    let posts = s.read("f", ReadQuery::default()).unwrap();
+    let note = posts["posts"].as_array().unwrap().iter().find(|p| p["seq"] == post_seq).unwrap().clone();
+    assert_eq!(note["kind"], "done");
+    assert_eq!(note["task"], t);
+    assert_eq!(note["author"]["id"], "c1");
+    assert!(note["text"].as_str().unwrap().starts_with("#1 done: build the parser\nparser done, 12 tests\nbranch agent/parser, commit abc1234, checks passed"));
+    let actions: Vec<String> = s.show("f", t, 150)["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string()).collect();
+    assert_eq!(actions, vec!["add", "claim", "block", "unblock", "done"]);
+    let ev = s.show("f", t, 150)["events"][2].clone();
+    assert_eq!(ev["note"], "needs the API key from the user");
+    assert_eq!(ev["from"], "claimed");
+    assert_eq!(ev["to"], "blocked");
+    assert_eq!(ev["actor"]["id"], "c1");
+}
+
+#[test]
+fn refusals_name_the_current_state_and_owner() {
+    let fx = Fixture::new("refusals");
+    let s = fx.store();
+    let t = s.add("r", "a task", &member("lead"), 1);
+    s.w("r", on("claim", t), &member("b2"), cx(2)).unwrap();
+    assert_eq!(s.w("r", on("claim", t), &member("c3"), cx(3)).unwrap_err(), "#1 is already claimed by b2 (b2 name)");
+    assert_eq!(
+        s.w("r", on("release", t), &member("c3"), cx(3)).unwrap_err(),
+        "#1 is claimed by b2 (b2 name): only its owner can release it"
+    );
+    assert!(s.w("r", done_op(t, "x"), &member("c3"), cx(3)).unwrap_err().contains("only its owner can finish it"));
+    assert!(s.w("r", TaskOpInput { error: Some("x".into()), ..on("fail", t) }, &member("c3"), cx(3)).is_err());
+    assert!(s.w("r", on("approve", t), &member("c3"), cx(3)).unwrap_err().contains("only a task in review"));
+    assert!(s.w("r", on("reopen", t), &root("lead"), cx(3)).unwrap_err().contains("only a done task"));
+    assert!(s.w("r", on("cancel", t), &member("c3"), cx(3)).unwrap_err().contains("who added it (lead)"));
+    // Still claimed by b2: refusals changed nothing.
+    assert_eq!(s.state("r", t, 4), "claimed");
+    s.w("r", on("release", t), &member("b2"), cx(5)).unwrap();
+    let after = s.show("r", t, 6);
+    assert_eq!(after["task"]["state"], "open");
+    assert_eq!(after["task"]["owner"], Value::Null);
+    assert_eq!(after["task"]["attempt"], 0, "release keeps the attempt");
+    s.w("r", on("cancel", t), &member("lead"), cx(7)).unwrap();
+    assert!(s.w("r", on("cancel", t), &root("lead"), cx(8)).unwrap_err().contains("cannot be cancelled"));
+    assert!(s.w("r", on("claim", t), &member("c3"), cx(8)).unwrap_err().contains("nothing to claim"));
+}
+
+#[test]
+fn cancel_by_creator_root_or_person_but_never_done() {
+    let fx = Fixture::new("cancel");
+    let s = fx.store();
+    let a = s.add("c", "a", &member("c1"), 1);
+    let b = s.add("c", "b", &member("c1"), 1);
+    let d = s.add("c", "d", &member("c1"), 1);
+    s.w("c", on("claim", b), &member("c2"), cx(2)).unwrap();
+    assert_eq!(s.w("c", on("cancel", a), &root("lead"), cx(3)).unwrap()["to"], "cancelled");
+    assert_eq!(s.w("c", on("cancel", b), &human(), cx(3)).unwrap()["task"]["leaseUntil"], Value::Null, "a claimed task can be cancelled");
+    s.w("c", on("claim", d), &member("c2"), cx(4)).unwrap();
+    s.w("c", done_op(d, "ok"), &member("c2"), cx(5)).unwrap();
+    assert!(s.w("c", on("cancel", d), &human(), cx(6)).unwrap_err().contains("is done: it cannot be cancelled"));
+    let ev = s.show("c", b, 7)["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(ev["actor"]["id"], "user");
+    assert_eq!(ev["action"], "cancel");
+}
+
+#[test]
+fn eight_claimers_on_one_task_exactly_one_wins() {
+    let fx = Fixture::new("race");
+    let t = fx.store().add("race", "only one", &member("lead"), 1);
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let s = fx.store();
+            std::thread::spawn(move || s.w("race", on("claim", t), &member(&format!("c{i}")), cx(10)))
+        })
+        .collect();
+    let results: Vec<Result<Value, String>> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    let winners: Vec<&Value> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    assert_eq!(winners.len(), 1, "{results:?}");
+    let owner = winners[0]["task"]["owner"]["id"].as_str().unwrap().to_string();
+    for e in results.iter().filter_map(|r| r.as_ref().err()) {
+        assert_eq!(e, &format!("#1 is already claimed by {owner} ({owner} name)"));
+    }
+    let events = fx.store().show("race", t, 20)["events"].as_array().unwrap().iter().filter(|e| e["action"] == "claim").count();
+    assert_eq!(events, 1);
+}
+
+#[test]
+fn eight_next_claimers_over_eight_tasks_all_get_different_ones() {
+    let fx = Fixture::new("next");
+    let s = fx.store();
+    for i in 1..=8 {
+        s.add("n", &format!("task {i}"), &member("lead"), i);
+    }
+    let handles: Vec<_> = (0..8)
+        .map(|i| {
+            let s = fx.store();
+            std::thread::spawn(move || {
+                s.w("n", TaskOpInput { next: true, ..op("claim") }, &member(&format!("c{i}")), cx(100)).unwrap()["task"]["seq"].as_i64().unwrap()
+            })
+        })
+        .collect();
+    let mut got: Vec<i64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    got.sort_unstable();
+    assert_eq!(got, (1..=8).collect::<Vec<_>>());
+    let none = s.w("n", TaskOpInput { next: true, ..op("claim") }, &member("c9"), cx(101)).unwrap();
+    assert_eq!(none["task"], Value::Null);
+    assert_eq!(none["none"], "no open task to claim");
+}
+
+#[test]
+fn next_picks_priority_then_number_and_skips_waiting_tasks() {
+    let fx = Fixture::new("order");
+    let s = fx.store();
+    let low = s.add("o", "low", &member("lead"), 1);
+    let first = s.add("o", "first", &member("lead"), 1);
+    let w = s.w("o", TaskOpInput { title: Some("urgent but waiting".into()), priority: Some(3), after: vec![first], ..op("add") }, &member("lead"), cx(1)).unwrap();
+    let waiting = w["task"]["seq"].as_i64().unwrap();
+    assert_eq!(w["task"]["waiting"], true);
+    assert_eq!(w["task"]["waitingOn"], serde_json::json!([first]));
+    let high = s.w("o", TaskOpInput { title: Some("high".into()), priority: Some(2), ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
+    let next = |who: &str| s.w("o", TaskOpInput { next: true, ..op("claim") }, &member(who), cx(5)).unwrap()["task"]["seq"].as_i64();
+    assert_eq!(next("a"), Some(high));
+    assert_eq!(next("b"), Some(low), "same priority: lower number first");
+    assert_eq!(next("c"), Some(first));
+    let none = s.w("o", TaskOpInput { next: true, ..op("claim") }, &member("d"), cx(5)).unwrap();
+    assert_eq!(none["none"], "no open task is ready: 1 wait for dependencies");
+    let e = s.w("o", on("claim", waiting), &member("d"), cx(5)).unwrap_err();
+    assert_eq!(e, format!("#{waiting} is waiting for #{first} (claimed): claim a ready task (agent task list --ready)"));
+    s.w("o", done_op(first, "done"), &member("c"), cx(6)).unwrap();
+    assert_eq!(next("d"), Some(waiting), "ready once its dependency is done");
+}
+
+#[test]
+fn dependencies_gate_claims_and_cycles_are_refused() {
+    let fx = Fixture::new("deps");
+    let s = fx.store();
+    let a = s.add("d", "a", &member("lead"), 1);
+    let b = s.add("d", "b", &member("lead"), 1);
+    let c = s.add("d", "c", &member("lead"), 1);
+    let dep = |task: i64, onto: i64, name: &str| s.w("d", TaskOpInput { on: Some(onto), ..on(name, task) }, &member("lead"), cx(2));
+    dep(b, a, "dep_add").unwrap();
+    dep(c, b, "dep_add").unwrap();
+    assert_eq!(dep(a, c, "dep_add").unwrap_err(), format!("#{c} already depends on #{a} (directly or through other tasks): that would be a cycle"));
+    assert_eq!(dep(b, a, "dep_add").unwrap_err(), format!("#{b} already depends on #{a}"));
+    assert_eq!(dep(a, a, "dep_add").unwrap_err(), format!("#{a} cannot depend on itself"));
+    assert!(dep(a, 99, "dep_add").unwrap_err().contains("no task #99"));
+    let shown = s.show("d", b, 3);
+    assert_eq!(shown["deps"][0]["seq"], a);
+    assert_eq!(shown["dependents"][0]["seq"], c);
+    let waiting = s.list("d", TaskListQuery { states: vec!["waiting".into()], ..Default::default() }, 3);
+    assert_eq!(task_seqs(&waiting), vec![b, c]);
+    assert_eq!(task_seqs(&s.list("d", TaskListQuery { ready: true, ..Default::default() }, 3)), vec![a]);
+    assert!(s.w("d", on("claim", c), &member("x"), cx(3)).unwrap_err().contains(&format!("waiting for #{b} (open)")));
+    dep(c, b, "dep_remove").unwrap();
+    assert_eq!(dep(c, b, "dep_remove").unwrap_err(), format!("#{c} does not depend on #{b}"));
+    assert_eq!(s.w("d", on("claim", c), &member("x"), cx(4)).unwrap()["to"], "claimed");
+    let actions: Vec<String> = s.show("d", c, 5)["events"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap().to_string()).collect();
+    assert_eq!(actions, vec!["add", "dep_add", "dep_remove", "claim"]);
+    // Dependency changes are refused once a task is finished.
+    s.w("d", done_op(c, "ok"), &member("x"), cx(6)).unwrap();
+    assert!(dep(c, a, "dep_add").unwrap_err().contains("dependencies change only"));
+}
+
+#[test]
+fn a_dependency_chain_deeper_than_the_bound_is_refused() {
+    let fx = Fixture::new("depth");
+    let s = fx.store();
+    // `add --after` runs the same bounded walk as `dep add`: a chain longer than the bound stops.
+    let mut last = 0;
+    let mut refused = None;
+    for i in 1..=(MAX_DEP_DEPTH as i64 + 5) {
+        let after = if i > 1 { vec![i - 1] } else { vec![] };
+        match s.w("z", TaskOpInput { title: Some(format!("t{i}")), after, ..op("add") }, &member("lead"), cx(1)) {
+            Ok(_) => last = i,
+            Err(e) => {
+                refused = Some(e);
+                break;
+            }
+        }
+    }
+    assert_eq!(refused.as_deref(), Some("dependency chain deeper than 64 levels: refused"));
+    assert!(last >= MAX_DEP_DEPTH as i64, "{last}");
+    let extra = s.add("z", "extra", &member("lead"), 1);
+    // extra → the chain's end walks the whole chain: deeper than the bound, refused.
+    let e = s.w("z", TaskOpInput { on: Some(last), ..on("dep_add", extra) }, &member("lead"), cx(2)).unwrap_err();
+    assert_eq!(e, "dependency chain deeper than 64 levels: refused");
+    // #1 → extra walks extra's (empty) chain: fine.
+    assert!(s.w("z", TaskOpInput { on: Some(extra), ..on("dep_add", 1) }, &member("lead"), cx(3)).is_ok());
+}
+
+#[test]
+fn retries_are_limited_for_members_but_not_for_root() {
+    let fx = Fixture::new("retry");
+    let s = fx.store();
+    let t = s.add("r", "flaky", &member("lead"), 1);
+    let fail = |n: i64| {
+        s.w("r", on("claim", t), &member("c1"), cx(n)).unwrap();
+        assert!(s.w("r", on("fail", t), &member("c1"), cx(n)).unwrap_err().starts_with("error required"));
+        s.w("r", TaskOpInput { error: Some(format!("boom {n}")), ..on("fail", t) }, &member("c1"), cx(n)).unwrap();
+    };
+    for n in 1..=3 {
+        fail(n);
+        let r = s.w("r", on("retry", t), &member("c2"), cx(n)).unwrap();
+        assert_eq!(r["task"]["attempt"], n);
+        assert_eq!(r["task"]["lastError"], format!("boom {n}"), "the previous error stays visible");
+    }
+    fail(4);
+    let e = s.w("r", on("retry", t), &member("c2"), cx(5)).unwrap_err();
+    assert_eq!(e, "#1 has used its retries (attempt 3 of 3): only the root tab or a person can retry it again");
+    assert_eq!(s.w("r", on("retry", t), &root("lead"), cx(6)).unwrap()["task"]["attempt"], 4);
+    let retries: Vec<Value> = s.show("r", t, 7)["events"].as_array().unwrap().iter().filter(|e| e["action"] == "retry").cloned().collect();
+    assert_eq!(retries.len(), 4);
+    assert_eq!(retries[0]["data"]["previousError"], "boom 1");
+}
+
+#[test]
+fn review_flow_submit_approve_reject() {
+    let fx = Fixture::new("review");
+    let s = fx.store();
+    let t = s.w("v", TaskOpInput { title: Some("risky change".into()), review: Some(true), ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("v", on("claim", t), &member("c1"), cx(2)).unwrap();
+    assert!(s.w("v", done_op(t, "x"), &member("c1"), cx(3)).unwrap_err().contains("use agent task submit"));
+    let sub = TaskOpInput { result: Some(ResultInput { summary: Some("first try".into()), ..Default::default() }), ..on("submit", t) };
+    let r = s.w("v", sub.clone(), &member("c1"), cx(4)).unwrap();
+    assert_eq!(r["to"], "review");
+    assert_eq!(r["task"]["submittedAt"], 4);
+    assert_eq!(r["post"], Value::Null, "no done note before approval");
+    assert!(s.w("v", on("approve", t), &member("c1"), cx(5)).unwrap_err().contains("someone else"));
+    assert!(s.w("v", on("reject", t), &member("c2"), cx(5)).unwrap_err().starts_with("reason required"));
+    let rj = s.w("v", TaskOpInput { reason: Some("missing tests".into()), ..on("reject", t) }, &member("c2"), cx(6)).unwrap();
+    assert_eq!(rj["to"], "open");
+    assert_eq!(rj["task"]["attempt"], 1);
+    assert_eq!(rj["task"]["lastError"], "rejected: missing tests");
+    assert_eq!(rj["task"]["owner"], Value::Null);
+    s.w("v", on("claim", t), &member("c1"), cx(7)).unwrap();
+    let sub2 = TaskOpInput { result: Some(ResultInput { summary: Some("with tests".into()), ..Default::default() }), ..on("submit", t) };
+    s.w("v", sub2, &member("c1"), cx(8)).unwrap();
+    let ap = s.w("v", on("approve", t), &root("lead"), cx(9)).unwrap();
+    assert_eq!(ap["to"], "done");
+    assert_eq!(ap["task"]["finishedAt"], 9);
+    let note = s.read("v", ReadQuery::default()).unwrap()["posts"].as_array().unwrap().last().unwrap().clone();
+    assert!(note["text"].as_str().unwrap().starts_with("#1 done (approved by lead name): risky change\nwith tests"));
+    assert_eq!(note["task"], t);
+    // Reopen: root or a person only.
+    assert!(s.w("v", on("reopen", t), &member("c2"), cx(10)).unwrap_err().contains("only the root tab or a person"));
+    let ro = s.w("v", on("reopen", t), &human(), cx(11)).unwrap();
+    assert_eq!(ro["to"], "open");
+    assert_eq!(ro["task"]["attempt"], 2);
+    assert_eq!(ro["task"]["finishedAt"], Value::Null);
+}
+
+#[test]
+fn edit_changes_fields_checks_permissions_and_versions() {
+    let fx = Fixture::new("edit");
+    let s = fx.store();
+    let t = s.add("e", "old title", &member("lead"), 1);
+    let v1 = s.show("e", t, 2)["task"]["version"].as_i64().unwrap();
+    assert!(s.w("e", TaskOpInput { title: Some("x".into()), ..on("edit", t) }, &member("c9"), cx(2)).unwrap_err().contains("can be changed only"));
+    assert!(s.w("e", on("edit", t), &member("lead"), cx(2)).unwrap_err().starts_with("nothing to edit"));
+    let r = s
+        .w(
+            "e",
+            TaskOpInput { title: Some("new title".into()), body: Some("new body".into()), priority: Some(0), labels: Some(vec!["x".into()]), expected_version: Some(v1), ..on("edit", t) },
+            &member("lead"),
+            cx(3),
+        )
+        .unwrap();
+    assert_eq!(r["task"]["title"], "new title");
+    assert_eq!(r["task"]["body"], "new body");
+    assert_eq!(r["task"]["priority"], 0);
+    assert_eq!(r["task"]["labels"], serde_json::json!(["x"]));
+    assert_eq!(r["task"]["version"], v1 + 1);
+    let stale = s.w("e", TaskOpInput { title: Some("again".into()), expected_version: Some(v1), ..on("edit", t) }, &human(), cx(4)).unwrap_err();
+    assert_eq!(stale, format!("#1 changed since you loaded it (version {v1}, now {}): load it again", v1 + 1));
+    let ev = s.show("e", t, 5)["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(ev["action"], "edit");
+    assert_eq!(ev["data"]["fields"], serde_json::json!(["title", "body", "priority", "labels"]));
+    // Clearing the body with an empty string.
+    let cleared = s.w("e", TaskOpInput { body: Some(" ".into()), ..on("edit", t) }, &member("lead"), cx(6)).unwrap();
+    assert_eq!(cleared["task"]["body"], Value::Null);
+}
+
+#[test]
+fn list_filters_states_mine_search_stale_and_all() {
+    let fx = Fixture::new("list");
+    let s = fx.store();
+    let a = s.add("l", "Write the parser", &member("lead"), 1);
+    let b = s.add("l", "Write docs", &member("lead"), 1);
+    let c = s.add("l", "Ship it", &member("lead"), 1);
+    s.w("l", on("claim", a), &member("c1"), cx(10)).unwrap();
+    s.w("l", on("claim", c), &member("c2"), cx(10)).unwrap();
+    s.w("l", done_op(c, "shipped"), &member("c2"), cx(11)).unwrap();
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery::default(), 12)), vec![a, b], "done is hidden by default");
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery { all: true, ..Default::default() }, 12)), vec![a, b, c]);
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery { mine: Some("c1".into()), ..Default::default() }, 12)), vec![a]);
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery { states: vec!["done".into()], ..Default::default() }, 12)), vec![c]);
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery { search: Some("write".into()), ..Default::default() }, 12)), vec![a, b]);
+    assert_eq!(task_seqs(&s.list("l", TaskListQuery { search: Some("%".into()), all: true, ..Default::default() }, 12)), Vec::<i64>::new());
+    let stale_at = 10 + DEFAULT_STALE_MS + 1;
+    // Renew the lease so it is not expired, only stale (no progress).
+    run(s.0.lease_tick("inst-a".into(), vec!["c1".into()], stale_at - 1, 3_600_000)).unwrap();
+    let st = s.list("l", TaskListQuery { states: vec!["stale".into()], ..Default::default() }, stale_at);
+    assert_eq!(task_seqs(&st), vec![a]);
+    assert_eq!(st["tasks"][0]["stale"], true);
+    assert_eq!(st["counts"]["stale"], 1);
+    assert_eq!(st["counts"]["claimed"], 1);
+    assert_eq!(st["counts"]["done"], 1);
+    let limited = s.list("l", TaskListQuery { all: true, limit: Some(1), ..Default::default() }, 12);
+    assert_eq!(limited["matched"], 3);
+    assert_eq!(limited["more"], 2);
+    assert!(run(s.0.task_list("l".into(), TaskListQuery { states: vec!["sleeping".into()], ..Default::default() }, cx(12))).unwrap_err().starts_with("invalid state"));
+}
+
+// ── Leases ───────────────────────────────────────────────────────────────
+
+#[test]
+fn leases_expire_lazily_and_an_owner_write_renews_its_own() {
+    let fx = Fixture::new("lease");
+    let s = fx.store();
+    let a = s.add("l", "a", &member("lead"), 1);
+    let b = s.add("l", "b", &member("lead"), 1);
+    s.w("l", TaskOpInput { lease_ms: Some(60_000), ..on("claim", a) }, &member("c1"), cx(1_000)).unwrap();
+    s.w("l", TaskOpInput { lease_ms: Some(60_000), ..on("claim", b) }, &member("c2"), cx(1_000)).unwrap();
+    // Before expiry nothing changes.
+    assert_eq!(s.state("l", a, 60_000), "claimed");
+    // c2 writes after its lease ran out: its own task is kept (it proves it is alive)…
+    let late = s.w("l", TaskOpInput { reason: Some("waiting on a".into()), lease_ms: Some(60_000), ..on("block", b) }, &member("c2"), cx(70_000)).unwrap();
+    assert_eq!(late["to"], "blocked");
+    assert_eq!(late["task"]["leaseUntil"], 70_000 + 60_000);
+    // …while c1's expired task was released in the same transaction.
+    assert_eq!(late["expired"][0]["seq"], a);
+    let shown = s.show("l", a, 70_001);
+    assert_eq!(shown["task"]["state"], "open");
+    let last = shown["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["action"], "lease_expired");
+    assert_eq!(last["actor"]["id"], "app");
+    assert_eq!(last["data"]["ownerId"], "c1");
+    // Another machine's reader expires an abandoned task on list.
+    let s2 = fx.store();
+    let l = run(s2.0.task_list("l".into(), TaskListQuery::default(), cx_other(70_000 + 60_001))).unwrap();
+    assert_eq!(l["expired"][0]["seq"], b);
+    assert_eq!(s.state("l", b, 200_000), "open");
+}
+
+#[test]
+fn lease_tick_renews_only_alive_owners_of_this_instance() {
+    let fx = Fixture::new("tick");
+    let s = fx.store();
+    for i in 1..=3 {
+        s.add("k", &format!("t{i}"), &member("lead"), 1);
+    }
+    s.w("k", TaskOpInput { lease_ms: Some(60_000), ..on("claim", 1) }, &member("c1"), cx(1_000)).unwrap();
+    s.w("k", TaskOpInput { lease_ms: Some(60_000), ..on("claim", 2) }, &member("c2"), cx(1_000)).unwrap();
+    s.w("k", TaskOpInput { lease_ms: Some(60_000), ..on("claim", 3) }, &remote("c3"), cx_other(1_000)).unwrap();
+    let r = run(s.0.lease_tick("inst-a".into(), vec!["c1".into(), "c3".into()], 50_000, 60_000)).unwrap();
+    assert_eq!(r["renewed"], 1, "c2 is not alive, c3 belongs to another instance");
+    let mut holders: Vec<String> = r["holders"].as_array().unwrap().iter().map(|h| h.as_str().unwrap().to_string()).collect();
+    holders.sort();
+    assert_eq!(holders, vec!["c1", "c2"]);
+    assert_eq!(s.show("k", 1, 50_000)["task"]["leaseUntil"], 110_000);
+    assert_eq!(s.show("k", 2, 50_000)["task"]["leaseUntil"], 61_000);
+    // The app releases c2 (tab gone) right away.
+    let rel = run(s.0.release_owner("inst-a".into(), "c2".into(), 50_001, Some(here()), "owner tab closed".into())).unwrap();
+    assert_eq!(rel["released"][0]["seq"], 2);
+    let ev = s.show("k", 2, 50_002)["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(ev["action"], "auto_release");
+    assert_eq!(ev["note"], "owner tab closed");
+    // Another instance's tab with the same id is not touched.
+    let none = run(s.0.release_owner("inst-a".into(), "c3".into(), 50_003, None, "x".into())).unwrap();
+    assert!(none["released"].as_array().unwrap().is_empty());
+    // Nothing held by this instance any more after c1 finishes: holders is empty.
+    s.w("k", done_op(1, "ok"), &member("c1"), cx(50_004)).unwrap();
+    let r = run(s.0.lease_tick("inst-a".into(), vec!["c1".into()], 50_005, 60_000)).unwrap();
+    assert_eq!(r["renewed"], 0);
+    assert!(r["holders"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn startup_adopts_recovered_owners_and_releases_the_rest() {
+    let fx = Fixture::new("adopt");
+    let s = fx.store();
+    for i in 1..=3 {
+        s.add("s", &format!("t{i}"), &member("lead"), 1);
+    }
+    s.w("s", on("claim", 1), &member("kept"), cx(1_000)).unwrap();
+    s.w("s", on("claim", 2), &member("gone"), cx(1_000)).unwrap();
+    s.w("s", on("claim", 3), &remote("remote"), cx_other(1_000)).unwrap();
+    let held = run(s.0.held_on_host(here())).unwrap();
+    assert_eq!(held.len(), 2, "only this host's tasks");
+    assert!(held.iter().all(|h| h["ownerInstance"] == "inst-a"));
+    let item = |seq: i64| LeaseItem { id: held.iter().find(|h| h["seq"] == seq).unwrap()["id"].as_str().unwrap().to_string(), instance: "inst-a".into() };
+    let r = run(s.0.lease_apply("inst-new".into(), vec![item(1)], vec![item(2)], 2_000, 60_000, Some(here()))).unwrap();
+    assert_eq!(r["adopted"], 1);
+    assert_eq!(r["released"][0]["seq"], 2);
+    let t1 = s.show("s", 1, 2_001)["task"].clone();
+    assert_eq!(t1["owner"]["instance"], "inst-new");
+    assert_eq!(t1["leaseUntil"], 62_000);
+    assert_eq!(s.state("s", 2, 2_001), "open");
+    assert_eq!(s.state("s", 3, 2_001), "claimed", "another host's task is left to its lease");
+    // A stale decision (the instance changed meanwhile) does nothing.
+    let again = run(s.0.lease_apply("inst-x".into(), vec![item(1)], vec![item(1)], 3_000, 60_000, None)).unwrap();
+    assert_eq!(again["adopted"], 0);
+    assert!(again["released"].as_array().unwrap().is_empty());
+}
+
+// ── Caps ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn task_cap_prunes_oldest_finished_and_never_live_tasks() {
+    let fx = Fixture::with_limits("taskcap", Limits { tasks: 4, ..Limits::default() });
+    let s = fx.store();
+    let finish = |seq: i64, now: i64| {
+        s.w("c", on("claim", seq), &member("w"), cx(now)).unwrap();
+        s.w("c", done_op(seq, "ok"), &member("w"), cx(now)).unwrap();
+    };
+    let t1 = s.add("c", "t1", &member("lead"), 1);
+    let t2 = s.add("c", "t2", &member("lead"), 2);
+    let keep = s.add("c", "dependent", &member("lead"), 3);
+    s.w("c", TaskOpInput { on: Some(t2), ..on("dep_add", keep) }, &member("lead"), cx(3)).unwrap();
+    finish(t1, 10);
+    s.w("c", on("claim", t2), &member("w"), cx(11)).unwrap();
+    s.w("c", TaskOpInput { error: Some("x".into()), ..on("fail", t2) }, &member("w"), cx(11)).unwrap();
+    let t4 = s.add("c", "t4", &member("lead"), 12);
+    // Full (4). The next add prunes t1 (oldest finished); t2 is failed but a live task
+    // depends on it, so it stays.
+    let t5 = s.add("c", "t5", &member("lead"), 13);
+    let all = s.list("c", TaskListQuery { all: true, ..Default::default() }, 14);
+    let mut got = task_seqs(&all);
+    got.sort_unstable();
+    assert_eq!(got, vec![t2, keep, t4, t5]);
+    // Everything left is live or protected: the cap refuses instead of pruning live tasks.
+    let e = s.w("c", TaskOpInput { title: Some("t6".into()), ..op("add") }, &member("lead"), cx(15)).unwrap_err();
+    assert!(e.starts_with("task limit reached: team c has 4 tasks"), "{e}");
+    assert_eq!(s.add("c2", "other team is separate", &member("lead"), 15), 1);
+}
+
+#[test]
+fn event_cap_drops_whole_finished_tasks_first() {
+    let fx = Fixture::with_limits("eventcap", Limits { events: 12, ..Limits::default() });
+    let s = fx.store();
+    let old = s.add("e", "old", &member("lead"), 1); // 1 event
+    s.w("e", on("claim", old), &member("w"), cx(2)).unwrap(); // 2
+    s.w("e", done_op(old, "ok"), &member("w"), cx(3)).unwrap(); // 3
+    let live = s.add("e", "live", &member("lead"), 4); // 4
+    for i in 0..4 {
+        s.w("e", TaskOpInput { title: Some(format!("v{i}")), ..on("edit", live) }, &member("lead"), cx(5 + i)).unwrap(); // 5..8
+    }
+    s.w("e", on("claim", live), &member("w"), cx(20)).unwrap(); // 9
+    for i in 0..3 {
+        s.w("e", TaskOpInput { reason: Some("r".into()), ..on("block", live) }, &member("w"), cx(30 + i)).unwrap();
+        s.w("e", on("unblock", live), &member("w"), cx(40 + i)).unwrap();
+    } // 15 → over the cap: the finished task and its 3 events go first.
+    assert!(task_seqs(&s.list("e", TaskListQuery { all: true, ..Default::default() }, 50)).iter().all(|n| *n != old));
+    let live_events = s.show("e", live, 50)["events"].as_array().unwrap().len();
+    assert_eq!(live_events, 12, "a live task's history is never trimmed");
+    assert_eq!(s.read("e", ReadQuery::default()).unwrap()["posts"][0]["task"], Value::Null, "its done note stays, unlinked");
+}
+
+// ── Review fixes ─────────────────────────────────────────────────────────
+
+#[test]
+fn an_owner_cannot_skip_review_by_editing_it_away() {
+    let fx = Fixture::new("bypass");
+    let s = fx.store();
+    let t = s.w("b", TaskOpInput { title: Some("risky".into()), review: Some(true), ..op("add") }, &member("c1"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("b", on("claim", t), &member("c1"), cx(2)).unwrap();
+    let e = s.w("b", TaskOpInput { review: Some(false), ..on("edit", t) }, &member("c1"), cx(3)).unwrap_err();
+    assert!(e.contains("its owner cannot change whether it needs review"), "{e}");
+    assert!(s.w("b", done_op(t, "x"), &member("c1"), cx(4)).unwrap_err().contains("needs review"));
+    // The owner may still fix the title while working on it.
+    assert!(s.w("b", TaskOpInput { title: Some("risky change".into()), ..on("edit", t) }, &member("c1"), cx(5)).is_ok());
+    // The root tab can drop the review step while it is not in review.
+    s.w("b", TaskOpInput { review: Some(false), ..on("edit", t) }, &root("lead"), cx(6)).unwrap();
+    // Nobody approves their own work, the root tab included.
+    let r = s.w("b", TaskOpInput { title: Some("lead's own".into()), review: Some(true), ..op("add") }, &root("lead"), cx(7)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("b", on("claim", r), &root("lead"), cx(8)).unwrap();
+    s.w("b", TaskOpInput { result: Some(ResultInput { summary: Some("s".into()), ..Default::default() }), ..on("submit", r) }, &root("lead"), cx(9)).unwrap();
+    assert!(s.w("b", on("approve", r), &root("lead"), cx(10)).unwrap_err().contains("someone else"));
+    assert_eq!(s.w("b", on("approve", r), &human(), cx(11)).unwrap()["to"], "done");
+}
+
+#[test]
+fn a_cancelled_dependency_counts_as_met_and_is_flagged() {
+    let fx = Fixture::new("canceldep");
+    let s = fx.store();
+    let a = s.add("c", "a", &member("lead"), 1);
+    let f = s.add("c", "f", &member("lead"), 1);
+    let b = s.w("c", TaskOpInput { title: Some("b".into()), after: vec![a, f], ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("c", on("cancel", a), &member("lead"), cx(2)).unwrap();
+    s.w("c", on("claim", f), &member("w"), cx(3)).unwrap();
+    s.w("c", TaskOpInput { error: Some("broke".into()), ..on("fail", f) }, &member("w"), cx(3)).unwrap();
+    let shown = s.show("c", b, 4)["task"].clone();
+    assert_eq!(shown["cancelledDeps"], serde_json::json!([a]));
+    assert_eq!(shown["waitingOn"], serde_json::json!([f]), "a failed dependency still blocks");
+    assert!(s.w("c", on("claim", b), &member("x"), cx(5)).unwrap_err().contains(&format!("#{f} (failed)")));
+    s.w("c", TaskOpInput { on: Some(f), ..on("dep_remove", b) }, &member("lead"), cx(6)).unwrap();
+    assert_eq!(s.w("c", on("claim", b), &member("x"), cx(7)).unwrap()["to"], "claimed", "only the cancelled one is left: met");
+    let d = s.add("c", "d", &member("lead"), 8);
+    assert_eq!(s.w("c", TaskOpInput { on: Some(a), ..on("dep_add", d) }, &member("lead"), cx(9)).unwrap_err(), format!("#{a} is cancelled: it cannot be a dependency"));
+    assert!(s.w("c", TaskOpInput { title: Some("e".into()), after: vec![a], ..op("add") }, &member("lead"), cx(9)).unwrap_err().contains("cancelled"));
+}
+
+#[test]
+fn dependency_changes_follow_the_edit_permission() {
+    let fx = Fixture::new("depperm");
+    let s = fx.store();
+    let a = s.add("p", "a", &member("lead"), 1);
+    let b = s.add("p", "b", &member("lead"), 1);
+    let add = |who: &Actor, name: &str| s.w("p", TaskOpInput { on: Some(a), ..on(name, b) }, who, cx(2));
+    assert!(add(&member("x"), "dep_add").unwrap_err().contains("can be changed only"));
+    add(&member("lead"), "dep_add").unwrap();
+    assert!(add(&member("x"), "dep_remove").unwrap_err().contains("can be changed only"));
+    add(&root("root"), "dep_remove").unwrap();
+}
+
+#[test]
+fn a_person_cannot_claim_or_work_on_a_task() {
+    let fx = Fixture::new("person");
+    let s = fx.store();
+    let t = s.add("h", "t", &human(), 1);
+    assert!(s.w("h", on("claim", t), &human(), cx(2)).unwrap_err().starts_with("a person cannot claim"));
+    assert!(s.w("h", TaskOpInput { next: true, ..op("claim") }, &human(), cx(2)).unwrap_err().starts_with("a person cannot claim"));
+    assert_eq!(s.w("h", on("cancel", t), &human(), cx(3)).unwrap()["to"], "cancelled");
+}
+
+#[test]
+fn another_member_claims_after_a_lease_expired() {
+    let fx = Fixture::new("reclaim");
+    let s = fx.store();
+    let t = s.add("r", "t", &member("lead"), 1);
+    s.w("r", TaskOpInput { lease_ms: Some(60_000), ..on("claim", t) }, &member("c1"), cx(1_000)).unwrap();
+    assert!(s.w("r", on("claim", t), &member("c2"), cx(30_000)).unwrap_err().contains("already claimed"));
+    let c = s.w("r", on("claim", t), &member("c2"), cx(61_001)).unwrap();
+    assert_eq!(c["expired"][0]["seq"], t);
+    assert_eq!(c["task"]["owner"]["id"], "c2");
+    // The first owner learns it lost the task.
+    assert!(s.w("r", done_op(t, "x"), &member("c1"), cx(61_002)).unwrap_err().contains("only its owner"));
+}
+
+#[test]
+fn block_moves_the_claim_to_the_acting_instance() {
+    let fx = Fixture::new("blockinst");
+    let s = fx.store();
+    let t = s.add("i", "t", &member("lead"), 1);
+    s.w("i", on("claim", t), &member("c1"), cx(1)).unwrap();
+    let other = Ctx { instance: "inst-z".into(), ..cx(2) };
+    let b = s.w("i", TaskOpInput { reason: Some("r".into()), ..on("block", t) }, &member("c1"), other).unwrap();
+    assert_eq!(b["task"]["owner"]["instance"], "inst-z");
+}
+
+#[test]
+fn live_history_over_the_event_cap_does_not_wipe_finished_tasks() {
+    let fx = Fixture::with_limits("livecap", Limits { events: 5, ..Limits::default() });
+    let s = fx.store();
+    let live = s.add("e", "live", &member("lead"), 1);
+    s.w("e", on("claim", live), &member("w"), cx(2)).unwrap();
+    for i in 0..4 {
+        s.w("e", TaskOpInput { reason: Some("r".into()), ..on("block", live) }, &member("w"), cx(3 + i)).unwrap();
+        s.w("e", on("unblock", live), &member("w"), cx(20 + i)).unwrap();
+    }
+    let done = s.add("e", "done one", &member("lead"), 30);
+    s.w("e", on("claim", done), &member("w"), cx(31)).unwrap();
+    s.w("e", done_op(done, "ok"), &member("w"), cx(32)).unwrap();
+    s.add("e", "one more write", &member("lead"), 33);
+    // The live task has 10 events (over the cap of 5 alone): pruning the finished task would
+    // not help, so it is kept.
+    assert!(task_seqs(&s.list("e", TaskListQuery { all: true, ..Default::default() }, 50)).contains(&done));
+}
+
+#[test]
+fn tombstones_are_kept_while_a_sync_consumer_exists() {
+    let fx = Fixture::new("purgeguard");
+    let s = fx.store();
+    let day = 24 * 60 * 60 * 1000;
+    s.post("g", input("t1", "note", "x"), 1).unwrap();
+    s.clear("g", 2).unwrap();
+    s.post("g", input("t1", "note", "keep the team alive"), 40 * day).unwrap();
+    let c = raw(&fx);
+    c.execute("INSERT INTO sync_state(key, value) VALUES ('consumer', 'test')", []).unwrap();
+    run(s.0.prune_stale(40 * day, STALE_AFTER_MS)).unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 2, "the old tombstone stays for the consumer");
+    c.execute("DELETE FROM sync_state", []).unwrap();
+    run(s.0.prune_stale(40 * day, STALE_AFTER_MS)).unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 1);
+}
+
+#[test]
+fn read_refuses_a_malformed_cursor_tab() {
+    let fx = Fixture::new("cursorid");
+    let s = fx.store();
+    let e = s.read("g", ReadQuery { cursor_tab: Some("x".repeat(129)), ..Default::default() }).unwrap_err();
+    assert!(e.starts_with("invalid read cursor tab id"), "{e}");
+}
+
+// ── Sync groundwork: ids, tombstones, change log, arrival cursors ────────
+
+fn raw(fx: &Fixture) -> rusqlite::Connection {
+    rusqlite::Connection::open(fx.db()).unwrap()
+}
+
+fn count(c: &rusqlite::Connection, sql: &str) -> i64 {
+    c.query_row(sql, [], |r| r.get(0)).unwrap()
+}
+
+#[test]
+fn row_ids_are_uuid_v7_in_creation_order() {
+    let fx = Fixture::new("ids");
+    let s = fx.store();
+    for i in 0..5 {
+        s.post("u", input("t1", "note", &format!("p{i}")), i).unwrap();
+    }
+    let t = s.add("u", "task", &member("t1"), 10);
+    s.w("u", on("claim", t), &member("t1"), cx(11)).unwrap();
+    let c = raw(&fx);
+    for (sql, n) in [
+        ("SELECT id FROM posts ORDER BY seq", 5),
+        ("SELECT id FROM task_events ORDER BY seq", 2),
+        ("SELECT id FROM tasks", 1),
+        ("SELECT uid FROM teams", 1),
+    ] {
+        let mut stmt = c.prepare(sql).unwrap();
+        let ids: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(ids.len(), n, "{sql}");
+        for id in &ids {
+            assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 7, "{id}");
+        }
+        let mut sorted = ids.clone();
+        sorted.sort();
+        assert_eq!(sorted, ids, "ids sort by creation: {sql}");
+    }
+    let (home, origin): (String, String) = c.query_row("SELECT home_host, origin_host FROM teams", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!((home, origin), (here(), here()));
+    let task_team: String = c.query_row("SELECT team_uid FROM tasks", [], |r| r.get(0)).unwrap();
+    let uid: String = c.query_row("SELECT uid FROM teams", [], |r| r.get(0)).unwrap();
+    assert_eq!(task_team, uid, "rows reference the team uid");
+}
+
+#[test]
+fn every_write_path_appends_to_the_change_log() {
+    let fx = Fixture::new("changes");
+    let s = fx.store();
+    s.post("w", input("t1", "note", "first"), 0).unwrap();
+    let c = raw(&fx);
+    let mut last = 0;
+    let mut step = |what: &str, f: &dyn Fn()| {
+        f();
+        let now = count(&c, "SELECT coalesce(max(local_seq), 0) FROM changes");
+        assert!(now > last, "{what} logged no change");
+        last = now;
+    };
+    step("post", &|| { s.post("w", input("t1", "note", "x"), 1).unwrap(); });
+    step("add", &|| { s.add("w", "a", &member("t1"), 2); });
+    step("add 2", &|| { s.add("w", "b", &member("t1"), 2); });
+    step("dep add", &|| { s.w("w", TaskOpInput { on: Some(1), ..on("dep_add", 2) }, &member("t1"), cx(3)).unwrap(); });
+    step("dep rm", &|| { s.w("w", TaskOpInput { on: Some(1), ..on("dep_remove", 2) }, &member("t1"), cx(3)).unwrap(); });
+    step("claim", &|| { s.w("w", on("claim", 1), &member("t1"), cx(4)).unwrap(); });
+    step("lease tick", &|| { run(s.0.lease_tick("inst-a".into(), vec!["t1".into()], 5, 60_000)).unwrap(); });
+    step("done", &|| { s.w("w", done_op(1, "ok"), &member("t1"), cx(6)).unwrap(); });
+    step("claim 2", &|| { s.w("w", on("claim", 2), &member("t2"), cx(7)).unwrap(); });
+    step("release owner", &|| { run(s.0.release_owner("inst-a".into(), "t2".into(), 8, None, "closed".into())).unwrap(); });
+    step("clear", &|| { s.clear("w", 9).unwrap(); });
+    // Each logged row is one of the synced tables; deps are keyed task/depends_on.
+    let tables: Vec<String> = {
+        let mut stmt = c.prepare("SELECT DISTINCT tbl FROM changes ORDER BY tbl").unwrap();
+        stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert_eq!(tables, vec!["posts", "task_deps", "task_events", "tasks", "teams"]);
+    assert_eq!(count(&c, "SELECT count(*) FROM changes WHERE tbl = 'task_deps' AND row_id LIKE '%/%'"), count(&c, "SELECT count(*) FROM changes WHERE tbl = 'task_deps'"));
+    // Every update bumps row_version.
+    assert!(count(&c, "SELECT row_version FROM tasks WHERE seq = 1") >= 3);
+}
+
+#[test]
+fn the_change_log_stays_bounded_without_a_consumer() {
+    let fx = Fixture::with_limits("changecap", Limits { changes: 10, ..Limits::default() });
+    let s = fx.store();
+    for i in 0..20 {
+        s.post("b", input("t1", "note", &format!("p{i}")), i).unwrap();
+    }
+    let c = raw(&fx);
+    assert!(count(&c, "SELECT count(*) FROM changes") <= 11);
+    c.execute("INSERT INTO sync_state(key, value) VALUES ('consumer', 'test')", []).unwrap();
+    for i in 0..20 {
+        s.post("b", input("t1", "note", &format!("q{i}")), 100 + i).unwrap();
+    }
+    assert!(count(&c, "SELECT count(*) FROM changes") > 30, "a consumer keeps the log");
+}
+
+#[test]
+fn tombstones_hide_rows_and_are_purged_after_thirty_days() {
+    let fx = Fixture::with_limits("tomb", Limits { posts: 3, ..Limits::default() });
+    let s = fx.store();
+    let day = 24 * 60 * 60 * 1000;
+    for i in 1..=4 {
+        s.post("t", input("t1", "note", &format!("p{i}")), i).unwrap();
+    }
+    let c = raw(&fx);
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 4, "the cap tombstones, it does not delete");
+    assert_eq!(count(&c, "SELECT count(*) FROM posts WHERE deleted_at IS NOT NULL"), 1);
+    assert_eq!(seqs(&s.read("t", ReadQuery::default()).unwrap()), vec![2, 3, 4]);
+    s.clear("t", 10).unwrap();
+    assert!(seqs(&s.read("t", ReadQuery::default()).unwrap()).is_empty());
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 4);
+    // Still active: nothing purged before 30 days; afterwards the tombstones go for good.
+    s.post("t", input("t1", "note", "later"), 20 * day).unwrap();
+    run(s.0.prune_stale(20 * day + 1, STALE_AFTER_MS)).unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 5);
+    run(s.0.prune_stale(45 * day, STALE_AFTER_MS)).unwrap();
+    assert_eq!(count(&c, "SELECT count(*) FROM posts"), 1, "only the live post is left");
+    assert_eq!(seqs(&s.read("t", ReadQuery::default()).unwrap()), vec![5]);
+}
+
+#[test]
+fn new_reads_follow_local_arrival_so_a_late_row_is_not_skipped() {
+    let fx = Fixture::new("arrival");
+    let s = fx.store();
+    s.post("a", input("t2", "note", "one"), 1).unwrap();
+    s.post("a", input("t2", "note", "two"), 2).unwrap();
+    let newq = || ReadQuery { cursor_tab: Some("t1".into()), exclude_author: Some("t1".into()), ..Default::default() };
+    assert_eq!(seqs(&s.read("a", newq()).unwrap()), vec![1, 2]);
+    // A row with a lower seq arrives later (as a sync would deliver it): it is still unread.
+    let c = raw(&fx);
+    c.execute("INSERT INTO changes(tbl, row_id, at) VALUES ('posts', 'late-row', 3)", []).unwrap();
+    let arrival = c.last_insert_rowid();
+    let uid: String = c.query_row("SELECT uid FROM teams", [], |r| r.get(0)).unwrap();
+    c.execute(
+        "INSERT INTO posts(id, team_uid, seq, ts, author_id, kind, text, arrival, origin_host, updated_at)
+         VALUES ('late-row', ?1, 0, 3, 't9', 'note', 'from another machine', ?2, 'host-b', 3)",
+        rusqlite::params![uid, arrival],
+    )
+    .unwrap();
+    let late = s.read("a", newq()).unwrap();
+    assert_eq!(seqs(&late), vec![0]);
+    assert!(seqs(&s.read("a", newq()).unwrap()).is_empty());
+}
+
+// ── SQLite file specifics ────────────────────────────────────────────────
+
+mod sqlite_only {
+    use super::*;
+    use rusqlite::{Connection, TransactionBehavior};
+    use std::time::Duration;
+
+    /// A database exactly as stage 1 left it (schema 1 in user_version, old column names).
+    fn write_stage1_db(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE posts (id INTEGER PRIMARY KEY, team TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
+              author_id TEXT, author_name TEXT, author_cli TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(team, seq));
+            CREATE INDEX posts_team_ts ON posts(team, ts);
+            CREATE TABLE teams (team TEXT PRIMARY KEY NOT NULL, name TEXT, last_seq INTEGER NOT NULL DEFAULT 0, updated_ts INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE cursors (team TEXT NOT NULL, tab_id TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(team, tab_id));
+            INSERT INTO posts(team, seq, ts, author_id, author_name, author_cli, kind, text) VALUES
+              ('r1', 1, 100, 't1', 'lead', 'claude', 'note', 'first'),
+              ('r1', 2, 200, 't2', 'kid', 'codex', 'finding', 'second');
+            INSERT INTO teams(team, name, last_seq, updated_ts) VALUES ('r1', 'lead', 3, 300);
+            INSERT INTO cursors(team, tab_id, seq) VALUES ('r1', 't2', 1);
+            PRAGMA user_version = 1;
+            "#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_stage1_database_migrates_forward_without_losing_data() {
+        let fx = Fixture::new("migrate");
+        write_stage1_db(&fx.db());
+        let s = fx.store();
+        let r = s.read("r1", ReadQuery { limit: Some(50), ..Default::default() }).unwrap();
+        assert_eq!(seqs(&r), vec![1, 2]);
+        assert_eq!(r["posts"][1]["author"]["cliType"], "codex");
+        assert_eq!(r["lastSeq"], 3);
+        assert_eq!(r["teamName"], "lead");
+        // The cursor survived: t2 has read seq 1.
+        let n = s.read("r1", ReadQuery { cursor_tab: Some("t2".into()), ..Default::default() }).unwrap();
+        assert_eq!(seqs(&n), vec![2]);
+        // Counters continue; tasks work.
+        assert_eq!(s.post("r1", input("t1", "note", "third"), 400).unwrap()["seq"], 4);
+        assert_eq!(s.add("r1", "first task", &member("t1"), 400), 1);
+        let teams = s.teams();
+        assert_eq!(teams[0]["updatedTs"], 400);
+        drop(s);
+        let conn = Connection::open(fx.db()).unwrap();
+        let (v, user): (String, i64) = conn
+            .query_row("SELECT (SELECT value FROM board_meta WHERE key='schema_version'), (SELECT user_version FROM pragma_user_version)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION.to_string());
+        assert_eq!(user, SCHEMA_VERSION, "mirrored so a stage-1 app refuses this file");
+        let created: i64 = conn.query_row("SELECT created_at FROM teams WHERE team = 'r1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(created, 100, "created_at from the oldest post");
+        let journal: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        for idx in ["tasks_next", "tasks_owner", "tasks_parent", "tasks_lease", "task_deps_on", "task_events_task", "task_events_team_ts", "posts_team_kind_seq", "posts_team_ts"] {
+            let n: i64 = conn.query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?1", [idx], |r| r.get(0)).unwrap();
+            assert_eq!(n, 1, "index {idx}");
+        }
+    }
+
+    #[test]
+    fn opening_needs_no_write_lock_and_refuses_a_newer_schema() {
+        let fx = Fixture::new("version");
+        drop(super::super::sqlite::open_db(&fx.db()).unwrap());
+        let mut holder = Connection::open(fx.db()).unwrap();
+        let tx = holder.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let start = std::time::Instant::now();
+        let conn = super::super::sqlite::open_db(&fx.db()).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(2), "open waited for the write lock");
+        drop(conn);
+        tx.rollback().unwrap();
+        drop(holder);
+        let newer = Connection::open(fx.db()).unwrap();
+        newer.execute("UPDATE board_meta SET value = ?1 WHERE key = 'schema_version'", [(SCHEMA_VERSION + 1).to_string()]).unwrap();
+        drop(newer);
+        let err = super::super::sqlite::open_db(&fx.db()).err().expect("must refuse");
+        assert!(err.starts_with("team board unavailable: database is from a newer app version"), "{err}");
+        let e = fx.store().post("t", input("t1", "note", "x"), 1).unwrap_err();
+        assert!(e.starts_with("team board unavailable:"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_wal_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let fx = Fixture::new("mode");
+        let s = fx.store();
+        s.post("m", input("t1", "note", "x"), 1).unwrap();
+        s.add("m", "a task", &member("t1"), 1);
+        let mode = |suffix: &str| {
+            let mut p = fx.db().into_os_string();
+            p.push(suffix);
+            std::fs::metadata(PathBuf::from(p)).map(|m| m.permissions().mode() & 0o777).ok()
+        };
+        assert_eq!(mode(""), Some(0o600));
+        assert_eq!(mode("-wal"), Some(0o600));
+        assert_eq!(mode("-shm"), Some(0o600));
+        drop(s);
+        std::fs::set_permissions(fx.db(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(super::super::sqlite::open_db(&fx.db()).unwrap());
+        assert_eq!(mode(""), Some(0o600), "a wider file is tightened");
+    }
+
+    #[test]
+    fn a_corrupt_database_reports_unavailable() {
+        let fx = Fixture::new("corrupt");
+        std::fs::create_dir_all(&fx.dir).unwrap();
+        std::fs::write(fx.db(), b"this is not a sqlite database, just bytes........................................................").unwrap();
+        let err = super::super::sqlite::open_db(&fx.db()).err().expect("must fail");
+        assert!(err.starts_with("team board unavailable:"), "{err}");
+    }
+}
