@@ -39,7 +39,7 @@ import {
   isProgramStatusStale,
   type ProgramStatusChange,
 } from './terminal/programStatusHandler';
-import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, readAgentStatusLog, recordAgentStatusLog, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, isAliveInHolderError, markAwaitingRestart, markRecoveredHandled, omittedBytesLine, planAfterProbe, recoveredPtyFor, recoveredStartPlan, type RecoveredPty } from './terminal/ptyRecovery';
 import { shouldNotifyReady } from './terminal/readyNotify';
@@ -440,8 +440,11 @@ const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extr
   };
   // Last-command tracking in agent tabs commits on the working transition (terminal/lastCommand.ts).
   if (!detail.replaying) noteAgentStatus(terminalId, detail.state, { cleared: detail.cleared });
+  recordAgentStatusLog(detail);
   window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
 };
+// Diagnostics for "the dot shows the wrong state": recent status events per terminal.
+if (typeof window !== 'undefined') (window as any).__bbaritAgentStatusLog = readAgentStatusLog;
 
 /** registerOscHandler(7501) 본체 — 로직은 terminal/programStatusHandler.ts. */
 const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
@@ -453,7 +456,7 @@ const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
       if (handler) handler(change);
       else dispatchAgentStatus(terminalId, change.store);
     },
-    onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore()),
+    onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore(), { reset: true }),
   });
 };
 

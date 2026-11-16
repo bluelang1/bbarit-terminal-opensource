@@ -186,7 +186,7 @@ import { getLoungeHandle } from './collab/loungeClient';
 import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, totalLoungeUnread, type LoungeUnreadCounts } from './collab/loungeNotifications';
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
-import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, clearedStatusDisplay, displayAgentState, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './terminal/busyAgentTabs';
 import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
 import { useGuideHost } from './guide/useGuideHost';
@@ -268,7 +268,7 @@ const sendAgentOsNotification = (title: string, body: string, settings: OsNotify
 
 // Per-terminal OSC 7501 status (docs/AGENT_STATUS_OSC7501.md). `done` drops to
 // `idle` once the user has looked at the terminal (seenTurn >= turn).
-type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number };
+type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number; resetAt?: number };
 const BROWSER_TOOLBAR_ENABLED = false;
 // GitHub repositories for the toolbar link and the "open release page" fallback
 // (VITE_BBARIT_RELEASE_REPO_MAC / _WIN, see src/config/endpoints.ts). The signed
@@ -3698,9 +3698,7 @@ function App() {
   const [agentStatus, setAgentStatus] = useState<Map<string, AgentStatusEntry>>(() => new Map());
   // Display state: OSC 7501 when the terminal reports it, else I/O activity (busyTerminals).
   const agentStateOf = (terminalId: string): AgentTabState => {
-    const s = agentStatus.get(terminalId);
-    if (s) return s.state === 'done' && s.seenTurn >= s.turn ? 'idle' : s.state;
-    return busyTerminals.has(terminalId) ? 'working' : 'idle';
+    return displayAgentState(agentStatus.get(terminalId), busyTerminals.has(terminalId));
   };
   // Legacy `running`/`stopped` stays alongside so existing CSS keeps working.
   const terminalStatusClass = (terminalId: string): string => {
@@ -5879,7 +5877,15 @@ Office project scaffold created by BBARIT Terminal.
       const looking = d.looking || isUserLooking(activeTerminalIdForStatusRef.current === tid);
       setAgentStatus((prev) => {
         const old = prev.get(tid);
-        if (d.cleared) {
+        const clearedAs = clearedStatusDisplay(d);
+        if (clearedAs === 'idle') {
+          // A 7501 program just (re)started in this tab: stay idle until it reports, instead
+          // of guessing "working" from screen output.
+          const next = new Map(prev);
+          next.set(tid, { state: 'idle', turn: d.turn, seenTurn: d.turn, resetAt: Date.now() });
+          return next;
+        }
+        if (clearedAs === 'drop') {
           if (!old) return prev;
           const next = new Map(prev);
           next.delete(tid);
