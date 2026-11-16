@@ -535,7 +535,8 @@ pub async fn handle_gateway_ui(
 
 /// UI-bus commands the external secretary (app_control) may invoke. Read/observe
 /// + safe in-app navigation only. Explicitly EXCLUDES: terminal.write/create/
-/// close/activate (shell exec), agent.run/send (start an agent / type into one),
+/// close/activate (shell exec), every agent.* relay command (start / type into /
+/// stop an agent, read relay state and the relay audit log),
 /// config.patch (settings tamper), palette.run/list (arbitrary actions),
 /// project.create/switch, persona.set, sidebar/layout set.
 const SECRETARY_ALLOWED_CMDS: &[&str] = &[
@@ -646,14 +647,25 @@ mod tests {
             "terminal.close",
             "terminal.activate",
             "agent.run",
+            "agent.run.result",
             "agent.send",
             "agent.stop",
+            "agent.status",
+            "agent.list",
+            "agent.log",
             "config.patch",
             "palette.run",
         ] {
             assert!(
                 !SECRETARY_ALLOWED_CMDS.contains(&banned),
                 "{banned} must stay denied to the secretary"
+            );
+        }
+        // Every agent relay command (present and future) stays off the remote allowlist.
+        for cmd in SECRETARY_ALLOWED_CMDS {
+            assert!(
+                !cmd.starts_with("agent."),
+                "{cmd}: agent.* must stay denied to the secretary"
             );
         }
     }

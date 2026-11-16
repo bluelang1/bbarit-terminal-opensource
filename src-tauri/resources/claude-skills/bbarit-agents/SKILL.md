@@ -83,6 +83,16 @@ continues, in order.
 
 ## Limits
 
+- The app caps relay agents (config `agents`, defaults): 6 live children per tab, depth 2
+  (a tab you started is depth 1, its children depth 2; a depth-2 tab cannot start agents),
+  12 live relay agents in the whole app. Past a cap `agent run` creates nothing and fails
+  (exit code 1) with a message naming the limit, e.g. `child limit reached: this tab
+  already has 6 live children (…)`. A stopped child still counts until its tab is
+  closed: close a finished child (`agent stop <id> --close`), do the work yourself, or
+  tell the user — do not loop retrying, and do not ask a child (or pass another
+  `--caller`) to get around the cap.
+- `node "$BBARIT_CTL" agent log [--tail N]` shows the relay audit log (who started,
+  messaged and stopped whom, refused runs) — useful to explain what happened.
 - Children open in the active project of the app window.
 - Closing this tab drops the links; child tabs stay open for the user to read.
 - A plain shell tab receives no notes (they would run as commands); use `agent wait`.

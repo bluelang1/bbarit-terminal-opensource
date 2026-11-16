@@ -449,8 +449,10 @@ describe('agentLinks persistence', () => {
     expect(saved.map((l: { childId: string }) => l.childId)).toEqual(['c1', 'c2', 'c3']);
     const restored = restoreAgentLinks(saved, new Set(['p', 'c1', 'c3']), 99);
     // Turn numbers belong to the previous app run (the counter restarts at 0): not restored.
+    // c3's parent is gone: it comes back orphaned (no notes, nobody's child, still counted).
     expect(restored).toEqual([
       { childId: 'c1', parentId: 'p', name: 'rev', cliType: 'claude', createdAt: 5, lastNotifiedTurn: -1 },
+      { childId: 'c3', parentId: '', createdAt: 7, lastNotifiedTurn: -1, depth: 1 },
     ]);
     expect(restoreAgentLinks('junk', new Set())).toEqual([]);
   });

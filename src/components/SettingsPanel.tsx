@@ -65,6 +65,7 @@ const CLI_EXAMPLES: Record<string, string> = {
   'agent.status': 'agent status <terminalId>',
   'agent.list': 'agent list',
   'agent.stop': 'agent stop --children',
+  'agent.log': 'agent log --tail 50',
   'editor.open': 'open ./README.md',
   'editor.list': 'files',
   'editor.close': 'close README.md',
