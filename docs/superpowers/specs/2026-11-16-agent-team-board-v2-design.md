@@ -531,7 +531,7 @@ the maintainer in the dev app before merge.
 | 1+2 | merged | PR #79 (5f3f900) |
 | 3a | implemented and tested (SQLite + PostgreSQL 16 in Docker); waiting for code review and the dev-app check | branch `feat/agent-board-pg`, worktree `.claude/worktrees/agent-board-pg`; notes in "Stage 3a notes" below |
 | 3b | implemented and tested (two SQLite files + PostgreSQL 16 in Docker); not yet tried in a running app; waiting for code review and the dev-app check | branch `feat/board-sync`, worktree `.claude/worktrees/board-sync`; notes in "Stage 3b notes" below |
-| 3c | not started | |
+| 3c | implemented and tested (SQLite + two/three computers on PostgreSQL 16 in Docker: restore with takeover guard and newer local rows, remote note exactly-once across crashes, double adopt race, old home returning); not yet tried in a running app; waiting for code review and the dev-app check | branch `feat/board-3c`, worktree `.claude/worktrees/board-3c`; notes in "Stage 3c notes" below |
 | 4 | not started | |
 
 ## Stage 2 notes (builder's choices inside the rules)
@@ -691,6 +691,118 @@ the maintainer in the dev app before merge.
   - Host refusals for Settings carry a stable code (`{code, vars, message}`) the UI translates.
 - Not done in 3b: "Restore my teams from the server" (3c), remote notes, adopt team; no LISTEN/NOTIFY
   (the view still polls); no CI job with PostgreSQL. Not tried in a running app yet.
+
+## Stage 3c notes (builder's choices inside the rules)
+
+- Schema: PostgreSQL version 4 adds only `outbox(id PK, team_uid, from_host, from_instance, author_*, kind, text,
+  created_at, state, reason, handled_at)`; created only by "Create / upgrade tables" (preview shows it). The app accepts a
+  version-3 server (`MIN_SCHEMA_VERSION` 3): `postgres` mode and 3b sync keep working, remote notes stay queued locally
+  and "Take over this team" is refused with `upgrade_tables`; Settings and the team view say "upgrade tables". A 3b app
+  meets a version-4 server as "newer" and pauses, so every computer that syncs with a v4 server runs the 3c push guard
+  (that is why takeover requires v4). Local SQLite schema 4 adds `outbox` automatically. The privilege check includes
+  `outbox` from version 4.
+- `hosts.last_seen` is refreshed on every round by `sync_register` (before 3c it moved only when rows were pushed), so
+  "silent" means "has not finished a round's registration".
+- Restore (Settings, sync mode only): `agent_board_restore_preview` → counts of live teams/tasks/notes homed on this
+  computer's name, unsent local changes of those teams, and whether another installation holds the name. Apply rules:
+  refused while any change of those teams waits (`unsent`); a name held by another `instance_id` moves only with the
+  explicit checkbox and only by `UPDATE hosts … WHERE instance_id = old AND last_seen <= now - 15 min`
+  (`RESTORE_TAKEOVER_MS`; 30 rounds, three times the longest backoff) → else `host_alive`; rows come down in one
+  REPEATABLE READ snapshot, validated like pulled rows, without the change log, insert or replace only a lower
+  `row_version` (a newer local row is kept and counted `keptNewer`); mirror marks of those teams are removed. A live local
+  team of the same tab and name is left alone (`clashes`); a retired one is purged. Claims of the old installation keep
+  their lease (only their own app instance could renew it) and run out through lazy expiry / the lease worker; a claim
+  without a lease gets `lease_until = now`.
+- Remote notes: the existing post command (`agent_board_post`, also the agent command) queues a note when the team is a
+  copy and the usage type is `sync` (`sqlite::post_or_queue`); outside sync a copy still refuses. Only `note`, no task
+  link, `PostSpec::check` text rules, at most 20 waiting per team and 100 per computer (checked locally and again on the
+  server under a per-team advisory lock). The outbox id (UUIDv7) is the idempotency key end to end: `outbox_send` is
+  `ON CONFLICT DO NOTHING`; the home's `inbox_apply` writes the post with that id in its own transaction and reports
+  `delivered` again when the post already exists (crash between the local write and `inbox_mark`); `inbox_mark` changes
+  only rows still `pending`. The home re-checks the note exactly like a local post (text must equal what
+  `clean_multiline` would store, kind `note`, UUID id, label host) → else `invalid`; a gone or tombstoned team →
+  `team_gone`; a team that is a copy at the "home" gets no verdict. The post keeps `author_host` = the sender (the feed
+  shows "from <computer>"), `origin_host` = the home. The sender's entry goes when the post arrives by pull; a `refused` or
+  `withdrawn` server state becomes `refused` locally with its code; a note the server no longer has goes back to
+  `pending` (sent again; its id keeps it single); after 7 days (`REMOTE_NOTE_EXPIRE_MS`) a still-pending note is withdrawn
+  (guarded UPDATE) and shown refused `expired`. The outbox has no `server_seq` (found by state, not by cursor), so it
+  needs no seq lock. Queued notes emit only a `sync` refresh event (never `post`), and nothing is typed into a tab.
+- Adopt ("Take over this team"): offered in the team view (overlay and pop-out) only for a copy in `sync` mode whose
+  home's `hosts.last_seen` is older than `agents.board.adoptAfterHours` (default 24 h, clamped 1–720, in
+  `PROTECTED_CONFIG_PATHS`). The preview reads the server's team row (home, `row_version`) and the home's last seen;
+  `agent_board_adopt(team, uid, home, version)` runs one transaction: team row `FOR UPDATE`, refused unless home and
+  `row_version` equal the preview (`changed`), the home's age passes the guard (`home_alive`; a home missing from `hosts`
+  falls back to the team's `last_activity_at`), not already ours (`already_home`), no live team of ours for the same tab
+  (`same_team_here`; a retired one is purged); then `home_host`/`home_instance`/`origin_host` change with `row_version + 1`
+  (the trigger draws `server_seq` under the shared writer lock, so pulls see it). Two computers adopting at once: the
+  second waits on the row lock and then fails the version check. Locally the team stops being a copy and its rows are
+  brought to the server snapshot; the old home's claims run out through the normal lease expiry (proved in tests).
+- Old home returning: every push reads the batch's team rows `FOR SHARE` and drops rows of teams whose server home is
+  another computer (counted refused, reason "taken over by …"); every round first asks the server for the home of each
+  live local home team and turns a moved one into a read-only copy of the server's rows, deleting (not applying) its unsent
+  change rows and adding them to `refused` with that reason.
+- Status: `agent_board_sync_status` adds `outboxWaiting`, `outboxRefused`, `serverSchema`, `codeSchema`,
+  `hosts[{host,lastSeen}]` (from the last round) and `adoptAfterMs`. New commands (all async, Settings/viewer only, not
+  `agent.*`): `agent_board_restore_preview`, `agent_board_restore`, `agent_board_adopt_preview`, `agent_board_adopt`,
+  `agent_board_outbox`, `agent_board_outbox_dismiss`. Refusals are `{code, vars, message}` and translated in the UI; other
+  errors go through `config::redact`.
+- Review fixes (2026-11-17):
+  - Clocks: every `hosts.last_seen` write and every "silent for" guard use the server's clock
+    (`clock_timestamp()`); `sync_hosts` / `team_homes` return ages computed on the server, the status
+    passes `ageMs` and the view compares only that. Takeover age is measured from the latest of the
+    home's `last_seen`, the team's `last_activity_at` and `updated_at` (a team still changing is never
+    taken), on the server inside the guarded transaction.
+  - Outbox lifecycle: a local entry goes as soon as its post exists here (pull, restore, takeover), and
+    with its copy (`drop_mirror`: cap, "Remove other computers' teams"); adopt and restore drop sent /
+    delivered entries of those teams; caps count only `pending` entries (not yet on the server). The
+    server keeps the per-team pending cap.
+  - Home side: a note for a team missing locally gets no verdict (a restore that took the name but has
+    not copied rows); refused `team_gone` only when tombstoned here or on the server; the sender must be
+    a registered (`from_host`, `from_instance`) pair in `hosts`, else `unknown_sender`; at most 30 notes
+    per sending computer and team per hour (`REMOTE_NOTES_PER_SENDER_WINDOW` / `REMOTE_NOTE_WINDOW_MS`),
+    else `rate_limited`, so a flood cannot push older posts out.
+  - Replaced installation: a restore that takes a name over records `hosts.replaced_instance` (v4);
+    that installation pauses with code `replaced` (Settings explains it) instead of `name_taken`, and
+    every push first reads its own `hosts` row `FOR SHARE` and writes nothing once the name moved.
+  - Kept changes: changes a takeover leaves unsent are written, before they are dropped from the log, to
+    `~/.config/octo/agent-board-kept/<team>-<ms>.json` (0600, at most 4 MiB per file, the newest 50
+    files kept); Settings shows the count, the newest path and "Show the file" (`reveal_in_explorer`).
+  - Clean up removes finished outbox rows (`delivered`, `refused`, `withdrawn`) older than 30 days.
+  - Adopt locally purges a retired team of this computer for the same tab (the server already did).
+  - UI: the takeover confirmation is an Esc layer (focus on Cancel, back to the button), a success says
+    "This computer is now the home of …" and remembers the team for the project; a failed Dismiss shows
+    an error; a restore preview that cannot be read shows an error; every refusal code the host sends
+    (takeover, restore, outbox reasons) has ko/en text, checked by a test that reads the Rust source.
+
+- Review fixes, round 2 (2026-11-17): the kept-changes folder is `agent-board-kept.dev` in debug
+  builds (at most 50 files of at most 4 MiB each, unchanged); the `replaced` message no longer suggests
+  renaming and says how many changes stayed unsent in the file; a takeover preview belongs to the team it
+  was asked for (a late answer for another team is dropped; confirm sends the preview's team); the
+  pop-out gives `adopt` / `adoptPreview` 60 s (`TAKEOVER_TIMEOUT_MS`), and a timeout says "check again"
+  and refreshes, never a refusal; the confirmation adds that an offline home may still be working and
+  its later changes are only saved to a file there. Tests cover a takeover committed between the old
+  home's check and its push (child-only and tombstone-only batches write nothing), a version-3 server
+  (notes wait, go after the upgrade; the v4 step is idempotent), a missing `outbox` grant, and a restore
+  retried after it took the name.
+
+- Server identity (2026-11-17, found in the dev app): `board_meta.server_uid` (UUIDv4) is written when
+  the tables are created and by "Create / upgrade tables" (also on an up-to-date server). A server that
+  has none gets it lazily on the next round (`INSERT … ON CONFLICT DO NOTHING` on `board_meta`, which the
+  privilege check already requires; no table change, so no schema version). The file keeps the uid in
+  `sync_state.server_uid` beside `server` (`label|schema`); a new label forgets it. Each round compares:
+  another uid, or a uid where the file had none while its cursors were non-zero → `server_replaced`; the
+  same uid with `board_server_seq` below `pulled_seq` → `server_restored`. Both set `pulled_seq` 0, start
+  a full push, clear `caught_up` and the mirror-cap ignore list; outbox `sent` → `pending` (re-sent; the
+  id keeps it single), `delivered` whose post is here → removed, `delivered` without its post → `pending`
+  (the home delivers it again, or reports it delivered if the post exists there). Copies of other
+  computers' teams stay as they are, also when the new server lacks them ("Remove other computers' teams"
+  clears them). The event is stored once (`server_event`, `server_event_at`) and shown in Settings. A
+  team retired here whose tombstone the new server never saw is sent as a tombstone by the full push and
+  causes no error or repeat.
+
+- Not done in 3c: remote task requests (still deferred); no LISTEN/NOTIFY; not tried in a running app yet; a person
+  cannot withdraw a note that is still waiting (it expires after 7 days); restore does not bring back teams tombstoned on
+  the server.
 
 ## Left to the builder
 

@@ -24,6 +24,19 @@ export interface BoardTeam {
   syncedAt?: number;
 }
 
+/** Stage 3c: this computer's note for a team on another computer that is not a post yet. */
+export interface OutboxEntry {
+  id: string;
+  team: string;
+  home: string;
+  text: string;
+  ts: number;
+  /** pending/sent/delivered: waiting to be delivered; refused: `reason` is a stable code. */
+  state: 'pending' | 'sent' | 'delivered' | 'refused';
+  reason?: string | null;
+  author?: { id?: string; name?: string | null };
+}
+
 export interface BoardInfo {
   host?: string;
   backend?: string;
@@ -52,6 +65,12 @@ export interface TeamBoardSource {
   postNote(team: string, text: string): Promise<ActionResult>;
   /** Sync status of this machine (Machines card); optional for sources without sync. */
   syncStatus?(): Promise<SyncStatus | null>;
+  /** Stage 3c (sync): notes this computer sent to a team on another computer, not posts yet. */
+  outbox?(team: string): Promise<OutboxEntry[]>;
+  dismissOutbox?(id: string): Promise<ActionResult>;
+  /** "Take over this team": what the host would do (it checks the guards again on `adopt`). */
+  adoptPreview?(team: string): Promise<unknown>;
+  adopt?(team: string, uid: string, home: string, version: number): Promise<ActionResult>;
 }
 
 export interface TeamSnapshot {

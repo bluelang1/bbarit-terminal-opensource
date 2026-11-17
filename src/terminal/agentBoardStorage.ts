@@ -84,7 +84,7 @@ export function missingPgFields(pg: BoardPgSettings): Array<'host' | 'database' 
 // ── Keeping agents away from the storage settings ───────────────────────
 
 /** Config paths agents may neither read nor change through `config.get` / `config.patch`. */
-export const PROTECTED_CONFIG_PATHS = ['agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName'] as const;
+export const PROTECTED_CONFIG_PATHS = ['agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName', 'agents.board.adoptAfterHours'] as const;
 
 function splitPath(path: string): string[] {
   return path.split('.').map((k) => k.trim()).filter((k) => k.length > 0);
@@ -282,6 +282,24 @@ export interface SyncStatus {
   fullPush: boolean;
   /** Other machines whose teams this file holds (read-only), with how many. */
   machines: Array<{ host: string; teams: number; syncedAt?: number }>;
+  /** Stage 3c: notes this computer sent to other computers' teams, not delivered yet / refused. */
+  outboxWaiting: number;
+  outboxRefused: number;
+  /** Board table version on the server (last round) and the one this app knows. */
+  serverSchema: number | null;
+  codeSchema: number | null;
+  /** Every registered computer and when it last synced (ms). */
+  /** `ageMs` is by the server's clock when the last round ran (never this computer's clock). */
+  hosts: Array<{ host: string; lastSeen: number; ageMs: number }>;
+  /** Changes a takeover left unsent, kept in a file (count, path of the newest file). */
+  keptRows: number;
+  keptFile: string | null;
+  /** The server at this address turned out to be another one (`server_replaced`) or restored
+   * from a backup (`server_restored`): the pull started over and this computer's teams were sent again. */
+  serverEvent: 'server_replaced' | 'server_restored' | null;
+  serverEventAt: number | null;
+  /** How long a team's home must be silent before "Take over this team" is offered (ms). */
+  adoptAfterMs: number;
   ok?: boolean;
 }
 
@@ -313,8 +331,99 @@ export function normalizeSyncStatus(raw: unknown): SyncStatus | null {
     refusedReason: typeof r.refusedReason === 'string' && r.refusedReason ? r.refusedReason : null,
     fullPush: r.fullPush === true,
     machines,
+    outboxWaiting: num(r.outboxWaiting) ?? 0,
+    outboxRefused: num(r.outboxRefused) ?? 0,
+    serverSchema: num(r.serverSchema),
+    codeSchema: num(r.codeSchema),
+    hosts: Array.isArray(r.hosts)
+      ? r.hosts
+          .filter((h): h is Record<string, unknown> => !!h && typeof h === 'object' && typeof (h as Record<string, unknown>).host === 'string')
+          .map((h) => ({ host: String(h.host), lastSeen: num(h.lastSeen) ?? 0, ageMs: num(h.ageMs) ?? 0 }))
+      : [],
+    keptRows: num(r.keptRows) ?? 0,
+    keptFile: typeof r.keptFile === 'string' && r.keptFile ? r.keptFile : null,
+    serverEvent: r.serverEvent === 'server_replaced' || r.serverEvent === 'server_restored' ? r.serverEvent : null,
+    serverEventAt: num(r.serverEventAt),
+    adoptAfterMs: num(r.adoptAfterMs) ?? 24 * 3_600_000,
     ok: typeof r.ok === 'boolean' ? r.ok : undefined,
   };
+}
+
+/** Remote notes and takeovers need board tables version 4 on the server (3b sync works on 3). */
+export function needsTableUpgrade(s: SyncStatus | null): boolean {
+  return !!s && s.serverSchema !== null && s.codeSchema !== null && s.serverSchema < s.codeSchema;
+}
+
+/** May a person be offered "Take over this team" for a copy homed on `home`? Only when the home
+ * has been silent for the threshold (the host checks again before it changes anything). */
+export function canOfferTakeover(s: SyncStatus | null, home: string | undefined): boolean {
+  if (!s || !home || s.mode !== 'sync' || needsTableUpgrade(s)) return false;
+  const h = s.hosts.find((x) => x.host === home);
+  if (!h) return false;
+  // Ages come from the server's clock; computers' clocks are never compared.
+  return h.ageMs >= s.adoptAfterMs;
+}
+
+/** `agent_board_restore_preview`. */
+export interface RestorePreview {
+  host: string;
+  teams: number;
+  tasks: number;
+  notes: number;
+  unsent: number;
+  /** Another installation holds this computer's name. */
+  takeover: { lastSeen: number; ageMs: number; minAgeMs: number; allowed: boolean } | null;
+}
+
+export function normalizeRestorePreview(raw: unknown): RestorePreview | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  const t = r.takeover && typeof r.takeover === 'object' ? (r.takeover as Record<string, unknown>) : null;
+  return {
+    host: typeof r.host === 'string' ? r.host : '',
+    teams: n(r.teams),
+    tasks: n(r.tasks),
+    notes: n(r.notes),
+    unsent: n(r.unsent),
+    takeover: t ? { lastSeen: n(t.lastSeen), ageMs: n(t.ageMs), minAgeMs: n(t.minAgeMs), allowed: t.allowed === true } : null,
+  };
+}
+
+/** `agent_board_adopt_preview`. */
+export interface AdoptPreview {
+  team: string;
+  teamName?: string;
+  uid: string;
+  home: string;
+  version: number;
+  lastSeen: number | null;
+  ageMs: number | null;
+  adoptAfterMs: number;
+  allowed: boolean;
+}
+
+export function normalizeAdoptPreview(raw: unknown): AdoptPreview | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  if (typeof r.uid !== 'string' || typeof r.home !== 'string' || num(r.version) === null) return null;
+  return {
+    team: typeof r.team === 'string' ? r.team : '',
+    teamName: typeof r.teamName === 'string' ? r.teamName : undefined,
+    uid: r.uid,
+    home: r.home,
+    version: num(r.version) ?? 0,
+    lastSeen: num(r.lastSeen),
+    ageMs: num(r.ageMs),
+    adoptAfterMs: num(r.adoptAfterMs) ?? 24 * 3_600_000,
+    allowed: r.allowed === true,
+  };
+}
+
+/** Whole hours (at least 0) for "last seen N hours ago". */
+export function hoursAgo(ms: number | null | undefined): number {
+  return ms && ms > 0 ? Math.floor(ms / 3_600_000) : 0;
 }
 
 /** Unicode format characters the Rust board strips (`model::is_format_char`). */

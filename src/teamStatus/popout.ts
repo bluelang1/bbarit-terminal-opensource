@@ -83,8 +83,8 @@ export function newPopoutToken(): string {
   return randomId();
 }
 
-const READS = ['info', 'teams', 'tasks', 'events', 'posts', 'history', 'refusals', 'syncStatus'] as const;
-const WRITES = ['act', 'postNote'] as const;
+const READS = ['info', 'teams', 'tasks', 'events', 'posts', 'history', 'refusals', 'syncStatus', 'outbox', 'adoptPreview'] as const;
+const WRITES = ['act', 'postNote', 'dismissOutbox', 'adopt'] as const;
 export type SourceMethod = (typeof READS)[number] | (typeof WRITES)[number];
 const METHODS: readonly string[] = [...READS, ...WRITES];
 /** A person's task actions only (never claim, block, release or finish). */
@@ -159,6 +159,22 @@ export async function serveRequest(source: TeamBoardSource, req: unknown, token:
         if (!team || typeof a[1] !== 'string') return { id, ok: true, value: { ok: false, error: 'empty note' } satisfies ActionResult };
         return { id, ok: true, value: await source.postNote(team, a[1]) };
       }
+      case 'outbox': return { id, ok: true, value: source.outbox && team ? await source.outbox(team) : [] };
+      case 'adoptPreview': {
+        if (!team || !source.adoptPreview) return { id, ok: false, error: 'not available' };
+        return { id, ok: true, value: await source.adoptPreview(team) };
+      }
+      case 'dismissOutbox': {
+        if (typeof a[0] !== 'string' || !source.dismissOutbox) return { id, ok: true, value: { ok: false, error: 'not available' } satisfies ActionResult };
+        return { id, ok: true, value: await source.dismissOutbox(a[0]) };
+      }
+      case 'adopt': {
+        const [, uid, home, version] = a;
+        if (!team || !source.adopt || typeof uid !== 'string' || typeof home !== 'string' || typeof version !== 'number') {
+          return { id, ok: true, value: { ok: false, error: 'not available' } satisfies ActionResult };
+        }
+        return { id, ok: true, value: await source.adopt(team, uid, home, version) };
+      }
     }
   } catch (e) {
     return { id, ok: false, error: errorText(e) };
@@ -188,12 +204,15 @@ export function remoteSource(
     clearTimeout(p.timer);
     if (res.ok) p.resolve(res.value); else p.reject(new Error(res.error || 'error'));
   });
+  // A takeover (and its preview) may wait behind a sync round holding the host's lock, so it
+  // gets TAKEOVER_TIMEOUT_MS; a timeout there is "no answer yet" (code `timeout`), never a refusal.
+  const slow = (m: SourceMethod) => m === 'adopt' || m === 'adoptPreview';
   const call = <T>(method: SourceMethod, ...args: unknown[]): Promise<T> => new Promise<T>((resolve, reject) => {
     const id = `${prefix}${++n}`;
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error('the main window did not answer'));
-    }, timeoutMs);
+      reject(new Error(slow(method) ? JSON.stringify({ code: 'timeout', vars: {}, message: 'no answer yet' }) : 'the main window did not answer'));
+    }, slow(method) ? Math.max(timeoutMs, TAKEOVER_TIMEOUT_MS) : timeoutMs);
     pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
     try {
       send({ id, token, method, args });
@@ -222,6 +241,10 @@ export function remoteSource(
     syncStatus: () => call('syncStatus'),
     act: (team, sub, request) => action(call<ActionResult>('act', team, sub, request)),
     postNote: (team, text) => action(call<ActionResult>('postNote', team, text)),
+    outbox: (team) => call('outbox', team),
+    dismissOutbox: (id) => action(call<ActionResult>('dismissOutbox', id)),
+    adoptPreview: (team) => call('adoptPreview', team),
+    adopt: (team, uid, home, version) => action(call<ActionResult>('adopt', team, uid, home, version)),
     dispose: () => {
       off();
       for (const p of pending.values()) { clearTimeout(p.timer); p.reject(new Error('closed')); }
@@ -229,6 +252,9 @@ export function remoteSource(
     },
   };
 }
+
+/** How long the pop-out waits for "Take over this team" and its preview. */
+export const TAKEOVER_TIMEOUT_MS = 60_000;
 
 /** A stable string of the context, so the main window pushes it only when something changed. */
 export function contextKey(ctx: PopoutContext | null): string {

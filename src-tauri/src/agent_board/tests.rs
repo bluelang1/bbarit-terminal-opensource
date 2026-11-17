@@ -1831,7 +1831,8 @@ mod pg_only {
         std::mem::forget(f); // the Bare guard removes the schema
         let fresh = PgStore::new(bare.0.clone());
         let e = run(fresh.post("t".into(), input("t1", "note", "x"), cx(4))).unwrap_err();
-        assert!(e.contains("database is from a newer app version (schema 4, this app knows 3)"), "{e}");
+        let v = super::super::pg::SCHEMA_VERSION;
+        assert!(e.contains(&format!("database is from a newer app version (schema {}, this app knows {v})", v + 1)), "{e}");
         let e = run(fresh.migrate(true)).unwrap_err();
         assert!(e.starts_with("database is from a newer app version"), "{e}");
     }
@@ -2089,7 +2090,7 @@ mod sync_two_machines {
         let server = t.server();
         let local = lite(&t.a);
         run(local.run(|c, l| super::super::sqlite::sync_prepare(c, l, "test-server", A, None, 1_500))).unwrap();
-        run(server.sync_register(A, &t.status(A)["instanceId"].as_str().unwrap().to_string(), 1_500)).unwrap();
+        run(server.sync_register(A, &t.status(A)["instanceId"].as_str().unwrap().to_string())).unwrap();
         let (_, rows) = run(local.run(|c, _| super::super::sqlite::sync_full_batch(c, A, 500))).unwrap();
         let first = run(server.sync_push(A, t.status(A)["instanceId"].as_str().unwrap(), &rows, 1_500)).unwrap();
         assert!(first.written > 0);
@@ -2335,7 +2336,7 @@ mod sync_two_machines {
         t.pg_exec(&format!(
             "CREATE ROLE {role} LOGIN PASSWORD 'test';
              GRANT USAGE ON SCHEMA {s} TO {role};
-             GRANT SELECT, INSERT, UPDATE, DELETE ON {s}.teams, {s}.posts, {s}.cursors, {s}.tasks, {s}.task_deps, {s}.task_events, {s}.board_meta, {s}.hosts TO {role};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON {s}.teams, {s}.posts, {s}.cursors, {s}.tasks, {s}.task_deps, {s}.task_events, {s}.board_meta, {s}.hosts, {s}.outbox TO {role};
              GRANT USAGE ON SEQUENCE {s}.board_server_seq, {s}.board_arrival_seq TO {role};
              GRANT EXECUTE ON FUNCTION {s}.board_set_server_seq() TO {role};"
         ));
@@ -2404,6 +2405,595 @@ mod sync_two_machines {
         assert_eq!(err.code(), "name_taken");
         run(server.close());
     }
+
+    // ── Stage 3c: restore, take over a team, remote notes ────────────────
+
+    const C: &str = "mac-c";
+    const HOUR: i64 = 3_600_000;
+
+    impl Two {
+        fn extra(&self, name: &str) -> BoardStore {
+            BoardStore::Sqlite(SqliteStore::new(self.dir.join(format!("{name}.db"))))
+        }
+        fn sync_store(&self, store: &BoardStore, host: &str, now: i64) -> Result<sync::RoundReport, SyncError> {
+            let server = self.server();
+            let r = run(sync::sync_round(lite(store), &server, "test-server", host, None, now));
+            run(server.close());
+            r
+        }
+        fn outbox(&self, which: &str, team: &str) -> Vec<Value> {
+            let t = team.to_string();
+            run(lite(if which == A { &self.a } else { &self.b }).run(move |c, _| super::super::sqlite::outbox_list(c, &t))).unwrap()
+        }
+        fn post_remote(&self, which: &str, team: &str, author: &str, text: &str, now: i64) -> Result<Value, String> {
+            let store = lite(if which == A { &self.a } else { &self.b });
+            let (team, inp, ctx) = (team.to_string(), input(author, "note", text), at(which, now));
+            run(store.run(move |c, l| super::super::sqlite::post_or_queue(c, l, &team, &inp, &ctx)))
+        }
+    }
+
+    fn code(e: &str) -> String {
+        serde_json::from_str::<Value>(e).map(|v| v["code"].as_str().unwrap_or_default().to_string()).unwrap_or_else(|_| e.to_string())
+    }
+
+    #[test]
+    fn two_computers_adopting_at_once_exactly_one_wins_and_only_after_the_age_guard() {
+        let Some(t) = two("adopt2") else { return };
+        t.post(A, "lead", "t1", "hello", 1_000).unwrap();
+        t.add(A, "lead", "work", 1_001).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        let c = t.extra("c");
+        t.sync_store(&c, C, 2_002).unwrap();
+        let server = t.server();
+        // A was seen moments ago: too early for anyone.
+        let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 3_000, 24 * HOUR)).unwrap();
+        assert_eq!(pre["home"], A);
+        assert_eq!(pre["allowed"], false);
+        let (uid, version) = (pre["uid"].as_str().unwrap().to_string(), pre["version"].as_i64().unwrap());
+        let early = run(sync::adopt_team(lite(&t.b), &server, B, "lead", &uid, A, version, 3_000, 24 * HOUR)).unwrap_err();
+        assert_eq!(code(&early), "home_alive");
+        // A clock far ahead on this computer changes nothing: ages are by the server's clock.
+        let skewed = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, i64::MAX / 4, 24 * HOUR)).unwrap();
+        assert_eq!(skewed["allowed"], false);
+        // A day later B and C both confirm the same preview at once: exactly one wins.
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let later = 2_000 + 25 * HOUR;
+        let (rb, rc) = run(async {
+            let s1 = PgStore::new(t.target.clone());
+            let s2 = PgStore::new(t.target.clone());
+            let out = tokio::join!(
+                sync::adopt_team(lite(&t.b), &s1, B, "lead", &uid, A, version, later, 24 * HOUR),
+                sync::adopt_team(lite(&c), &s2, C, "lead", &uid, A, version, later, 24 * HOUR)
+            );
+            s1.close().await;
+            s2.close().await;
+            out
+        });
+        assert_eq!(rb.is_ok() as u8 + rc.is_ok() as u8, 1, "{rb:?} {rc:?}");
+        let (winner, loser) = if rb.is_ok() { (B, rc.unwrap_err()) } else { (C, rb.unwrap_err()) };
+        assert_eq!(code(&loser), "changed");
+        let home = run(server.team_homes(std::slice::from_ref(&uid))).unwrap();
+        assert_eq!(home[0].1.as_deref(), Some(winner));
+        assert_eq!(home[0].2, version + 1);
+        run(server.close());
+        // The winner writes to it now; the loser's copy follows on its next round.
+        if winner == B {
+            t.add(B, "lead", "next", later + 1).unwrap();
+            t.sync(B, later + 2).unwrap();
+            t.sync_store(&c, C, later + 3).unwrap();
+            let teams = run(c.teams()).unwrap();
+            assert_eq!(teams[0]["homeHost"], B);
+            assert_eq!(run(c.task_list("lead".into(), TaskListQuery { all: true, ..Default::default() }, at(C, later + 4))).unwrap()["tasks"].as_array().unwrap().len(), 2);
+        } else {
+            assert!(t.teams(B)[0]["mirror"].as_bool().unwrap());
+        }
+    }
+
+    #[test]
+    fn an_old_home_that_returns_after_a_takeover_becomes_a_read_only_copy() {
+        let Some(t) = two("oldhome") else { return };
+        t.post(A, "lead", "t1", "before", 1_000).unwrap();
+        t.add(A, "lead", "claimed by a", 1_001).unwrap();
+        t.write(A, "lead", on("claim", 1), agent("t1", A), 1_002).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        // A goes away with an unsent change.
+        t.post(A, "lead", "t1", "written while away", 3_000).unwrap();
+        let later = 2_000 + 25 * HOUR;
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let server = t.server();
+        let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, later, 24 * HOUR)).unwrap();
+        assert_eq!(pre["allowed"], true);
+        let out = run(sync::adopt_team(
+            lite(&t.b),
+            &server,
+            B,
+            "lead",
+            pre["uid"].as_str().unwrap(),
+            A,
+            pre["version"].as_i64().unwrap(),
+            later,
+            24 * HOUR,
+        ))
+        .unwrap();
+        run(server.close());
+        assert_eq!(out["team"], "lead");
+        let tb = t.teams(B);
+        assert!(tb[0].get("mirror").is_none(), "home here now: {tb:?}");
+        // A's agent is gone: its claim ran out through the normal lease expiry.
+        assert_eq!(states(&t.list(B, "lead", later + 1)), vec![(1, "open".into())]);
+        t.post(B, "lead", "t5", "new home speaking", later + 2).unwrap();
+        t.sync(B, later + 3).unwrap();
+        // A comes back: nothing of its unsent change reaches the server, it is reported, and
+        // the team is a read-only copy of B's.
+        let r = t.sync(A, later + 10).unwrap();
+        assert_eq!(r.moved, vec!["lead".to_string()]);
+        assert!(r.refused >= 1, "{r:?}");
+        let st = t.status(A);
+        assert!(st["refusedReason"].as_str().unwrap().contains("taken over by mac-b"), "{st}");
+        // The unsent change is kept in a file, not lost.
+        assert!(st["keptRows"].as_i64().unwrap() >= 1, "{st}");
+        let kept = std::fs::read_to_string(st["keptFile"].as_str().unwrap()).unwrap();
+        assert!(kept.contains("written while away"), "{kept}");
+        assert_eq!(t.teams(A)[0]["homeHost"], B);
+        assert_eq!(t.teams(A)[0]["mirror"], true);
+        assert_eq!(t.post(A, "lead", "t1", "again", later + 11).unwrap_err(), "this team lives on mac-b; it is read-only here");
+        let texts: Vec<String> = t.read(A, "lead", ReadQuery::default())["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect();
+        assert!(texts.contains(&"new home speaking".to_string()), "{texts:?}");
+        assert!(!texts.contains(&"written while away".to_string()), "{texts:?}");
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.posts WHERE text = 'written while away'", t.target.schema)), 0);
+        // Later rounds are quiet.
+        let r = t.sync(A, later + 20).unwrap();
+        assert!(r.moved.is_empty());
+    }
+
+    #[test]
+    fn a_remote_note_is_delivered_exactly_once_across_crashes_and_refusals_come_back() {
+        let Some(t) = two("rnote") else { return };
+        t.post(A, "lead", "t1", "hello", 1_000).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        let queued = t.post_remote(B, "lead", "b1", "from b", 2_002).unwrap();
+        assert_eq!(queued["pending"], true);
+        assert_eq!(t.outbox(B, "lead")[0]["state"], "pending");
+        // Crash after the server stored it but before B noted it: the resend changes nothing.
+        let server = t.server();
+        let notes = run(lite(&t.b).run(|c, _| super::super::sqlite::outbox_to_send(c, B, 10))).unwrap();
+        let b_inst = t.status(B)["instanceId"].as_str().unwrap().to_string();
+        run(server.outbox_send(&b_inst, &notes, 20, 100)).unwrap();
+        t.sync(B, 2_003).unwrap();
+        assert_eq!(t.outbox(B, "lead")[0]["state"], "sent");
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.outbox", t.target.schema)), 1);
+        // Crash at the home after the post was written but before the server heard back.
+        let pending = run(server.inbox_pending(A, 10)).unwrap();
+        assert_eq!(pending.len(), 1);
+        let ctx = at(A, 2_004);
+        run(lite(&t.a).run(move |c, l| super::super::sqlite::inbox_apply(c, l, &pending, &ctx))).unwrap();
+        let r = t.sync(A, 2_005).unwrap();
+        assert_eq!(r.delivered, 1, "reported delivered again, not posted twice");
+        run(server.close());
+        let id = queued["id"].as_str().unwrap();
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.posts WHERE id = '{id}'", t.target.schema)), 1);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.posts WHERE text = 'from b'", t.target.schema)), 1);
+        let on_a = t.read(A, "lead", ReadQuery::default());
+        let post = on_a["posts"].as_array().unwrap().iter().find(|p| p["text"] == "from b").cloned().unwrap();
+        assert_eq!(post["seq"], 2);
+        assert_eq!(post["author"]["host"], B);
+        // B receives the real post by pull; the waiting entry is gone.
+        t.sync(B, 2_006).unwrap();
+        assert!(t.outbox(B, "lead").is_empty());
+        assert_eq!(seqs(&t.read(B, "lead", ReadQuery::default())), vec![1, 2]);
+        // A note the home refuses comes back refused, with its code.
+        t.post_remote(B, "lead", "b1", "will be spoiled", 2_007).unwrap();
+        t.sync(B, 2_008).unwrap();
+        t.pg_exec(&format!("UPDATE {}.outbox SET text = 'bell' || chr(7) WHERE state = 'pending'", t.target.schema));
+        t.sync(A, 2_009).unwrap();
+        t.sync(B, 2_010).unwrap();
+        let ob = t.outbox(B, "lead");
+        assert_eq!((ob[0]["state"].as_str(), ob[0]["reason"].as_str()), (Some("refused"), Some("invalid")));
+        // A note that is never taken expires after a week instead of waiting forever.
+        t.post_remote(B, "lead", "b1", "nobody home", 2_011).unwrap();
+        t.pg_exec(&format!("UPDATE {}.teams SET home_host = 'mac-gone'", t.target.schema));
+        t.sync(B, 2_012).unwrap();
+        t.sync(B, 2_013 + super::super::sync::REMOTE_NOTE_EXPIRE_MS).unwrap();
+        let ob = t.outbox(B, "lead");
+        assert!(ob.iter().any(|n| n["text"] == "nobody home" && n["state"] == "refused" && n["reason"] == "expired"), "{ob:?}");
+    }
+
+
+    #[test]
+    fn a_delivered_note_does_not_linger_after_a_takeover_and_the_cap_counts_only_queued_notes() {
+        let Some(t) = two("linger") else { return };
+        t.post(A, "lead", "t1", "hello", 1_000).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        t.post_remote(B, "lead", "b1", "from b", 2_002).unwrap();
+        t.sync(B, 2_003).unwrap();
+        t.sync(A, 2_004).unwrap();
+        // B learns "delivered" but has not pulled the post yet when it takes the team over.
+        let server = t.server();
+        let ids: Vec<String> = t.outbox(B, "lead").iter().map(|n| n["id"].as_str().unwrap().to_string()).collect();
+        let states = run(server.outbox_states(&ids)).unwrap();
+        run(lite(&t.b).run(move |c, _| super::super::sqlite::outbox_apply_states(c, &states, &[]))).unwrap();
+        assert_eq!(t.outbox(B, "lead")[0]["state"], "delivered");
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 3_000, 24 * HOUR)).unwrap();
+        run(sync::adopt_team(lite(&t.b), &server, B, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 3_000, 24 * HOUR)).unwrap();
+        run(server.close());
+        assert!(t.outbox(B, "lead").is_empty(), "{:?}", t.outbox(B, "lead"));
+        let texts: Vec<String> = t.read(B, "lead", ReadQuery::default())["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect();
+        assert!(texts.contains(&"from b".to_string()));
+        // B still posts (now as the home) and sync goes on.
+        t.post(B, "lead", "b1", "as the home", 3_001).unwrap();
+        t.sync(B, 3_002).unwrap();
+    }
+
+    #[test]
+    fn a_note_for_a_team_a_half_finished_restore_has_not_copied_waits() {
+        let Some(t) = two("halfrestore") else { return };
+        t.post(A, "lead", "t1", "hello", 1_000).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        t.post_remote(B, "lead", "b1", "while a is gone", 2_002).unwrap();
+        t.sync(B, 2_003).unwrap();
+        // A new installation of mac-a took the name over but has not copied the rows yet.
+        let fresh = t.extra("a2");
+        let mine = run(lite(&fresh).run(|c, _| super::super::sqlite::sync_instance(c))).unwrap();
+        let old = t.status(A)["instanceId"].as_str().unwrap().to_string();
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let server = t.server();
+        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync::RESTORE_TAKEOVER_MS, true)).unwrap());
+        t.sync_store(&fresh, A, 2_100).unwrap();
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.outbox WHERE state = 'pending'", t.target.schema)), 1, "no verdict yet");
+        run(sync::restore_teams(lite(&fresh), &server, A, false, 2_200)).unwrap();
+        run(server.close());
+        let r = t.sync_store(&fresh, A, 2_300).unwrap();
+        assert_eq!(r.delivered, 1);
+        t.sync(B, 2_400).unwrap();
+        assert!(t.outbox(B, "lead").is_empty());
+    }
+
+    #[test]
+    fn the_home_refuses_a_spoofed_sender_and_stops_a_flood_at_the_limit() {
+        let Some(t) = two_with("flood", Limits { posts: 35, ..Limits::default() }) else { return };
+        t.post(A, "lead", "t1", "the first post", 1_000).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        let uid = t.teams(B)[0]["uid"].as_str().map(str::to_string).unwrap_or_else(|| {
+            run(lite(&t.b).run(|c, _| super::super::sqlite::mirror_of(c, "lead"))).unwrap().unwrap().0
+        });
+        let b_inst = t.status(B)["instanceId"].as_str().unwrap().to_string();
+        let s = &t.target.schema;
+        // Someone with the credentials writes a note in B's name but not as B's installation.
+        t.pg_exec(&format!(
+            "INSERT INTO {s}.outbox (id, team_uid, from_host, from_instance, author_id, kind, text, created_at)
+             VALUES ('01900000-0000-7000-8000-000000000a00', '{uid}', 'mac-b', 'not-b', 'x', 'note', 'spoofed', 1)"
+        ));
+        for i in 0..40 {
+            t.pg_exec(&format!(
+                "INSERT INTO {s}.outbox (id, team_uid, from_host, from_instance, author_id, kind, text, created_at)
+                 VALUES ('01900000-0000-7000-8000-000000000b{i:02}', '{uid}', 'mac-b', '{b_inst}', 'b1', 'note', 'flood {i}', {})",
+                10 + i
+            ));
+        }
+        let r = t.sync(A, 3_000).unwrap();
+        assert_eq!(r.delivered as i64, super::super::sync::REMOTE_NOTES_PER_SENDER_WINDOW);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox WHERE reason = 'unknown_sender'")), 1);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox WHERE reason = 'rate_limited'")), 40 - super::super::sync::REMOTE_NOTES_PER_SENDER_WINDOW);
+        let texts: Vec<String> = t.read(A, "lead", ReadQuery { limit: Some(100), ..Default::default() })["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect();
+        assert!(texts.contains(&"the first post".to_string()), "older posts stay");
+        assert!(!texts.iter().any(|x| x == "spoofed"));
+    }
+
+    #[test]
+    fn clean_up_removes_finished_outbox_rows_after_thirty_days() {
+        let Some(t) = two("obclean") else { return };
+        let s = &t.target.schema;
+        t.pg_exec(&format!(
+            "INSERT INTO {s}.outbox (id, team_uid, from_host, from_instance, author_id, kind, text, created_at, state, handled_at) VALUES
+             ('01900000-0000-7000-8000-000000000c01', 'u', 'h', 'i', 'a', 'note', 'old', 1, 'delivered', 1),
+             ('01900000-0000-7000-8000-000000000c02', 'u', 'h', 'i', 'a', 'note', 'waiting', 1, 'pending', NULL)"
+        ));
+        let server = t.server();
+        run(server.prune_stale(now_ms(), STALE_AFTER_MS)).unwrap();
+        run(server.close());
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox")), 1, "only the pending one stays");
+    }
+
+
+    #[test]
+    fn a_takeover_between_the_old_homes_check_and_its_push_lets_nothing_through() {
+        let Some(t) = two("lateadopt") else { return };
+        t.post(A, "lead", "t1", "one", 1_000).unwrap();
+        t.post(A, "lead", "t1", "two", 1_001).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        // A writes a note and tombstones the board's posts while B takes the team over.
+        t.post(A, "lead", "t1", "after the check", 3_000).unwrap();
+        let notes = run(lite(&t.a).run(|c, _| super::super::sqlite::sync_push_batch(c, A, 500))).unwrap().unwrap().1;
+        run(t.a.clear("lead".into(), at(A, 3_001))).unwrap();
+        let all = run(lite(&t.a).run(|c, _| super::super::sqlite::sync_push_batch(c, A, 500))).unwrap().unwrap().1;
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let server = t.server();
+        let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 4_000, 24 * HOUR)).unwrap();
+        run(sync::adopt_team(lite(&t.b), &server, B, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 4_000, 24 * HOUR)).unwrap();
+        let a_inst = t.status(A)["instanceId"].as_str().unwrap().to_string();
+        let posts_before = t.pg_count(&format!("SELECT count(*) FROM {}.posts", t.target.schema));
+        // Only child rows (the new note), then only tombstones: both refused, nothing written.
+        let mut only_children = notes.clone();
+        only_children.teams.clear();
+        assert!(!only_children.posts.is_empty());
+        let o = run(server.sync_push(A, &a_inst, &only_children, 4_001)).unwrap();
+        assert_eq!((o.written, o.refused as usize), (0, only_children.posts.len()));
+        let mut only_tombstones = super::super::copy::Dump::default();
+        let del = super::super::copy::col_index(super::super::sync::POSTS_SYNC, "deleted_at");
+        only_tombstones.posts = all.posts.iter().filter(|r| !matches!(r[del], super::super::copy::Cell::Null)).cloned().collect();
+        assert!(!only_tombstones.posts.is_empty());
+        let o = run(server.sync_push(A, &a_inst, &only_tombstones, 4_002)).unwrap();
+        assert_eq!(o.written, 0);
+        assert!(o.moved.iter().any(|(_, h)| h == B));
+        run(server.close());
+        let s = &t.target.schema;
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.posts")), posts_before);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.posts WHERE deleted_at IS NOT NULL OR text = 'after the check'")), 0);
+    }
+
+    /// A schema built only up to version 3 (what a 3b app created).
+    fn two_v3(tag: &str) -> Option<Two> {
+        if !pg_enabled() {
+            return None;
+        }
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("bbarit-sync-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target = pg_test_target(&test_schema(&format!("sync{tag}"), n));
+        let steps = super::super::pg::migration_steps(&target.schema, None).unwrap();
+        run(async {
+            let mut c = pg_raw(&target).await;
+            for step in steps.iter().filter(|s| s.version <= 3) {
+                for sql in &step.sql {
+                    sqlx::raw_sql(sql).execute(&mut c).await.unwrap();
+                }
+            }
+            let q = super::super::config::quote_ident(&target.schema);
+            sqlx::raw_sql(&format!("INSERT INTO {q}.board_meta (key, value) VALUES ('schema_version', '3')")).execute(&mut c).await.unwrap();
+        });
+        let a = BoardStore::Sqlite(SqliteStore::new(dir.join("a.db")));
+        let b = BoardStore::Sqlite(SqliteStore::new(dir.join("b.db")));
+        Some(Two { dir, target, a, b })
+    }
+
+    #[test]
+    fn against_version_three_tables_notes_wait_and_go_after_the_upgrade_which_runs_once() {
+        let Some(t) = two_v3("v3") else { return };
+        t.post(A, "lead", "t1", "hello", 1_000).unwrap();
+        let r = t.sync(A, 2_000).unwrap();
+        assert_eq!(r.server_schema, 3, "3b sync keeps working");
+        t.sync(B, 2_001).unwrap();
+        t.post_remote(B, "lead", "b1", "queued on v3", 2_002).unwrap();
+        t.sync(B, 2_003).unwrap();
+        assert_eq!(t.outbox(B, "lead")[0]["state"], "pending");
+        assert_eq!(t.status(B)["outboxWaiting"], 1);
+        let server = t.server();
+        let e = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 2_004, HOUR)).unwrap_err();
+        assert_eq!(code(&e), "upgrade_tables");
+        // Create / upgrade tables: 3 → 4, then again: nothing to do, nothing changed.
+        let up = run(server.migrate(true)).unwrap();
+        assert_eq!(up["applied"], true);
+        run(server.close());
+        t.sync(B, 2_005).unwrap();
+        assert_eq!(t.outbox(B, "lead")[0]["state"], "sent");
+        let before = t.pg_count(&format!("SELECT count(*) FROM {}.outbox", t.target.schema));
+        let again = run(PgStore::new(t.target.clone()).migrate(true)).unwrap();
+        assert_eq!(again["upToDate"], true);
+        // The version-4 statements themselves are safe to run twice.
+        let v4 = super::super::pg::migration_steps(&t.target.schema, Some(3)).unwrap();
+        t.pg_exec(&v4[0].sql.join(";\n"));
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.outbox", t.target.schema)), before);
+        assert_eq!(t.sync(A, 2_006).unwrap().delivered, 1);
+        t.sync(B, 2_007).unwrap();
+        assert!(t.outbox(B, "lead").is_empty());
+    }
+
+    #[test]
+    fn the_privilege_check_names_the_outbox_when_it_is_not_granted() {
+        let Some(t) = two("nooutbox") else { return };
+        let role = format!("bbt_role_{}_{}", std::process::id(), FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let s = super::super::config::quote_ident(&t.target.schema);
+        t.pg_exec(&format!(
+            "CREATE ROLE {role} LOGIN PASSWORD 'test';
+             GRANT USAGE ON SCHEMA {s} TO {role};
+             GRANT SELECT, INSERT, UPDATE, DELETE ON {s}.teams, {s}.posts, {s}.cursors, {s}.tasks, {s}.task_deps, {s}.task_events, {s}.board_meta, {s}.hosts TO {role};
+             GRANT USAGE ON SEQUENCE {s}.board_server_seq, {s}.board_arrival_seq TO {role};
+             GRANT EXECUTE ON FUNCTION {s}.board_set_server_seq() TO {role};"
+        ));
+        let mut target = t.target.clone();
+        target.opts = target.opts.clone().username(&role).password("test");
+        let d = run(PgStore::diagnose(&target));
+        assert_eq!(d["canReadWrite"], false, "{d}");
+        assert!(d["next"].as_str().unwrap().contains("hosts and outbox included"), "{d}");
+        t.pg_exec(&format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {role}; REVOKE ALL ON ALL SEQUENCES IN SCHEMA {s} FROM {role}; REVOKE ALL ON SCHEMA {s} FROM {role}; REVOKE ALL ON FUNCTION {s}.board_set_server_seq() FROM {role}; DROP ROLE {role};"));
+    }
+
+    #[test]
+    fn a_restore_that_stopped_after_taking_the_name_completes_on_retry() {
+        let Some(t) = two("restoreretry") else { return };
+        t.post(A, "lead", "t1", "one", 1_000).unwrap();
+        t.add(A, "lead", "task", 1_001).unwrap();
+        t.sync(A, 2_000).unwrap();
+        let fresh = t.extra("a2");
+        let mine = run(lite(&fresh).run(|c, _| super::super::sqlite::sync_instance(c))).unwrap();
+        let old = t.status(A)["instanceId"].as_str().unwrap().to_string();
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
+        let server = t.server();
+        // First attempt: the name moved, then the app stopped before any row came down.
+        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync::RESTORE_TAKEOVER_MS, true)).unwrap());
+        assert!(run(fresh.teams()).unwrap().is_empty());
+        // Retry: no takeover is needed any more; the rows come down.
+        let pre = run(sync::restore_preview(lite(&fresh), &server, A, 3_000)).unwrap();
+        assert!(pre["takeover"].is_null(), "{pre}");
+        let out = run(sync::restore_teams(lite(&fresh), &server, A, true, 3_001)).unwrap();
+        run(server.close());
+        assert_eq!((out["teams"].as_i64(), out["tasks"].as_i64(), out["notes"].as_i64()), (Some(1), Some(1), Some(1)));
+        t.sync_store(&fresh, A, 3_002).unwrap();
+        assert_eq!(t.sync(A, 3_003).unwrap_err().code(), "replaced");
+    }
+
+
+    /// A second server (another schema) that the same "test-server" label points at, as when a
+    /// server is rebuilt at the same address.
+    struct Other(PgTarget);
+    impl Drop for Other {
+        fn drop(&mut self) {
+            remove_test_schema(&self.0);
+        }
+    }
+    fn other_server(tag: &str) -> Other {
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let target = pg_test_target(&test_schema(&format!("new{tag}"), n));
+        run(PgStore::new(target.clone()).migrate(true)).expect("create the second schema");
+        Other(target)
+    }
+    fn sync_to(store: &BoardStore, target: &PgTarget, host: &str, now: i64) -> Result<sync::RoundReport, SyncError> {
+        let server = PgStore::new(target.clone());
+        let r = run(sync::sync_round(lite(store), &server, "test-server", host, None, now));
+        run(server.close());
+        r
+    }
+
+    #[test]
+    fn a_new_empty_server_at_the_same_address_gets_this_computers_teams_and_its_rows_are_pulled() {
+        let Some(t) = two("rebuilt") else { return };
+        for i in 0..10 {
+            t.post(A, "lead", "t1", &format!("a{i}"), 1_000 + i).unwrap();
+        }
+        t.post(B, "bteam", "b1", "b first", 1_100).unwrap();
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        // The old server had drawn many numbers: A's pull position ends far above anything the
+        // new server will hand out.
+        t.pg_exec(&format!("SELECT setval('{}.board_server_seq', 1000)", t.target.schema));
+        t.sync(A, 2_002).unwrap();
+        let unchanged = t.sync(A, 2_003).unwrap();
+        assert_eq!(unchanged.server_event, None, "the same server: no reset");
+        assert_eq!(unchanged.pushed, 0);
+        let pulled_before = run(lite(&t.a).run(|c, _| super::super::sqlite::sync_state_now(c))).unwrap().pulled_seq;
+        assert!(pulled_before >= 1000);
+        // The server is rebuilt empty at the same address.
+        let new = other_server("rebuilt");
+        let r = sync_to(&t.a, &new.0, A, 3_000).unwrap();
+        assert_eq!(r.server_event, Some("server_replaced"));
+        assert!(r.pushed > 0, "{r:?}");
+        let q = super::super::config::quote_ident(&new.0.schema);
+        let count = |sql: &str| run(async {
+            let mut c = pg_raw(&new.0).await;
+            sqlx::query_scalar::<_, i64>(sql).fetch_one(&mut c).await.unwrap()
+        });
+        assert_eq!(count(&format!("SELECT count(*) FROM {q}.teams WHERE team = 'lead'")), 1);
+        assert_eq!(t.status(A)["serverEvent"], "server_replaced");
+        // B's new team lands there with low numbers; A still pulls it.
+        t.post(B, "bnew", "b1", "after the rebuild", 3_100).unwrap();
+        sync_to(&t.b, &new.0, B, 3_101).unwrap();
+        assert!(count(&format!("SELECT max(p.server_seq) FROM {q}.posts p JOIN {q}.teams t ON t.uid = p.team_uid WHERE t.team = 'bnew'")) < pulled_before);
+        let r = sync_to(&t.a, &new.0, A, 3_102).unwrap();
+        assert_eq!(r.server_event, None, "reported once");
+        assert!(t.teams(A).iter().any(|x| x["team"] == "bnew"), "{:?}", t.teams(A));
+        // The copy of B's old team that the new server also has stays.
+        assert!(t.teams(A).iter().any(|x| x["team"] == "bteam"));
+    }
+
+    #[test]
+    fn a_server_restored_from_a_backup_resets_the_pull_and_sends_again() {
+        let Some(t) = two("backup") else { return };
+        for i in 0..5 {
+            t.post(A, "lead", "t1", &format!("a{i}"), 1_000 + i).unwrap();
+        }
+        t.sync(A, 2_000).unwrap();
+        t.sync(B, 2_001).unwrap();
+        t.sync(A, 2_002).unwrap();
+        // Restored from an older backup: same uid, the sequence went back, A's rows are gone.
+        let s = &t.target.schema;
+        t.pg_exec(&format!("UPDATE {s}.posts SET deleted_at = 1 WHERE false; DELETE FROM {s}.posts; SELECT setval('{s}.board_server_seq', 1)"));
+        let r = t.sync(A, 3_000).unwrap();
+        assert_eq!(r.server_event, Some("server_restored"));
+        assert!(r.pushed > 0);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.posts")), 5);
+        t.post(B, "bnew", "b1", "after the restore", 3_100).unwrap();
+        t.sync(B, 3_101).unwrap();
+        t.sync(A, 3_102).unwrap();
+        assert!(t.teams(A).iter().any(|x| x["team"] == "bnew"));
+        assert_eq!(t.sync(A, 3_103).unwrap().server_event, None);
+    }
+
+    #[test]
+    fn a_team_deleted_here_and_absent_on_the_new_server_neither_errors_nor_loops() {
+        let Some(t) = two("tombnew") else { return };
+        t.post(A, "gone", "t1", "x", 1_000).unwrap();
+        t.post(A, "lead", "t1", "y", 1_000 + 40 * 86_400_000).unwrap();
+        t.sync(A, 2_000).unwrap();
+        // "gone" is retired here (30 days idle) and the tombstone is not on any server yet.
+        run(t.a.prune_stale(1_000 + 31 * 86_400_000, STALE_AFTER_MS)).unwrap();
+        let new = other_server("tombnew");
+        let r = sync_to(&t.a, &new.0, A, 3_000).unwrap();
+        assert_eq!(r.server_event, Some("server_replaced"));
+        let again = sync_to(&t.a, &new.0, A, 3_001).unwrap();
+        assert_eq!((again.pushed, again.server_event), (0, None));
+        assert_eq!(t.status(A)["fullPush"], false);
+        assert_eq!(t.status(A)["waiting"], 0);
+    }
+
+    #[test]
+    fn restore_takes_over_a_silent_name_only_and_keeps_newer_local_rows() {
+        let Some(t) = two("restore") else { return };
+        t.post(A, "lead", "t1", "one", 1_000).unwrap();
+        t.add(A, "lead", "task one", 1_001).unwrap();
+        t.add(A, "lead", "task two", 1_002).unwrap();
+        t.write(A, "lead", on("claim", 1), agent("t1", A), 1_003).unwrap();
+        t.sync(A, 2_000).unwrap();
+        // A new installation with the same name: sync pauses, restore offers a takeover.
+        let fresh = t.extra("a2");
+        assert_eq!(t.sync_store(&fresh, A, 2_100).unwrap_err().code(), "name_taken");
+        let server = t.server();
+        let pre = run(sync::restore_preview(lite(&fresh), &server, A, 2_200)).unwrap();
+        assert_eq!((pre["teams"].as_i64(), pre["tasks"].as_i64(), pre["notes"].as_i64()), (Some(1), Some(2), Some(1)));
+        assert_eq!(pre["takeover"]["allowed"], false);
+        assert_eq!(code(&run(sync::restore_teams(lite(&fresh), &server, A, false, 2_200)).unwrap_err()), "takeover_needed");
+        // A computer seen minutes ago is never impersonated.
+        assert_eq!(code(&run(sync::restore_teams(lite(&fresh), &server, A, true, 2_200)).unwrap_err()), "host_alive");
+        let later = 2_000 + super::super::sync::RESTORE_TAKEOVER_MS;
+        t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = last_seen - 16 * 60000 WHERE host = 'mac-a'", t.target.schema));
+        let out = run(sync::restore_teams(lite(&fresh), &server, A, true, later)).unwrap();
+        assert_eq!((out["teams"].as_i64(), out["tasks"].as_i64(), out["notes"].as_i64()), (Some(1), Some(2), Some(1)));
+        assert!(run(fresh.teams()).unwrap()[0].get("mirror").is_none(), "home again");
+        assert_eq!(states(&t.list(A, "lead", 1_004)), states(&run(fresh.task_list("lead".into(), TaskListQuery { all: true, ..Default::default() }, at(A, 1_004))).unwrap()));
+        // It syncs as that name now; the old installation is the one paused.
+        t.sync_store(&fresh, A, later + 1).unwrap();
+        // The replaced installation is told what happened (not "name taken").
+        assert_eq!(t.sync(A, later + 2).unwrap_err().code(), "replaced");
+        // A claim of the old installation's agent runs out through the normal lease expiry.
+        let list = run(fresh.task_list("lead".into(), TaskListQuery { all: true, ..Default::default() }, at(A, later + 10 * HOUR))).unwrap();
+        assert_eq!(states(&list), vec![(1, "open".into()), (2, "open".into())]);
+        run(server.close());
+
+        // Restore on a file that has the team: a newer local row is kept, unsent changes refuse.
+        let Some(u) = two("restore2") else { return };
+        u.add(A, "lead", "server title", 1_000).unwrap();
+        u.sync(A, 2_000).unwrap();
+        let path = u.dir.join("a.db");
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute("UPDATE tasks SET title = 'newer here', row_version = row_version + 5", []).unwrap();
+        let server = u.server();
+        let out = run(sync::restore_teams(lite(&u.a), &server, A, false, 3_000)).unwrap();
+        assert!(out["keptNewer"].as_i64().unwrap() >= 1, "{out}");
+        let list = u.list(A, "lead", 3_001);
+        assert_eq!(list["tasks"][0]["title"], "newer here");
+        u.add(A, "lead", "unsent", 3_002).unwrap();
+        let e = run(sync::restore_teams(lite(&u.a), &server, A, false, 3_003)).unwrap_err();
+        assert_eq!(code(&e), "unsent");
+        run(server.close());
+    }
+
 }
 
 // ── Sync rules without a server (stage 3b) ───────────────────────────────
@@ -2658,5 +3248,165 @@ mod sync_local {
             .query_row("SELECT count(*) FROM posts WHERE deleted_at IS NOT NULL", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+}
+
+// ── Stage 3c without a server: remote-note queue and delivery rules ──────
+
+mod stage3c_local {
+    use super::super::pg::OutboxNote;
+    use super::super::sqlite;
+    use super::*;
+
+    fn file(tag: &str) -> (PathBuf, SqliteStore) {
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("bbarit-3c-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("board.db");
+        (dir, SqliteStore::new(path))
+    }
+
+    fn at(host: &str, now: i64) -> Ctx {
+        Ctx { now, host: Some(host.into()), instance: format!("inst-{host}") }
+    }
+
+    fn queue(s: &SqliteStore, inp: PostInput, now: i64) -> Result<Value, String> {
+        let ctx = at("mac-b", now);
+        run(s.run(move |c, l| sqlite::post_or_queue(c, l, "lead", &inp, &ctx)))
+    }
+
+    #[test]
+    fn a_note_for_a_copy_is_queued_with_the_local_rules_and_caps() {
+        let (dir, s) = file("queue");
+        // A team homed on mac-a that this file holds as a copy.
+        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        let raw = rusqlite::Connection::open(s_path(&dir)).unwrap();
+        raw.execute("INSERT INTO mirror_teams(team_uid, home_host, synced_at) SELECT uid, home_host, 1 FROM teams", []).unwrap();
+        let q = queue(&s, input("b1", "note", "  from b \u{200B}"), 10).unwrap();
+        assert_eq!((q["pending"].as_bool(), q["home"].as_str(), q["text"].as_str()), (Some(true), Some("mac-a"), Some("from b")));
+        assert!(queue(&s, input("b1", "announce", "x"), 11).is_err());
+        assert_eq!(queue(&s, PostInput { root: true, ..input("b1", "announce", "x") }, 11).unwrap_err(), "only notes can be sent to a team that lives on mac-a");
+        assert!(queue(&s, PostInput { task: Some(1), ..input("b1", "note", "x") }, 11).unwrap_err().contains("cannot link a task"));
+        assert!(queue(&s, input("b1", "note", ""), 11).is_err(), "empty text is refused like a local post");
+        for i in 1..super::super::sync::REMOTE_NOTES_PER_TEAM {
+            queue(&s, input("b1", "note", &format!("n{i}")), 20 + i).unwrap();
+        }
+        let full = queue(&s, input("b1", "note", "one too many"), 100).unwrap_err();
+        assert!(full.contains("waiting to be delivered to mac-a"), "{full}");
+        let list = run(s.run(|c, _| sqlite::outbox_list(c, "lead"))).unwrap();
+        assert_eq!(list.len() as i64, super::super::sync::REMOTE_NOTES_PER_TEAM);
+        assert!(list.iter().all(|n| n["state"] == "pending"));
+        // Nothing was written to the copy itself.
+        let posts: i64 = raw.query_row("SELECT count(*) FROM posts", [], |r| r.get(0)).unwrap();
+        assert_eq!(posts, 1);
+        // A refused note can be dismissed; a waiting one cannot.
+        let id = list[0]["id"].as_str().unwrap().to_string();
+        let i2 = id.clone();
+        assert_eq!(run(s.run(move |c, _| sqlite::outbox_dismiss(c, &i2))).unwrap(), 0);
+        let i3 = id.clone();
+        run(s.run(move |c, _| sqlite::outbox_mark_refused(c, &i3, "team_gone"))).unwrap();
+        assert_eq!(run(s.run(move |c, _| sqlite::outbox_dismiss(c, &id))).unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn s_path(dir: &Path) -> PathBuf {
+        dir.join("board.db")
+    }
+
+    fn note(id: &str, team_uid: &str, text: &str) -> OutboxNote {
+        OutboxNote {
+            id: id.into(),
+            team_uid: team_uid.into(),
+            from_host: "mac-b".into(),
+            author_id: "b1".into(),
+            author_name: Some("b1 name".into()),
+            author_cli: Some("claude".into()),
+            kind: "note".into(),
+            text: text.into(),
+            created_at: 5,
+            team_deleted: false,
+            sender_known: true,
+        }
+    }
+
+    #[test]
+    fn the_home_numbers_a_remote_note_once_and_refuses_bad_or_orphaned_ones() {
+        let (dir, s) = file("inbox");
+        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        let raw = rusqlite::Connection::open(s_path(&dir)).unwrap();
+        let uid: String = raw.query_row("SELECT uid FROM teams", [], |r| r.get(0)).unwrap();
+        let ok = "01900000-0000-7000-8000-00000000000a";
+        let notes = vec![
+            note(ok, &uid, "from b"),
+            note("01900000-0000-7000-8000-00000000000b", &uid, "bell\u{7}"),
+            note("01900000-0000-7000-8000-00000000000c", "01900000-0000-7000-8000-0000000000ff", "orphan"),
+            OutboxNote { kind: "announce".into(), ..note("01900000-0000-7000-8000-00000000000d", &uid, "loud") },
+        ];
+        let apply = |n: Vec<OutboxNote>| {
+            let ctx = at("mac-a", 10);
+            run(s.run(move |c, l| sqlite::inbox_apply(c, l, &n, &ctx))).unwrap()
+        };
+        let (first, teams) = apply(notes.clone());
+        assert_eq!(teams, vec!["lead".to_string()]);
+        let verdicts: Vec<(&str, Option<&str>)> = first.iter().map(|r| (r.1, r.2)).collect();
+        // A team that is not here gives no verdict (a half-finished restore); the note waits.
+        assert_eq!(verdicts, vec![("delivered", None), ("refused", Some("invalid")), ("refused", Some("invalid"))]);
+        let spoofed = OutboxNote { sender_known: false, ..note("01900000-0000-7000-8000-00000000000e", &uid, "who am i") };
+        let gone = OutboxNote { team_deleted: true, ..note("01900000-0000-7000-8000-00000000000f", &uid, "late") };
+        let (v, _) = apply(vec![spoofed, gone]);
+        assert_eq!(v.iter().map(|r| r.2).collect::<Vec<_>>(), vec![Some("unknown_sender"), Some("team_gone")]);
+        // Again (the server did not hear back): reported delivered, never posted twice.
+        let (again, _) = apply(notes[..1].to_vec());
+        assert_eq!(again[0].1, "delivered");
+        let n: i64 = raw.query_row("SELECT count(*) FROM posts WHERE id = ?1", [ok], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        let (seq, host, origin): (i64, String, String) =
+            raw.query_row("SELECT seq, author_host, origin_host FROM posts WHERE id = ?1", [ok], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!((seq, host.as_str(), origin.as_str()), (2, "mac-b", "mac-a"));
+        // Logged for the push like any local post.
+        let logged: i64 = raw.query_row("SELECT count(*) FROM changes WHERE tbl = 'posts' AND row_id = ?1", [ok], |r| r.get(0)).unwrap();
+        assert_eq!(logged, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_different_or_restored_server_resets_this_files_side_once() {
+        let (dir, s) = file("identity");
+        let check = |uid: &'static str, last: i64| run(s.run(move |c, _| sqlite::sync_check_server(c, uid, last, 7)));
+        let raw = rusqlite::Connection::open(s_path(&dir)).unwrap();
+        // A fresh file learns the uid without a reset.
+        assert_eq!(check("srv-one", 0).unwrap(), None);
+        raw.execute_batch("INSERT INTO sync_state(key, value) VALUES ('pulled_seq', '63'), ('pushed_seq', '136')").unwrap();
+        assert_eq!(check("srv-one", 100).unwrap(), None, "unchanged server");
+        // Notes on their way: sent and delivered-without-post go again; delivered-with-post goes.
+        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        let (uid, post): (String, String) = raw.query_row("SELECT team_uid, id FROM posts", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        for (id, st) in [("o-sent", "sent"), ("o-deliv", "delivered"), (post.as_str(), "delivered"), ("o-ref", "refused")] {
+            raw.execute(
+                "INSERT INTO outbox(id, team_uid, team, home_host, author_id, kind, text, created_at, state) VALUES (?1, ?2, 'lead', 'mac-a', 'b', 'note', 't', 1, ?3)",
+                rusqlite::params![id, uid, st],
+            )
+            .unwrap();
+        }
+        assert_eq!(check("srv-two", 100).unwrap(), Some("server_replaced"));
+        let get = |k: &str| raw.query_row("SELECT value FROM sync_state WHERE key = ?1", [k], |r| r.get::<_, String>(0)).ok();
+        assert_eq!((get("pulled_seq").as_deref(), get("full_push").as_deref(), get("server_event").as_deref()), (Some("0"), Some("1"), Some("server_replaced")));
+        let states: Vec<(String, String)> = {
+            let mut st = raw.prepare("SELECT id, state FROM outbox ORDER BY id").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+        };
+        assert_eq!(states, vec![("o-deliv".into(), "pending".into()), ("o-ref".into(), "refused".into()), ("o-sent".into(), "pending".into())]);
+        // Same server, sequence below the pull position: restored from a backup.
+        raw.execute("UPDATE sync_state SET value = '50' WHERE key = 'pulled_seq'", []).unwrap();
+        raw.execute("DELETE FROM sync_state WHERE key = 'full_push'", []).unwrap();
+        assert_eq!(check("srv-two", 10).unwrap(), Some("server_restored"));
+        assert_eq!(get("pulled_seq").as_deref(), Some("0"));
+        assert_eq!(check("srv-two", 10).unwrap(), None, "once");
+        // A file that synced before servers had a uid, with cursors: treated as another server.
+        raw.execute("DELETE FROM sync_state WHERE key = 'server_uid'", []).unwrap();
+        raw.execute("UPDATE sync_state SET value = '9' WHERE key = 'pulled_seq'", []).unwrap();
+        assert_eq!(check("srv-two", 100).unwrap(), Some("server_replaced"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

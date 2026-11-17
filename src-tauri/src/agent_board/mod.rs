@@ -241,7 +241,22 @@ pub fn prune_on_start() {
 
 #[tauri::command]
 pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, String> {
-    let res = track(async { current_store()?.post(team.trim().to_string(), post, ctx()).await }.await)?;
+    let sync_mode = read_selection().mode.mode == config::BoardMode::Sync;
+    let res = track(
+        async {
+            let store = current_store()?;
+            match &*store {
+                // Stage 3c: in sync mode a note for another computer's team is queued for its
+                // home (a remote note) instead of refused.
+                BoardStore::Sqlite(s) if sync_mode => {
+                    let (team, c) = (team.trim().to_string(), ctx());
+                    s.run(move |conn, l| sqlite::post_or_queue(conn, l, &team, &post, &c)).await
+                }
+                _ => store.post(team.trim().to_string(), post, ctx()).await,
+            }
+        }
+        .await,
+    )?;
     sync::note_local_write();
     Ok(res)
 }

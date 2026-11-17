@@ -26,13 +26,14 @@ import { AgentList, type AgentRow } from './AgentList';
 import { LimitsCard, MachinesCard } from './LimitsCard';
 import { NeedsYouList } from './NeedsYouList';
 import { Sparkline, StateBar, StateIcon, TabBar } from './parts';
-import { useSyncStatus, useTeamBoard, type HumanTaskSub, type TeamBoardSource } from './source';
-import { groupTeamsByHome } from '../terminal/agentBoardStorage';
+import { useSyncStatus, useTeamBoard, type ActionResult, type HumanTaskSub, type OutboxEntry, type TeamBoardSource } from './source';
+import { canOfferTakeover, groupTeamsByHome, hoursAgo, needsTableUpgrade, normalizeAdoptPreview, parseBoardRefusal, type AdoptPreview } from '../terminal/agentBoardStorage';
 import { AddTaskForm, TaskBoard, TaskFilters, TaskList, emptyFilters, type FilterState } from './TaskArea';
 import { TaskDrawer } from './TaskDrawer';
 import { DependencyView } from './DependencyView';
 import { TimelineView } from './TimelineView';
-import { makeT, stateLabel } from './strings';
+import { TAKEOVER_REFUSAL_CODES, makeT, stateLabel, type TsKey } from './strings';
+import { useEscapeLayer } from './escape';
 
 export interface TeamMember {
   id: string;
@@ -141,7 +142,23 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   const [drawer, setDrawer] = useState<number | null>(null);
   const [adding, setAdding] = useState(false);
   const [actionError, setActionError] = useState('');
-  useEffect(() => { setFilters(emptyFilters()); setDrawer(null); setAdding(false); setActionError(''); }, [team]);
+  const [adoptAsk, setAdoptAsk] = useState<AdoptPreview | null>(null);
+  const [adoptBusy, setAdoptBusy] = useState(false);
+  const [outbox, setOutbox] = useState<OutboxEntry[]>([]);
+  const [outboxNonce, setOutboxNonce] = useState(0);
+  const [notice, setNotice] = useState('');
+  // The confirmation is a layer: Esc closes only it; focus goes to Cancel and comes back.
+  useEscapeLayer(adoptAsk !== null, () => setAdoptAsk(null));
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const takeoverRef = useRef<HTMLButtonElement | null>(null);
+  const askOpen = adoptAsk !== null;
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (askOpen) cancelRef.current?.focus();
+    else if (wasOpenRef.current) (takeoverRef.current ?? rootRef.current)?.focus();
+    wasOpenRef.current = askOpen;
+  }, [askOpen]);
+  useEffect(() => { setFilters(emptyFilters()); setDrawer(null); setAdding(false); setActionError(''); setAdoptAsk(null); setNotice(''); }, [team]);
 
   const info = board.info;
   const teamRow = board.teams.find((x) => x.team === team);
@@ -150,6 +167,15 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   // Until the team list is known nothing says whose team this is: no actions yet.
   const listPending = board.loading && !teamRow;
   const snap = board.snapshot?.team === team ? board.snapshot : null;
+  // This computer's waiting notes for a copy: read again whenever the board was read (the
+  // existing poller) or a note was posted / dismissed here; never a poller of its own.
+  const outboxKey = `${team}|${mirror ? 1 : 0}|${snap?.at ?? 0}|${outboxNonce}`;
+  useEffect(() => {
+    if (!team || !mirror || !source.outbox) { setOutbox([]); return; }
+    let live = true;
+    source.outbox(team).then((v) => { if (live) setOutbox(Array.isArray(v) ? v : []); }).catch(() => { /* shown again on the next read */ });
+    return () => { live = false; };
+  }, [outboxKey]);
   const nowBucket = Math.floor(now / 30_000);
   const views = useMemo(() => (snap ? deriveTaskViews(snap.tasks, now, props.staleMs, { mirror }) : []), [snap, props.staleMs, mirror, nowBucket]);
   const summary = useMemo(() => summarize(views), [views]);
@@ -229,6 +255,66 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   const owners = [...new Map(views.filter((v) => v.ownerId).map((v) => [v.ownerId!, { id: v.ownerId!, name: v.ownerName || v.ownerId! }])).values()];
   const drawerView = drawer !== null ? views.find((v) => v.seq === drawer) : undefined;
   const readOnly = mirror || listPending || !!board.error;
+  // Stage 3c: a person may post a note on a copy (it waits for the home); taking a team over
+  // is offered only once its home has been silent for the threshold (the host checks again).
+  const remoteNotes = mirror && sync?.mode === 'sync' && !needsTableUpgrade(sync);
+  const noteBlocked = listPending || !!board.error || (mirror && !remoteNotes);
+  const noteHint = !mirror ? undefined : remoteNotes ? t('remote.hint', { home: teamRow?.homeHost ?? '?' }) : sync?.mode === 'sync' ? t('remote.upgrade') : undefined;
+  const offerTakeover = mirror && !!source.adoptPreview && canOfferTakeover(sync, teamRow?.homeHost);
+  const takeoverRefusal = (e: unknown): string => {
+    const r = parseBoardRefusal(e);
+    const vars = { home: String(r.vars.home ?? teamRow?.homeHost ?? '?'), hours: Number(r.vars.hours ?? 0), message: r.message };
+    if ((TAKEOVER_REFUSAL_CODES as readonly string[]).includes(r.code)) return t(`takeover.refused.${r.code}` as TsKey, vars);
+    return t('error.action', { error: r.message });
+  };
+  // A preview belongs to the team it was asked for: an answer that arrives after the person
+  // picked another team is dropped, and confirming always sends the preview's own team.
+  const teamNowRef = useRef(team);
+  teamNowRef.current = team;
+  const takeoverTimeout = (e: unknown) => {
+    if (parseBoardRefusal(e).code !== 'timeout') return false;
+    setActionError(t('takeover.timeout'));
+    board.refresh();
+    return true;
+  };
+  const askTakeover = async () => {
+    if (!source.adoptPreview || adoptBusy) return;
+    const asked = team;
+    setActionError('');
+    setAdoptBusy(true);
+    try {
+      const p = normalizeAdoptPreview(await source.adoptPreview(asked));
+      if (teamNowRef.current !== asked) return;
+      if (p) setAdoptAsk({ ...p, team: p.team || asked });
+    } catch (e) {
+      if (teamNowRef.current === asked && !takeoverTimeout(e)) setActionError(takeoverRefusal(e));
+    } finally {
+      setAdoptBusy(false);
+    }
+  };
+  const confirmTakeover = async () => {
+    const p = adoptAsk;
+    if (!p || !source.adopt || adoptBusy) return;
+    setAdoptBusy(true);
+    const r = await source.adopt(p.team, p.uid, p.home, p.version);
+    setAdoptBusy(false);
+    setAdoptAsk(null);
+    if (r.ok) {
+      // It is this computer's team now: remember it for the project and say so.
+      if (teamNowRef.current === p.team) {
+        pickedRef.current = true;
+        writeStore(TEAM_KEY(projectId), p.team);
+      }
+      setNotice(t('takeover.done', { team: p.teamName || p.team }));
+      board.refresh();
+    } else if (!takeoverTimeout(r.error)) setActionError(takeoverRefusal(r.error));
+  };
+  const dismissOutbox = async (id: string) => {
+    if (!source.dismissOutbox) return;
+    const r = await source.dismissOutbox(id);
+    if (!r.ok) setActionError(t('outbox.dismissFailed', { error: r.error }));
+    setOutboxNonce((n) => n + 1);
+  };
   const greyed = !!board.error && !!snap;
   const sentence = stateBarSentence(summary, (s) => stateLabel(locale, s), (n) => t('summary.tasks', { n }));
 
@@ -259,6 +345,9 @@ export function TeamStatusView(props: TeamStatusViewProps) {
             </>}
       </select>
       {team && <span className="ts-machine">{t('team.root', { id: team.slice(0, 10) })}</span>}
+      {offerTakeover && (
+        <button type="button" ref={takeoverRef} className="ts-btn" data-testid="ts-takeover" disabled={adoptBusy} onClick={() => void askTakeover()}>{t('takeover.button')}</button>
+      )}
       {mirror && (
         <span className="ts-chip ts-readonly-chip" data-testid="ts-readonly-chip" title={t('team.readOnlyHint', { host: teamRow?.homeHost ?? '?', age: teamRow?.syncedAt ? formatBoardTime(teamRow.syncedAt, now) : '-' })}>
           <Icons.Lock size={11} aria-hidden="true" />{t('team.readOnlyChip')}
@@ -304,7 +393,17 @@ export function TeamStatusView(props: TeamStatusViewProps) {
     </section>
   );
 
-  const activity = <ActivityFeed entries={feed} now={now} locale={locale} t={t} readOnly={readOnly} onOpen={setDrawer} onPost={(text) => source.postNote(team, text)} draftKey={team} />;
+  const postNote = async (text: string): Promise<ActionResult> => {
+    const r = await source.postNote(team, text);
+    if (r.ok && mirror) setOutboxNonce((n) => n + 1);
+    return r;
+  };
+  const activity = (
+    <ActivityFeed
+      entries={feed} now={now} locale={locale} t={t} readOnly={noteBlocked} onOpen={setDrawer} onPost={postNote} draftKey={team}
+      pending={mirror ? outbox : []} onDismiss={(id) => void dismissOutbox(id)} homeHost={teamRow?.homeHost} hint={noteHint}
+    />
+  );
   const limitsCard = <LimitsCard usage={props.limits} refusals={board.refusals} now={now} locale={locale} t={t} />;
 
   const taskBody = (narrow: boolean) => {
@@ -354,6 +453,18 @@ export function TeamStatusView(props: TeamStatusViewProps) {
           <>
             {!snap && board.loading && slow && <div className="ts-muted">{t('loading')}</div>}
             {actionError && <div className="ts-error" role="alert">{actionError}</div>}
+            {notice && <div className="ts-hint" role="status" data-testid="ts-notice">{notice}</div>}
+            {adoptAsk && (
+              <div className="ts-banner" role="alertdialog" aria-label={t('takeover.title')} data-testid="ts-takeover-confirm">
+                <span className="ts-banner-text">
+                  {adoptAsk.ageMs === null
+                    ? t('takeover.unknownAge', { team: adoptAsk.teamName || adoptAsk.team, home: adoptAsk.home })
+                    : t('takeover.confirm', { team: adoptAsk.teamName || adoptAsk.team, home: adoptAsk.home, hours: hoursAgo(adoptAsk.ageMs), limit: hoursAgo(adoptAsk.adoptAfterMs) })}
+                </span>
+                <button type="button" className="ts-btn ts-danger" disabled={adoptBusy || !adoptAsk.allowed} onClick={() => void confirmTakeover()}>{t('takeover.yes')}</button>
+                <button type="button" ref={cancelRef} className="ts-btn" onClick={() => setAdoptAsk(null)}>{t('takeover.cancel')}</button>
+              </div>
+            )}
             <div className={greyed ? 'ts-greyed' : undefined}>{summaryStrip}</div>
             <div className="ts-grid">
               <div className="ts-area-needs">{needs}</div>

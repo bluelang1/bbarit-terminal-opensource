@@ -6124,17 +6124,18 @@ Office project scaffold created by BBARIT Terminal.
     if (!isValidTeamId(team)) return { ok: false, error: `invalid team id: ${team}` };
     const text = sanitizeBoardText(raw);
     if (!text.ok) return { ok: false, error: text.error };
-    let stored: BoardPost;
+    let stored: BoardPost & { pending?: boolean; home?: string };
     try {
-      stored = await invoke<BoardPost>('agent_board_post', {
+      stored = await invoke<BoardPost & { pending?: boolean; home?: string }>('agent_board_post', {
         team,
         post: { teamName: boardTeamName(team) || undefined, authorId: 'user', authorName: 'user', kind: 'note', text: text.value, root: false },
       });
     } catch (e) {
       return { ok: false, error: boardError(e) };
     }
-    logAgentRelay({ event: 'board_post', text: text.value, extra: { team, kind: 'note', seq: stored.seq, by: 'viewer' } });
-    emitAgentBoardEvent({ team, action: 'post', seq: stored.seq, kind: 'note', authorId: 'user' });
+    logAgentRelay({ event: 'board_post', text: text.value, extra: { team, kind: 'note', seq: stored.seq, by: 'viewer', ...(stored.pending ? { pendingFor: stored.home } : {}) } });
+    // A note queued for another computer's team is not a post yet: views refresh, nobody is told.
+    emitAgentBoardEvent(stored.pending ? { team, action: 'sync' } : { team, action: 'post', seq: stored.seq, kind: 'note', authorId: 'user' });
     return { ok: true };
   };
   // ── Team status view (src/teamStatus/, toolbar gauge overlay) ── reads go through the board
@@ -6174,6 +6175,25 @@ Office project scaffold created by BBARIT Terminal.
       return r.ok ? { ok: true } : { ok: false, error: r.error };
     },
     postNote: humanBoardPost,
+    outbox: (team) => invoke('agent_board_outbox', { team }),
+    dismissOutbox: async (id) => {
+      try {
+        await invoke('agent_board_outbox_dismiss', { id });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: boardError(e) };
+      }
+    },
+    adoptPreview: (team) => invoke('agent_board_adopt_preview', { team }),
+    adopt: async (team, uid, home, version) => {
+      try {
+        await invoke('agent_board_adopt', { team, uid, home, version });
+        emitAgentBoardEvent({ team, action: 'sync' });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e instanceof Error ? e.message : e) };
+      }
+    },
   };
   // Badges: read while relay children exist or the Team status tab is open (never for the
   // Dashboard tab alone). The hook re-renders only when a badge-relevant key changes.
@@ -8465,13 +8485,20 @@ Office project scaffold created by BBARIT Terminal.
         } catch (e) {
           return { ok: false, error: boardError(e) };
         }
+        const queued = (stored as BoardPost & { pending?: boolean; home?: string }).pending === true;
         logAgentRelay({
           event: 'board_post',
           caller: relayLogParty(caller),
           callerVerified: callerCheck.verified,
           text: text.value,
-          extra: { team, kind: kind.value, seq: stored.seq, task: taskLink },
+          extra: { team, kind: kind.value, seq: stored.seq, task: taskLink, ...(queued ? { pendingFor: (stored as { home?: string }).home } : {}) },
         });
+        // A note for another computer's team (sync) waits for its home: not a post here yet,
+        // so nothing is announced; the home numbers it on its next sync round.
+        if (queued) {
+          emitAgentBoardEvent({ team, action: 'sync' });
+          return { ok: true, team, pending: true, home: (stored as { home?: string }).home, ts: stored.ts };
+        }
         emitAgentBoardEvent({ team, action: 'post', seq: stored.seq, kind: kind.value, authorId: caller, ...(taskLink ? { task: taskLink } : {}) });
         return { ok: true, team, seq: stored.seq, ts: stored.ts, ...(taskLink ? { task: taskLink } : {}) };
       }
