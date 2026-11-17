@@ -13,6 +13,8 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { useConfig } from '../config/ConfigContext';
+import { emitAgentBoardEvent } from '../terminal/agentBoard';
+import { useSyncStatus } from '../teamStatus/source';
 import { useTranslation, type TranslationKey } from '../i18n';
 import {
   BOARD_MODES,
@@ -32,13 +34,16 @@ import {
   type NextStep,
   type PgDraft,
   type PgTestResult,
+  checkMachineName,
+  normalizeSyncStatus,
+  parseBoardRefusal,
+  type SyncStatus,
 } from '../terminal/agentBoardStorage';
 
 interface BoardStatus {
   mode: BoardMode;
   modeWarning?: string | null;
   backend: 'sqlite' | 'postgres';
-  syncPending: boolean;
   envOverride: boolean;
   passwordSaved: boolean;
   passwordFor?: string | null;
@@ -124,6 +129,17 @@ export function AgentBoardSettings() {
   const [merge, setMerge] = useState(false);
   const [copyFrom, setCopyFrom] = useState<CopyFrom>(copySource(mode));
   const statusSeq = useRef(0);
+  const [syncNonce, setSyncNonce] = useState(0);
+  const busyRef = useRef(false);
+  // Sync status: polled while syncing (keyed on the usage type), read once otherwise; a
+  // "Sync now" answer is shown until the next poll replaces it.
+  const polled = useSyncStatus(isTauri() ? () => invoke('agent_board_sync_status') : undefined, { key: `${mode}|${syncNonce}`, poll: mode === 'sync' });
+  const [fresh, setFresh] = useState<SyncStatus | null>(null);
+  useEffect(() => setFresh(null), [polled]);
+  const sync: SyncStatus | null = fresh ?? polled;
+  const setSync = setFresh;
+  const [nameDraft, setNameDraft] = useState<string>(typeof board.hostName === 'string' ? board.hostName : '');
+  const [removeAsk, setRemoveAsk] = useState<number | null>(null);
 
   // A saved change elsewhere (or Revert) replaces an untouched draft.
   const savedKey = JSON.stringify(savedDraft);
@@ -197,14 +213,18 @@ export function AgentBoardSettings() {
   };
 
   const run = async <T,>(label: string, fn: () => Promise<T>): Promise<T | null> => {
+    // One action at a time (a second click while one runs does nothing).
+    if (busyRef.current) return null;
+    busyRef.current = true;
     setBusy(label);
     setMessage(null);
     try {
       return await fn();
     } catch (e) {
-      setMessage({ ok: false, lines: [String(e)] });
+      setMessage({ ok: false, lines: [e instanceof Error ? e.message : String(e)] });
       return null;
     } finally {
+      busyRef.current = false;
       setBusy(null);
       refresh();
     }
@@ -302,7 +322,6 @@ export function AgentBoardSettings() {
     if (!status) return statusError ? t('settings.agentBoard.status.failed') : '…';
     const parts: string[] = [];
     parts.push(status.backend === 'postgres' ? fillText(t('settings.agentBoard.status.postgres'), { target: status.target ?? '' }) : t('settings.agentBoard.status.sqlite'));
-    if (status.syncPending) parts.push(t('settings.agentBoard.status.syncPending'));
     if (status.schemaVersion != null) parts.push(fillText(t('settings.agentBoard.status.schema'), { v: status.schemaVersion }));
     else if (status.backend === 'postgres' && !status.error) parts.push(t('settings.agentBoard.status.noTables'));
     if (status.counts) parts.push(fillText(t('settings.agentBoard.status.counts'), status.counts));
@@ -310,6 +329,70 @@ export function AgentBoardSettings() {
   })();
 
   const disabled = busy !== null;
+
+  // ── Sync (usage type "Both (sync)") ──
+  const savedName = typeof board.hostName === 'string' ? board.hostName : '';
+  useEffect(() => setNameDraft(savedName), [savedName]);
+  const nameCheck = checkMachineName(nameDraft);
+  const saveName = () =>
+    run('name', async () => {
+      if (!nameCheck.ok) throw new Error(t('settings.agentBoard.hostName.invalid'));
+      let r: { host: string };
+      try {
+        r = await invoke<{ host: string }>('agent_board_check_host_name', { name: nameCheck.value });
+      } catch (e) {
+        throw new Error(refusalText(e));
+      }
+      updateConfig((prev) => {
+        const b: typeof prev.agents.board = { ...prev.agents.board };
+        if (nameCheck.value) b.hostName = nameCheck.value;
+        else delete b.hostName;
+        return { ...prev, agents: { ...prev.agents, board: b } };
+      });
+      setMessage({ ok: true, lines: [fillText(t('settings.agentBoard.hostName.saved'), { name: r.host })] });
+    });
+  const syncNow = () =>
+    run('sync', async () => {
+      const raw = await invoke<Record<string, unknown>>('agent_board_sync_now');
+      const r = normalizeSyncStatus(raw);
+      setSync(r);
+      setMessage(r?.ok
+        ? { ok: true, lines: [fillText(t('settings.agentBoard.sync.nowDone'), { pushed: Number(raw?.pushed ?? 0), pulled: Number(raw?.pulled ?? 0) })] }
+        : { ok: false, lines: [fillText(t('settings.agentBoard.sync.nowFailed'), { e: r?.lastError ?? '?' })] });
+    });
+  const otherTeams = (sync?.machines ?? []).reduce((n, m) => n + m.teams, 0);
+  const runRemove = () =>
+    run('remove', async () => {
+      let r: { removed: number };
+      try {
+        r = await invoke<{ removed: number }>('agent_board_remove_mirrors');
+      } catch (e) {
+        setRemoveAsk(null);
+        throw new Error(refusalText(e));
+      }
+      setRemoveAsk(null);
+      setSyncNonce((n) => n + 1);
+      // Open team views drop the removed teams at once.
+      emitAgentBoardEvent({ team: '', action: 'sync' });
+      setMessage({ ok: true, lines: [fillText(t('settings.agentBoard.sync.removed'), { n: r.removed })] });
+    });
+  // Host refusals carry a stable code; shown in the person's language.
+  const refusalText = (e: unknown): string => {
+    const r = parseBoardRefusal(e);
+    const known: Record<string, TranslationKey> = {
+      env_set: 'settings.agentBoard.hostName.refused.env_set',
+      invalid: 'settings.agentBoard.hostName.refused.invalid',
+      live_teams: 'settings.agentBoard.hostName.refused.live_teams',
+      sync_on: 'settings.agentBoard.sync.removeOnlyOff',
+    };
+    return known[r.code] ? fillText(t(known[r.code]), r.vars) : r.message;
+  };
+  const syncProblem = (st: SyncStatus): string | null => {
+    if (st.lastErrorCode === 'name_changed') return t('settings.agentBoard.sync.nameChanged');
+    if (st.lastErrorCode === 'name_taken') return t('settings.agentBoard.sync.nameTaken');
+    return st.lastError ?? null;
+  };
+  const syncTime = (ms?: number | null) => (ms ? new Date(ms).toLocaleString() : t('settings.agentBoard.sync.never'));
   const blockHint = !pg
     ? null
     : passwordUnsaved
@@ -362,6 +445,69 @@ export function AgentBoardSettings() {
         <span className="setting-description" style={{ display: 'block', color: WARN }}>
           {t('settings.agentBoard.mode.unknown')}
         </span>
+      )}
+
+      <div className="setting-item">
+        <label htmlFor={`${ID}-host-name`} style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.hostName')}</label>
+        {sync?.hostSource === 'env' ? (
+          <span className="setting-description">{fillText(t('settings.agentBoard.hostName.env'), { name: sync.host })}</span>
+        ) : (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <input id={`${ID}-host-name`} type="text" value={nameDraft} maxLength={120} placeholder={sync?.hostSource === 'system' ? sync.host : ''} onChange={(e) => setNameDraft(e.target.value)} />
+            <button type="button" className="btn-secondary" disabled={disabled || !nameCheck.ok || nameDraft.trim() === savedName} onClick={saveName}>
+              {t('settings.agentBoard.hostName.save')}
+            </button>
+          </span>
+        )}
+        <span className="setting-description">{fillText(t('settings.agentBoard.hostName.desc'), { system: sync?.hostSource === 'system' ? sync.host : '-' })}</span>
+      </div>
+
+      {(mode === 'sync' || otherTeams > 0) && (
+        <div className="setting-item" data-testid="agent-board-sync" style={{ alignItems: 'flex-start' }}>
+          <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.sync.title')}</span>
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {mode === 'sync' && sync && (
+              <>
+                <span role="status">{fillText(t('settings.agentBoard.sync.state'), { state: t(`settings.agentBoard.sync.state.${sync.state}` as TranslationKey) })}</span>
+                <span className="setting-description">{fillText(t('settings.agentBoard.sync.times'), { push: syncTime(sync.lastPushAt), pull: syncTime(sync.lastPullAt) })}</span>
+                <span className="setting-description">{fillText(t('settings.agentBoard.sync.counts'), { waiting: sync.waiting, skipped: sync.skipped })}</span>
+                {sync.fullPush && <span className="setting-description">{t('settings.agentBoard.sync.fullPush')}</span>}
+                {sync.refused > 0 && (
+                  <span className="setting-description" style={{ color: WARN }}>
+                    {fillText(t('settings.agentBoard.sync.refused'), { n: sync.refused, reason: sync.refusedReason ?? '-' })}
+                  </span>
+                )}
+                {syncProblem(sync) && <span className="setting-description" style={{ color: sync.state === 'paused' ? WARN : DANGER }}>{fillText(t('settings.agentBoard.status.lastError'), { e: syncProblem(sync) ?? '' })}</span>}
+              </>
+            )}
+            {otherTeams > 0 && (
+              <span className="setting-description">
+                {fillText(t('settings.agentBoard.sync.others'), { list: (sync?.machines ?? []).map((m) => `${m.host} (${m.teams})`).join(', ') })}
+              </span>
+            )}
+            <span style={{ display: 'flex', gap: 6 }}>
+              {mode === 'sync' && (
+                <button type="button" className="btn-secondary" disabled={disabled} onClick={syncNow}>
+                  {busy === 'sync' ? t('settings.agentBoard.working') : t('settings.agentBoard.sync.now')}
+                </button>
+              )}
+              {otherTeams > 0 && mode !== 'sync' && (
+                <button type="button" className="btn-secondary" disabled={disabled} onClick={() => setRemoveAsk(otherTeams)}>
+                  {t('settings.agentBoard.sync.remove')}
+                </button>
+              )}
+            </span>
+            {removeAsk !== null && (
+              <div style={{ ...monoBox, fontFamily: 'inherit', fontSize: 12 }} role="alertdialog" aria-label={t('settings.agentBoard.sync.remove')}>
+                <div style={{ color: WARN }}>{fillText(t('settings.agentBoard.sync.removeConfirm'), { n: removeAsk })}</div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button type="button" className="btn-secondary" disabled={disabled} onClick={runRemove}>{t('settings.agentBoard.sync.removeYes')}</button>
+                  <button type="button" className="btn-secondary" disabled={disabled} onClick={() => setRemoveAsk(null)}>{t('settings.agentBoard.cancel')}</button>
+                </div>
+              </div>
+            )}
+          </span>
+        </div>
       )}
 
       <h4 style={{ margin: '12px 0 4px', fontSize: 12 }}>{t('settings.agentBoard.pg.title')}</h4>

@@ -6144,8 +6144,9 @@ Office project scaffold created by BBARIT Terminal.
   // events carry no sender (the pop-out's requests are only checked against a per-open token).
   const teamBoardSource: TeamBoardSource = {
     info: () => invoke('agent_board_info'),
+    syncStatus: () => invoke('agent_board_sync_status'),
     teams: async () => {
-      const rows = await invoke<Array<{ team: string; teamName?: string; updatedTs?: number; liveTasks?: number; homeHost?: string }>>('agent_board_teams');
+      const rows = await invoke<Array<{ team: string; teamName?: string; updatedTs?: number; liveTasks?: number; homeHost?: string; mirror?: boolean; syncedAt?: number }>>('agent_board_teams');
       return (Array.isArray(rows) ? rows : []).map((r) => ({ ...r, teamName: boardTeamName(r.team) || r.teamName }));
     },
     tasks: async (team) => {
@@ -6258,6 +6259,16 @@ Office project scaffold created by BBARIT Terminal.
     if (popoutCtxRef.current && isTauri()) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.ctx, popoutCtxRef.current).catch(() => {});
   };
   useEffect(() => { sendPopoutCtx(); }, [popoutCtxKey]);
+  // Board sync (Rust sync worker) announces teams of other machines that changed as the Tauri
+  // event `octo-agent-board`; views listen for the window event of the same name.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const off = tauriListen<{ team?: unknown }>('octo-agent-board', (e) => {
+      const team = e.payload?.team;
+      if (typeof team === 'string') emitAgentBoardEvent({ team, action: 'sync' });
+    });
+    return () => { void off.then((f) => f()).catch(() => {}); };
+  }, []);
   useEffect(() => {
     if (!teamPopout.open || !isTauri()) return;
     return onAgentBoardChange((d) => { void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.board, d).catch(() => {}); });

@@ -439,15 +439,16 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
 Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관), `common.rs`(두 엔진이
 같이 쓰는 할 일 행·JSON·입력 검사), `store.rs`(`BoardStore` — 모든 연산이 지나는 async 인터페이스, `Sqlite`·`Pg` 두 변형),
 `sqlite.rs`·`pg.rs`(엔진별 SQL 전부), `config.rs`(사용 유형·연결 칸·비밀번호 파일·가림), `copy.rs`(데이터 복사),
-`admin.rs`(설정 화면 커맨드), `mod.rs`(게시판 커맨드와 저장소 고르기, SQL 없음), `tests.rs`(`BoardStore` 만 쓰는 동작
+`admin.rs`(설정 화면 커맨드), `sync.rs`(동기화 규칙·한 바퀴·작업자·설정 커맨드), `mod.rs`(게시판 커맨드와 저장소 고르기, SQL 없음), `tests.rs`(`BoardStore` 만 쓰는 동작
 테스트 묶음 — SQLite 에는 늘, `BBARIT_TEST_PG_URL` 이 있으면 PostgreSQL 에도 같은 테스트를 돌린다). 커맨드:
 `agent_board_post|read|teams|clear|info`, `agent_task_write|list|show`, `agent_task_lease_tick|release_owner|held_on_host|
-lease_apply`, 설정용 `agent_board_settings_status|pg_test|pg_migrate|copy|pg_cleanup|secret_save|secret_clear`.
+lease_apply`, 설정용 `agent_board_settings_status|pg_test|pg_migrate|copy|pg_cleanup|secret_save|secret_clear`, 동기화용
+`agent_board_sync_status|sync_now|remove_mirrors|check_host_name`(모두 `agent.*` 가 아니다; 이름 거절은 `{code, vars, message}` JSON).
 
 #### 저장소 고르기 (SQLite / PostgreSQL)
 
-- `config.json` → `agents.board.mode`: `sqlite`(기본), `sync`(3b 단계 동기화 작업자가 들어오기 전까지는 SQLite 와 같다),
-  `postgres`. 예전 키 `backend: "sqlite" | "postgres"` 도 같은 이름의 mode 로 읽는다. 모르는 값은 SQLite(서버로 몰래 바꾸지
+- `config.json` → `agents.board.mode`: `sqlite`(기본), `sync`(이 맥의 파일에 쓰고 작업자가 서버와 맞춘다, 아래
+  "동기화"), `postgres`. 예전 키 `backend: "sqlite" | "postgres"` 도 같은 이름의 mode 로 읽는다. 모르는 값은 SQLite(서버로 몰래 바꾸지
   않음) + 설정 화면 경고. 연결 칸은 `agents.board.postgres.{host, port, database, user, sslMode, schema}`(기본 스키마
   `bbarit_board`). 저장소는 명령마다 설정·환경·비밀번호 파일을 다시 읽어 고르므로 바꾸면 다음 명령부터 적용된다. 자동 복사는 없다.
 - 비밀번호는 config.json 에 넣지 않는다: `~/.config/octo/agent-board.secret`(debug `agent-board.dev.secret`), 0600,
@@ -480,6 +481,51 @@ lease_apply`, 설정용 `agent_board_settings_status|pg_test|pg_migrate|copy|pg_
   안에서만 한다. 설정 커맨드는 `agent.*` UI 커맨드가 아니고, `config get|set`(`config.get`/`config.patch`)은
   `agents.board.mode|backend|postgres` 를 보여 주지도 바꾸지도 않는다(부모 경로를 바꿔도 그 값은 그대로) — 다만 로컬
   브리지처럼 같은 사용자의 프로세스가 Tauri 커맨드를 직접 부르는 것은 막지 못한다(아래 "알려진 한계").
+#### 동기화 (`sync`, 3b)
+
+- 팀마다 주인 컴퓨터가 하나다(팀을 만든 컴퓨터, `teams.home_host`). 주인만 그 팀의 행을 쓰고, 다른 컴퓨터에는 읽기 전용 사본이 생긴다
+  (로컬 표 `mirror_teams(team_uid, home_host, synced_at)`, 스키마 3). 사본 팀에 대한 모든 쓰기(post·clear·task 명령,
+  사람의 동작 포함)는 `this team lives on <host>; it is read-only here` 로 거절된다. 읽기·검색·기록은 된다. 임대 만료와
+  `held_on_host`·30 일 정리는 사본을 건드리지 않는다(주인에서만 판단).
+- 이 컴퓨터의 이름: `BBARIT_BOARD_HOST` > `agents.board.hostName`(설정 "이 컴퓨터 이름", `config get|set` 으로는 못 바꾼다) >
+  시스템 호스트 이름. 이 이름을 집으로 가진 살아 있는 팀이 있으면 이름 바꾸기를 거절한다. 파일의 기계 id 는
+  `board_meta.instance_id`(UUID). 첫 동기화 때 서버 `hosts` 에 (이름, id) 를 등록하고, 같은 이름이 다른 id 로 있으면
+  "another machine uses the name …" 으로 동기화를 멈춘다.
+- 작업자(`sync::start_sync_worker`, 호스트 태스크): `sync` 일 때만 시작 직후·30 초마다·로컬 쓰기 2 초 뒤에 한 바퀴. 실패는
+  5 초 → 5 분으로 늘려 다시 한다. 게시판 명령은 서버를 기다리지 않는다. 서버 표 버전이 다르면 멈추고 할 일을 알려 준다.
+  바뀐 다른 컴퓨터 팀마다 Tauri 이벤트 `octo-agent-board` 를 보내고, App 이 같은 이름의 창 이벤트로 넘긴다.
+- 올리기: `changes` 의 `sync_state.pushed_seq` 다음 500 줄을 서로 다른 행으로 줄여, 이 컴퓨터가 집인 팀의 행만(묘비 포함)
+  서버 트랜잭션 하나로 부모 → 자식 순서로 넣는다. `ON CONFLICT … WHERE 저장된 row_version < 새 row_version AND 같은 팀`
+  이라 같은 묶음을 두 번 보내도 바뀌는 것이 없다. 커밋 뒤에 `pushed_seq` 를 옮기고 그 아래 `changes` 를 지운다. 처음 켤 때,
+  껐다 다시 켤 때, 밀린 줄이 50 000 을 넘을 때는 `full_push`: 집 팀 전체를 표마다 키 순서로 500 줄씩 보낸다.
+  `sync_state`: `consumer`(켜져 있음), `server`(서버가 바뀌면 받기 위치를 처음부터), `pushed_seq`, `pulled_seq`,
+  `full_push`/`full_pos`/`full_from`, `skipped`. 켜져 있는 동안 묘비는 올린 뒤(남은 변경이 없을 때) 30 일이 지나야 지운다.
+- 받기: `pulled_seq < server_seq ≤ 상한` 인 다른 컴퓨터 팀의 행을 표마다 500 줄씩. 행마다 로컬 입력과 같은 검사(id 모양,
+  상태·종류 이름, 길이, 제어·서식 문자, JSON)를 하고 틀린 행은 쓰지 않고 센다. `log_change` 없이 넣고(되돌려 올리지
+  않음), 새 글은 로컬 변경 위치에서 `arrival` 을 받는다(`--new` 가 사본에서도 동작). 이 컴퓨터가 집인 팀의 행, 이 컴퓨터를 집이라
+  주장하는 팀 행은 무시한다. 사본 팀은 200 개까지(가장 오래 조용한 것부터 로컬에서만 지우고 `mirror_ignored` 에 적어, 그 팀의 나중 줄이 일부만 들어오지 않게 한다).
+- 늦게 커밋되는 행: `server_seq` 는 트리거가 쓰는 순간에 번호를 주므로, 작은 번호의 행이 큰 번호보다 늦게 커밋될 수 있다.
+  스키마 3 의 트리거는 번호를 받기 전에 `pg_advisory_xact_lock_shared(hashtext('bbarit-board-seq:<schema>'))` 를 잡는다
+  (올리기와 `postgres` 모드의 직접 쓰기 모두). 받기는 같은 키를 배타로 잡은 뒤 `board_server_seq` 의 현재 값을 상한으로
+  읽는다(최대 3 초 기다림). 배타 잠금을 얻었다는 것은 그 값 이하의 번호를 받은 트랜잭션이 모두 끝났다는 뜻이므로 커서가
+  늦게 커밋된 행을 건너뛰지 않는다.
+- 이름·복사 검사: 파일에 `board_meta.home_name`(팀이 집으로 가진 이름)과 OS 기계 id 의 해시(`board_meta.machine`; macOS
+  IOPlatformUUID, Linux /etc/machine-id, Windows MachineGuid, 읽지 못하면 검사 안 함)를 둔다. 이름이 바뀌었는데 그 이름의
+  살아 있는 팀이나 안 올린 변경이 있으면 동기화를 멈춘다(`name_changed`). 기계 id 가 바뀌면(설정 폴더를 다른 컴퓨터로 복사)
+  새 `instance_id` 를 만들어 서버의 `hosts` 가 이름 충돌로 거절하게 한다. 집이 다른 이름인 팀은 동기화 준비와 데이터 복사
+  뒤에 모두 읽기 전용(`mirror_teams`)으로 표시한다.
+- 서버가 받지 않는 줄: 묶음이 실패하면 줄마다 savepoint 로 다시 넣어, 여전히 안 되는 줄(다른 유일 규칙과 충돌)은 세고
+  넘어간다(`sync_state.refused`, 첫 이유는 `refused_reason`). 서버에 더 새 `row_version` 이 있어 무시된 줄도 센다. 이 컴퓨터가
+  예전에 지운 같은 (team, home_host) 팀이 서버에 묘비로 남아 있으면 데이터 복사처럼 먼저 지운다. `postgres` 모드의 직접
+  쓰기는 `hosts` 에 등록된(동기화하는) 컴퓨터가 집인 팀을 쓰지 못한다.
+- 받기 상한은 `pg_try_advisory_xact_lock` 을 50 ms 마다 3 초까지 시도해 얻는다(쓰는 쪽이 받기 뒤에 줄 서지 않는다). 못 얻으면
+  상태는 "바쁨"(`busy`)이고 곧 다시 한다. 상한은 `pg_sequence_last_value` 로 읽어 시퀀스 USAGE 만 있으면 된다(설정의 권한 검사는
+  `hosts` 표 권한도 본다).
+- 묘비: 한 번이라도 서버와 동기화한 파일(`sync_state.server`)은 사용 유형과 상관없이 이 컴퓨터 팀의 묘비를 "모든 변경이 서버에
+  있던 마지막 시각"(`caught_up`) 전에 바뀐 것만 지운다.
+- 설정: 동기화 상태(켜짐·멈춤·연결 안 됨, 마지막 올리기·받기, 올릴 변경 수, 건너뛴 줄, 마지막 오류 — 비밀번호·URL 은
+  가린다), "지금 동기화", "다른 컴퓨터의 팀 지우기"(동기화를 끈 뒤에만, 확인 후 이 파일에서만; 받기 위치를 처음으로 돌려 다시 켜면 팀 전체를 다시 받는다). `sqlite → sync` 는 전체 올리기로 시작하고
+  `sync → sqlite` 는 사본을 그대로 둔다(계속 읽기 전용).
 - 테스트용 PostgreSQL: `docker run -d --name bbarit-board-pg-test -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16`
   뒤 `BBARIT_TEST_PG_URL=postgres://postgres:test@127.0.0.1:55432/postgres cargo test --manifest-path src-tauri/Cargo.toml
   agent_board`(픽스처마다 스키마를 따로 만들고 지운다; `BBARIT_TEST_PG_REQUIRED=1` 이면 URL 이 없을 때 건너뛰지 않고
@@ -492,7 +538,7 @@ version" 으로 거부하게 한다). 열 때 버전만 읽고 낮을 때만 쓰
 그대로 v2 로 올라간다). 앱보다 새 버전이면 거부한다. 시각은 모두 unix ms 정수, JSON 값은 JSON 을 담은 TEXT, 상태·종류는
 CHECK 없는 텍스트(코드가 검사).
 
-동기화 준비(아직 동기화 작업자는 없다): teams·posts·tasks·task_deps·task_events 는 UUIDv7 텍스트 id(teams 는 `uid`)를
+동기화 준비(작업자는 위 "동기화"): teams·posts·tasks·task_deps·task_events 는 UUIDv7 텍스트 id(teams 는 `uid`)를
 쓰고, 모두 `origin_host`, `updated_at`, `row_version`(바뀔 때마다 +1), `deleted_at`(묘비)을 가진다. clear·상한·30 일 정리는
 지우지 않고 `deleted_at` 을 적으며 읽기는 묘비를 건너뛴다. 30 일 지난 묘비는 앱 시작 때 실제로 지운다. 이런 행을 넣거나
 바꾸거나 묘비로 만들 때마다 같은 트랜잭션에서 `changes` 에 한 줄을 남긴다(`log_change`; 소비자가 없으면 최근 50 000 줄만
@@ -510,7 +556,9 @@ CHECK 없는 텍스트(코드가 검사).
 | `task_deps` | (`task_id`, `depends_on_id`) PK, `team_uid`, 동기화 열 — 앞 작업이 done 이어야 claim 된다 |
 | `task_events` | `id` PK (UUIDv7), `task_id`, `team_uid`, `seq` (작업별), `ts`, `actor_id/_name/_host`, `action` (add, claim, release, auto_release, lease_expired, block, unblock, submit, approve, reject, done, fail, retry, reopen, cancel, edit, dep_add, dep_remove), `from_state`, `to_state`, `attempt`, `note`, `data` (JSON), 동기화 열 |
 | `changes` | `local_seq` PK AUTOINCREMENT, `tbl`, `row_id` (task_deps 는 `<task_id>/<depends_on_id>`), `at` |
-| `sync_state` | `key` PK, `value` — 지금은 비어 있다(`consumer` 가 있으면 `changes` 를 줄이지 않는다) |
+| `sync_state` | `key` PK, `value` — 동기화 위치(`consumer`, `server`, `pushed_seq`, `pulled_seq`, `full_push`, `skipped`; `consumer` 가 있으면 `changes` 는 `pushed_seq` 아래만 지운다) |
+| `mirror_teams` | `team_uid` PK, `home_host`, `synced_at` — 다른 컴퓨터에서 받아 온 읽기 전용 팀(스키마 3) |
+| `mirror_ignored` | `team_uid` PK, `at` — 사본 상한으로 지운 팀(받기가 처음부터 다시 시작할 때 비운다) |
 
 동기화 열 = `origin_host`, `updated_at`, `row_version`, `deleted_at`.
 

@@ -1,6 +1,6 @@
 // Relay limits as segmented meters (children of the busiest parent, depth, total) with a
-// tick strip of refusals in the last 60 min and the last five refusals; the Machines card is
-// a placeholder until sync (stage 3b).
+// tick strip of refusals in the last 60 min and the last five refusals; the Machines card shows
+// the usage type and, when syncing, this machine's sync status (stage 3b).
 import { useId } from 'react';
 import * as Icons from 'lucide-react';
 import { formatBoardTime } from '../terminal/agentBoard';
@@ -8,6 +8,7 @@ import { formatAge, REFUSAL_WINDOW_MS, type LimitUsage, type Refusal } from './m
 import { limitName } from './NeedsYouList';
 import { ChartFrame, SegmentedMeter } from './parts';
 import type { TsT } from './strings';
+import type { SyncStatus } from '../terminal/agentBoardStorage';
 
 function RefusalTicks({ refusals, now, t }: { refusals: Refusal[]; now: number; t: TsT }) {
   const titleId = useId();
@@ -68,13 +69,44 @@ export function LimitsCard({ usage, refusals, now, locale, t }: { usage: LimitUs
   );
 }
 
-export function MachinesCard({ mode, t, onOpenSettings }: { mode?: string; t: TsT; onOpenSettings: () => void }) {
-  const label = mode === 'postgres' ? t('machine.postgres') : mode === 'sync' ? t('machine.sync') : t('machine.local');
+const STATE_KEY = { off: 'machines.state.off', starting: 'machines.state.starting', on: 'machines.state.on', paused: 'machines.state.paused', offline: 'machines.state.offline', busy: 'machines.state.busy' } as const;
+
+/**
+ * Machines: the usage type, this machine's name and — when syncing — the sync state, last
+ * send/receive times, rows waiting, rows skipped, the last error and the other machines whose
+ * teams are shown here read-only.
+ */
+export function MachinesCard({ mode, sync, now, locale, t, onOpenSettings }: { mode?: string; sync?: SyncStatus | null; now?: number; locale?: string; t: TsT; onOpenSettings: () => void }) {
+  const m = sync?.mode ?? mode;
+  const label = m === 'postgres' ? t('machine.postgres') : m === 'sync' ? t('machine.sync') : t('machine.local');
+  const at = now ?? Date.now();
+  const age = (ms?: number | null) => (!ms ? t('machines.never') : at - ms < 60_000 ? t('machines.justNow') : t('machines.ago', { age: formatAge(at - ms, locale ?? 'en') }));
+  const others = sync?.machines ?? [];
   return (
-    <section className="ts-card ts-machines" aria-labelledby="ts-machines-title">
+    <section className="ts-card ts-machines" aria-labelledby="ts-machines-title" data-sync-state={m === 'sync' ? sync?.state ?? 'starting' : 'off'}>
       <h2 className="ts-card-title" id="ts-machines-title"><Icons.Server size={12} aria-hidden="true" />{t('machines.title')}</h2>
       <div style={{ fontSize: 12 }}>{label}</div>
-      {mode !== 'postgres' && <div className="ts-muted" style={{ fontSize: 12, margin: '4px 0' }}>{t('machines.placeholder')}</div>}
+      {sync?.host && <div className="ts-muted" style={{ fontSize: 12 }}>{t('machines.name', { name: sync.host })}</div>}
+      {m === 'sync' && sync && (
+        <dl className="ts-kv" style={{ fontSize: 12, margin: '4px 0' }}>
+          <dt>{t('machines.state')}</dt><dd>{t(STATE_KEY[sync.state])}</dd>
+          <dt>{t('machines.lastPush')}</dt><dd>{age(sync.lastPushAt)}</dd>
+          <dt>{t('machines.lastPull')}</dt><dd>{age(sync.lastPullAt)}</dd>
+          <dt>{t('machines.waiting')}</dt><dd>{sync.waiting}</dd>
+          {sync.skipped > 0 && <><dt>{t('machines.skipped')}</dt><dd>{sync.skipped}</dd></>}
+          {sync.refused > 0 && <><dt>{t('machines.refused')}</dt><dd>{sync.refused}{sync.refusedReason ? ` · ${sync.refusedReason}` : ''}</dd></>}
+          {sync.lastError && <><dt>{t('machines.lastError')}</dt><dd role="status">{sync.lastErrorCode === 'name_changed' ? t('machines.nameChanged') : sync.lastError}</dd></>}
+        </dl>
+      )}
+      {m !== 'postgres' && others.length > 0 && (
+        <div style={{ fontSize: 12, margin: '4px 0' }}>
+          <div className="ts-muted">{t('machines.others')}</div>
+          <ul className="ts-feed" role="list">
+            {others.map((o) => <li key={o.host}><span>{t('machines.otherTeams', { host: o.host, n: o.teams })}</span></li>)}
+          </ul>
+        </div>
+      )}
+      {m === 'sqlite' && others.length === 0 && <div className="ts-muted" style={{ fontSize: 12, margin: '4px 0' }}>{t('machines.placeholder')}</div>}
       <button type="button" className="ts-link" onClick={onOpenSettings}>{t('openSettings')}</button>
     </section>
   );

@@ -83,6 +83,11 @@ pub fn host_id(env_override: Option<&str>, hostname: &str) -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// Refusal for any write on a team another machine owns (sync home rule).
+pub fn read_only_message(home: &str) -> String {
+    format!("this team lives on {home}; it is read-only here")
+}
+
 pub const POST_KINDS: [&str; 6] = ["note", "finding", "question", "decision", "done", "announce"];
 pub const TASK_STATES: [&str; 7] = ["open", "claimed", "blocked", "review", "done", "failed", "cancelled"];
 pub const CHECKS: [&str; 3] = ["passed", "failed", "none"];

@@ -23,7 +23,10 @@ export const EMPTY_WATCH: TeamWatch = { teams: [], needs: new Map() };
 
 export async function readTeamWatch(source: Pick<TeamBoardSource, 'teams' | 'tasks'>, now: number, staleMs: number): Promise<TeamWatch> {
   const rows = await source.teams();
+  // Other computers' teams (sync) are read-only here: they never badge, and never take one of
+  // the watched slots.
   const teams = [...(Array.isArray(rows) ? rows : [])]
+    .filter((r) => !r.mirror)
     .sort((a, b) => (b.updatedTs || 0) - (a.updatedTs || 0))
     .slice(0, WATCH_MAX_TEAMS)
     .map((r) => r.team);

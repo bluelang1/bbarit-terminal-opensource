@@ -349,7 +349,6 @@ button.ts-chip { cursor: pointer; font-family: inherit; }
 .ts-meter.ts-full .ts-cell.ts-used { background: var(--ts-blocked); border-color: var(--ts-blocked); }
 .ts-full-label { color: var(--ts-blocked-ink); display: inline-flex; align-items: center; gap: 2px; }
 .ts-ticks { display: block; width: 100%; height: 12px; margin: 4px 0; }
-.ts-machines { border-style: dashed; }
 
 /* ── Banner, empty, drawer ──────────────────────────────────────── */
 .ts-banner {

@@ -84,7 +84,7 @@ export function missingPgFields(pg: BoardPgSettings): Array<'host' | 'database' 
 // ── Keeping agents away from the storage settings ───────────────────────
 
 /** Config paths agents may neither read nor change through `config.get` / `config.patch`. */
-export const PROTECTED_CONFIG_PATHS = ['agents.board.mode', 'agents.board.backend', 'agents.board.postgres'] as const;
+export const PROTECTED_CONFIG_PATHS = ['agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName'] as const;
 
 function splitPath(path: string): string[] {
   return path.split('.').map((k) => k.trim()).filter((k) => k.length > 0);
@@ -254,4 +254,102 @@ export function copySource(mode: BoardMode): 'sqlite' | 'postgres' {
 /** `{name}` placeholders in a translated string. */
 export function fillText(text: string, values: Record<string, string | number>): string {
   return text.replace(/\{(\w+)\}/g, (m, k: string) => (k in values ? String(values[k]) : m));
+}
+
+// ── Sync status (usage type "Both (sync)", stage 3b) ─────────────────────
+
+/** `agent_board_sync_status` (also the result of `agent_board_sync_now`, plus `ok`). */
+export interface SyncStatus {
+  mode: BoardMode;
+  /** This machine's name as teams record it. */
+  host: string;
+  /** Where the name comes from: BBARIT_BOARD_HOST, the Settings field, or the system. */
+  hostSource: 'env' | 'setting' | 'system';
+  state: 'off' | 'starting' | 'on' | 'paused' | 'offline' | 'busy';
+  /** Why sync stopped: name_taken, name_changed, no_tables, server_newer, server_older, local, settings, offline, busy. */
+  lastErrorCode?: string | null;
+  lastPushAt?: number | null;
+  lastPullAt?: number | null;
+  lastError?: string | null;
+  lastErrorAt?: number | null;
+  /** Local changes not on the server yet. */
+  waiting: number;
+  /** Rows from the server that failed the checks and were not written. */
+  skipped: number;
+  /** Rows of this computer the server refused (a clash, or it holds a newer version), with the first reason. */
+  refused: number;
+  refusedReason?: string | null;
+  fullPush: boolean;
+  /** Other machines whose teams this file holds (read-only), with how many. */
+  machines: Array<{ host: string; teams: number; syncedAt?: number }>;
+  ok?: boolean;
+}
+
+/** A status from the host, with wrong types dropped (the UI never trusts shapes). */
+export function normalizeSyncStatus(raw: unknown): SyncStatus | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const states = ['off', 'starting', 'on', 'paused', 'offline', 'busy'] as const;
+  const state = states.find((s) => s === r.state) ?? 'off';
+  const machines = Array.isArray(r.machines)
+    ? r.machines
+        .filter((m): m is Record<string, unknown> => !!m && typeof m === 'object' && typeof (m as Record<string, unknown>).host === 'string')
+        .map((m) => ({ host: String(m.host), teams: num(m.teams) ?? 0, syncedAt: num(m.syncedAt) ?? undefined }))
+    : [];
+  return {
+    mode: readBoardMode({ mode: r.mode }),
+    host: typeof r.host === 'string' ? r.host : '',
+    hostSource: r.hostSource === 'env' || r.hostSource === 'setting' ? r.hostSource : 'system',
+    state,
+    lastPushAt: num(r.lastPushAt),
+    lastPullAt: num(r.lastPullAt),
+    lastError: typeof r.lastError === 'string' && r.lastError ? r.lastError : null,
+    lastErrorCode: typeof r.lastErrorCode === 'string' && r.lastErrorCode ? r.lastErrorCode : null,
+    lastErrorAt: num(r.lastErrorAt),
+    waiting: num(r.waiting) ?? 0,
+    skipped: num(r.skipped) ?? 0,
+    refused: num(r.refused) ?? 0,
+    refusedReason: typeof r.refusedReason === 'string' && r.refusedReason ? r.refusedReason : null,
+    fullPush: r.fullPush === true,
+    machines,
+    ok: typeof r.ok === 'boolean' ? r.ok : undefined,
+  };
+}
+
+/** Unicode format characters the Rust board strips (`model::is_format_char`). */
+const FORMAT_CHARS = /[\u00AD\u0600-\u0605\u061C\u06DD\u070F\u0890\u0891\u08E2\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\uFFF9-\uFFFB\u{110BD}\u{110CD}\u{13430}-\u{1343F}\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0001}\u{E0020}-\u{E007F}]/gu;
+
+/**
+ * Computer name as typed, cleaned like Rust `clean_label`: format characters dropped, control
+ * characters and runs of whitespace become one space, trimmed; at most 120 characters (empty:
+ * use the system name). A name with a line break is refused rather than joined.
+ */
+export function checkMachineName(raw: string): { ok: true; value: string } | { ok: false } {
+  if (/[\r\n]/.test(raw.trim())) return { ok: false };
+  // eslint-disable-next-line no-control-regex
+  const v = raw.replace(FORMAT_CHARS, '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').split(/\s+/).filter(Boolean).join(' ');
+  if ([...v].length > 120) return { ok: false };
+  return { ok: true, value: v };
+}
+
+/** A host refusal from the Settings sync commands: `{ code, vars, message }` (JSON), else plain text. */
+export function parseBoardRefusal(e: unknown): { code: string; vars: Record<string, string | number>; message: string } {
+  const text = String(e instanceof Error ? e.message : e ?? '');
+  try {
+    const v = JSON.parse(text) as { code?: unknown; vars?: unknown; message?: unknown };
+    if (v && typeof v.code === 'string') {
+      const vars = v.vars && typeof v.vars === 'object' ? (v.vars as Record<string, string | number>) : {};
+      return { code: v.code, vars, message: typeof v.message === 'string' ? v.message : text };
+    }
+  } catch { /* plain text */ }
+  return { code: '', vars: {}, message: text };
+}
+
+/** Teams split for the team selector: this machine's, then other machines' (read-only). */
+export function groupTeamsByHome<T extends { mirror?: boolean; homeHost?: string }>(teams: readonly T[]): { mine: T[]; others: T[] } {
+  const mine: T[] = [];
+  const others: T[] = [];
+  for (const t of teams) (t.mirror ? others : mine).push(t);
+  return { mine, others };
 }

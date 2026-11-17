@@ -5,10 +5,12 @@
 // not reachable through `agent.*` UI commands. That is not a security boundary: `bbarit-ctl js`
 // / the mcp-bridge already has full control of the main window.
 import { useEffect, useRef, useState } from 'react';
+import { normalizeSyncStatus } from '../terminal/agentBoardStorage';
 import { onAgentBoardChange } from '../terminal/agentBoard';
 import type { BoardTask } from '../terminal/agentTasks';
 import { createStatusPoller } from '../git/statusPoll';
 import type { FeedEvent, FeedPost, Refusal } from './model';
+import type { SyncStatus } from '../terminal/agentBoardStorage';
 
 export interface BoardTeam {
   team: string;
@@ -16,6 +18,10 @@ export interface BoardTeam {
   updatedTs?: number;
   liveTasks?: number;
   homeHost?: string;
+  /** Copied from another machine by sync: read-only here. */
+  mirror?: boolean;
+  /** When sync last changed this copy (ms). */
+  syncedAt?: number;
 }
 
 export interface BoardInfo {
@@ -44,6 +50,8 @@ export interface TeamBoardSource {
   refusals(): Promise<Refusal[]>;
   act(team: string, sub: HumanTaskSub, request: Record<string, unknown>): Promise<ActionResult>;
   postNote(team: string, text: string): Promise<ActionResult>;
+  /** Sync status of this machine (Machines card); optional for sources without sync. */
+  syncStatus?(): Promise<SyncStatus | null>;
 }
 
 export interface TeamSnapshot {
@@ -135,7 +143,8 @@ export function useTeamBoard(source: TeamBoardSource, team: string, opts: { poll
     void poller.refresh();
     poller.start();
     const off = onAgentBoardChange((d) => {
-      if (!team || d.team === team) void poller.refresh({ fresh: true });
+      // A sync change without a team (other computers' teams removed) refreshes the list too.
+      if (!team || d.team === team || (d.action === 'sync' && !d.team)) void poller.refresh({ fresh: true });
     });
     return () => {
       alive = false;
@@ -146,4 +155,48 @@ export function useTeamBoard(source: TeamBoardSource, team: string, opts: { poll
   }, [team, pollMs]);
 
   return { ...state, refresh: () => { void pollerRef.current?.refresh({ fresh: true }); } };
+}
+
+/**
+ * This computer's sync status (Machines card, Settings): read on open, on every board change
+ * and — while `poll` — by a slow poll (createStatusPoller). Keyed on `key` (the usage type) and
+ * `poll`; the reader lives in a ref. A sequence guard drops an answer older than the newest
+ * one. Null when there is no reader or it failed.
+ */
+export function useSyncStatus(read: (() => Promise<unknown>) | undefined, opts: { key?: string; poll?: boolean; pollMs?: number } = {}): SyncStatus | null {
+  const readRef = useRef(read);
+  readRef.current = read;
+  const [status, setStatus] = useState<SyncStatus | null>(null);
+  const key = opts.key ?? '';
+  const poll = opts.poll ?? true;
+  const pollMs = opts.pollMs ?? 15_000;
+  useEffect(() => {
+    let alive = true;
+    let seq = 0;
+    let shown = 0;
+    const run = async () => {
+      const r = readRef.current;
+      if (!r) return;
+      const mine = ++seq;
+      let next: SyncStatus | null = null;
+      try {
+        next = normalizeSyncStatus(await r());
+      } catch {
+        next = null;
+      }
+      if (!alive || mine < shown) return;
+      shown = mine;
+      setStatus(next);
+    };
+    const poller = createStatusPoller(run, { baseMs: pollMs });
+    void poller.refresh();
+    if (poll) poller.start();
+    const off = onAgentBoardChange(() => { void poller.refresh({ fresh: true }); });
+    return () => {
+      alive = false;
+      off();
+      poller.stop();
+    };
+  }, [key, poll, pollMs]);
+  return status;
 }

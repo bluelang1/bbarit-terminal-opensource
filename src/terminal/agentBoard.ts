@@ -27,7 +27,8 @@ export const AGENT_BOARD_EVENT = 'octo-agent-board';
 
 export interface AgentBoardEventDetail {
   team: string;
-  action: 'post' | 'clear' | 'task';
+  /** sync: rows of another machine's team arrived (Rust sync worker). */
+  action: 'post' | 'clear' | 'task' | 'sync';
   /** post: the new post's seq (also the done note a task completion wrote). */
   seq?: number;
   kind?: BoardKind;

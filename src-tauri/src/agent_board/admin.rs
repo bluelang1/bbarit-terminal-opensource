@@ -42,8 +42,6 @@ pub async fn agent_board_settings_status() -> Result<Value, String> {
         "mode": sel.mode.mode.as_str(),
         "modeWarning": sel.mode.warning,
         "backend": if sel.uses_postgres() { "postgres" } else { "sqlite" },
-        // `sync` uses the local file until the sync worker lands (stage 3b).
-        "syncPending": sel.mode.mode == config::BoardMode::Sync,
         "envOverride": sel.env_url.is_some(),
         "passwordSaved": sel.password.is_some(),
         // Which server the saved password is for (`user@host:port/database`; never the password).
