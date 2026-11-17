@@ -304,31 +304,39 @@ Rules that keep the two interchangeable:
 
 ```json
 {
-  "backend": "sqlite",
+  "mode": "sqlite",
   "postgres": { "host": "", "port": 5432, "database": "", "user": "",
                 "sslMode": "prefer", "schema": "bbarit_board" },
   "leaseSeconds": 300, "renewSeconds": 60, "staleMinutes": 30
 }
 ```
 
+`mode` is `sqlite` | `sync` | `postgres` (see "Usage types and sync"); an older `backend`
+key is read as the same-named mode.
+
 The password is never in config.json. It is written to `~/.config/octo/agent-board.secret`
-(0600, `.dev` variant for debug builds) through a write-only command; the webview can ask
-"is a password saved?" but never read it. `BBARIT_BOARD_DATABASE_URL` (process env or
+(0600, `.dev` variant for debug builds) through a write-only command, together with the server
+it is for (`user@host:port/database`); it is used only while the connection fields still name
+that server. The webview can ask "is a password saved, and for which server?" but never read it. `BBARIT_BOARD_DATABASE_URL` (process env or
 `~/.config/octo/.env`) overrides everything, for teams that provision by environment. An OS
 keychain backend is a possible later improvement (needs a new dependency; not in scope).
 
 ### Settings UI ("Agent team board" group)
 
-- Storage: SQLite (this Mac) / PostgreSQL (shared).
-- PostgreSQL fields: host, port, database, user, password (write-only, shows "saved"),
-  SSL mode, schema name.
+- Usage type: SQLite only (this Mac) / Both (sync; until 3b the same as SQLite only) /
+  PostgreSQL only (shared). "PostgreSQL only" can be chosen only with applied fields.
+- PostgreSQL fields: host, port, database, user, SSL mode, schema name — a draft until Apply
+  (Revert drops it); password (write-only, shows "saved for <server>").
 - Test connection → reports: reachable, server version, TLS in use, schema present,
   schema version, privileges (can create / can read-write), and what to do next.
 - Create / upgrade tables → runs the migrations in the configured schema; shows what it
   will run first; refuses when the schema belongs to a newer app version.
-- Copy data → copies teams, posts, tasks, deps, events and cursors from the other backend
-  into the selected one (empty target or explicit "merge teams that do not exist there");
-  never deletes the source.
+- Copy data → copies teams, posts, tasks, deps, events and cursors in the direction the person
+  picks ("this computer (SQLite) → PostgreSQL" or the reverse); empty target or explicit "merge
+  teams that do not exist there"; never changes or deletes the source.
+- Clean up old teams (PostgreSQL) → counts the teams idle for 30 days first, then asks to
+  confirm (it affects every machine using the server; retired teams are removed for good 30
+  days later). Never automatic.
 - Status line: current backend, schema version, counts, last error.
 - Switching takes effect for the next command; nothing is copied automatically. When
   PostgreSQL is selected but unreachable, board commands fail with
@@ -347,6 +355,136 @@ read connection settings or trigger table creation through `bbarit-ctl`.
   through the lease.
 - Live refresh in the viewer uses the local event for local writes and a slow poll
   (existing poller rules) for remote ones. `LISTEN/NOTIFY` is a later improvement.
+
+## Usage types and sync (approved 2026-11-16: "home machine" model)
+
+### 요약 (Korean summary)
+
+사용 유형은 세 가지다. **SQLite만**(기본, 이 맥 안에서만), **둘 다(동기화)**(평소엔 이 맥의
+SQLite에 쓰고, 연결될 때 PostgreSQL과 맞춘다. 끊겨도 그대로 일한다), **PostgreSQL만**(서버에
+바로 쓴다. 서버가 안 되면 게시판 명령이 실패한다). 동기화에서는 팀마다 **주인 맥**이 하나다.
+팀을 만든 맥이 주인이고, 그 팀의 번호·할 일 상태는 주인 맥만 바꾼다. 다른 맥은 그 팀을
+**읽기 전용**으로 본다. 그래서 두 맥이 같은 줄을 동시에 고쳐 충돌하는 일이 생기지 않는다.
+다른 맥의 팀에 메모 남기기, 주인이 사라진 팀 넘겨받기는 3c 단계로 미룬다.
+
+### Usage types
+
+`agents.board.mode` (replaces `backend`; `backend: "sqlite" | "postgres"` is still read as
+the same-named mode):
+
+| Mode | Commands read/write | Needs the server | Other machines |
+|---|---|---|---|
+| `sqlite` (default) | local file | never | not visible |
+| `sync` | local file; a host worker pushes and pulls | only for syncing; every board command works offline | their teams appear read-only; ours appear read-only there |
+| `postgres` | the server directly | always; unreachable → "team board unavailable: …" | everyone with the credentials reads and writes the same rows |
+
+Why `sync` is not "two writers on the same rows": an offline-first board with free
+multi-writer merges needs conflict resolution for task state (two machines claiming the
+same task while offline). The home rule removes the conflict instead of resolving it.
+
+### Home rule
+
+- A team's home is `(home_host, home_instance)` of the app that created it. Only the home
+  writes that team's rows (posts, tasks, deps, events, counters, leases). UUIDv7 ids make
+  rows from different machines collision-free; per-team numbers (`#12`) stay unique because
+  only the home assigns them.
+- On any other machine the team is a **mirror**: every write command on it is refused with
+  "this team lives on <host>; it is read-only here". Reads, search and history work.
+- Leases, auto-release and `stale` are evaluated only at home. A mirror shows the values it
+  received and the time of the last sync.
+- Ordering and "newer wins" use `row_version`, never wall clocks. Since one machine writes a
+  row, a higher `row_version` is always the newer state.
+
+### Machine identity
+
+`home_host` must be unique per machine. The server keeps `hosts(host PK, instance_id,
+first_seen, last_seen, app_version)`. First sync registers the machine; a host name already
+registered with a different `instance_id` pauses sync with "another machine uses the name
+<host>; set a machine name in Settings" (Settings field "Machine name" →
+`agents.board.hostName`; `BBARIT_BOARD_HOST` still overrides). `instance_id` is a UUID kept
+in `board_meta` of the local file. Renaming a machine after teams exist is refused while
+those teams are live (their `home_host` would dangle).
+
+### Server schema additions
+
+Same tables as SQLite plus, on every synced table, `server_seq BIGINT NOT NULL` filled from
+one sequence (`board_server_seq`). Stage 3a fills it with a trigger on every insert/update,
+including direct writes in `postgres` mode. Pushes take
+`pg_advisory_xact_lock(<schema-derived key>)` so `server_seq` order equals commit order and
+a pull cursor never skips a row committed late. **3b requirement:** direct writers in
+`postgres` mode take no advisory lock, and the trigger assigns `server_seq` at write time, so a
+row can commit after a row with a higher number. A pull must therefore read only below the
+oldest in-flight transaction's numbers (e.g. bound by `pg_snapshot_xmin` / a per-transaction
+watermark), or the trigger path must take the same advisory lock as pushes. Until then rows
+written in `postgres` mode are not safely pullable. `changes`, `cursors` and `sync_state` stay
+local-only; `hosts` is server-only.
+
+### Push (this machine → server)
+
+1. Read `changes` after `sync_state.pushed_seq`, at most 500 rows, collapse to distinct
+   `(tbl, row_id)`.
+2. Load the current local rows (a tombstone is a row with `deleted_at`), keep only rows of
+   teams homed here.
+3. One server transaction: advisory lock, upsert parents before children (teams, tasks,
+   posts, task_deps, task_events) with `WHERE excluded.row_version > stored.row_version`,
+   set `server_seq`, update `hosts.last_seen`. Commit, then store `pushed_seq`.
+4. A batch is idempotent: a crash between commit and storing `pushed_seq` only re-sends
+   rows the guard ignores.
+
+`changes` is trimmed only below `pushed_seq` once sync is on (`sync_state.consumer` set).
+If the backlog passes 50 000 rows, the log is dropped and `sync_state.full_push` is set: the
+next push sends a full snapshot of the home teams in batches. Turning sync on for the first
+time does the same. Tombstones are purged locally only after they were pushed and are 30
+days old; on the server by the explicit "Clean up" button.
+
+### Pull (server → this machine)
+
+1. Per table, rows with `server_seq > sync_state.pulled_seq` whose team's home is another
+   machine, in `server_seq` order, at most 500 per round.
+2. Each row is validated like local input (lengths, state names, id shapes, limits); a row
+   that fails is skipped and counted in the status, never written.
+3. Upsert into the local file with the same `row_version` guard, **without** `log_change`
+   (pulled rows must not be pushed back), with `posts.arrival` taken from the local
+   change-log position so `read --new` still works for mirrors.
+4. Rows that claim this machine as home are ignored by pull. They are used only by the
+   explicit "Restore my teams from the server" button (new Mac, lost file): it requires the
+   same machine name, copies those rows down and marks them home again.
+
+Caps on mirrors: the same per-team limits, plus at most 200 mirror teams; the oldest
+inactive mirrors are dropped locally (not tombstoned, not pushed).
+
+### Worker
+
+A host task like the lease worker (never in the webview): runs when mode is `sync`, on
+start, every 30 s, and 2 s after a local write (debounced). Failures back off 5 s → 5 min
+and never affect board commands. A server whose schema version is newer than the app pauses
+sync with "update the app"; an older one asks for "Create / upgrade tables". The worker
+emits `octo-agent-board` for changed mirror teams so open views refresh.
+
+### Status and controls (Settings)
+
+Usage type selector (three radio choices with one-line explanations); machine name; sync
+state: on/paused/offline, last push and pull times, rows waiting to push, rows skipped,
+last error; buttons "Sync now", "Restore my teams from the server". Switching mode never
+copies or deletes anything by itself: `sqlite → sync` starts a full push; `sync → sqlite`
+keeps mirrors as they are (a "Remove other machines' teams" button clears them);
+`postgres ↔ others` uses the existing "Copy data" action.
+
+### Security notes
+
+Database credentials are the trust boundary: whoever has them can write any team on the
+server. Pulled text is untrusted and goes through the same output hardening as local posts.
+A pull never changes rows of a home team, so a hostile server row cannot rewrite local task
+state. Settings and sync controls are not `agent.*` commands.
+
+### Deferred to 3c (agreed)
+
+- Remote notes: posting a note to another machine's team (an outbox the home turns into
+  numbered posts when it syncs).
+- Adopt team: moving a team's home when its machine is gone (needs confirmation and a
+  "home last seen" age guard).
+- Remote task requests (asking the home to add/claim/finish). Not planned before there is
+  demand; `postgres` mode already covers true multi-machine writing.
 
 ## Viewer panel
 
@@ -379,7 +517,9 @@ the maintainer in the dev app before merge.
 |---|---|
 | 1 | Notes on SQLite + `agent board` CLI |
 | 2 | Store interface, schema v2 (`board_meta`, tasks, deps, events, leases), `agent task` CLI, brief/skill, lease renewal and auto-release |
-| 3 | PostgreSQL store, config, secret file, settings UI (test, create/upgrade, copy), shared-suite tests |
+| 3a | PostgreSQL store, config (`mode`), secret file, settings UI (usage type, test, create/upgrade, copy), shared-suite tests (Docker PostgreSQL locally) |
+| 3b | Sync worker (push, pull, mirrors read-only), machine identity, sync status and "Sync now" |
+| 3c | Remote notes, adopt team, restore from server |
 | 4 | Viewer panel (notes + tasks), human actions, guide step |
 
 ## Progress
@@ -388,7 +528,10 @@ the maintainer in the dev app before merge.
 |---|---|---|
 | 1 | done: implemented, reviewed, checked in the dev app | first PR from branch `feat/agent-board` (stages 1+2 together) |
 | 2 | done: implemented, reviewed twice (store; app/CLI), checked in the dev app (claim, deps, review flow, fail/retry, tab-close release, lease renewal, claims surviving quit/relaunch with the PTY holder) | same PR; notes in "Stage 2 notes" below |
-| 3 | not started | |
+| 1+2 | merged | PR #79 (5f3f900) |
+| 3a | implemented and tested (SQLite + PostgreSQL 16 in Docker); waiting for code review and the dev-app check | branch `feat/agent-board-pg`, worktree `.claude/worktrees/agent-board-pg`; notes in "Stage 3a notes" below |
+| 3b | not started | |
+| 3c | not started | |
 | 4 | not started | |
 
 ## Stage 2 notes (builder's choices inside the rules)
@@ -414,6 +557,61 @@ the maintainer in the dev app before merge.
 - Announcements: a plain `board read` returns the newest three apart and leaves them out of
   the list; `--new` shows them in order with the other unread posts.
 - `claim --next` with nothing ready exits with code 4 in `bbarit-ctl`.
+
+## Stage 3a notes (builder's choices inside the rules)
+
+- Engine-neutral code moved to `agent_board/common.rs` (task row, JSON, done-note text, the
+  post/read/add/write/edit/list input checks), so `sqlite.rs` and `pg.rs` differ only in SQL and
+  validation errors come out in the same order on both engines.
+- PostgreSQL locking: every write locks the team row `FOR UPDATE` first (lock order is always
+  team → task), which gives the same counter, cap and guard behaviour as SQLite's single writer
+  and the same refusal texts under races (`#1 is already claimed by …`). Concurrent writes to one
+  team therefore serialize on PostgreSQL too (`touch_team` at the end of each write would have
+  done that anyway); different teams do not block each other. `claim --next` and lazy lease
+  expiry still use `FOR UPDATE SKIP LOCKED`; deadlock/serialization errors are retried 3 times.
+- `--new` reads hold the team row `FOR SHARE` so no post lands between the rows returned and the
+  stored cursor; plain reads use one REPEATABLE READ READ ONLY snapshot.
+- PostgreSQL has no `changes`/`sync_state` tables. `server_seq` is set by a `BEFORE INSERT OR
+  UPDATE` trigger from `board_server_seq` on every synced table (so direct writes in `postgres`
+  mode carry a number for 3b; they are not safely pullable until 3b adds the watermark or
+  lock described under "Server schema additions"); `posts.arrival` comes from a separate `board_arrival_seq`
+  taken under the team lock. `cursors` exist on the server (needed by `postgres` mode). The
+  `hosts` table is created now and unused. All integer columns are BIGINT (`needs_review` 0/1).
+- PostgreSQL schema versions start at 2 (same number as the SQLite file); there is one step that
+  creates everything with `IF NOT EXISTS`. The migration runs under `pg_advisory_xact_lock` and
+  re-reads the version under the lock. Requires PostgreSQL 11+ (`EXECUTE FUNCTION`).
+- Release of tasks on PostgreSQL (`release_owner`, `lease_apply`) is one transaction per task
+  (team row first), not one for all; adoption is one guarded UPDATE per task.
+- `sync` mode: selectable in Settings with the note "syncing arrives in the next update"; until
+  3b it reads and writes the SQLite file exactly like `sqlite`.
+- `BBARIT_BOARD_DATABASE_URL` replaces the connection fields and the saved password (only
+  `postgres://` / `postgresql://` URLs); the schema still comes from the settings and the usage
+  type is still chosen in Settings (the env URL does not switch the mode by itself).
+- The store is re-selected on every board command from config.json, the environment and the
+  password file (cached while that selection is unchanged), so a Settings change applies to
+  the next command. The 30-day team cleanup at app start runs only for the SQLite file.
+- The Settings commands take the connection fields currently shown on the page, so Test /
+  Create / Copy do not wait for the debounced config save; the password always comes from the
+  secret file. "Copy data" copies into the store the selected usage type uses (`postgres`:
+  SQLite → PostgreSQL; `sqlite`/`sync`: PostgreSQL → SQLite).
+- `config.get` / `config.patch` (bbarit-ctl `config get|set`) hide and refuse
+  `agents.board.mode|backend|postgres`; a patch of a parent path keeps those values. Local
+  processes calling Tauri commands directly are still not stopped (documented limitation).
+- Review fixes (2026-11-16): connection fields are a draft until Apply; the table preview
+  is applied with exactly the fields it was made for; Test/Create/Copy/Clean up wait while a
+  typed password is unsaved; the password is bound to its server and refused for another;
+  diagnose warns about TLS off on a remote host, checks USAGE on both sequences and EXECUTE on
+  the trigger function, and refuses a schema that already holds tables with the board's
+  names; every PostgreSQL store call has a 15 s deadline; the internal retry marker never
+  leaves the store; copy exports posts in read order (and `copy::plan` sorts them again),
+  inserts in batches of 300 rows, and ignores (purges if in the way) tombstoned target teams;
+  `BBARIT_BOARD_DATABASE_URL` is removed from every terminal's environment;
+  `BBARIT_TEST_PG_REQUIRED=1` makes the PostgreSQL tests fail instead of skip.
+- Known limits / not done in 3a: no root-certificate field for verify-ca / verify-full in
+  Settings (only through `BBARIT_BOARD_DATABASE_URL` with `sslrootcert=`); no CI job with
+  PostgreSQL; no `agent board storage init` CLI (tables are created only from Settings); sync
+  worker, mirrors, machine name field and viewer panel are later stages. The UI has not been
+  checked in the dev app yet.
 
 ## Left to the builder
 

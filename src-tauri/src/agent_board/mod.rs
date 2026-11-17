@@ -7,16 +7,27 @@
 //!
 //! Layout:
 //! - `model`: limits, text cleaning, request types, actors and the task state machine
-//!   (engine independent);
+//!   (engine independent); `common`: the task row, its JSON and the input checks both
+//!   engines share;
 //! - `store`: `BoardStore`, the one async interface every operation goes through;
-//! - `sqlite`: the SQLite engine (all SQL for it), file `~/.config/octo/agent-board[.dev].db`.
+//! - `sqlite`: the SQLite engine (all SQL for it), file `~/.config/octo/agent-board[.dev].db`;
+//! - `pg`: the PostgreSQL engine (all SQL for it), tables in a configured schema;
+//! - `config`: usage type (`agents.board.mode`), connection settings, password file,
+//!   redaction; `copy`: "Copy data" between the engines; `admin`: the Settings commands.
 //!
-//! This file holds the Tauri commands (no SQL here), the store selection and the
-//! per-process facts every write records: this machine's host name and this app instance's
-//! id (random per start; leases and auto-release are scoped by it).
+//! This file holds the board's Tauri commands (no SQL here), the store selection (re-read
+//! from config.json, the environment and the password file on every command, so a change in
+//! Settings takes effect for the next command) and the per-process facts every write records:
+//! this machine's host name and this app instance's id (random per start; leases and
+//! auto-release are scoped by it).
 //! Design: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md
 
+pub mod admin;
+pub mod common;
+pub mod config;
+pub mod copy;
 pub mod model;
+pub mod pg;
 pub mod sqlite;
 pub mod store;
 #[cfg(test)]
@@ -31,11 +42,20 @@ pub use store::BoardStore;
 
 pub const DB_FILE: &str = if cfg!(debug_assertions) { "agent-board.dev.db" } else { "agent-board.db" };
 
-/// `~/.config/octo/agent-board[.dev].db` (directory of `config_file_path()`).
-fn db_path() -> Result<PathBuf, String> {
+/// `~/.config/octo` (directory of `config_file_path()`).
+fn config_dir() -> Result<PathBuf, String> {
     let config = crate::config_file_path().map_err(unavailable)?;
-    let dir = config.parent().ok_or_else(|| unavailable("no config directory"))?;
-    Ok(dir.join(DB_FILE))
+    Ok(config.parent().ok_or_else(|| unavailable("no config directory"))?.to_path_buf())
+}
+
+/// `~/.config/octo/agent-board[.dev].db`.
+fn db_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(DB_FILE))
+}
+
+/// `~/.config/octo/agent-board[.dev].secret` (the PostgreSQL password, 0600).
+fn secret_path() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join(config::SECRET_FILE))
 }
 
 /// This app instance: random per start, kept in memory only.
@@ -72,21 +92,93 @@ fn ctx() -> Ctx {
     Ctx { now: now_ms(), host: Some(board_host().to_string()), instance: instance_id().to_string() }
 }
 
-/// The selected store, created on first use (the SQLite file is opened lazily by the store).
-/// Stage 3 replaces the cached store when the backend setting changes.
-pub fn current_store() -> Result<Arc<BoardStore>, String> {
-    static STORE: Mutex<Option<Arc<BoardStore>>> = Mutex::new(None);
-    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(s) = guard.as_ref() {
-        return Ok(s.clone());
+/// What config.json (`agents.board`), the environment and the password file say right now.
+pub struct Selection {
+    pub mode: config::ModeChoice,
+    pub settings: config::PgSettings,
+    pub env_url: Option<String>,
+    pub password: Option<config::Secret>,
+}
+
+pub fn read_selection() -> Selection {
+    let cfg = crate::read_octo_config_json();
+    let board = cfg.as_ref().and_then(|c| c.get("agents")).and_then(|a| a.get("board"));
+    Selection {
+        mode: config::parse_mode(board),
+        settings: config::PgSettings::from_board(board),
+        env_url: crate::get_env_value(config::URL_ENV).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
+        password: secret_path().ok().and_then(|p| config::read_secret(&p)),
     }
-    let store = Arc::new(BoardStore::Sqlite(sqlite::SqliteStore::new(db_path()?)));
-    *guard = Some(store.clone());
+}
+
+impl Selection {
+    /// The engine commands use: PostgreSQL only in `postgres` mode (`sync` reads and writes the
+    /// local file; its worker arrives in stage 3b).
+    pub fn uses_postgres(&self) -> bool {
+        self.mode.mode == config::BoardMode::Postgres
+    }
+
+    pub fn pg_target(&self) -> Result<config::PgTarget, String> {
+        config::pg_target(&self.settings, self.env_url.as_deref(), self.password.as_ref())
+    }
+
+    /// Identifies the store this selection needs (never shown; secrets only as a hash).
+    fn key(&self) -> Result<String, String> {
+        if !self.uses_postgres() {
+            return Ok(format!("sqlite:{}", db_path()?.display()));
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (&self.env_url, self.password.as_ref().map(|p| (&p.password, &p.label))).hash(&mut h);
+        Ok(format!("pg:{}:{:x}", serde_json::to_string(&self.settings).unwrap_or_default(), h.finish()))
+    }
+}
+
+/// The selected store, created on first use and replaced when the selection changes (the
+/// SQLite file is opened lazily; the PostgreSQL pool connects on first use). When PostgreSQL
+/// is selected but not configured, board commands fail with "team board unavailable: …";
+/// there is never a silent fallback to SQLite.
+pub fn current_store() -> Result<Arc<BoardStore>, String> {
+    static STORE: Mutex<Option<(String, Arc<BoardStore>)>> = Mutex::new(None);
+    let sel = read_selection();
+    let key = sel.key()?;
+    let mut guard = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((k, s)) = guard.as_ref() {
+        if *k == key {
+            return Ok(s.clone());
+        }
+    }
+    let store = if sel.uses_postgres() {
+        Arc::new(BoardStore::Pg(pg::PgStore::new(sel.pg_target().map_err(unavailable)?)))
+    } else {
+        Arc::new(BoardStore::Sqlite(sqlite::SqliteStore::new(db_path()?)))
+    };
+    *guard = Some((key, store.clone()));
     Ok(store)
 }
 
-/// App start: drop teams idle for 30 days. Never creates the database.
+/// The last "team board unavailable" error a board command returned (Settings status line).
+static LAST_ERROR: Mutex<Option<(i64, String)>> = Mutex::new(None);
+
+pub fn last_error() -> Option<(i64, String)> {
+    LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn track<T>(r: Result<T, String>) -> Result<T, String> {
+    if let Err(e) = &r {
+        if e.starts_with("team board unavailable") {
+            *LAST_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some((now_ms(), e.clone()));
+        }
+    }
+    r
+}
+
+/// App start: drop teams idle for 30 days — on the local SQLite file only (a shared
+/// PostgreSQL board is cleaned only from Settings). Never creates the database.
 pub fn prune_on_start() {
+    if read_selection().uses_postgres() {
+        return;
+    }
     let Ok(path) = db_path() else { return };
     if !path.exists() {
         return;
@@ -100,32 +192,33 @@ pub fn prune_on_start() {
 
 #[tauri::command]
 pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, String> {
-    current_store()?.post(team.trim().to_string(), post, ctx()).await
+    track(async { current_store()?.post(team.trim().to_string(), post, ctx()).await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_board_read(team: String, query: Option<ReadQuery>) -> Result<Value, String> {
-    current_store()?.read(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await
+    track(async { current_store()?.read(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
-    current_store()?.teams().await
+    track(async { current_store()?.teams().await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_board_clear(team: String) -> Result<Value, String> {
-    current_store()?.clear(team.trim().to_string(), ctx()).await
+    track(async { current_store()?.clear(team.trim().to_string(), ctx()).await }.await)
 }
 
 /// This instance id, host name and backend (the App plans leases with them).
 #[tauri::command]
 pub async fn agent_board_info() -> Result<Value, String> {
-    let store = current_store()?;
+    let store = track(current_store())?;
     Ok(json!({
         "instance": instance_id(),
         "host": board_host(),
         "backend": store.backend(),
+        "mode": read_selection().mode.mode.as_str(),
         "schemaVersion": store.schema_version(),
     }))
 }
@@ -240,7 +333,7 @@ pub fn start_lease_worker(
 pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) -> Result<Value, String> {
     let c = ctx();
     let actor = Actor::from_input(&actor, c.host.as_deref())?;
-    let res = current_store()?.task_write(team.trim().to_string(), op, actor, c).await?;
+    let res = track(async { current_store()?.task_write(team.trim().to_string(), op, actor, c).await }.await)?;
     if matches!(res["task"]["state"].as_str(), Some("claimed" | "blocked")) {
         note_holding();
     }
@@ -249,14 +342,12 @@ pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) 
 
 #[tauri::command]
 pub async fn agent_task_list(team: String, query: Option<TaskListQuery>) -> Result<Value, String> {
-    current_store()?.task_list(team.trim().to_string(), query.unwrap_or_default(), ctx()).await
+    track(async { current_store()?.task_list(team.trim().to_string(), query.unwrap_or_default(), ctx()).await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_task_show(team: String, task: i64, history: Option<bool>, stale_ms: Option<i64>) -> Result<Value, String> {
-    current_store()?
-        .task_show(team.trim().to_string(), task, history.unwrap_or(false), stale_ms, ctx())
-        .await
+    track(async { current_store()?.task_show(team.trim().to_string(), task, history.unwrap_or(false), stale_ms, ctx()).await }.await)
 }
 
 /// A tab closed: hand back what it holds through this instance — only when its PTY is really
@@ -267,9 +358,14 @@ pub async fn agent_task_release_owner(owner_id: String, reason: Option<String>) 
         return Ok(json!({ "released": [] }));
     }
     let reason = clean_label(reason.as_deref(), 200).unwrap_or_else(|| "owner tab closed".to_string());
-    let res = current_store()?
-        .release_owner(instance_id().to_string(), owner_id, now_ms(), Some(board_host().to_string()), reason.clone())
-        .await?;
+    let res = track(
+        async {
+            current_store()?
+                .release_owner(instance_id().to_string(), owner_id, now_ms(), Some(board_host().to_string()), reason.clone())
+                .await
+        }
+        .await,
+    )?;
     audit_released(&res, "task_auto_release", &reason);
     Ok(res)
 }
@@ -278,15 +374,17 @@ pub async fn agent_task_release_owner(owner_id: String, reason: Option<String>) 
 /// creates the database (an app start must not leave a board file behind).
 #[tauri::command]
 pub async fn agent_task_held_on_host() -> Result<Vec<Value>, String> {
-    if !db_path()?.exists() {
+    if !read_selection().uses_postgres() && !db_path()?.exists() {
         return Ok(Vec::new());
     }
-    current_store()?.held_on_host(board_host().to_string()).await
+    track(async { current_store()?.held_on_host(board_host().to_string()).await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_task_lease_apply(adopt: Vec<LeaseItem>, release: Vec<LeaseItem>, lease_ms: Option<i64>) -> Result<Value, String> {
-    let res = current_store()?
+    let res = track(
+        async {
+            current_store()?
         .lease_apply(
             instance_id().to_string(),
             adopt,
@@ -295,7 +393,10 @@ pub async fn agent_task_lease_apply(adopt: Vec<LeaseItem>, release: Vec<LeaseIte
             model::lease_ms(lease_ms),
             Some(board_host().to_string()),
         )
-        .await?;
+        .await
+        }
+        .await,
+    )?;
     if res["adopted"].as_u64().unwrap_or(0) > 0 {
         note_holding();
     }

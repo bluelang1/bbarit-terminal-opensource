@@ -19,6 +19,8 @@
 //! change position of the post's insert), so rows that arrive later by sync are not skipped.
 //! Schema reference: docs/AGENT_RELAY.md.
 
+use super::common::*;
+use super::copy;
 use super::model::*;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{json, Value};
@@ -622,19 +624,7 @@ fn task_id_of(tx: &Connection, team_uid: &str, team: &str, seq: i64) -> Result<S
 
 /// Store one post in one IMMEDIATE transaction.
 pub fn post(conn: &mut Connection, limits: Limits, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, String> {
-    check_team(team)?;
-    let kind = input.kind.trim().to_ascii_lowercase();
-    if !POST_KINDS.contains(&kind.as_str()) {
-        return Err(format!("invalid kind: {} ({})", input.kind, POST_KINDS.join("|")));
-    }
-    if kind == "announce" && !input.root {
-        return Err("only the team's root tab can post an announcement (--kind announce)".to_string());
-    }
-    let text = clean_text(&input.text)?;
-    let author_id = clean_label(Some(&input.author_id), 256).ok_or_else(|| "author required".to_string())?;
-    let author_name = clean_label(input.author_name.as_deref(), MAX_NAME_CHARS);
-    let author_cli = clean_label(input.author_cli.as_deref(), 40);
-    let team_name = clean_label(input.team_name.as_deref(), MAX_NAME_CHARS);
+    let PostSpec { kind, text, author_id, author_name, author_cli, team_name } = PostSpec::check(team, input)?;
     let tx = immediate(conn)?;
     let uid = ensure_team(&tx, team, team_name.as_deref(), ctx)?;
     let task_id = match input.task {
@@ -669,30 +659,9 @@ pub fn post(conn: &mut Connection, limits: Limits, team: &str, input: &PostInput
 ///   moves to the last returned arrival while unread posts remain (`more` > 0), or to the
 ///   team's newest arrival once none remain — so no unread teammate post is ever skipped.
 pub fn read(conn: &mut Connection, team: &str, q: &ReadQuery, host: Option<&str>) -> Result<Value, String> {
-    check_team(team)?;
-    let limit = q.limit.unwrap_or(DEFAULT_READ_LIMIT).clamp(1, MAX_READ_LIMIT);
-    let kind = non_empty(&q.kind).map(|k| k.to_ascii_lowercase());
-    if let Some(k) = &kind {
-        if !POST_KINDS.contains(&k.as_str()) {
-            return Err(format!("invalid kind: {k} ({})", POST_KINDS.join("|")));
-        }
-    }
-    let author = non_empty(&q.author);
-    let search = non_empty(&q.search);
-    if let Some(s) = &search {
-        if s.chars().count() > MAX_SEARCH_CHARS {
-            return Err(format!("search text too long (max {MAX_SEARCH_CHARS} characters)"));
-        }
-    }
-    let exclude = non_empty(&q.exclude_author);
-    let cursor_tab = non_empty(&q.cursor_tab);
-    if cursor_tab.as_deref().is_some_and(|t| !valid_team_id(t)) {
-        return Err("invalid read cursor tab id (expected 1-128 characters of A-Z a-z 0-9 _ -)".to_string());
-    }
-    if cursor_tab.is_some() && (kind.is_some() || author.is_some() || search.is_some() || q.since.is_some()) {
-        return Err(NEW_WITH_FILTER_ERROR.to_string());
-    }
-    let pinned = cursor_tab.is_none() && kind.is_none() && author.is_none() && search.is_none();
+    let spec = ReadSpec::check(team, q)?;
+    let ReadSpec { limit, kind, author, exclude, cursor_tab, pinned, since, seq_after, .. } = &spec;
+    let (limit, pinned, since, seq_after) = (*limit, *pinned, *since, *seq_after);
     let exclude_kind: Option<&str> = if pinned { Some("announce") } else { None };
     let tx = conn
         .transaction_with_behavior(if cursor_tab.is_some() {
@@ -702,15 +671,7 @@ pub fn read(conn: &mut Connection, team: &str, q: &ReadQuery, host: Option<&str>
         })
         .db()?;
     let Some(t) = find_team(&tx, team, host)? else {
-        let mut out = json!({ "team": team, "posts": [], "lastSeq": 0, "total": 0, "matched": 0, "more": 0, "since": q.since.unwrap_or(0) });
-        if pinned {
-            out["announcements"] = json!([]);
-        }
-        if cursor_tab.is_some() {
-            out["cursor"] = json!(0);
-            out["nextCursor"] = json!(0);
-        }
-        return Ok(out);
+        return Ok(spec.empty(team));
     };
     let uid = t.uid.as_str();
     let cursor: i64 = match &cursor_tab {
@@ -721,9 +682,6 @@ pub fn read(conn: &mut Connection, team: &str, q: &ReadQuery, host: Option<&str>
             .unwrap_or(0),
         None => 0,
     };
-    let since = q.since.unwrap_or(0).max(0);
-    // Lower bound on seq: none unless --since (a synced row can carry any number).
-    let seq_after = q.since.map(|n| n.max(0)).unwrap_or(i64::MIN);
     let total: i64 = tx
         .query_row("SELECT count(*) FROM posts WHERE team_uid = ?1 AND deleted_at IS NULL", params![uid], |r| r.get(0))
         .db()?;
@@ -734,7 +692,7 @@ pub fn read(conn: &mut Connection, team: &str, q: &ReadQuery, host: Option<&str>
         AND (?6 IS NULL OR p.text LIKE ?6 ESCAPE '\\')
         AND (?7 IS NULL OR p.author_id IS NOT ?7)
         AND (?8 IS NULL OR p.kind <> ?8)";
-    let pattern = search.as_deref().map(like_pattern);
+    let pattern = spec.pattern.as_deref();
     let matched: i64 = tx
         .query_row(
             &format!("SELECT count(*) FROM posts p WHERE {FILTER}"),
@@ -928,207 +886,57 @@ const TASK_COLS: &str = "t.id, (SELECT tm.team FROM teams tm WHERE tm.uid = t.te
     t.created_at, t.updated_at, t.claimed_at, t.started_at, t.submitted_at, t.finished_at,
     t.lease_until, t.heartbeat_at, t.due_at, t.version, t.team_uid, t.row_version";
 
-#[derive(Debug, Clone)]
-struct TaskRow {
-    id: String,
-    team: String,
-    seq: i64,
-    parent_seq: Option<i64>,
-    title: String,
-    body: Option<String>,
-    state: String,
-    priority: i64,
-    needs_review: bool,
-    created_by_id: Option<String>,
-    created_by_name: Option<String>,
-    created_by_host: Option<String>,
-    owner_id: Option<String>,
-    owner_name: Option<String>,
-    owner_host: Option<String>,
-    owner_instance: Option<String>,
-    attempt: i64,
-    max_attempts: i64,
-    blocked_reason: Option<String>,
-    last_error: Option<String>,
-    result_summary: Option<String>,
-    result_body: Option<String>,
-    result_branch: Option<String>,
-    result_commit: Option<String>,
-    result_worktree: Option<String>,
-    result_checks: Option<String>,
-    result_artifacts: Option<String>,
-    labels: String,
-    meta: String,
-    created_at: i64,
-    updated_at: i64,
-    claimed_at: Option<i64>,
-    started_at: Option<i64>,
-    submitted_at: Option<i64>,
-    finished_at: Option<i64>,
-    lease_until: Option<i64>,
-    heartbeat_at: Option<i64>,
-    due_at: Option<i64>,
-    version: i64,
-    team_uid: String,
-    row_version: i64,
-}
-
-impl TaskRow {
-    fn from_row(r: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
-        Ok(TaskRow {
-            id: r.get(0)?,
-            team: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
-            seq: r.get(2)?,
-            parent_seq: r.get(4)?,
-            title: r.get(5)?,
-            body: r.get(6)?,
-            state: r.get(7)?,
-            priority: r.get(8)?,
-            needs_review: r.get(9)?,
-            created_by_id: r.get(10)?,
-            created_by_name: r.get(11)?,
-            created_by_host: r.get(12)?,
-            owner_id: r.get(13)?,
-            owner_name: r.get(14)?,
-            owner_host: r.get(15)?,
-            owner_instance: r.get(16)?,
-            attempt: r.get(17)?,
-            max_attempts: r.get(18)?,
-            blocked_reason: r.get(19)?,
-            last_error: r.get(20)?,
-            result_summary: r.get(21)?,
-            result_body: r.get(22)?,
-            result_branch: r.get(23)?,
-            result_commit: r.get(24)?,
-            result_worktree: r.get(25)?,
-            result_checks: r.get(26)?,
-            result_artifacts: r.get(27)?,
-            labels: r.get(28)?,
-            meta: r.get(29)?,
-            created_at: r.get(30)?,
-            updated_at: r.get(31)?,
-            claimed_at: r.get(32)?,
-            started_at: r.get(33)?,
-            submitted_at: r.get(34)?,
-            finished_at: r.get(35)?,
-            lease_until: r.get(36)?,
-            heartbeat_at: r.get(37)?,
-            due_at: r.get(38)?,
-            version: r.get(39)?,
-            team_uid: r.get(40)?,
-            row_version: r.get(41)?,
-        })
-    }
-
-    fn facts(&self) -> TaskFacts<'_> {
-        TaskFacts {
-            seq: self.seq,
-            state: &self.state,
-            owner_id: self.owner_id.as_deref(),
-            owner_name: self.owner_name.as_deref(),
-            created_by_id: self.created_by_id.as_deref(),
-            needs_review: self.needs_review,
-            attempt: self.attempt,
-            max_attempts: self.max_attempts,
-        }
-    }
-}
-
-fn parse_json(raw: &str, fallback: Value) -> Value {
-    serde_json::from_str(raw).unwrap_or(fallback)
-}
-
-fn party(id: &Option<String>, name: &Option<String>, host: &Option<String>) -> Value {
-    let mut m = serde_json::Map::new();
-    if let Some(v) = id {
-        m.insert("id".into(), json!(v));
-    }
-    if let Some(v) = name {
-        m.insert("name".into(), json!(v));
-    }
-    if let Some(v) = host {
-        m.insert("host".into(), json!(v));
-    }
-    Value::Object(m)
-}
-
-/// A task as JSON (camelCase). `waiting` and `stale` are derived, never stored.
-fn task_json(t: &TaskRow, deps: &[(i64, String)], now: i64, stale_ms: i64) -> Value {
-    // A cancelled dependency counts as met (flagged); a failed one still blocks.
-    let waiting_on: Vec<i64> = deps.iter().filter(|(_, s)| !dep_met(s)).map(|(n, _)| *n).collect();
-    let cancelled_deps: Vec<i64> = deps.iter().filter(|(_, s)| s == "cancelled").map(|(n, _)| *n).collect();
-    let waiting = t.state == "open" && !waiting_on.is_empty();
-    let stale = is_held(&t.state) && t.updated_at < now - stale_ms;
-    let owner = if t.owner_id.is_some() {
-        let mut o = party(&t.owner_id, &t.owner_name, &t.owner_host);
-        if let Some(i) = &t.owner_instance {
-            o["instance"] = json!(i);
-        }
-        o
-    } else {
-        Value::Null
-    };
-    let result = match &t.result_summary {
-        Some(summary) => json!({
-            "summary": summary,
-            "body": t.result_body,
-            "branch": t.result_branch,
-            "commit": t.result_commit,
-            "worktree": t.result_worktree,
-            "checks": t.result_checks,
-            "artifacts": t.result_artifacts.as_deref().map(|a| parse_json(a, json!({}))).unwrap_or(json!({})),
-        }),
-        None => Value::Null,
-    };
-    json!({
-        "id": t.id,
-        "team": t.team,
-        "teamUid": t.team_uid,
-        "seq": t.seq,
-        "parent": t.parent_seq,
-        "title": t.title,
-        "body": t.body,
-        "state": t.state,
-        "priority": t.priority,
-        "needsReview": t.needs_review,
-        "createdBy": party(&t.created_by_id, &t.created_by_name, &t.created_by_host),
-        "owner": owner,
-        "attempt": t.attempt,
-        "maxAttempts": t.max_attempts,
-        "blockedReason": t.blocked_reason,
-        "lastError": t.last_error,
-        "result": result,
-        "labels": parse_json(&t.labels, json!([])),
-        "meta": parse_json(&t.meta, json!({})),
-        "createdAt": t.created_at,
-        "updatedAt": t.updated_at,
-        "claimedAt": t.claimed_at,
-        "startedAt": t.started_at,
-        "submittedAt": t.submitted_at,
-        "finishedAt": t.finished_at,
-        "leaseUntil": t.lease_until,
-        "heartbeatAt": t.heartbeat_at,
-        "dueAt": t.due_at,
-        "version": t.version,
-        "rowVersion": t.row_version,
-        "deps": deps.iter().map(|(n, s)| json!({ "seq": n, "state": s })).collect::<Vec<_>>(),
-        "waiting": waiting,
-        "waitingOn": waiting_on,
-        "cancelledDeps": cancelled_deps,
-        "stale": stale,
+fn task_from_row(r: &rusqlite::Row) -> rusqlite::Result<TaskRow> {
+    Ok(TaskRow {
+        id: r.get(0)?,
+        team: r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+        seq: r.get(2)?,
+        parent_seq: r.get(4)?,
+        title: r.get(5)?,
+        body: r.get(6)?,
+        state: r.get(7)?,
+        priority: r.get(8)?,
+        needs_review: r.get(9)?,
+        created_by_id: r.get(10)?,
+        created_by_name: r.get(11)?,
+        created_by_host: r.get(12)?,
+        owner_id: r.get(13)?,
+        owner_name: r.get(14)?,
+        owner_host: r.get(15)?,
+        owner_instance: r.get(16)?,
+        attempt: r.get(17)?,
+        max_attempts: r.get(18)?,
+        blocked_reason: r.get(19)?,
+        last_error: r.get(20)?,
+        result_summary: r.get(21)?,
+        result_body: r.get(22)?,
+        result_branch: r.get(23)?,
+        result_commit: r.get(24)?,
+        result_worktree: r.get(25)?,
+        result_checks: r.get(26)?,
+        result_artifacts: r.get(27)?,
+        labels: r.get(28)?,
+        meta: r.get(29)?,
+        created_at: r.get(30)?,
+        updated_at: r.get(31)?,
+        claimed_at: r.get(32)?,
+        started_at: r.get(33)?,
+        submitted_at: r.get(34)?,
+        finished_at: r.get(35)?,
+        lease_until: r.get(36)?,
+        heartbeat_at: r.get(37)?,
+        due_at: r.get(38)?,
+        version: r.get(39)?,
+        team_uid: r.get(40)?,
+        row_version: r.get(41)?,
     })
-}
-
-/// A dependency in this state no longer holds its dependent back.
-fn dep_met(state: &str) -> bool {
-    state == "done" || state == "cancelled"
 }
 
 fn load_task(tx: &Connection, team_uid: &str, team: &str, seq: i64) -> Result<TaskRow, String> {
     tx.query_row(
         &format!("SELECT {TASK_COLS} FROM tasks t WHERE t.team_uid = ?1 AND t.seq = ?2 AND t.deleted_at IS NULL"),
         params![team_uid, seq],
-        TaskRow::from_row,
+        task_from_row,
     )
     .optional()
     .db()?
@@ -1136,7 +944,7 @@ fn load_task(tx: &Connection, team_uid: &str, team: &str, seq: i64) -> Result<Ta
 }
 
 fn load_task_by_id(tx: &Connection, id: &str) -> Result<Option<TaskRow>, String> {
-    tx.query_row(&format!("SELECT {TASK_COLS} FROM tasks t WHERE t.id = ?1 AND t.deleted_at IS NULL"), params![id], TaskRow::from_row)
+    tx.query_row(&format!("SELECT {TASK_COLS} FROM tasks t WHERE t.id = ?1 AND t.deleted_at IS NULL"), params![id], task_from_row)
         .optional()
         .db()
 }
@@ -1225,7 +1033,7 @@ fn expire_leases(tx: &Transaction, team_uid: Option<&str>, now: i64, except: Opt
                    AND (?2 IS NULL OR t.team_uid = ?2) AND (?3 IS NULL OR t.id <> ?3)"
             ))
             .db()?;
-        let it = stmt.query_map(params![now, team_uid, except], TaskRow::from_row).db()?;
+        let it = stmt.query_map(params![now, team_uid, except], task_from_row).db()?;
         it.collect::<rusqlite::Result<Vec<_>>>().db()?
     };
     let app = Actor::app(host);
@@ -1417,72 +1225,20 @@ fn depends_transitively(tx: &Transaction, from: &str, target: &str) -> Result<bo
     }
 }
 
-fn done_post_text(row: &TaskRow, summary: &str, approved_by: Option<&Actor>) -> String {
-    let mut lines = vec![match approved_by {
-        Some(a) => format!("#{} done (approved by {}): {}", row.seq, a.name.as_deref().unwrap_or(&a.id), row.title),
-        None => format!("#{} done: {}", row.seq, row.title),
-    }];
-    lines.push(summary.to_string());
-    let mut where_ = Vec::new();
-    if let Some(b) = &row.result_branch {
-        where_.push(format!("branch {b}"));
-    }
-    if let Some(c) = &row.result_commit {
-        where_.push(format!("commit {c}"));
-    }
-    if let Some(c) = &row.result_checks {
-        where_.push(format!("checks {c}"));
-    }
-    if !where_.is_empty() {
-        lines.push(where_.join(", "));
-    }
-    let text = lines.join("\n");
-    clean_text(&text).unwrap_or_else(|_| text.chars().take(MAX_TEXT_CHARS).collect())
-}
-
-fn require_text(raw: &Option<String>, field: &str, flag: &str) -> Result<String, String> {
-    match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(v) => clean_multiline(v, field, MAX_REASON_CHARS, MAX_TEXT_LINES),
-        None => Err(format!("{field} required ({flag} \"<text>\")")),
-    }
-}
-
 /// Add one task (state open) with its dependencies, in one IMMEDIATE transaction.
 fn add_task(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, String> {
-    let title = clean_line(op.title.as_deref().unwrap_or(""), "title", MAX_TITLE_CHARS)?;
-    let body = match op.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(b) => Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES)?),
-        None => None,
-    };
-    let priority = op.priority.unwrap_or(DEFAULT_PRIORITY);
-    if !(0..=MAX_PRIORITY).contains(&priority) {
-        return Err(format!("priority must be 0-{MAX_PRIORITY} (higher is claimed first)"));
-    }
-    let max_attempts = op.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS);
-    if !(1..=MAX_MAX_ATTEMPTS).contains(&max_attempts) {
-        return Err(format!("max attempts must be 1-{MAX_MAX_ATTEMPTS}"));
-    }
-    let labels = clean_labels(op.labels.as_deref().unwrap_or(&[]))?;
-    let mut after: Vec<i64> = Vec::new();
-    for n in &op.after {
-        if !after.contains(n) {
-            after.push(*n);
-        }
-    }
-    if after.len() > MAX_DEPS_PER_TASK {
-        return Err(format!("too many dependencies (max {MAX_DEPS_PER_TASK})"));
-    }
-    let team_name = clean_label(op.team_name.as_deref(), MAX_NAME_CHARS);
+    let spec = AddSpec::check(op)?;
+    let (after, priority) = (&spec.after, spec.priority);
     let now = ctx.now;
     let tx = immediate(conn)?;
-    let uid = ensure_team(&tx, team, team_name.as_deref(), ctx)?;
+    let uid = ensure_team(&tx, team, spec.team_name.as_deref(), ctx)?;
     let parent_id = match op.parent {
         Some(seq) => Some(task_id_of(&tx, &uid, team, seq)?),
         None => None,
     };
     let id = new_id();
     let mut dep_ids = Vec::new();
-    for seq in &after {
+    for seq in after {
         let dep = load_task(&tx, &uid, team, *seq)?;
         if dep.state == "cancelled" {
             return Err(format!("#{seq} is cancelled: it cannot be a dependency"));
@@ -1511,15 +1267,15 @@ fn add_task(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOpInput,
             uid,
             seq,
             parent_id,
-            title,
-            body,
+            spec.title,
+            spec.body,
             priority,
-            op.review.unwrap_or(false),
+            spec.review,
             actor.id,
             actor.name,
             actor.host,
-            max_attempts,
-            serde_json::to_string(&labels).unwrap_or_else(|_| "[]".into()),
+            spec.max_attempts,
+            spec.labels_json(),
             now,
             ctx.host
         ],
@@ -1540,7 +1296,7 @@ fn add_task(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOpInput,
         Some("open"),
         0,
         None,
-        Some(json!({ "parent": op.parent, "after": after, "priority": priority, "review": op.review.unwrap_or(false) })),
+        Some(json!({ "parent": op.parent, "after": after, "priority": priority, "review": spec.review })),
         ctx.host.as_deref(),
     )?;
     prune_team(&tx, &uid, limits, 0, now)?;
@@ -1559,28 +1315,9 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
     if name == "add" {
         return add_task(conn, limits, team, op, actor, ctx);
     }
-    let action = Action::parse(name).ok_or_else(|| format!("unknown task operation: {name}"))?;
+    let WriteSpec { action, reason, result, claim_next, lease } = WriteSpec::check(name, op)?;
     let now = ctx.now;
     let host = ctx.host.as_deref();
-    let lease = lease_ms(op.lease_ms);
-    let reason = match action {
-        Action::Block => Some(require_text(&op.reason, "reason", "--reason")?),
-        Action::Reject => Some(require_text(&op.reason, "reason", "--reason")?),
-        Action::Fail => Some(require_text(&op.error, "error", "--error")?),
-        Action::Reopen | Action::Cancel | Action::Approve => match op.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(r) => Some(clean_multiline(r, "reason", MAX_REASON_CHARS, MAX_TEXT_LINES)?),
-            None => None,
-        },
-        _ => None,
-    };
-    let result = match action {
-        Action::Done | Action::Submit => Some(TaskResult::check(op.result.as_ref().unwrap_or(&ResultInput::default()))?),
-        _ => None,
-    };
-    let claim_next = action == Action::Claim && op.next && op.task.is_none();
-    if op.task.is_none() && !claim_next {
-        return Err(format!("task number required (agent task {name} <#>)"));
-    }
     let tx = immediate(conn)?;
     let Some(team_ref) = find_team(&tx, team, host)? else {
         if claim_next {
@@ -1622,13 +1359,8 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .db()?;
-                    let none = if open == 0 {
-                        "no open task to claim".to_string()
-                    } else {
-                        format!("no open task is ready: {waiting} wait for dependencies")
-                    };
                     finish(tx, limits)?;
-                    return Ok(json!({ "action": "claim", "task": Value::Null, "open": open, "waiting": waiting, "expired": expired, "none": none }));
+                    return Ok(none_ready(open, waiting, expired));
                 }
             }
         }
@@ -1769,43 +1501,7 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
                     return Err(format!("#{seq} changed since you loaded it (version {v}, now {}): load it again", row.version));
                 }
             }
-            let title = match &op.title {
-                Some(t) => Some(clean_line(t, "title", MAX_TITLE_CHARS)?),
-                None => None,
-            };
-            let body = match &op.body {
-                Some(b) if b.trim().is_empty() => Some(None),
-                Some(b) => Some(Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES)?)),
-                None => None,
-            };
-            if let Some(p) = op.priority {
-                if !(0..=MAX_PRIORITY).contains(&p) {
-                    return Err(format!("priority must be 0-{MAX_PRIORITY}"));
-                }
-            }
-            let labels = match &op.labels {
-                Some(l) => Some(serde_json::to_string(&clean_labels(l)?).unwrap_or_else(|_| "[]".into())),
-                None => None,
-            };
-            let mut fields = Vec::new();
-            if title.is_some() {
-                fields.push("title");
-            }
-            if body.is_some() {
-                fields.push("body");
-            }
-            if op.priority.is_some() {
-                fields.push("priority");
-            }
-            if labels.is_some() {
-                fields.push("labels");
-            }
-            if op.review.is_some() {
-                fields.push("review");
-            }
-            if fields.is_empty() {
-                return Err("nothing to edit (--title, --body, --priority, --label)".to_string());
-            }
+            let EditSpec { title, body, labels, fields } = EditSpec::check(op)?;
             data = Some(json!({ "fields": fields }));
             update_task(
                 &tx,
@@ -1927,48 +1623,15 @@ fn expire_if_needed(conn: &mut Connection, limits: Limits, uid: &str, now: i64, 
 /// search), claimed first, then blocked, review, open, failed, done, cancelled; higher
 /// priority first, then by number. Also counts per state and the derived counts.
 pub fn task_list(conn: &mut Connection, limits: Limits, team: &str, q: &TaskListQuery, ctx: &Ctx) -> Result<Value, String> {
-    check_team(team)?;
     let now = ctx.now;
-    let stale = stale_ms(q.stale_ms);
-    let mut stored: Vec<String> = Vec::new();
-    let (mut want_waiting, mut want_ready, mut want_stale) = (false, q.ready, false);
-    for s in &q.states {
-        let s = s.trim().to_ascii_lowercase();
-        match s.as_str() {
-            "" => {}
-            "waiting" => want_waiting = true,
-            "ready" => want_ready = true,
-            "stale" => want_stale = true,
-            s if TASK_STATES.contains(&s) => stored.push(s.to_string()),
-            other => return Err(format!("invalid state: {other} ({}|waiting|ready|stale)", TASK_STATES.join("|"))),
-        }
-    }
-    let search = non_empty(&q.search);
-    if let Some(s) = &search {
-        if s.chars().count() > MAX_SEARCH_CHARS {
-            return Err(format!("search text too long (max {MAX_SEARCH_CHARS} characters)"));
-        }
-    }
-    let mut counts = serde_json::Map::new();
-    for s in TASK_STATES {
-        counts.insert(s.into(), json!(0));
-    }
-    counts.insert("waiting".into(), json!(0));
-    counts.insert("stale".into(), json!(0));
+    let ListSpec { stale, stored, want_waiting, want_ready, want_stale, state_filter, pattern, mine, limit } = ListSpec::check(team, q)?;
+    let mut counts = ListSpec::zero_counts();
     let Some(team_ref) = find_team(conn, team, ctx.host.as_deref())? else {
         return Ok(json!({ "team": team, "tasks": [], "matched": 0, "more": 0, "counts": counts, "expired": [] }));
     };
     let uid = team_ref.uid.clone();
     let expired = expire_if_needed(conn, limits, &uid, now, ctx.host.as_deref())?;
-    let any_filter = !stored.is_empty() || want_waiting || want_ready || want_stale;
-    if !any_filter && !q.all {
-        stored = ["open", "claimed", "blocked", "review", "failed"].iter().map(|s| s.to_string()).collect();
-    }
-    let state_filter = !stored.is_empty() || want_waiting || want_ready || want_stale;
     let stored_json = serde_json::to_string(&stored).unwrap_or_else(|_| "[]".into());
-    let pattern = search.as_deref().map(like_pattern);
-    let mine = non_empty(&q.mine);
-    let limit = q.limit.unwrap_or(DEFAULT_LIST_LIMIT).clamp(1, MAX_LIST_LIMIT);
     let filter = format!(
         "t.team_uid = ?1 AND t.deleted_at IS NULL
          AND (?2 = 0 OR t.state IN (SELECT value FROM json_each(?3))
@@ -1999,7 +1662,7 @@ pub fn task_list(conn: &mut Connection, limits: Limits, team: &str, q: &TaskList
         let it = stmt
             .query_map(
                 params![uid, state_filter, stored_json, want_waiting, want_ready, want_stale, stale_before, mine, pattern, limit],
-                TaskRow::from_row,
+                task_from_row,
             )
             .db()?;
         it.collect::<rusqlite::Result<Vec<_>>>().db()?
@@ -2225,7 +1888,7 @@ pub fn release_owner(
                  WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_id = ?1 AND t.owner_instance = ?2"
             ))
             .db()?;
-        let it = stmt.query_map(params![owner_id, instance], TaskRow::from_row).db()?;
+        let it = stmt.query_map(params![owner_id, instance], task_from_row).db()?;
         it.collect::<rusqlite::Result<Vec<_>>>().db()?
     };
     let released = release_rows(&tx, rows, now, host, reason)?;
@@ -2309,4 +1972,124 @@ pub fn lease_apply(
     let released = release_rows(&tx, rows, now, host, "owner tab did not come back after the app restarted")?;
     finish(tx, limits)?;
     Ok(json!({ "adopted": adopted, "released": released }))
+}
+
+// ── Settings: counts, copy ───────────────────────────────────────────────
+
+/// Live teams, posts and tasks (status line).
+pub fn counts(conn: &mut Connection) -> Result<Value, String> {
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM teams WHERE deleted_at IS NULL),
+                (SELECT count(*) FROM posts WHERE deleted_at IS NULL),
+                (SELECT count(*) FROM tasks WHERE deleted_at IS NULL)",
+        [],
+        |r| Ok(json!({ "teams": r.get::<_, i64>(0)?, "posts": r.get::<_, i64>(1)?, "tasks": r.get::<_, i64>(2)? })),
+    )
+    .db()
+}
+
+fn select_sql(table: &str, cols: copy::Cols) -> String {
+    let list = copy::col_list(cols);
+    let filter = match table {
+        "teams" => "deleted_at IS NULL",
+        "cursors" => "team_uid IN (SELECT uid FROM teams WHERE deleted_at IS NULL)",
+        _ => "deleted_at IS NULL AND team_uid IN (SELECT uid FROM teams WHERE deleted_at IS NULL)",
+    };
+    // Posts in read order: the target gives them new arrival positions in this order and
+    // converts read cursors through it, so any other order could move a cursor past an
+    // unread post.
+    let order = if table == "posts" { " ORDER BY team_uid, arrival, seq" } else { "" };
+    format!("SELECT {list} FROM {table} WHERE {filter}{order}")
+}
+
+/// Every live row of every live team (Copy data), in one read transaction.
+pub fn export_dump(conn: &mut Connection) -> Result<copy::Dump, String> {
+    let tx = conn.transaction().db()?;
+    let mut dump = copy::Dump::default();
+    for (table, cols) in copy::TABLES {
+        let mut stmt = tx.prepare(&select_sql(table, cols)).db()?;
+        let rows = stmt
+            .query_map([], |r| {
+                let mut cells = Vec::with_capacity(cols.len());
+                for (i, (_, kind)) in cols.iter().enumerate() {
+                    cells.push(match kind {
+                        copy::Kind::Int => r.get::<_, Option<i64>>(i)?.map_or(copy::Cell::Null, copy::Cell::Int),
+                        copy::Kind::Text => r.get::<_, Option<String>>(i)?.map_or(copy::Cell::Null, copy::Cell::Text),
+                    });
+                }
+                Ok(cells)
+            })
+            .db()?;
+        *dump.rows_mut(table) = rows.collect::<rusqlite::Result<Vec<_>>>().db()?;
+    }
+    drop(tx);
+    Ok(dump)
+}
+
+/// Insert a dump (Copy data) in one IMMEDIATE transaction: refused unless the board is empty
+/// or `merge` is set; teams it already has are skipped. Every inserted synced row is logged
+/// in the change log; posts get this file's arrival order and cursors are converted to it.
+pub fn import_dump(conn: &mut Connection, limits: Limits, dump: copy::Dump, merge: bool, now: i64) -> Result<Value, String> {
+    let tx = immediate(conn)?;
+    let mut existing = copy::Existing::default();
+    {
+        let mut stmt = tx.prepare("SELECT uid, team, home_host, deleted_at IS NOT NULL FROM teams").db()?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, bool>(3)?)))
+            .db()?;
+        for row in rows {
+            let (uid, team, host, dead) = row.db()?;
+            existing.add(uid, team, host, dead);
+        }
+    }
+    let copy::Plan { dump: plan, skipped, purge } = copy::plan(dump, &existing, merge)?;
+    // Tombstoned teams in the way of a copied one go for good (they were already deleted).
+    for uid in &purge {
+        for table in copy::PURGE_TABLES {
+            tx.execute(&format!("DELETE FROM {table} WHERE team_uid = ?1"), params![uid]).db()?;
+        }
+        tx.execute("DELETE FROM teams WHERE uid = ?1", params![uid]).db()?;
+    }
+    let mut arrivals = copy::ArrivalMap::default();
+    for (table, cols) in copy::TABLES {
+        let names = copy::col_list(cols);
+        let params: Vec<String> = (1..=cols.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!("INSERT INTO {table} ({names}) VALUES ({})", params.join(", "));
+        let to_sql = |c: &copy::Cell| match c {
+            copy::Cell::Null => rusqlite::types::Value::Null,
+            copy::Cell::Int(n) => rusqlite::types::Value::Integer(*n),
+            copy::Cell::Text(s) => rusqlite::types::Value::Text(s.clone()),
+        };
+        let at = |name: &str| copy::col_index(cols, name);
+        for row in plan.rows(table) {
+            let mut values: Vec<rusqlite::types::Value> = row.iter().map(to_sql).collect();
+            match table {
+                "posts" => {
+                    let id = row[at("id")].text().unwrap_or_default();
+                    let team_uid = row[at("team_uid")].text().unwrap_or_default();
+                    let arrival = log_change(&tx, "posts", id, now)?;
+                    arrivals.add(team_uid, row[at("arrival")].int().unwrap_or(0), arrival);
+                    values[at("arrival")] = rusqlite::types::Value::Integer(arrival);
+                }
+                "cursors" => {
+                    let team_uid = row[at("team_uid")].text().unwrap_or_default();
+                    let converted = arrivals.convert(team_uid, row[at("arrival")].int().unwrap_or(0));
+                    values[at("arrival")] = rusqlite::types::Value::Integer(converted);
+                }
+                "task_deps" => {
+                    let key = dep_key(row[at("task_id")].text().unwrap_or_default(), row[at("depends_on_id")].text().unwrap_or_default());
+                    log_change(&tx, "task_deps", &key, now)?;
+                }
+                "teams" => {
+                    log_change(&tx, "teams", row[at("uid")].text().unwrap_or_default(), now)?;
+                }
+                other => {
+                    log_change(&tx, other, row[at("id")].text().unwrap_or_default(), now)?;
+                }
+            }
+            tx.execute(&sql, rusqlite::params_from_iter(values)).db()?;
+        }
+    }
+    finish(tx, limits)?;
+    Ok(copy::summary(&plan, &skipped))
 }
