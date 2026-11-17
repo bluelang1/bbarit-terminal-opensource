@@ -59,8 +59,12 @@ export async function applyWindowPin(win: PinnableWindow, state: WindowPinState,
 }
 
 export const MAIN_WINDOW_LABEL = 'main';
-/** Windows that never follow the main window's pin: main itself and the desktop pet. */
-const NOT_FOLLOWING = new Set([MAIN_WINDOW_LABEL, 'pet']);
+/**
+ * Windows that never follow the main window's pin: main itself, the desktop pet, and the Team
+ * status pop-out (it has its own pin and applies "own pin or main pin" itself, from the main
+ * pin state it is sent; src/teamStatus/popout.ts popoutOnTop).
+ */
+const NOT_FOLLOWING = new Set([MAIN_WINDOW_LABEL, 'pet', 'tool-team-status']);
 
 /**
  * Whether the effect in App.tsx should touch the window: only `main`, only after

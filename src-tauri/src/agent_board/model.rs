@@ -494,6 +494,29 @@ pub struct TaskListQuery {
     pub stale_ms: Option<i64>,
 }
 
+/// Team activity for the viewer (`agent_board_team_events`): the newest task events of every
+/// task of a team. Not an `agent.*` command.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventsQuery {
+    /// At most this many events (1..=1000, default 200), the newest ones.
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Only events after this time (unix ms).
+    #[serde(default)]
+    pub since: Option<i64>,
+}
+
+pub const DEFAULT_TEAM_EVENTS: i64 = 200;
+pub const MAX_TEAM_EVENTS: i64 = 1000;
+
+impl EventsQuery {
+    /// (limit, since) with the limit clamped and a missing `since` as "everything".
+    pub fn check(&self) -> (i64, i64) {
+        (self.limit.unwrap_or(DEFAULT_TEAM_EVENTS).clamp(1, MAX_TEAM_EVENTS), self.since.unwrap_or(i64::MIN))
+    }
+}
+
 pub fn lease_ms(raw: Option<i64>) -> i64 {
     raw.unwrap_or(DEFAULT_LEASE_MS).clamp(MIN_LEASE_MS, MAX_LEASE_MS)
 }

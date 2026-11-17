@@ -175,7 +175,7 @@ import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard'
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
 const Pm2Panel = React.lazy(() => import('./pm2/Pm2Panel').then(m => ({ default: m.Pm2Panel })));
 const HubPanel = React.lazy(() => import('./pm2/HubPanel').then(m => ({ default: m.HubPanel })));
-const DashboardPanel = React.lazy(() => import('./dashboard/DashboardPanel').then(m => ({ default: m.DashboardPanel })));
+const TeamStatusOverlay = React.lazy(() => import('./teamStatus/TeamStatusOverlay').then(m => ({ default: m.TeamStatusOverlay })));
 import type { KanbanTask } from './kanban/types';
 import { loadKanbanBoard, saveKanbanBoard, createTask, moveTask, updateTask } from './kanban/storage';
 
@@ -197,12 +197,18 @@ import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from
 import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
-import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
+import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, onAgentBoardChange, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
 import { isProtectedConfigPath, keepProtectedConfig, redactProtectedConfig } from './terminal/agentBoardStorage';
 import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
+import './teamStatus/teamStatus.css';
+import { badgeCount, badgeLabel, badgeSeverity, badgeText, limitUsage, needsYou, projectTeams, teamMemberIds, teamStatusSurface, type NeedsYouItem } from './teamStatus/model';
+import { useTeamWatch } from './teamStatus/watch';
+import { POPOUT_EVENT, POPOUT_LABEL, POPOUT_SIZE, contextKey, newPopoutToken, popoutUrl, serveRequest, type PopoutContext } from './teamStatus/popout';
+import type { ActionResult, HumanTaskSub, TeamBoardSource } from './teamStatus/source';
+import type { TeamMember } from './teamStatus/TeamStatusView';
 import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
 import { useDialogFocus } from './a11y/dialogFocus';
 import { isHiddenStackedPane, isStackedTerminalMode } from './terminal/stackedPanes';
@@ -2620,7 +2626,7 @@ function App() {
 
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   // Set by the guide's keep-running step; cleared when settings closes.
-  const [settingsInitialTab, setSettingsInitialTab] = useState<{ tab: 'terminal'; nonce: number } | undefined>(undefined);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<{ tab: 'terminal' | 'agent'; nonce: number } | undefined>(undefined);
   const [themePickerTerminalId, setThemePickerTerminalId] = useState<string | null>(null);
   const [projectThemePickerPosition, setProjectThemePickerPosition] = useState<{ top: number; left: number } | null>(null);
   // Poll for BBARIT instances on the same LAN while the SSH project form is open.
@@ -3273,6 +3279,22 @@ function App() {
   // 앱 내부 비서(웹챗 iframe) 오버레이. URL은 gateway_info로 lazy 로드.
   const [showSecretary, setShowSecretary] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
+  /** Gauge overlay request: the tab and team an entry point asked for (badge, team button). */
+  const [gaugeRequest, setGaugeRequest] = useState<{ tab?: 'team' | 'dashboard'; team?: string; projectId?: string; nonce: number }>({ nonce: 0 });
+  /** The overlay tab shown: the board is read only for Team status (never just for the Dashboard). */
+  const [gaugeTab, setGaugeTab] = useState<'team' | 'dashboard' | null>(null);
+  /** Set by a jump to an agent tab: the overlay closes without giving focus back. */
+  const gaugeNoRestoreRef = useRef(false);
+  // Team status in its own window (tool-team-status): open, the team it shows, the project it
+  // came from, and a nonce bumped when the main window asks it to show a team.
+  const [teamPopout, setTeamPopout] = useState<{ open: boolean; team: string; projectId: string; nonce: number }>({ open: false, team: '', projectId: '', nonce: 0 });
+  /** Per-open random token: the pop-out gets it in its URL and must send it with every message. */
+  const popoutTokenRef = useRef<string | null>(null);
+  /** Cleanup of the one close listener on the pop-out window. */
+  const popoutCloseOffRef = useRef<(() => void) | null>(null);
+  /** The team the overlay's Team status tab shows (handed to the pop-out). */
+  const gaugeTeamRef = useRef('');
+  useEffect(() => { if (!showDashboard) setGaugeTab(null); }, [showDashboard]);
   const [secretaryUrl, setSecretaryUrl] = useState<string | null>(null);
   const [secretaryError, setSecretaryError] = useState<string | null>(null);
   const openSecretary = useCallback(async () => {
@@ -6097,7 +6119,291 @@ Office project scaffold created by BBARIT Terminal.
     if (!built.ok) return built;
     return runAgentTaskWrite(team, built.value, { id: 'user', name: 'user', root: false, human: true }, { source: 'viewer' });
   };
-  void humanTaskAction;
+  /** A person posts a note to a team board from the Team status view (author "user"). Not reachable through ctl. */
+  const humanBoardPost = async (team: string, raw: string): Promise<ActionResult> => {
+    if (!isValidTeamId(team)) return { ok: false, error: `invalid team id: ${team}` };
+    const text = sanitizeBoardText(raw);
+    if (!text.ok) return { ok: false, error: text.error };
+    let stored: BoardPost;
+    try {
+      stored = await invoke<BoardPost>('agent_board_post', {
+        team,
+        post: { teamName: boardTeamName(team) || undefined, authorId: 'user', authorName: 'user', kind: 'note', text: text.value, root: false },
+      });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    logAgentRelay({ event: 'board_post', text: text.value, extra: { team, kind: 'note', seq: stored.seq, by: 'viewer' } });
+    emitAgentBoardEvent({ team, action: 'post', seq: stored.seq, kind: 'note', authorId: 'user' });
+    return { ok: true };
+  };
+  // ── Team status view (src/teamStatus/, toolbar gauge overlay) ── reads go through the board
+  // commands; a person's actions go through humanTaskAction / humanBoardPost (author "user").
+  // A person's actions are not reachable through agent.* UI commands. Not a security boundary:
+  // `bbarit-ctl js` / the mcp-bridge already has full control of the main window, and Tauri
+  // events carry no sender (the pop-out's requests are only checked against a per-open token).
+  const teamBoardSource: TeamBoardSource = {
+    info: () => invoke('agent_board_info'),
+    teams: async () => {
+      const rows = await invoke<Array<{ team: string; teamName?: string; updatedTs?: number; liveTasks?: number; homeHost?: string }>>('agent_board_teams');
+      return (Array.isArray(rows) ? rows : []).map((r) => ({ ...r, teamName: boardTeamName(r.team) || r.teamName }));
+    },
+    tasks: async (team) => {
+      const res = await invoke<{ tasks?: any[]; teamName?: string; expired?: TaskWriteResult['expired'] }>('agent_task_list', {
+        team, query: { all: true, limit: 500, staleMs: boardConfig().staleMinutes * 60_000 },
+      });
+      if (res?.expired?.length) reportTaskChange(team, { op: 'list' }, { expired: res.expired }, { source: 'app' });
+      return { tasks: Array.isArray(res?.tasks) ? res.tasks : [], teamName: boardTeamName(team) || res?.teamName };
+    },
+    events: async (team) => {
+      const res = await invoke<{ events?: any[] }>('agent_board_team_events', { team, query: { limit: 500 } });
+      return Array.isArray(res?.events) ? res.events : [];
+    },
+    posts: async (team) => {
+      const res = await invoke<{ posts?: any[]; announcements?: any[] }>('agent_board_read', { team, query: { limit: 200 } });
+      return [...(Array.isArray(res?.announcements) ? res.announcements : []), ...(Array.isArray(res?.posts) ? res.posts : [])];
+    },
+    history: async (team, seq) => {
+      const res = await invoke<{ events?: any[] }>('agent_task_show', { team, task: seq, history: true, staleMs: boardConfig().staleMinutes * 60_000 });
+      return Array.isArray(res?.events) ? res.events : [];
+    },
+    refusals: () => invoke('agent_relay_log_refusals', { limit: 20 }),
+    act: async (team, sub: HumanTaskSub, request) => {
+      const r = await humanTaskAction(team, sub, request);
+      return r.ok ? { ok: true } : { ok: false, error: r.error };
+    },
+    postNote: humanBoardPost,
+  };
+  // Badges: read while relay children exist or the Team status tab is open (never for the
+  // Dashboard tab alone). The hook re-renders only when a badge-relevant key changes.
+  const teamWatch = useTeamWatch(teamBoardSource, !!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open, boardConfig().staleMinutes * 60_000);
+  const teamMembersOf = (team: string): TeamMember[] => teamMemberIds(agentLinksRef.current, team).map((id) => {
+    const term = findTerminalAnywhere(id);
+    const link = agentLinksRef.current.get(id);
+    const status = !term || link?.exited ? 'exited' : agentStateOf(id);
+    return {
+      id,
+      name: term?.name || link?.name || id,
+      cli: term?.cliType || link?.cliType,
+      status,
+      open: !!term,
+      message: status === 'blocked' ? agentStatus.get(id)?.msg : undefined,
+    };
+  });
+  const teamNeeds = (team: string): NeedsYouItem[] => {
+    const agents = needsYou([], teamMembersOf(team).map((m) => ({ id: m.id, name: m.name, status: m.status, message: m.message })), [], Date.now());
+    return [...(teamWatch.needs.get(team) || []), ...agents];
+  };
+  const projectTeamMap = projectTeams(projects.map((p) => ({ id: p.id, terminalIds: p.terminals.map((tm) => tm.id) })), agentLinksRef.current, teamWatch.teams);
+  const projectNeeds = (projectId: string): NeedsYouItem[] => (projectTeamMap.get(projectId) || []).flatMap(teamNeeds);
+  /** Open Team status for `team`; `projectId` is the project the request came from (the team is remembered there). */
+  const openTeamStatus = (team?: string, projectId?: string) => {
+    setGaugeRequest({ tab: 'team', team, projectId, nonce: Date.now() });
+    setShowDashboard(true);
+  };
+  /** Jump to an agent's tab: focus only (nothing is typed into it); the overlay closes. */
+  const jumpToTeamTab = (tabId: string) => {
+    const project = projectsRef.current.find((p) => p.terminals.some((tm) => tm.id === tabId));
+    if (!project) return;
+    updateProject(project.id, { activeTerminalId: tabId });
+    openProjectTerminal(project.id);
+    // Close without giving focus back to the previously focused terminal, then focus the
+    // target tab's terminal once it is shown (keys must go to the tab the person picked).
+    gaugeNoRestoreRef.current = true;
+    setShowDashboard(false);
+    window.setTimeout(() => {
+      gaugeNoRestoreRef.current = false;
+      const host = Array.from(document.querySelectorAll<HTMLElement>('[data-terminal-id]')).find((el) => el.getAttribute('data-terminal-id') === tabId);
+      host?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus({ preventScroll: true });
+    }, 60);
+  };
+  const openBoardSettings = () => {
+    setShowDashboard(false);
+    setSettingsInitialTab({ tab: 'agent', nonce: Date.now() });
+    setShowGlobalSettings(true);
+  };
+  const teamLimits = () => limitUsage(agentLinksRef.current, normalizeAgentLimits(getConfigSnapshot().agents), (l) => !l.exited && (!!l.pending || !!findTerminalAnywhere(l.childId)));
+  // ── Team status pop-out (src/teamStatus/popout.ts) ── the main window answers its reads and
+  // a person's actions with teamBoardSource, pushes the context it cannot compute (agent tabs,
+  // limits, the owning project's theme) and forwards board change hints (DOM events stay in
+  // their window). Only the main window serves it (the harness window loads App too).
+  const popoutProjectId = teamPopout.open
+    ? ([...projectTeamMap.entries()].find(([, teams]) => teams.includes(teamPopout.team))?.[0] || teamPopout.projectId || activeProjectId || '')
+    : '';
+  const popoutProject = teamPopout.open ? projects.find((p) => p.id === popoutProjectId) : undefined;
+  const popoutStyle = popoutProject ? (STYLES[popoutProject.styleIndex] || STYLES[0]) : activeStyle;
+  const popoutCtx: PopoutContext | null = teamPopout.open ? {
+    team: teamPopout.team,
+    nonce: teamPopout.nonce,
+    projectId: popoutProjectId,
+    projectTeamIds: projectTeamMap.get(popoutProjectId) || [],
+    locale,
+    surface: teamStatusSurface(popoutStyle),
+    theme: {
+      bg: popoutStyle.bg,
+      text: popoutStyle.text,
+      accent: popoutStyle.accent,
+      font: popoutProject ? getEffectiveFont(popoutProject.fontIndex, popoutProject.customFontFamily) : activeFont.value,
+      light: isLightBg(popoutStyle.bg),
+    },
+    staleMs: boardConfig().staleMinutes * 60_000,
+    members: teamPopout.team ? teamMembersOf(teamPopout.team) : [],
+    limits: teamLimits(),
+    mainPinned: windowPin.alwaysOnTop,
+  } : null;
+  const popoutCtxKey = contextKey(popoutCtx);
+  const popoutCtxRef = useRef<PopoutContext | null>(null);
+  popoutCtxRef.current = popoutCtx;
+  const sendPopoutCtx = () => {
+    if (popoutCtxRef.current && isTauri()) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.ctx, popoutCtxRef.current).catch(() => {});
+  };
+  useEffect(() => { sendPopoutCtx(); }, [popoutCtxKey]);
+  useEffect(() => {
+    if (!teamPopout.open || !isTauri()) return;
+    return onAgentBoardChange((d) => { void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.board, d).catch(() => {}); });
+  }, [teamPopout.open]);
+  const teamPopoutOpenRef = useRef(false);
+  teamPopoutOpenRef.current = teamPopout.open;
+  const popoutHandlersRef = useRef({ source: teamBoardSource, jump: jumpToTeamTab, settings: openBoardSettings });
+  popoutHandlersRef.current = { source: teamBoardSource, jump: jumpToTeamTab, settings: openBoardSettings };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let me: ReturnType<typeof getCurrentWindow>;
+    try { me = getCurrentWindow(); } catch { return; }
+    if (me.label !== 'main') return;
+    const focusMain = () => { void me.unminimize().catch(() => {}); void me.show().catch(() => {}); void me.setFocus().catch(() => {}); };
+    const offs = [
+      me.listen<unknown>(POPOUT_EVENT.req, async (e) => {
+        const res = await serveRequest(popoutHandlersRef.current.source, e.payload, popoutTokenRef.current);
+        if (res) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.res, res).catch(() => {});
+      }),
+      me.listen<{ team?: unknown; projectId?: unknown; token?: unknown }>(POPOUT_EVENT.hello, (e) => {
+        const token = typeof e.payload?.token === 'string' ? e.payload.token : '';
+        // After this window reloaded no token is known: the open pop-out's one is taken (it can
+        // only come from a window this app opened; see the trust note in AGENT_RELAY.md).
+        if (!popoutTokenRef.current && token) popoutTokenRef.current = token;
+        if (!token || token !== popoutTokenRef.current) return;
+        const team = typeof e.payload?.team === 'string' ? e.payload.team : '';
+        const projectId = typeof e.payload?.projectId === 'string' ? e.payload.projectId : '';
+        // A heartbeat, or the first hello after this window reloaded: the pop-out says which team
+        // it shows (the nonce is not bumped, so its own choice stands).
+        if (!teamPopoutOpenRef.current) {
+          teamPopoutOpenRef.current = true;
+          setTeamPopout((p) => (p.open ? p : { ...p, open: true, team, projectId }));
+          void watchTeamPopoutClose();
+        }
+        sendPopoutCtx();
+      }),
+      me.listen<{ team?: unknown; token?: unknown }>(POPOUT_EVENT.team, (e) => {
+        if (!popoutTokenOk(e.payload)) return;
+        const team = typeof e.payload?.team === 'string' ? e.payload.team : '';
+        if (team) setTeamPopout((p) => (p.team === team ? p : { ...p, team }));
+      }),
+      me.listen<{ tabId?: unknown; token?: unknown }>(POPOUT_EVENT.jump, (e) => {
+        if (!popoutTokenOk(e.payload) || typeof e.payload?.tabId !== 'string') return;
+        focusMain();
+        popoutHandlersRef.current.jump(e.payload.tabId);
+      }),
+      me.listen<{ token?: unknown }>(POPOUT_EVENT.settings, (e) => { if (popoutTokenOk(e.payload)) { focusMain(); popoutHandlersRef.current.settings(); } }),
+    ];
+    return () => { offs.forEach((p) => { void p.then((un) => un()).catch(() => {}); }); };
+  }, []);
+  /**
+   * Marks the pop-out closed only when no live window has its label (a stale handle's close
+   * event must not close the state of a newer window).
+   */
+  const confirmTeamPopoutClosed = async () => {
+    try {
+      const w = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (w) {
+        try { await w.isVisible(); return; } catch { /* dead handle: it is gone */ }
+      }
+    } catch { /* treat as gone */ }
+    popoutTokenRef.current = null;
+    popoutCloseOffRef.current?.();
+    popoutCloseOffRef.current = null;
+    setTeamPopout((p) => (p.open ? { ...p, open: false } : p));
+  };
+  /** One close listener on the current pop-out window (replaces any earlier one). */
+  const watchTeamPopoutClose = async (win?: WebviewWindow | null) => {
+    popoutCloseOffRef.current?.();
+    popoutCloseOffRef.current = null;
+    try {
+      const w = win ?? await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (!w) { void confirmTeamPopoutClosed(); return; }
+      const off = await w.once('tauri://destroyed', () => { void confirmTeamPopoutClosed(); });
+      popoutCloseOffRef.current = off;
+    } catch { /* the next hello or open tries again */ }
+  };
+  const popoutTokenOk = (payload: unknown) => {
+    const token = (payload as { token?: unknown } | null)?.token;
+    return typeof token === 'string' && !!popoutTokenRef.current && token === popoutTokenRef.current;
+  };
+  /** Open (or focus) Team status in its own window for `team`. */
+  const openTeamStatusPopout = async (team: string, projectId: string) => {
+    setTeamPopout((p) => ({ open: true, team: team || p.team, projectId, nonce: p.nonce + 1 }));
+    setShowDashboard(false);
+    const markClosed = () => { void confirmTeamPopoutClosed(); };
+    try {
+      const existing = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (existing) {
+        try {
+          await existing.isVisible();
+          await existing.show();
+          await existing.setFocus();
+          return;
+        } catch {
+          try { await existing.close(); } catch { /* already gone */ }
+        }
+      }
+    } catch { /* not found, create new */ }
+    try {
+      popoutTokenRef.current = newPopoutToken();
+      const w = new WebviewWindow(POPOUT_LABEL, {
+        url: popoutUrl(window.location.origin, team, projectId, popoutTokenRef.current),
+        title: locale === 'ko' ? '팀 현황' : 'Team status',
+        width: POPOUT_SIZE.width,
+        height: POPOUT_SIZE.height,
+        minWidth: POPOUT_SIZE.minWidth,
+        minHeight: POPOUT_SIZE.minHeight,
+        center: true,
+        resizable: true,
+        decorations: true,
+      });
+      w.once('tauri://error', (e) => { console.error('[team-status popout] error:', e); markClosed(); });
+      void watchTeamPopoutClose(w);
+    } catch (e) {
+      console.error('[team-status popout] create failed:', e);
+      markClosed();
+    }
+  };
+  const bringTeamPopoutToFront = async () => {
+    try {
+      const w = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (!w) { void confirmTeamPopoutClosed(); return; }
+      await w.unminimize().catch(() => {});
+      await w.show();
+      await w.setFocus();
+    } catch {
+      void confirmTeamPopoutClosed();
+    }
+  };
+  const renderTeamBadge = (items: NeedsYouItem[], className = 'ts-badge', onClick?: () => void) => {
+    const n = badgeCount(items);
+    if (!n) return null;
+    const label = badgeLabel(items, locale);
+    return (
+      <span
+        className={className}
+        data-severity={badgeSeverity(items) || undefined}
+        aria-label={label}
+        title={label}
+        {...(onClick ? { role: 'button', tabIndex: 0, onClick: (e: React.MouseEvent) => { e.stopPropagation(); onClick(); }, onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onClick(); } } } : {})}
+      >
+        {badgeText(n)}
+      </span>
+    );
+  };
   /**
    * Caller check shared by every agent.* command that reads `caller` (src/terminal/agentCaller.ts):
    * the ctl's BBARIT_TERM_TOKEN must match the caller id (Rust agent_caller_verify); without a
@@ -6913,6 +7219,7 @@ Office project scaffold created by BBARIT Terminal.
     statusTabCount: agentStatus.size,
     gitPanelOpen: showGitPanel,
     hintModeOpen: hintMode.active,
+    teamStatusOpen: (showDashboard && gaugeTab === 'team') || teamPopout.open,
   });
   guideStartupRef.current = guide.runStartup;
 
@@ -17933,6 +18240,35 @@ Office project scaffold created by BBARIT Terminal.
                 })()}
               </span>
 
+              {/* 팀 현황 — 이 프로젝트에 팀 보드가 있을 때 (게이지 오버레이의 팀 현황 탭) */}
+              {(projectTeamMap.get(activeProjectId || '') || []).length > 0 && (
+                <button
+                  className="view-mode-apply-all ts-badge-host"
+                  data-guide="team-status"
+                  onClick={() => openTeamStatus((projectTeamMap.get(activeProjectId || '') || [])[0], activeProjectId || undefined)}
+                  title={locale === 'ko' ? '이 프로젝트의 팀 현황' : 'Team status for this project'}
+                  aria-label={locale === 'ko' ? '이 프로젝트의 팀 현황' : 'Team status for this project'}
+                  style={{
+                    marginLeft: 4,
+                    padding: 0,
+                    width: 26,
+                    height: 22,
+                    background: 'transparent',
+                    border: `1px solid ${activeStyle.text}33`,
+                    borderRadius: 'var(--brutal-radius)',
+                    color: activeStyle.text,
+                    cursor: 'pointer',
+                    opacity: 0.8,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <LucideIcons.Users size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
+                </button>
+              )}
+
               {/* 팀 멈춤 — 릴레이 자식이 하나라도 작업 중일 때만 (agent stop 과 같은 경로) */}
               {relayTeamWorking && (
                 <button
@@ -18062,6 +18398,7 @@ Office project scaffold created by BBARIT Terminal.
                 )}
               </span>
             )}
+            {renderTeamBadge(projectNeeds(project.id), 'ts-badge ts-tab-badge', () => openTeamStatus((projectTeamMap.get(project.id) || [])[0], project.id))}
             {renderProjectThemePicker(project)}
             <span className="tab-close" data-project-tab-ignore-drag="true" onClick={(e) => { e.stopPropagation(); closeProject(project.id); }}>
               <OctoX size={12} />
@@ -18615,7 +18952,7 @@ Office project scaffold created by BBARIT Terminal.
             {isToolbarVisible('hub') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
               <LucideIcons.Waypoints size={14} />
             </button>}
-            {isToolbarVisible('dashboard') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
+            {isToolbarVisible('dashboard') && <button data-hint="tool" data-guide="team-status" className={`btn-top-small toolbar-tool tool-dashboard ts-badge-host${showDashboard ? ' active' : ''}`} onClick={() => { setGaugeRequest({ nonce: Date.now() }); setShowDashboard((v) => !v); }} title={locale === 'ko' ? '팀 현황 · 에이전트 대시보드 (대시보드 주소는 설정 > Hub)' : 'Team status · Agent Dashboard (dashboard URL in Settings > Hub)'}><LucideIcons.Gauge size={14} />{renderTeamBadge(activeProjectId ? projectNeeds(activeProjectId) : [])}</button>}
             {isToolbarVisible('skills') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
             {isToolbarVisible('mcp') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
               <LucideIcons.ServerCog size={14} />
@@ -24229,12 +24566,30 @@ Office project scaffold created by BBARIT Terminal.
       {/* BBARIT Secretary — 앱 내부 비서 웹챗(gateway) iframe 오버레이 */}
       {showDashboard && (
         <React.Suspense fallback={null}>
-          <DashboardPanel
+          <TeamStatusOverlay
+            initialTab={gaugeRequest.tab}
             onClose={() => setShowDashboard(false)}
-            onOpenExternal={(url) => { void openExternalUrl(url); }}
-            accent={activeStyle.accent}
-            bg={activeStyle.bg}
-            text={activeStyle.text}
+            onOpenExternal={(url: string) => { void openExternalUrl(url); }}
+            onTabChange={setGaugeTab}
+            restoreFocus={() => !gaugeNoRestoreRef.current}
+            poppedOut={teamPopout.open}
+            onPopOut={() => { void openTeamStatusPopout(gaugeTeamRef.current, gaugeRequest.projectId || activeProjectId || ''); }}
+            onBringToFront={() => { void bringTeamPopoutToFront(); }}
+            view={{
+              source: teamBoardSource,
+              locale,
+              surface: teamStatusSurface(activeStyle),
+              requested: gaugeRequest.team ? { team: gaugeRequest.team, nonce: gaugeRequest.nonce } : undefined,
+              projectId: gaugeRequest.projectId || activeProjectId || '',
+              projectTeamIds: projectTeamMap.get(gaugeRequest.projectId || activeProjectId || '') || [],
+              membersOf: teamMembersOf,
+              limits: teamLimits(),
+              staleMs: boardConfig().staleMinutes * 60_000,
+              onTeamChange: (team: string) => { gaugeTeamRef.current = team; },
+              onJump: jumpToTeamTab,
+              onOpenSettings: openBoardSettings,
+              onCopy: (text: string) => { void navigator.clipboard?.writeText(text).catch(() => {}); },
+            }}
           />
         </React.Suspense>
       )}

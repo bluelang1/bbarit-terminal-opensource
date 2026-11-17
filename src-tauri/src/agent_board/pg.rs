@@ -1982,6 +1982,63 @@ impl PgStore {
         Ok(out)
     }
 
+    /// See sqlite::team_events (one REPEATABLE READ READ ONLY snapshot).
+    pub async fn team_events(&self, team: String, q: EventsQuery, host: Option<String>) -> Result<Value, String> {
+        retrying!(self, self.team_events_once(&team, &q, host.as_deref()))
+    }
+
+    async fn team_events_once(&self, team: &str, q: &EventsQuery, host: Option<&str>) -> Result<Value, String> {
+        check_team(team)?;
+        let (limit, since) = q.check();
+        let pool = self.ready().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+        let Some(team_ref) = self.find_team(&mut tx, team, host, Lock::None).await? else {
+            tx.commit().await.map_err(|e| self.err(e))?;
+            return Ok(json!({ "team": team, "events": [], "more": 0 }));
+        };
+        let from = "FROM @@.task_events e JOIN @@.tasks x ON x.id = e.task_id
+                    WHERE e.team_uid = $1 AND e.deleted_at IS NULL AND x.deleted_at IS NULL AND e.ts > $2";
+        let matched: i64 = sqlx::query_scalar(&self.s(&format!("SELECT count(*) {from}")))
+            .bind(&team_ref.uid)
+            .bind(since)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        let rows = sqlx::query(&self.s(&format!(
+            "SELECT e.seq, e.ts, e.actor_id, e.actor_name, e.actor_host, e.action, e.from_state, e.to_state, e.attempt,
+                    e.note, e.id, x.seq {from} ORDER BY e.ts DESC, e.id DESC LIMIT $3"
+        )))
+        .bind(&team_ref.uid)
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| self.err(e))?;
+        tx.commit().await.map_err(|e| self.err(e))?;
+        let mut events = rows
+            .iter()
+            .map(|r| -> Result<Value, sqlx::Error> {
+                Ok(json!({
+                    "id": r.try_get::<String, _>(10)?,
+                    "task": r.try_get::<i64, _>(11)?,
+                    "seq": r.try_get::<i64, _>(0)?,
+                    "ts": r.try_get::<i64, _>(1)?,
+                    "actor": party(&r.try_get(2)?, &r.try_get(3)?, &r.try_get(4)?),
+                    "action": r.try_get::<String, _>(5)?,
+                    "from": r.try_get::<Option<String>, _>(6)?,
+                    "to": r.try_get::<Option<String>, _>(7)?,
+                    "attempt": r.try_get::<Option<i64>, _>(8)?,
+                    "note": r.try_get::<Option<String>, _>(9)?,
+                }))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| self.err(e))?;
+        events.reverse();
+        let more = (matched - events.len() as i64).max(0);
+        Ok(json!({ "team": team, "events": events, "more": more }))
+    }
+
     // ── Leases ───────────────────────────────────────────────────────────
 
     /// See sqlite::lease_tick (only the lease columns change; no team lock needed).

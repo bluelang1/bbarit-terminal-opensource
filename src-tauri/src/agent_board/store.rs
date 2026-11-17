@@ -93,6 +93,14 @@ impl BoardStore {
         }
     }
 
+    /// The newest task events of a whole team (viewer activity feed), oldest first.
+    pub async fn team_events(&self, team: String, query: EventsQuery, host: Option<String>) -> Result<Value, String> {
+        match self {
+            BoardStore::Sqlite(s) => s.run(move |c, _| super::sqlite::team_events(c, &team, &query, host.as_deref())).await,
+            BoardStore::Pg(p) => super::pg::timed(super::pg::CALL_TIMEOUT, p.team_events(team, query, host)).await,
+        }
+    }
+
     /// Renew leases of this instance's tasks whose owner tab is in `alive`; returns
     /// `{ renewed, holders }` (owner tabs of this instance that still hold tasks).
     pub async fn lease_tick(&self, instance: String, alive: Vec<String>, now: i64, lease_ms: i64) -> Result<Value, String> {
