@@ -1226,6 +1226,72 @@ fn read_refuses_a_malformed_cursor_tab(e: Engine) {
 
 // ── Sync groundwork: ids, tombstones, change log, arrival cursors ────────
 
+fn team_events_list_every_task_newest_window_oldest_first(e: Engine) {
+    let fx = Fixture::new(e, "events");
+    let s = fx.store();
+    let a = s.add("ev", "first", &member("lead"), 10);
+    let b = s.add("ev", "second", &member("lead"), 20);
+    s.w("ev", on("claim", a), &member("c1"), cx(30)).unwrap();
+    s.w("ev", done_op(a, "did it"), &member("c1"), cx(40)).unwrap();
+    s.w("ev", on("cancel", b), &human(), cx(50)).unwrap();
+    s.add("other", "not mine", &member("x"), 60);
+    let ev = |q: EventsQuery| run(s.0.team_events("ev".into(), q, Some(here()))).unwrap();
+    let all = ev(EventsQuery::default());
+    let rows = all["events"].as_array().unwrap();
+    let got: Vec<(i64, String, i64)> =
+        rows.iter().map(|r| (r["task"].as_i64().unwrap(), r["action"].as_str().unwrap().to_string(), r["ts"].as_i64().unwrap())).collect();
+    assert_eq!(
+        got,
+        vec![(a, "add".into(), 10), (b, "add".into(), 20), (a, "claim".into(), 30), (a, "done".into(), 40), (b, "cancel".into(), 50)]
+    );
+    assert_eq!(all["more"], 0);
+    assert_eq!(rows[3]["from"], "claimed");
+    assert_eq!(rows[3]["to"], "done");
+    assert_eq!(rows[3]["actor"]["id"], "c1");
+    assert_eq!(rows[4]["actor"]["id"], "user");
+    // The newest two, still oldest first; `more` counts the rest.
+    let last2 = ev(EventsQuery { limit: Some(2), since: None });
+    assert_eq!(last2["events"].as_array().unwrap().iter().map(|r| r["ts"].as_i64().unwrap()).collect::<Vec<_>>(), vec![40, 50]);
+    assert_eq!(last2["more"], 3);
+    // Only after `since`.
+    let after = ev(EventsQuery { limit: None, since: Some(30) });
+    assert_eq!(after["events"].as_array().unwrap().len(), 2);
+    // An unknown team is empty, a bad id is refused.
+    assert_eq!(run(s.0.team_events("nobody".into(), EventsQuery::default(), Some(here()))).unwrap()["events"], serde_json::json!([]));
+    assert!(run(s.0.team_events("bad id!".into(), EventsQuery::default(), Some(here()))).is_err());
+}
+
+fn a_person_reviews_retries_reopens_cancels_and_edits(e: Engine) {
+    let fx = Fixture::new(e, "viewer");
+    let s = fx.store();
+    let t = s.w("pv", TaskOpInput { title: Some("needs eyes".into()), review: Some(true), ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("pv", on("claim", t), &member("c1"), cx(2)).unwrap();
+    let sub = TaskOpInput { result: Some(ResultInput { summary: Some("done".into()), ..Default::default() }), ..on("submit", t) };
+    s.w("pv", sub.clone(), &member("c1"), cx(3)).unwrap();
+    let rj = s.w("pv", TaskOpInput { reason: Some("add a test".into()), ..on("reject", t) }, &human(), cx(4)).unwrap();
+    assert_eq!(rj["to"], "open");
+    s.w("pv", on("claim", t), &member("c1"), cx(5)).unwrap();
+    s.w("pv", sub, &member("c1"), cx(6)).unwrap();
+    assert_eq!(s.w("pv", on("approve", t), &human(), cx(7)).unwrap()["to"], "done");
+    assert_eq!(s.w("pv", on("reopen", t), &human(), cx(8)).unwrap()["to"], "open");
+    // Retry past the limit: a person may.
+    let f = s.w("pv", TaskOpInput { title: Some("flaky".into()), max_attempts: Some(1), ..op("add") }, &human(), cx(9)).unwrap()["task"]["seq"].as_i64().unwrap();
+    s.w("pv", on("claim", f), &member("c1"), cx(10)).unwrap();
+    s.w("pv", TaskOpInput { error: Some("exit 1".into()), ..on("fail", f) }, &member("c1"), cx(11)).unwrap();
+    s.w("pv", on("retry", f), &member("c2"), cx(12)).unwrap();
+    s.w("pv", on("claim", f), &member("c1"), cx(13)).unwrap();
+    s.w("pv", TaskOpInput { error: Some("exit 1 again".into()), ..on("fail", f) }, &member("c1"), cx(14)).unwrap();
+    assert!(s.w("pv", on("retry", f), &member("c2"), cx(15)).unwrap_err().contains("only the root tab or a person"));
+    assert_eq!(s.w("pv", on("retry", f), &human(), cx(16)).unwrap()["to"], "open");
+    let ed = s.w("pv", TaskOpInput { title: Some("flaky, renamed".into()), priority: Some(3), ..on("edit", f) }, &human(), cx(17)).unwrap();
+    assert_eq!(ed["task"]["title"], "flaky, renamed");
+    assert_eq!(s.w("pv", on("cancel", f), &human(), cx(18)).unwrap()["to"], "cancelled");
+    let actors: Vec<String> = s.show("pv", t, 20)["events"].as_array().unwrap().iter()
+        .filter(|e| matches!(e["action"].as_str(), Some("reject" | "approve" | "reopen")))
+        .map(|e| e["actor"]["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(actors, vec!["user", "user", "user"]);
+}
+
 fn raw(fx: &Fixture) -> rusqlite::Connection {
     rusqlite::Connection::open(fx.db()).unwrap()
 }
@@ -1519,6 +1585,8 @@ shared_tests!(
     block_moves_the_claim_to_the_acting_instance,
     live_history_over_the_event_cap_does_not_wipe_finished_tasks,
     read_refuses_a_malformed_cursor_tab,
+    team_events_list_every_task_newest_window_oldest_first,
+    a_person_reviews_retries_reopens_cancels_and_edits,
     row_ids_are_uuid_v7_in_creation_order,
     tombstones_hide_rows_and_are_purged_after_thirty_days,
     copy_data_moves_every_team_and_refuses_or_merges_into_a_board_with_data,

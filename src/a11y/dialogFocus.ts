@@ -12,10 +12,26 @@ const FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
-/** Keyboard-reachable elements inside `container`, in DOM order. */
+/**
+ * Does `el` take part in layout? Elements under `display: none` (a card a container query
+ * hides, a `[hidden]` panel) have no client rects. Without a layout engine (jsdom, where
+ * nothing has rects) the computed `display` of the element and its ancestors decides.
+ */
+export function hasLayoutBox(el: HTMLElement): boolean {
+  if (el.getClientRects().length > 0) return true;
+  const doc = el.ownerDocument;
+  if (doc.documentElement.getClientRects().length > 0) return false;
+  const view = doc.defaultView;
+  for (let n: HTMLElement | null = el; n; n = n.parentElement) {
+    if (n.hidden || view?.getComputedStyle(n).display === 'none') return false;
+  }
+  return true;
+}
+
+/** Keyboard-reachable elements inside `container`, in DOM order (only those with a layout box). */
 export function focusableIn(container: Element): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    .filter((el) => !el.closest('[inert]') && !el.hidden);
+    .filter((el) => !el.closest('[inert]') && !el.closest('[hidden]') && hasLayoutBox(el));
 }
 
 /**
@@ -60,6 +76,8 @@ export interface DialogFocusOptions {
   /** The button that gets focus on open (Cancel for destructive dialogs). Enter with focus outside the dialog clicks it. */
   initialFocus: () => HTMLElement | null;
   onEscape: () => void;
+  /** Asked on close: false skips giving focus back (the dialog moved focus somewhere on purpose). */
+  restoreFocus?: () => boolean;
 }
 
 /**
@@ -74,8 +92,10 @@ export interface DialogFocusOptions {
 export function useDialogFocus(
   dialogRef: RefObject<HTMLElement | null>,
   open: boolean,
-  { initialFocus, onEscape }: DialogFocusOptions,
+  { initialFocus, onEscape, restoreFocus }: DialogFocusOptions,
 ): void {
+  const restoreRef = useRef(restoreFocus);
+  restoreRef.current = restoreFocus;
   const onEscapeRef = useRef(onEscape);
   onEscapeRef.current = onEscape;
   const initialFocusRef = useRef(initialFocus);
@@ -117,7 +137,7 @@ export function useDialogFocus(
     window.addEventListener('keydown', onKeyDown, true);
     return () => {
       window.removeEventListener('keydown', onKeyDown, true);
-      if (shouldRestoreFocus(previous, doc.activeElement, dialog, doc)) focusQuietly(previous);
+      if ((restoreRef.current?.() ?? true) && shouldRestoreFocus(previous, doc.activeElement, dialog, doc)) focusQuietly(previous);
     };
     // Callbacks are read through refs; re-run only when the dialog opens or closes.
   }, [open]);

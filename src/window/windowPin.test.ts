@@ -90,6 +90,7 @@ describe('followsMainPin', () => {
   it('every app window but main and the pet', () => {
     expect(followsMainPin('main')).toBe(false);
     expect(followsMainPin('pet')).toBe(false);
+    expect(followsMainPin('tool-team-status')).toBe(false);
     for (const l of ['tool-guide', 'tool-settings', 'term-detach-abc', 'harness', 'agent-1', 'scrum-x', 'research-y']) {
       expect(followsMainPin(l), l).toBe(true);
     }

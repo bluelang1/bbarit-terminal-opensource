@@ -200,8 +200,13 @@ pub async fn agent_board_read(team: String, query: Option<ReadQuery>) -> Result<
     track(async { current_store()?.read(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await }.await)
 }
 
+/// Never creates the SQLite file: with no board file there are no teams (the Team status view
+/// and its badges list teams before anything else, and must not leave a file behind).
 #[tauri::command]
 pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
+    if !read_selection().uses_postgres() && !db_path()?.exists() {
+        return Ok(Vec::new());
+    }
     track(async { current_store()?.teams().await }.await)
 }
 
@@ -348,6 +353,13 @@ pub async fn agent_task_list(team: String, query: Option<TaskListQuery>) -> Resu
 #[tauri::command]
 pub async fn agent_task_show(team: String, task: i64, history: Option<bool>, stale_ms: Option<i64>) -> Result<Value, String> {
     track(async { current_store()?.task_show(team.trim().to_string(), task, history.unwrap_or(false), stale_ms, ctx()).await }.await)
+}
+
+/// Team status view (a person in the app): the newest task events of every task of a team.
+/// A viewer command, not an `agent.*` UI command, so `bbarit-ctl` cannot reach it.
+#[tauri::command]
+pub async fn agent_board_team_events(team: String, query: Option<EventsQuery>) -> Result<Value, String> {
+    track(async { current_store()?.team_events(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await }.await)
 }
 
 /// A tab closed: hand back what it holds through this instance — only when its PTY is really

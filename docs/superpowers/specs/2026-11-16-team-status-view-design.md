@@ -5,6 +5,30 @@ a pop-out always-on-top window. Data: board v2 spec (only in worktrees, e.g.
 `.claude/worktrees/agent-board-pg/docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md`),
 `docs/AGENT_RELAY.md`, `2026-11-16-agent-limits-and-log-design.md`.
 
+## 0. Decisions (maintainer + main session, 2026-11-17)
+
+요약: 상단 대시보드(계기판) 버튼 하나로 열고, 그 안에서 [팀 현황 | 대시보드] 탭으로 나눈다.
+"창으로 떼기"로 독립 창이 되고 항상 위 고정을 켤 수 있다. 팀 전체 중지 버튼 옆 버튼과 프로젝트
+탭의 숫자 배지로도 열린다. 아이디어 10개를 모두 넣되, 맥별 보기는 동기화(3b) 전까지 자리만 둔다.
+
+- Entry points: the existing toolbar gauge button opens one overlay with tabs
+  `[Team status | Dashboard]` (last tab remembered); a small button next to the stop-team
+  button and the project-tab badge open the Team status tab for that team. No new toolbar button.
+- Pop-out: "open in its own window" for either tab; pin (always on top) in the pop-out header.
+- All ten ideas ship; "Machines" is a placeholder card until sync (stage 3b).
+- Open choices in section 13, settled: (1) no OS notification in this stage; (2) the view shows
+  one team, the badge sums the active project's teams; (3) the pop-out follows the theme of the
+  project that owns the team; (4) stale uses `agents.board.staleMinutes`; (5) five grouped board
+  columns; (6) review is pink; (7) the app's mono font everywhere; (8) refusals come from a new
+  read-only host command over `agent-relay.log` (last entries only, never the text head of
+  messages); (9) no mermaid.
+- The look follows the app's flat, hard-edged skin first; the maintainer reviews it in the dev
+  app and may ask for a softer look afterwards, so keep radius/shadow/spacing in `--ts-*` tokens.
+- Stages: 4a = data model (pure functions + tests), overlay shell with the two tabs, summary
+  strip, Needs you, agents, task board/list, task drawer with human actions, activity feed,
+  limits, badges, the stop-team-side button. 4b = dependency graph/tree, timeline (burn-up,
+  time in state), pop-out window + pin, machines placeholder, getting-started guide step.
+
 ## 1. What exists today (fit constraints)
 | Topic | Finding | Where |
 |---|---|---|
@@ -397,3 +421,141 @@ math as the brief's calculation; runs in ms).
    command that doesn't exist yet.
 9. **Mermaid** is bundled and could draw the graph as a stopgap. I recommend against it (no
    per-node focus, async, off-theme), but it would cut DAG work if time is short.
+
+## Stage 4a notes (builder's choices inside the rules)
+
+- Data: `agent_task_list` with `all: true, limit: 500` (tasks + dependency states), new
+  `agent_board_team_events` (newest 500 task events of the whole team, both stores, shared
+  suite `team_events_list_every_task_newest_window_oldest_first`), `agent_board_read` (200 posts,
+  announcements first), `agent_task_show --history` for the drawer, new read-only
+  `agent_relay_log_refusals` (last 20 `run_refused` entries with a limit name among the last
+  500 log lines; returns ts/limit/caller id+name/count/max, never `textHead` or `error`). The
+  relay log has no `.dev` variant, so neither does the reader.
+- A person's actions reuse the App's existing `humanTaskAction` (store `Actor.human`) and a new
+  `humanBoardPost` (author "user", kind note). No new host write command was needed; the
+  store's `check_transition` already refuses claim/block/release/finish for a person. A shared
+  test (`a_person_reviews_retries_reopens_cancels_and_edits`) covers reject/approve/reopen/
+  retry-past-limit/edit/cancel as "user" on both engines.
+- Strings live in `src/teamStatus/strings.ts` (en + ko; other locales fall back to English
+  like `src/i18n`) instead of adding ~150 keys to all eight locale files.
+- Needs you: a stale blocked task stays one "blocked" item flagged stale; refusals of the
+  last 60 min are listed as info (never counted). Blocked agents have no start time from 7501,
+  so their age reads "now". Mirror detection: `mode === 'sync'` and the team's `homeHost` is
+  not this host (no mirrors exist until 3b).
+- Badges: a background read (`useTeamWatch`, createStatusPoller 15 s + board events debounced
+  500 ms) of the 12 most recently active teams, only while relay children exist or the Team
+  status tab is open (never for the Dashboard tab alone). The hook computes the task-based items
+  itself and sets state only when the teams/item-key string changes; turning it off clears the
+  badges. It still reads alongside the open view's own poll (not merged; both are cheap local
+  reads on SQLite). A team belongs to the project holding
+  its root tab, else one of its relay children. The project-tab badge is clickable (opens Team
+  status for that project's first team).
+- Team status button: shown next to the stop-team button whenever the active project has a
+  board team (the stop-team button itself still only appears while a child works).
+- Layout: CSS container queries do the visual split; a ResizeObserver also picks the main tabs
+  (wide [Board|List], medium [Board|List|Activity], narrow [Agents|Tasks|Activity|Limits]) and
+  three board columns below 900 px. The drawer is absolutely placed in the view.
+- The Dashboard tab is the old iframe panel content (`DashboardContent`), restyled to `ts-*`
+  buttons inside the shared modal shell; URL, sandbox and Esc behaviour are unchanged.
+- Review fixes (2026-11-17):
+  - Cards a layout hides are not rendered (narrow: agents and band; medium: band activity), and
+    `focusableIn` skips elements with no layout box (`getClientRects()`; jsdom falls back to
+    computed `display`), so Tab never lands on hidden controls and ids stay unique.
+  - Esc closes the innermost open part first (reject form / drawer edit-cancel-reject mode →
+    drawer → add-task form) through an escape stack (`escape.ts`), then the overlay. Unsent note
+    text is kept per team when the overlay closes.
+  - Tries are shown as people count them: `attempt + 1` capped at the maximum (`triesUsed`;
+    the store's attempt is 0 on the first try, +1 per retry/reject/reopen).
+  - Needs you lists only refusals whose caller is a member of the selected team (keys without
+    a list index); the Limits card still lists the app-wide recent refusals.
+  - The "Agents" tile is this team's live agents, root tab left out, without `/max` (the
+    Limits card shows the app-wide total/max).
+  - A badge click remembers the chosen team under the badge's project.
+  - Jump to tab closes the overlay without restoring the old focus (`useDialogFocus`
+    `restoreFocus`) and focuses the target tab's xterm textarea.
+  - No board file from the viewer: `agent_board_info` only builds the store (the SQLite file is
+    opened lazily, so no file); `agent_board_teams` now returns `[]` in SQLite mode when the file
+    does not exist (it used to open, and so create, it); the view reads a team's tasks/events/
+    posts only once the board lists that team.
+  - Narrow spacing tokens are set on `.ts-view`/`.ts-drawer` (a container query cannot style its
+    container); badges use the `--ts-*` tokens; `[data-state]` rules are scoped to `.team-status`.
+  - The Dashboard tab no longer grabs focus when reached with the arrow keys, and its iframe
+    stays mounted (hidden) after the first visit, so tab switches do not reload it.
+  - Korean wording without jargon (팀장 탭, 하위 에이전트, 응답이 끊겨 회수됨, 에이전트 추가가 한도에
+    걸림; idle 쉬는 중 vs waiting 선행 작업 대기); note kinds are localized in Activity.
+- Not done in 4a / not checked: the view has **not been looked at in a running app**
+  (no dev-app check; container widths, focus order and the hard-shadow look are unverified);
+  no merge of the badge read with the open view's read; no OS notification; no per-bucket sparkline tooltips; refusal ticks do not link to log
+  lines; Machines card is the placeholder; 4b items (dependency graph/tree, timeline, pop-out +
+  pin, guide step) not started.
+
+## Stage 4b notes (builder's choices inside the rules)
+
+- Pure functions live in `src/teamStatus/graph.ts` (`depSubgraph`, `layoutDag`, `dagChain`,
+  `dagNeighbor`, `depTree`) and `src/teamStatus/timeline.ts` (`burnUp`, `timeInState`,
+  `medianTimeIn`, `laneTotals`) instead of growing `model.ts` past 650 lines.
+- Dependencies: the subgraph is built from the **filtered** tasks (filters apply); open tasks with
+  no dependency and no dependent are left out and counted ("n open tasks wait on nothing").
+  `layoutDag` sorts ids and edges first, so it is deterministic whatever the input order; the
+  sweeps stop early at zero crossings. Self-dependencies count as a cycle. Graph → tree when
+  > 40 tasks, > 8 layers (or the walk passes 64), a cycle, or a narrow view; when the graph fits,
+  a [Graph | List] toggle is offered. Nodes are absolutely placed `<button>`s over the edge SVG
+  (`role="img"` + sentence) with a roving tab stop; the table toggle lists depends on / needed
+  by. The critical-path outline (spec 4.1) is **not** built.
+- Tree: roots are tasks nothing in the graph depends on; a task already expanded elsewhere is
+  shown again as a leaf marked "listed above"; a cycle is marked and not expanded. Keys follow
+  the WAI-ARIA tree pattern (Up/Down, Right opens/enters, Left closes/goes up, Home/End,
+  Enter/Space opens the task).
+- Timeline: events come from the team's newest 500 task events; a task whose `add` fell out of
+  that window starts at `createdAt` in the state its first known event left. A task with no event
+  in the window is drawn open from `createdAt` and in its current state from `updatedAt` (review
+  fix; before, an old finished task looked done from its creation); time-in-state skips such
+  tasks. A lane's work ends at done/cancelled (then a faded segment in that state, 45% opacity,
+  runs to now so the lane reads as finished; not counted in totals or medians), otherwise at now;
+  event times later than now are clamped to now; an event that does not change the state never
+  splits a segment. The cache key includes the team. Lanes are HTML spans (`role="img"` on the lane block, segment tooltips via
+  `title`); the burn-up is SVG with `vector-effect: non-scaling-stroke` and HTML axis labels. The
+  task drawer shows the same strip for one task from its full history.
+- Tabs: wide [Board|List|Dependencies|Timeline], medium [... |Activity], narrow
+  [Agents|Tasks|Activity|Dependencies|Timeline|Limits] (Timeline added to narrow too).
+- Review fixes (2026-11-17): the dependency memo caches only the shape (ids + links, keyed on
+  states/deps); titles, owners and waiting flags are read from the current task lists each render
+  (graph and tree). Crossing counts use hops grouped per layer once (worst case 40 nodes / 8
+  layers dense is tested). Mouse-leave keeps the keyboard-focus highlight. Korean sentence uses
+  "먼저 끝나야 할 일을 기다림" (the short chip label stays "선행 작업 대기").
+- Pop-out security wording: a person's actions are not reachable through `agent.*` UI commands,
+  which is not a boundary (`bbarit-ctl js` / mcp-bridge already control the main window). Tauri
+  events carry no sender, so each open makes a random token (`crypto.randomUUID`) passed in the
+  URL; every request and notice (hello, team, jump, settings) must carry it, otherwise it is
+  ignored. After the main window reloads (token lost) it adopts the token of the first hello.
+- Pins: `tool-team-status` no longer follows the main window's pin (`windowPin.ts`
+  NOT_FOLLOWING); the context carries `mainPinned` and the pop-out applies "own pin OR main pin"
+  (`popoutOnTop`); its button shows its own pin, with a hint when on-top comes from main.
+- Close race: a close event marks the pop-out closed only after `getByLabel` finds no live window
+  with that label; one close listener at a time (replaced on open, set again only when a hello
+  arrives while the state says closed). The context message is shape-checked before use.
+- Pop-out: `src/teamStatus/popout.ts` + `src/pages/TeamStatusPage.tsx`. The pop-out never reads
+  the board itself: every read and a person's action is a request to the main window
+  (`serveRequest` serves only the source's read methods and a person's action names), so there is
+  one data path and no Rust change. The main window pushes a context (team, nonce, agent tab
+  states, limits, theme of the project owning the team, surface, stale threshold) whenever its
+  JSON changes, and forwards `octo-agent-board` DOM events as `ts-pop:board`; the page re-emits
+  them as DOM events, so `useTeamBoard` is unchanged. The page says hello every 2 s until the
+  first context arrives (after ~12 s it says the main window is not answering). Only the window
+  labelled `main` answers (the harness window loads the same App). Pin = `applyWindowPin` on
+  the pop-out (remembered in localStorage); Esc closes the innermost open part, never the window.
+  The overlay closes when the pop-out opens; reopening it shows "Team status is open in its own
+  window" + [Bring to front]. `tool-*` is already in the default capability, so no capability or
+  Rust change was needed. **Dashboard pop-out is not built** (the iframe tab would need its own
+  route and Esc handling; skipped as not cheap enough).
+- Guide: step `team-status` after `window-pin`, target `[data-guide="team-status"]` (the gauge
+  button), ticked when the Team status tab or the pop-out is showing; other locales carry the
+  English text like earlier steps.
+- Fixes: Activity rows wrap inside the visible width (`overflow-x: hidden`, `scrollbar-gutter:
+  stable`, `min-width: 0` on the grid cells, wrapping links); task-card titles/meta and Needs-you
+  titles get `min-width: 0` + `overflow-wrap: anywhere`. The cause of the clipped "owner tal…" was
+  not reproduced (no dev-app check); the rules are defensive.
+- Not done / not checked: **nothing of 4b has been looked at in a running app** (graph sizes,
+  hover dimming, pop-out window creation, theme push, pin on macOS, focus of the main window on
+  jump are unverified); no critical-path toggle; no Dashboard pop-out; the Machines card stays
+  the placeholder.

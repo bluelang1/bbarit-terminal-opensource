@@ -148,10 +148,117 @@ pub fn agent_relay_log_tail(lines: Option<usize>) -> Vec<String> {
     }
 }
 
+/// The limits `agent run` refuses on (src/terminal/agentLimits.ts `AgentLimitName`).
+const LIMIT_NAMES: [&str; 3] = ["maxChildren", "maxDepth", "maxTotal"];
+pub const DEFAULT_REFUSALS: usize = 20;
+pub const MAX_REFUSALS: usize = 100;
+
+/// One `run_refused` line of the relay log as the Team status view shows it: time (unix ms),
+/// the limit, the calling tab and the counts. Never the prompt head or the error text.
+/// Lines that are not JSON, not a limit refusal, or carry no readable time are skipped.
+pub fn parse_refusal(line: &str) -> Option<serde_json::Value> {
+    let v: serde_json::Value = serde_json::from_str(line).ok()?;
+    if v.get("event")?.as_str()? != "run_refused" {
+        return None;
+    }
+    let limit = v.get("reason")?.as_str()?;
+    if !LIMIT_NAMES.contains(&limit) {
+        return None;
+    }
+    let ts = chrono::DateTime::parse_from_rfc3339(v.get("ts")?.as_str()?).ok()?.timestamp_millis();
+    let mut out = serde_json::json!({ "ts": ts, "limit": limit });
+    let small = |key: &str| v.get(key).and_then(serde_json::Value::as_i64).filter(|n| (0..=10_000).contains(n));
+    if let Some(n) = small("count") {
+        out["count"] = n.into();
+    }
+    if let Some(n) = small("max") {
+        out["max"] = n.into();
+    }
+    let text = |p: &serde_json::Value, key: &str, max: usize| -> Option<String> {
+        let s: String = p.get(key)?.as_str()?.chars().filter(|c| !c.is_control()).take(max).collect();
+        Some(s).filter(|s| !s.trim().is_empty())
+    };
+    if let Some(caller) = v.get("caller").filter(|c| c.is_object()) {
+        let mut c = serde_json::json!({});
+        if let Some(id) = text(caller, "id", 128) {
+            c["id"] = id.into();
+        }
+        if let Some(name) = text(caller, "name", 80) {
+            c["name"] = name.into();
+        }
+        if c.as_object().is_some_and(|o| !o.is_empty()) {
+            out["caller"] = c;
+        }
+    }
+    Some(out)
+}
+
+/// The last `n` limit refusals (1..=100) among the last 500 log lines, oldest first.
+pub fn recent_refusals(dir: &Path, n: usize) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = tail_lines(dir, MAX_TAIL).iter().filter_map(|l| parse_refusal(l)).collect();
+    let skip = out.len().saturating_sub(n.clamp(1, MAX_REFUSALS));
+    out.split_off(skip)
+}
+
+/// Team status view: recent `agent run` limit refusals (read only; not an `agent.*` command).
+#[tauri::command(async)]
+pub fn agent_relay_log_refusals(limit: Option<usize>) -> Vec<serde_json::Value> {
+    match log_dir() {
+        Some(dir) => recent_refusals(&dir, limit.unwrap_or(DEFAULT_REFUSALS)),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn refusals_keep_time_limit_caller_and_counts_but_never_text() {
+        let line = json!({
+            "ts": "2026-11-17T05:02:03.004Z", "event": "run_refused",
+            "caller": { "id": "t1", "name": "lead\u{1b}[31m", "cliType": "claude" }, "depth": 1,
+            "textLen": 40, "textHead": "secret prompt head",
+            "reason": "maxChildren", "count": 6, "max": 6, "error": "child limit reached: …",
+        })
+        .to_string();
+        let r = parse_refusal(&line).unwrap();
+        assert_eq!(r["ts"], 1_794_891_723_004i64);
+        assert_eq!(r["limit"], "maxChildren");
+        assert_eq!(r["count"], 6);
+        assert_eq!(r["max"], 6);
+        assert_eq!(r["caller"]["id"], "t1");
+        assert_eq!(r["caller"]["name"], "lead[31m");
+        let s = r.to_string();
+        assert!(!s.contains("secret") && !s.contains("child limit") && !s.contains("textHead"), "{s}");
+    }
+
+    #[test]
+    fn refusal_parser_skips_other_events_bad_limits_bad_times_and_junk() {
+        let ok = |reason: &str, ts: &str| json!({ "ts": ts, "event": "run_refused", "reason": reason }).to_string();
+        assert!(parse_refusal(&ok("maxTotal", "2026-11-17T05:02:03Z")).is_some());
+        assert!(parse_refusal(&ok("maxDepth", "2026-11-17T05:02:03+09:00")).is_some());
+        assert!(parse_refusal(&ok("worktree", "2026-11-17T05:02:03Z")).is_none());
+        assert!(parse_refusal(&ok("maxTotal", "yesterday")).is_none());
+        assert!(parse_refusal(&json!({ "ts": "2026-11-17T05:02:03Z", "event": "run", "reason": "maxTotal" }).to_string()).is_none());
+        assert!(parse_refusal("not json").is_none());
+        assert!(parse_refusal("[1,2]").is_none());
+        let r = parse_refusal(&json!({ "ts": "2026-11-17T05:02:03Z", "event": "run_refused", "reason": "maxTotal", "count": -1, "caller": { "id": "" } }).to_string()).unwrap();
+        assert!(r.get("count").is_none() && r.get("caller").is_none(), "{r}");
+    }
+
+    #[test]
+    fn recent_refusals_returns_the_last_n_oldest_first() {
+        let dir = temp_dir("refusals");
+        for i in 0..5 {
+            append_entry(&dir, &json!({ "ts": format!("2026-11-17T05:0{i}:00Z"), "event": "run_refused", "reason": "maxTotal", "count": i })).unwrap();
+            append_entry(&dir, &json!({ "ts": "2026-11-17T05:00:00Z", "event": "send" })).unwrap();
+        }
+        let r = recent_refusals(&dir, 3);
+        assert_eq!(r.iter().map(|v| v["count"].as_i64().unwrap()).collect::<Vec<_>>(), vec![2, 3, 4]);
+        assert!(recent_refusals(&temp_dir("refusals-none"), 3).is_empty());
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

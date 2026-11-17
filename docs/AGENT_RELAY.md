@@ -415,6 +415,25 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   - 설정 `config.json` → `agents.board.{leaseSeconds 60..3600, renewSeconds 10..600, staleMinutes 5..1440}`
     (`normalizeAgentBoardConfig`, 범위 밖은 잘라 맞춤, renew 는 lease 의 절반 이하).
 
+- **팀 현황 보기**(설계 [2026-11-16-team-status-view-design.md](superpowers/specs/2026-11-16-team-status-view-design.md),
+  `src/teamStatus/`): 위쪽 막대의 계기판 버튼이 [팀 현황 | 대시보드] 오버레이를 연다. 읽기는 `agent_board_teams`·
+  `agent_task_list`(all)·`agent_task_show`(history)·`agent_board_read`·`agent_board_team_events`(팀 전체 할 일 이력, 최신
+  N 개, 두 엔진 공통 테스트)·`agent_relay_log_refusals`(감사 로그의 `run_refused` 중 제한 이름이 있는 것만, 시각·제한·
+  호출 탭·개수만 돌려주고 프롬프트 머리·오류 문장은 돌려주지 않음)로 한다. 사람이 하는 일(승인·반려·다시 시도·취소·다시 열기·
+  고치기·할 일 추가·메모)은 App 내부 `humanTaskAction`·`humanBoardPost`(작성자 "user", 감사 로그 `by: viewer`)로만 가고,
+  둘 다 `agent.*` UI 커맨드로는 닿지 않는다(보안 경계는 아니다: `bbarit-ctl js`·mcp-bridge 는 이미 메인 창을 마음대로
+  다룰 수 있다). 갱신은 `octo-agent-board` 이벤트와
+  `createStatusPoller`(10 s, 배지는 15 s, 릴레이 자식이 있거나 오버레이가 열려 있을 때만). 배지 개수 = 처리할 일
+  (검수 대기·실패·막힌 에이전트(7501)·막힌 할 일·멈춘 할 일; 기다림·거부는 세지 않음).
+  "선행 관계" 탭(그림: `layoutDag`, 40개·8단계·순환 없음·760px 이상일 때만, 아니면 `role="tree"` 목록)과 "시간 흐름" 탭
+  (`burnUp`·`timeInState`, `src/teamStatus/graph.ts`·`timeline.ts`)이 있다. "따로 창으로 열기"는 `tool-team-status`
+  창(`/team-status?team=&projectId=`)을 띄운다. 그 창은 보드를 직접 읽지 않고 Tauri 이벤트(`ts-pop:req`/`res`)로 메인 창에
+  묻고, 사람이 하는 일도 메인 창의 같은 `humanTaskAction` 으로 간다(허용된 읽기·사람 동작 이름만, `popout.ts serveRequest`).
+  Tauri 이벤트에는 보낸 창이 실려 오지 않으므로, 창을 열 때마다 만든 무작위 토큰(`crypto.randomUUID`)을 URL 로 넘기고 모든
+  요청·알림에 같은 토큰이 있어야 받는다(메인 창이 다시 읽혀 토큰을 잃었으면 열려 있는 창의 첫 hello 토큰을 받아들인다).
+  메인 창이 에이전트 탭 상태·제한·팀이 속한 프로젝트 테마를 `ts-pop:ctx` 로 보내고, 창 사이를 건너지 못하는 DOM 이벤트
+  `octo-agent-board` 는 `ts-pop:board` 로 넘겨 준다. 하네스 창은 같은 App 을 띄우지만 `main` 창만 응답한다.
+
 ### 팀 할 일과 보드 저장소 (스키마 2, 외부에서 읽는 사람용)
 
 Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관), `common.rs`(두 엔진이

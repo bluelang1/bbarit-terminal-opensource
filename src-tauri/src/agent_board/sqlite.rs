@@ -1795,6 +1795,50 @@ pub fn task_show(conn: &mut Connection, limits: Limits, team: &str, seq: i64, hi
     Ok(out)
 }
 
+/// The newest task events of every task of a team (the viewer's activity feed), oldest first,
+/// each with its task's `#seq`; `more` counts matching events not returned. Read only (no
+/// lease expiry: the viewer's task list does that).
+pub fn team_events(conn: &mut Connection, team: &str, q: &EventsQuery, host: Option<&str>) -> Result<Value, String> {
+    check_team(team)?;
+    let (limit, since) = q.check();
+    let Some(team_ref) = find_team(conn, team, host)? else {
+        return Ok(json!({ "team": team, "events": [], "more": 0 }));
+    };
+    let tx = conn.transaction().db()?;
+    let from = "FROM task_events e JOIN tasks x ON x.id = e.task_id
+                WHERE e.team_uid = ?1 AND e.deleted_at IS NULL AND x.deleted_at IS NULL AND e.ts > ?2";
+    let matched: i64 = tx.query_row(&format!("SELECT count(*) {from}"), params![team_ref.uid, since], |r| r.get(0)).db()?;
+    let mut events = {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT e.seq, e.ts, e.actor_id, e.actor_name, e.actor_host, e.action, e.from_state, e.to_state, e.attempt,
+                        e.note, e.id, x.seq {from} ORDER BY e.ts DESC, e.id DESC LIMIT ?3"
+            ))
+            .db()?;
+        let it = stmt
+            .query_map(params![team_ref.uid, since, limit], |r| {
+                Ok(json!({
+                    "id": r.get::<_, String>(10)?,
+                    "task": r.get::<_, i64>(11)?,
+                    "seq": r.get::<_, i64>(0)?,
+                    "ts": r.get::<_, i64>(1)?,
+                    "actor": party(&r.get(2)?, &r.get(3)?, &r.get(4)?),
+                    "action": r.get::<_, String>(5)?,
+                    "from": r.get::<_, Option<String>>(6)?,
+                    "to": r.get::<_, Option<String>>(7)?,
+                    "attempt": r.get::<_, Option<i64>>(8)?,
+                    "note": r.get::<_, Option<String>>(9)?,
+                }))
+            })
+            .db()?;
+        it.collect::<rusqlite::Result<Vec<_>>>().db()?
+    };
+    drop(tx);
+    events.reverse();
+    let more = (matched - events.len() as i64).max(0);
+    Ok(json!({ "team": team, "events": events, "more": more }))
+}
+
 // ── Leases ───────────────────────────────────────────────────────────────
 
 /// Renew (one UPDATE) the lease of every claimed/blocked task of this instance whose owner
