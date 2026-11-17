@@ -21,6 +21,7 @@ import { WebglAddon } from 'xterm-addon-webgl';
 import { SearchAddon, type ISearchResultChangeEvent } from '@xterm/addon-search';
 import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
+import { createSelectionCopyState, type SelectionCopyState } from './terminal/selectionCopy';
 import { writePasteChunked } from './terminal/pasteChunks';
 import { disposeInputGate, setInputGateHost, writeHumanInput } from './terminal/inputGate';
 import {
@@ -1464,6 +1465,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   const lastNativePasteAtRef = useRef(0);
   const pendingPasteFallbackTimerRef = useRef<number | null>(null);
   const lastTerminalSelectionRef = useRef('');
+  const selectionCopyRef = useRef<SelectionCopyState>(createSelectionCopyState());
   const isReadyRef = useRef(false);
   // 마운트마다 새로 만들어지는 ref — writer 재등록 여부를 추적한다.
   const writerRegisteredRef = useRef(false);
@@ -3216,8 +3218,21 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // clipboard. Disposed with the terminal, no manual cleanup needed.
       term.parser.registerOscHandler(52, (data) => {
         const text = decodeOsc52Payload(data);
-        if (text) void writeClipboardTextSafe(text);
+        if (text) {
+          // The program's copy is now the newest one: an older xterm selection
+          // (still on screen or only remembered) must not be copied over it.
+          const stale = !!term.hasSelection();
+          selectionCopyRef.current.programCopied(text, stale);
+          lastTerminalSelectionRef.current = text;
+          if (stale) term.clearSelection();
+          void writeClipboardTextSafe(text);
+        }
         return true;
+      });
+      term.onSelectionChange(() => {
+        const has = !!term.hasSelection();
+        selectionCopyRef.current.selectionChanged(has);
+        if (!has) lastTerminalSelectionRef.current = selectionCopyRef.current.last();
       });
       // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
       // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
@@ -4815,7 +4830,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try {
         const t = termRef.current as any;
         if (t?.hasSelection?.()) {
-          const sel = (t.getSelection?.() || '') as string;
+          // Only a selection that changed since the last copy: this runs on every
+          // mouse release in the app, and re-copying a selection that is merely
+          // still on screen put old text back over newer copies.
+          const sel = selectionCopyRef.current.takeForAutoCopy((t.getSelection?.() || '') as string);
           if (sel) {
             lastTerminalSelectionRef.current = sel;
             void writeClipboardTextSafe(sel);
