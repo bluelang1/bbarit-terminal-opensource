@@ -33,7 +33,7 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 /// Schema version this code reads and writes (the same number as the SQLite store's).
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Longest a board command may wait on the server (a network drop mid-query must not stall
 /// the lease worker or a command): "team board unavailable: …" after that.
@@ -205,6 +205,29 @@ $fn$"
     out
 }
 
+/// Version 3 (stage 3b): the server_seq trigger first takes a shared transaction-level advisory
+/// lock (`seq_lock_key`), so every writer (sync pushes and direct `postgres`-mode writes alike)
+/// holds it from the moment it draws a number until it commits. A pull reads its upper bound
+/// (`sync_watermark`) under the same lock taken exclusively: once granted, every transaction
+/// that drew a number at or below the sequence's current value has ended, so the pull cursor
+/// can never pass a row that commits later with a lower number.
+fn v3_sql() -> Vec<String> {
+    vec!["CREATE OR REPLACE FUNCTION @@.board_set_server_seq() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  PERFORM pg_advisory_xact_lock_shared(hashtext('bbarit-board-seq:' || TG_TABLE_SCHEMA));
+  NEW.server_seq := nextval('@@.board_server_seq');
+  RETURN NEW;
+END
+$fn$"
+        .into()]
+}
+
+/// Text hashed into the server_seq lock key (`hashtext(...)`; the trigger builds the same text
+/// from `TG_TABLE_SCHEMA`).
+pub fn seq_lock_key(schema: &str) -> String {
+    format!("bbarit-board-seq:{schema}")
+}
+
 /// The migration steps from `stored` to SCHEMA_VERSION, SQL as it will run.
 pub fn migration_steps(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, String> {
     let prefix = format!("{}.", quote_ident(schema));
@@ -215,6 +238,11 @@ pub fn migration_steps(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, S
                 version: 2,
                 description: "create the board tables, indexes and sequences (teams, posts, cursors, tasks, task_deps, task_events, hosts, board_meta) and the server_seq trigger",
                 sql: v2_sql(schema).into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
+            }),
+            3 => Ok(Step {
+                version: 3,
+                description: "server_seq numbers are drawn under a shared lock, so syncing machines never miss a row that commits late",
+                sql: v3_sql().into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
             }),
             other => Err(format!("no PostgreSQL migration to version {other}")),
         })
@@ -320,6 +348,8 @@ struct TeamRef {
     uid: String,
     name: Option<String>,
     last_post_seq: i64,
+    /// Home of a team another computer keeps in sync mode (read-only for direct writers).
+    sync_home: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -571,7 +601,7 @@ impl PgStore {
             out["schemaVersion"] = json!(stored);
             let can_rw: Option<bool> = if stored.is_some() {
                 let mut all = true;
-                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta"] {
+                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta", "hosts"] {
                     let ok: bool = sqlx::query_scalar("SELECT has_table_privilege($1, 'SELECT, INSERT, UPDATE, DELETE')")
                         .bind(format!("{}{t}", store.prefix))
                         .fetch_one(&mut c)
@@ -608,7 +638,7 @@ impl PgStore {
                 None => format!("this user cannot create tables here: ask the database owner to create schema {schema} or grant CREATE"),
                 Some(v) if v < SCHEMA_VERSION => format!("press Create / upgrade tables (version {v} → {SCHEMA_VERSION})"),
                 Some(_) if can_rw == Some(false) => {
-                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them, USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
+                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them (hosts included), USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
                 }
                 Some(_) => "ready: choose \"PostgreSQL only\" as the usage type; to bring the boards of this computer, use Copy data from this computer (SQLite) to PostgreSQL first".to_string(),
             };
@@ -628,13 +658,19 @@ impl PgStore {
     /// The live team row this machine uses for root tab `team` (see sqlite::find_team).
     async fn find_team(&self, c: &mut PgConnection, team: &str, host: Option<&str>, lock: Lock) -> Result<Option<TeamRef>, String> {
         let sql = self.s(&format!(
-            "SELECT uid, name, last_post_seq FROM @@.teams WHERE team = $1 AND deleted_at IS NULL
+            "SELECT uid, name, last_post_seq, home_host, EXISTS (SELECT 1 FROM @@.hosts h WHERE h.host = teams.home_host)
+             FROM @@.teams WHERE team = $1 AND deleted_at IS NULL
              ORDER BY (home_host IS NOT DISTINCT FROM $2) DESC, last_activity_at DESC LIMIT 1{}",
             lock.sql()
         ));
         let row = sqlx::query(&sql).bind(team).bind(host).fetch_optional(&mut *c).await.map_err(|e| self.err(e))?;
         row.map(|r| -> Result<TeamRef, sqlx::Error> {
-            Ok(TeamRef { uid: r.try_get(0)?, name: r.try_get(1)?, last_post_seq: r.try_get(2)? })
+            let home: Option<String> = r.try_get(3)?;
+            let synced: bool = r.try_get(4)?;
+            // A team homed on a computer that syncs (registered in `hosts`) is written only by
+            // that computer; a direct write here would bump row_version past its next push.
+            let sync_home = if synced && home.as_deref() != host { home } else { None };
+            Ok(TeamRef { uid: r.try_get(0)?, name: r.try_get(1)?, last_post_seq: r.try_get(2)?, sync_home })
         })
         .transpose()
         .map_err(|e| self.err(e))
@@ -1025,6 +1061,9 @@ impl PgStore {
         let Some(t) = self.find_team(&mut tx, team, ctx.host.as_deref(), Lock::Update).await? else {
             return Ok(json!({ "team": team, "removed": 0, "lastSeq": 0 }));
         };
+        if let Some(home) = &t.sync_home {
+            return Err(read_only_message(home));
+        }
         let ids = self.ids(&mut tx, "SELECT id FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", &t.uid).await?;
         self.tombstone_posts(&mut tx, &ids, ctx.now).await?;
         self.touch_team(&mut tx, &t.uid, ctx.now).await?;
@@ -1195,6 +1234,7 @@ impl PgStore {
             "SELECT {TASK_COLS} FROM @@.tasks t
              WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.lease_until IS NOT NULL AND t.lease_until < $1
                AND ($2::text IS NULL OR t.team_uid = $2) AND ($3::text IS NULL OR t.id <> $3)
+               AND t.team_uid NOT IN (SELECT tm.uid FROM @@.teams tm JOIN @@.hosts h ON h.host = tm.home_host)
              FOR UPDATE OF t SKIP LOCKED"
         )))
         .bind(now)
@@ -1460,6 +1500,9 @@ impl PgStore {
             }
             return Err(format!("no task #{} in team {team}", op.task.unwrap_or(0)));
         };
+        if let Some(home) = &team_ref.sync_home {
+            return Err(read_only_message(home));
+        }
         let uid = team_ref.uid.as_str();
         let target: Option<TaskRow> = match op.task {
             Some(seq) => Some(self.load_task(&mut tx, uid, team, seq, true).await?),
@@ -2354,6 +2397,343 @@ impl PgStore {
     }
 }
 
+// ── Sync (stage 3b; the orchestration lives in sync.rs) ─────────────────
+
+/// What one push batch did on the server.
+#[derive(Debug, Default, Clone)]
+pub struct PushOutcome {
+    pub written: u64,
+    pub refused: u64,
+    pub reason: Option<String>,
+}
+
+/// Primary key columns of a synced table.
+fn sync_pk(table: &str) -> &'static [&'static str] {
+    match table {
+        "teams" => &["uid"],
+        "task_deps" => &["task_id", "depends_on_id"],
+        _ => &["id"],
+    }
+}
+
+fn bind_cells<'q>(
+    mut q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    row: &[Cell],
+    cols: Cols,
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for (cell, (_, kind)) in row.iter().zip(cols.iter()) {
+        q = match (cell, kind) {
+            (Cell::Int(v), _) => q.bind(*v),
+            (Cell::Text(v), _) => q.bind(v.clone()),
+            (Cell::Null, Kind::Int) => q.bind(None::<i64>),
+            (Cell::Null, Kind::Text) => q.bind(None::<String>),
+        };
+    }
+    q
+}
+
+impl PgStore {
+    /// Close the pool (sync stopped or its server changed).
+    pub async fn close(&self) {
+        if let Some(p) = self.pool.get() {
+            p.close().await;
+        }
+    }
+
+    fn cells(&self, r: &PgRow, cols: Cols) -> Result<Vec<Cell>, String> {
+        let mut cells = Vec::with_capacity(cols.len());
+        for (i, (_, kind)) in cols.iter().enumerate() {
+            cells.push(match kind {
+                Kind::Int => r.try_get::<Option<i64>, _>(i).map_err(|e| self.err(e))?.map_or(Cell::Null, Cell::Int),
+                Kind::Text => r.try_get::<Option<String>, _>(i).map_err(|e| self.err(e))?.map_or(Cell::Null, Cell::Text),
+            });
+        }
+        Ok(cells)
+    }
+
+    /// Register this machine in `hosts` (first sync) or find who holds its name. Returns the
+    /// other instance id when the name belongs to another machine.
+    pub async fn sync_register(&self, host: &str, instance: &str, now: i64) -> Result<Option<String>, String> {
+        let pool = self.pool().await?;
+        sqlx::query(&self.s(
+            "INSERT INTO @@.hosts (host, instance_id, first_seen, last_seen, app_version) VALUES ($1, $2, $3, $3, $4)
+             ON CONFLICT (host) DO NOTHING",
+        ))
+        .bind(host)
+        .bind(instance)
+        .bind(now)
+        .bind(env!("CARGO_PKG_VERSION"))
+        .execute(pool)
+        .await
+        .map_err(|e| self.err(e))?;
+        let owner: String = sqlx::query_scalar(&self.s("SELECT instance_id FROM @@.hosts WHERE host = $1"))
+            .bind(host)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(if owner == instance { None } else { Some(owner) })
+    }
+
+    /// Push one batch of this computer's rows in one transaction, parents before children. Each
+    /// row is an upsert that only replaces an older `row_version` of the same team (so a batch
+    /// sent twice changes nothing); new posts get this server's read order. The server_seq
+    /// trigger takes the shared writer lock (see `v3_sql`). A chunk that fails is retried row by
+    /// row, each under a savepoint: a row the server still refuses (a clash with a unique rule)
+    /// is counted and the batch goes on. Rows the server ignored because it holds a newer
+    /// version (or the id belongs to another team) are counted as refused too.
+    pub async fn sync_push(&self, host: &str, instance: &str, rows: &Dump, now: i64) -> Result<PushOutcome, String> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        let mut out = PushOutcome::default();
+        for (table, cols) in super::sync::SYNC_TABLES {
+            let rows = rows.rows(table);
+            if rows.is_empty() {
+                continue;
+            }
+            if table == "teams" {
+                // This computer's own retired team with the same root id (purged here after it was
+                // sent) is in the way of the new one: removed for good, as Copy data does.
+                for row in rows {
+                    let (uid, team, home) = (
+                        row[copy::col_index(cols, "uid")].text().unwrap_or_default(),
+                        row[copy::col_index(cols, "team")].text().unwrap_or_default(),
+                        row[copy::col_index(cols, "home_host")].text(),
+                    );
+                    let old: Vec<String> = sqlx::query_scalar(&self.s(
+                        "SELECT uid FROM @@.teams WHERE team = $1 AND home_host IS NOT DISTINCT FROM $2 AND uid <> $3 AND deleted_at IS NOT NULL",
+                    ))
+                    .bind(team)
+                    .bind(home)
+                    .bind(uid)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| self.err(e))?;
+                    if old.is_empty() {
+                        continue;
+                    }
+                    for t in copy::PURGE_TABLES {
+                        sqlx::query(&self.s(&format!("DELETE FROM @@.{t} WHERE team_uid = ANY($1)")))
+                            .bind(&old)
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| self.err(e))?;
+                    }
+                    sqlx::query(&self.s("DELETE FROM @@.teams WHERE uid = ANY($1)")).bind(&old).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                }
+            }
+            let pk = sync_pk(table);
+            let names = copy::col_list(cols);
+            let set = cols
+                .iter()
+                .filter(|(c, _)| !pk.contains(c))
+                .map(|(c, _)| format!("{c} = excluded.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let same_team =
+                if table == "teams" { "t.home_host IS NOT DISTINCT FROM excluded.home_host" } else { "t.team_uid = excluded.team_uid" };
+            let posts = table == "posts";
+            let sql_for = |n_rows: usize| {
+                let mut n = 0usize;
+                let values: Vec<String> = (0..n_rows)
+                    .map(|_| {
+                        let mut ps: Vec<String> = (0..cols.len())
+                            .map(|_| {
+                                n += 1;
+                                format!("${n}")
+                            })
+                            .collect();
+                        if posts {
+                            ps.push("nextval('@@.board_arrival_seq')".into());
+                        }
+                        format!("({})", ps.join(", "))
+                    })
+                    .collect();
+                self.s(&format!(
+                    "INSERT INTO @@.{table} AS t ({names}{}) VALUES {} ON CONFLICT ({}) DO UPDATE SET {set}
+                     WHERE t.row_version < excluded.row_version AND {same_team}",
+                    if posts { ", arrival" } else { "" },
+                    values.join(", "),
+                    pk.join(", ")
+                ))
+            };
+            for chunk in rows.chunks(IMPORT_CHUNK) {
+                sqlx::query("SAVEPOINT push_chunk").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                let chunk_sql = sql_for(chunk.len());
+                let mut q = sqlx::query(&chunk_sql);
+                for row in chunk {
+                    q = bind_cells(q, row, cols);
+                }
+                match q.execute(&mut *tx).await {
+                    Ok(r) => {
+                        sqlx::query("RELEASE SAVEPOINT push_chunk").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                        out.written += r.rows_affected();
+                        if (r.rows_affected() as usize) < chunk.len() {
+                            self.count_ignored(&mut tx, table, cols, chunk, &mut out).await?;
+                        }
+                    }
+                    Err(_) => {
+                        sqlx::query("ROLLBACK TO SAVEPOINT push_chunk").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                        let one = sql_for(1);
+                        for row in chunk {
+                            sqlx::query("SAVEPOINT push_row").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                            match bind_cells(sqlx::query(&one), row, cols).execute(&mut *tx).await {
+                                Ok(r) => {
+                                    sqlx::query("RELEASE SAVEPOINT push_row").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                                    out.written += r.rows_affected();
+                                    if r.rows_affected() == 0 {
+                                        self.count_ignored(&mut tx, table, cols, std::slice::from_ref(row), &mut out).await?;
+                                    }
+                                }
+                                Err(e) => {
+                                    // A connection-level failure is not the row's fault: give up.
+                                    if !matches!(e, sqlx::Error::Database(_)) {
+                                        return Err(self.err(e));
+                                    }
+                                    sqlx::query("ROLLBACK TO SAVEPOINT push_row").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                                    out.refused += 1;
+                                    if out.reason.is_none() {
+                                        out.reason = Some(clean_err(self.err(e)).trim_start_matches("team board unavailable: ").to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sqlx::query(&self.s("UPDATE @@.hosts SET last_seen = $2, app_version = $3 WHERE host = $1 AND instance_id = $4"))
+            .bind(host)
+            .bind(now)
+            .bind(env!("CARGO_PKG_VERSION"))
+            .bind(instance)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        tx.commit().await.map_err(|e| self.err(e))?;
+        Ok(out)
+    }
+
+    /// Rows of `chunk` the upsert left alone: the same version again is fine (a batch sent
+    /// twice); a newer version on the server, or the id held by another team, is refused.
+    async fn count_ignored(&self, c: &mut PgConnection, table: &str, cols: Cols, chunk: &[Vec<Cell>], out: &mut PushOutcome) -> Result<(), String> {
+        let pk = sync_pk(table);
+        let team = if table == "teams" { "home_host" } else { "team_uid" };
+        let where_pk = pk.iter().enumerate().map(|(i, k)| format!("{k} = ${}", i + 1)).collect::<Vec<_>>().join(" AND ");
+        let sql = self.s(&format!("SELECT row_version, {team} FROM @@.{table} WHERE {where_pk}"));
+        for row in chunk {
+            let mut q = sqlx::query_as::<_, (i64, Option<String>)>(&sql);
+            for k in pk {
+                q = q.bind(row[copy::col_index(cols, k)].text().unwrap_or_default().to_string());
+            }
+            let Some((stored, owner)) = q.fetch_optional(&mut *c).await.map_err(|e| self.err(e))? else { continue };
+            let sent = row[copy::col_index(cols, "row_version")].int().unwrap_or(0);
+            let mine = row[copy::col_index(cols, team)].text().map(str::to_string);
+            if stored > sent || owner != mine {
+                out.refused += 1;
+                if out.reason.is_none() {
+                    out.reason = Some(if owner != mine {
+                        format!("a {table} row with the same id belongs to another team on the server")
+                    } else {
+                        format!("the server has a newer version of a {table} row (it was changed there directly)")
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The highest server_seq a pull may read: taken under the exclusive server_seq lock, so
+    /// every transaction that drew a number up to it has ended (committed or rolled back). The
+    /// lock is only tried (writers never queue behind a waiting pull): None when writers kept it
+    /// for 3 s ("busy"). `pg_sequence_last_value` needs only USAGE on the sequence.
+    pub async fn sync_watermark(&self) -> Result<Option<i64>, String> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let got: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtext($1))")
+                .bind(seq_lock_key(&self.target.schema))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            if got {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = tx.rollback().await;
+                return Ok(None);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let last: Option<i64> = sqlx::query_scalar("SELECT pg_sequence_last_value($1::regclass)")
+            .bind(format!("{}board_server_seq", self.prefix))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        tx.commit().await.map_err(|e| self.err(e))?;
+        Ok(Some(last.unwrap_or(0)))
+    }
+
+    /// Rows of teams homed on other machines with `after < server_seq <= upto`, per table in
+    /// server_seq order, at most `limit` per table, in one snapshot. Also the team rows that a
+    /// returned child references but the batch lacks. Returns the rows and, per table in
+    /// `SYNC_TABLES` order, (rows returned, last server_seq).
+    pub async fn sync_pull(&self, host: &str, after: i64, upto: i64, limit: i64) -> Result<(Dump, Vec<(usize, Option<i64>)>), String> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+        let mut dump = Dump::default();
+        let mut stats = Vec::new();
+        for (table, cols) in super::sync::SYNC_TABLES {
+            let list = cols.iter().map(|(n, _)| format!("x.{n}")).collect::<Vec<_>>().join(", ");
+            let elsewhere = if table == "teams" {
+                "x.home_host IS DISTINCT FROM $3".to_string()
+            } else {
+                "EXISTS (SELECT 1 FROM @@.teams tm WHERE tm.uid = x.team_uid AND tm.home_host IS DISTINCT FROM $3)".to_string()
+            };
+            let sql = self.s(&format!(
+                "SELECT {list}, x.server_seq FROM @@.{table} x WHERE x.server_seq > $1 AND x.server_seq <= $2 AND {elsewhere}
+                 ORDER BY x.server_seq LIMIT $4"
+            ));
+            let rows = sqlx::query(&sql).bind(after).bind(upto).bind(host).bind(limit).fetch_all(&mut *tx).await.map_err(|e| self.err(e))?;
+            let mut last = None;
+            let out = dump.rows_mut(table);
+            for r in &rows {
+                out.push(self.cells(r, cols)?);
+                last = Some(r.try_get::<i64, _>(cols.len()).map_err(|e| self.err(e))?);
+            }
+            stats.push((rows.len(), last));
+        }
+        let have: std::collections::HashSet<String> =
+            dump.teams.iter().filter_map(|r| r.first().and_then(|c| c.text()).map(str::to_string)).collect();
+        let mut missing: Vec<String> = Vec::new();
+        for (table, cols) in super::sync::SYNC_TABLES.iter().skip(1) {
+            let i = copy::col_index(cols, "team_uid");
+            for r in dump.rows(table) {
+                if let Some(uid) = r[i].text() {
+                    if !have.contains(uid) && !missing.iter().any(|m| m == uid) {
+                        missing.push(uid.to_string());
+                    }
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let list = copy::col_list(copy::TEAMS);
+            let rows = sqlx::query(&self.s(&format!("SELECT {list} FROM @@.teams WHERE uid = ANY($1) AND home_host IS DISTINCT FROM $2")))
+                .bind(&missing)
+                .bind(host)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            for r in &rows {
+                dump.teams.push(self.cells(r, copy::TEAMS)?);
+            }
+        }
+        tx.commit().await.map_err(|e| self.err(e))?;
+        Ok((dump, stats))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2375,7 +2755,10 @@ mod tests {
     #[test]
     fn migration_sql_names_only_the_quoted_schema() {
         let steps = migration_steps("team_board", None).unwrap();
-        assert_eq!(steps.len(), 1);
+        assert_eq!(steps.len(), 2, "version 2 creates, version 3 adds the late-commit lock");
+        assert!(steps[1].sql[0].contains("pg_advisory_xact_lock_shared(hashtext('bbarit-board-seq:' || TG_TABLE_SCHEMA))"));
+        assert!(steps[1].sql[0].contains("nextval('\"team_board\".board_server_seq')"));
+        assert_eq!(migration_steps("team_board", Some(2)).unwrap().iter().map(|s| s.version).collect::<Vec<_>>(), vec![3]);
         let sql = &steps[0].sql;
         assert_eq!(sql[0], "CREATE SCHEMA IF NOT EXISTS \"team_board\"");
         for s in sql {

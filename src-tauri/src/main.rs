@@ -10442,6 +10442,8 @@ fn main() {
                         || agent_board::board_timing(read_octo_config_json().as_ref()),
                     );
                 }
+                // Board sync (usage type "Both (sync)"): a host task; idle in the other modes.
+                agent_board::sync::start_sync_worker(app.handle().clone());
 
                 if std::env::var_os("BBARIT_DISABLE_BUNDLED_SKILLS_INSTALL").is_none() {
                     // Ship bundled SEO/GEO skills to this user's ~/.claude/skills (every installed copy).
@@ -10570,6 +10572,10 @@ fn main() {
             agent_board::admin::agent_board_pg_cleanup,
             agent_board::admin::agent_board_secret_save,
             agent_board::admin::agent_board_secret_clear,
+            agent_board::sync::agent_board_sync_status,
+            agent_board::sync::agent_board_sync_now,
+            agent_board::sync::agent_board_remove_mirrors,
+            agent_board::sync::agent_board_check_host_name,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,

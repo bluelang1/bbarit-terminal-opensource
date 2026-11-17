@@ -30,6 +30,7 @@ pub mod model;
 pub mod pg;
 pub mod sqlite;
 pub mod store;
+pub mod sync;
 #[cfg(test)]
 mod tests;
 
@@ -65,10 +66,58 @@ pub fn instance_id() -> &'static str {
 }
 
 /// This machine's stable host id (`*_host`, `origin_host`, `home_host`): `BBARIT_BOARD_HOST`
-/// when set, else the host name (model::host_id).
-pub fn board_host() -> &'static str {
-    static HOST: OnceLock<String> = OnceLock::new();
-    HOST.get_or_init(|| host_id(std::env::var("BBARIT_BOARD_HOST").ok().as_deref(), &raw_host_name()))
+/// when set, else the machine name from Settings (`agents.board.hostName`, stage 3b), else the
+/// host name (model::host_id). The setting is re-read at most every 2 s.
+pub fn board_host() -> String {
+    if let Some(env) = env_host() {
+        return host_id(Some(&env), &raw_host_name_cached());
+    }
+    static CACHE: Mutex<Option<(std::time::Instant, Option<String>)>> = Mutex::new(None);
+    let setting = {
+        let mut guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some((at, v)) if at.elapsed() < std::time::Duration::from_secs(2) => v.clone(),
+            _ => {
+                let v = setting_host();
+                *guard = Some((std::time::Instant::now(), v.clone()));
+                v
+            }
+        }
+    };
+    host_id(setting.as_deref(), &raw_host_name_cached())
+}
+
+/// `BBARIT_BOARD_HOST`, when set.
+pub fn env_host() -> Option<String> {
+    std::env::var("BBARIT_BOARD_HOST").ok().filter(|v| !v.trim().is_empty())
+}
+
+/// `agents.board.hostName` from config.json, when set.
+fn setting_host() -> Option<String> {
+    let cfg = crate::read_octo_config_json()?;
+    let v = cfg.get("agents")?.get("board")?.get("hostName")?.as_str()?.trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// The name this machine would have without an override or setting.
+pub fn system_host() -> String {
+    host_id(None, &raw_host_name_cached())
+}
+
+/// Where the machine name comes from: env | setting | system.
+pub fn host_source() -> &'static str {
+    if env_host().is_some() {
+        "env"
+    } else if setting_host().is_some() {
+        "setting"
+    } else {
+        "system"
+    }
+}
+
+fn raw_host_name_cached() -> String {
+    static RAW: OnceLock<String> = OnceLock::new();
+    RAW.get_or_init(raw_host_name).clone()
 }
 
 #[cfg(unix)]
@@ -89,7 +138,7 @@ fn raw_host_name() -> String {
 }
 
 fn ctx() -> Ctx {
-    Ctx { now: now_ms(), host: Some(board_host().to_string()), instance: instance_id().to_string() }
+    Ctx { now: now_ms(), host: Some(board_host()), instance: instance_id().to_string() }
 }
 
 /// What config.json (`agents.board`), the environment and the password file say right now.
@@ -113,7 +162,7 @@ pub fn read_selection() -> Selection {
 
 impl Selection {
     /// The engine commands use: PostgreSQL only in `postgres` mode (`sync` reads and writes the
-    /// local file; its worker arrives in stage 3b).
+    /// local file; the sync worker exchanges it with the server, sync.rs).
     pub fn uses_postgres(&self) -> bool {
         self.mode.mode == config::BoardMode::Postgres
     }
@@ -192,7 +241,9 @@ pub fn prune_on_start() {
 
 #[tauri::command]
 pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, String> {
-    track(async { current_store()?.post(team.trim().to_string(), post, ctx()).await }.await)
+    let res = track(async { current_store()?.post(team.trim().to_string(), post, ctx()).await }.await)?;
+    sync::note_local_write();
+    Ok(res)
 }
 
 #[tauri::command]
@@ -212,7 +263,9 @@ pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 pub async fn agent_board_clear(team: String) -> Result<Value, String> {
-    track(async { current_store()?.clear(team.trim().to_string(), ctx()).await }.await)
+    let res = track(async { current_store()?.clear(team.trim().to_string(), ctx()).await }.await)?;
+    sync::note_local_write();
+    Ok(res)
 }
 
 /// This instance id, host name and backend (the App plans leases with them).
@@ -245,6 +298,10 @@ pub fn note_holding() {
 /// Called first thing on RunEvent::Exit and on the update relaunch.
 pub fn mark_exiting() {
     EXITING.store(true, Ordering::SeqCst);
+}
+
+pub fn exiting() -> bool {
+    EXITING.load(Ordering::SeqCst)
 }
 
 fn pty_ready() -> bool {
@@ -342,6 +399,7 @@ pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) 
     if matches!(res["task"]["state"].as_str(), Some("claimed" | "blocked")) {
         note_holding();
     }
+    sync::note_local_write();
     Ok(res)
 }
 

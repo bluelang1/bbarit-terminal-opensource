@@ -83,7 +83,7 @@ export function newPopoutToken(): string {
   return randomId();
 }
 
-const READS = ['info', 'teams', 'tasks', 'events', 'posts', 'history', 'refusals'] as const;
+const READS = ['info', 'teams', 'tasks', 'events', 'posts', 'history', 'refusals', 'syncStatus'] as const;
 const WRITES = ['act', 'postNote'] as const;
 export type SourceMethod = (typeof READS)[number] | (typeof WRITES)[number];
 const METHODS: readonly string[] = [...READS, ...WRITES];
@@ -140,6 +140,7 @@ export async function serveRequest(source: TeamBoardSource, req: unknown, token:
       case 'info': return { id, ok: true, value: await source.info() };
       case 'teams': return { id, ok: true, value: await source.teams() };
       case 'refusals': return { id, ok: true, value: await source.refusals() };
+      case 'syncStatus': return { id, ok: true, value: source.syncStatus ? await source.syncStatus() : null };
       case 'tasks': return { id, ok: true, value: await source.tasks(team) };
       case 'events': return { id, ok: true, value: await source.events(team) };
       case 'posts': return { id, ok: true, value: await source.posts(team) };
@@ -218,6 +219,7 @@ export function remoteSource(
     posts: (team) => call('posts', team),
     history: (team, seq) => call('history', team, seq),
     refusals: () => call('refusals'),
+    syncStatus: () => call('syncStatus'),
     act: (team, sub, request) => action(call<ActionResult>('act', team, sub, request)),
     postNote: (team, text) => action(call<ActionResult>('postNote', team, text)),
     dispose: () => {

@@ -530,7 +530,7 @@ the maintainer in the dev app before merge.
 | 2 | done: implemented, reviewed twice (store; app/CLI), checked in the dev app (claim, deps, review flow, fail/retry, tab-close release, lease renewal, claims surviving quit/relaunch with the PTY holder) | same PR; notes in "Stage 2 notes" below |
 | 1+2 | merged | PR #79 (5f3f900) |
 | 3a | implemented and tested (SQLite + PostgreSQL 16 in Docker); waiting for code review and the dev-app check | branch `feat/agent-board-pg`, worktree `.claude/worktrees/agent-board-pg`; notes in "Stage 3a notes" below |
-| 3b | not started | |
+| 3b | implemented and tested (two SQLite files + PostgreSQL 16 in Docker); not yet tried in a running app; waiting for code review and the dev-app check | branch `feat/board-sync`, worktree `.claude/worktrees/board-sync`; notes in "Stage 3b notes" below |
 | 3c | not started | |
 | 4 | not started | |
 
@@ -612,6 +612,85 @@ the maintainer in the dev app before merge.
   PostgreSQL; no `agent board storage init` CLI (tables are created only from Settings); sync
   worker, mirrors, machine name field and viewer panel are later stages. The UI has not been
   checked in the dev app yet.
+
+## Stage 3b notes (builder's choices inside the rules)
+
+- Late commits (the 3a requirement): schema 3 changes the `server_seq` trigger to take
+  `pg_advisory_xact_lock_shared(hashtext('bbarit-board-seq:' || schema))` before `nextval`, so every
+  writer — sync pushes and direct `postgres`-mode writes alike — holds the shared lock from drawing a
+  number until it commits. A pull reads its upper bound (`last_value` of `board_server_seq`) after
+  taking the same key exclusively (`lock_timeout` 3 s): once granted, every transaction that drew a
+  number up to that value has ended, so the cursor never passes a row committed later. Chosen over a
+  `pg_snapshot_xmin` watermark because it needs no per-row xid column and works the same for every
+  writer. Cost: writers never wait for each other (shared/shared); only a pull waits for in-flight
+  writes (milliseconds). `postgres`-mode users must run "Create / upgrade tables" once (2 → 3).
+- Local schema 3 adds `mirror_teams(team_uid, home_host, synced_at)`: a team is a mirror exactly when
+  it has a row there (written only by pull). `find_team` prefers this machine's team over a mirror of
+  the same root id. Read-only refusals happen in the store (`refuse_mirror` / the team lookup of every
+  write), so agents and the viewer's human actions are refused alike; lazy lease expiry,
+  `held_on_host` and the 30-day cleanup skip mirrors.
+- Machine identity: `board_meta.instance_id` (UUIDv4) is created on the first sync round; `hosts` is
+  registered with `ON CONFLICT DO NOTHING` and compared, so two machines with one name pause instead
+  of racing. `board_host()` now reads `agents.board.hostName` (cached 2 s) below `BBARIT_BOARD_HOST`.
+  Renaming is checked by `agent_board_check_host_name` (refused while live home teams carry the old
+  name); the setting is in `PROTECTED_CONFIG_PATHS`.
+- Push: changes are collapsed per (table, row id) and loaded as they are now; the server upsert is
+  `ON CONFLICT … DO UPDATE … WHERE stored.row_version < excluded.row_version AND same team` (a row
+  that claims another team's id is ignored). Posts get a server `arrival` from `board_arrival_seq` on
+  insert; `arrival` is never sent. A full push walks each table in key order (`sync_state.full_pos`)
+  and, when done, counts every change up to the position it started at (`full_from`) as pushed.
+  Changing the server or schema (`sync_state.server`) restarts the pull position and forces a full
+  push. Leaving `sync` removes `consumer` (the log is trimmed normally again) and sets `full_push` for
+  the next time.
+- Pull: per table at most 500 rows by `server_seq`; the cursor moves to the bound, or below the last
+  row of any table that hit the limit. Rows are validated (`sync::validate_row`: UUID ids, team id,
+  state/kind names, lengths, control/format characters, JSON shapes); a failing row, a row of an
+  unknown mirror team, or one that breaks a local constraint is skipped and counted in
+  `sync_state.skipped`. Missing parent team rows are fetched in the same snapshot. Per-team caps are
+  applied to mirrors by deleting (not tombstoning) the oldest rows; at most 200 mirror teams.
+- Worker: one loop ticking every 250 ms that decides when a round is due (start, 30 s, 2 s after a
+  write, backoff 5 s → 5 min); the server pool is kept per (label, schema) and closed on exit and on
+  leaving `sync`. Status (`off/starting/on/paused/offline`, last push/pull, last error) lives in
+  memory; waiting/skipped/other machines are read from the file. Errors go through `config::redact`.
+- UI: the team selector uses `<optgroup>`s "This machine" / "Other machines (read-only)" (only when
+  there are mirrors) and a lock "read-only" chip; `mirror` now comes from the team row (`mirror:
+  true` from `agent_board_teams`), not from comparing host names. Settings shows the sync block when
+  the mode is `sync` or mirrors exist.
+- Review fixes (2026-11-17):
+  - Unsent tombstones: once a file has synced with a server (`sync_state.server`), the 30-day
+    purge removes a tombstone of a home team only when it changed before `caught_up` (the last
+    round that ended with nothing waiting), whatever the usage type is now.
+  - Push: each chunk runs under a savepoint; a failing chunk is retried row by row and a row that
+    still fails (another unique rule) is skipped and counted (`refused`, first reason), so the
+    batch and `pushed_seq` move on. Rows the server ignored because it holds a newer
+    `row_version` (or the id belongs to another team) are counted the same way. This computer's
+    own tombstoned team with the same (team, home_host) on the server is purged first (as Copy
+    data does).
+  - The pull bound is read with `pg_sequence_last_value` (USAGE is enough) after
+    `pg_try_advisory_xact_lock` succeeds (tried every 50 ms for 3 s; writers never queue behind a
+    pull); a timeout is the status "busy". Proven by a test that syncs as a non-owner role holding
+    exactly the grants the privilege check asks for (the check now includes `hosts`).
+  - Direct writes in `postgres` mode to a team whose home is registered in `hosts` (a syncing
+    computer) are refused with the read-only message, and lazy lease expiry there skips them.
+  - Identity: `board_meta.home_name` (the name home teams carry) and `board_meta.machine` (hash of
+    the OS machine id). A changed name with live home teams or unsent changes pauses sync
+    (`name_changed`); a changed machine id gets a new `instance_id`, so `hosts` refuses the name
+    (`name_taken`). Teams homed under another name are marked read-only in `sync_prepare` and
+    after Copy data into SQLite.
+  - The sync connection cache key includes the password and env URL (hashed); the board file
+    stores only `label|schema` as the server id.
+  - Pulled rows must equal what `clean_label` / `clean_multiline` would store (format and control
+    characters, line counts, lengths), with label count/length and byte caps on `labels` (2 KiB),
+    `meta` (16 KiB), `result_artifacts` (32 KiB) and `task_events.data` (16 KiB).
+  - Whole mirror teams only: "Remove other computers' teams" is for after leaving sync (the
+    design: "`sync → sqlite` keeps mirrors … a button clears them"), so it is refused while the
+    usage type is `sync` and the UI offers it only outside `sync`; it resets `pulled_seq` (and the
+    ignore list), so turning sync on again pulls whole teams from the start. Teams dropped by the
+    200-mirror cap go on `mirror_ignored`; a pull never writes their later rows (cleared when the
+    pull starts over for a new server).
+  - Host refusals for Settings carry a stable code (`{code, vars, message}`) the UI translates.
+- Not done in 3b: "Restore my teams from the server" (3c), remote notes, adopt team; no LISTEN/NOTIFY
+  (the view still polls); no CI job with PostgreSQL. Not tried in a running app yet.
 
 ## Left to the builder
 

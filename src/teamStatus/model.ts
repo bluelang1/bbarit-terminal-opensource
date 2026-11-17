@@ -417,11 +417,15 @@ export function projectTeams(
   return out;
 }
 
-/** Default team: the remembered one if still listed, else the active project's most recent, else the most recent. */
-export function pickDefaultTeam(teams: ReadonlyArray<{ team: string; updatedTs?: number }>, projectTeamIds: readonly string[], remembered?: string): string {
+/**
+ * Default team: the remembered one if still listed (a team of another computer is remembered
+ * only when the person picked it), else the active project's most recent, else the most recent
+ * — this computer's teams before other computers' (read-only) ones.
+ */
+export function pickDefaultTeam(teams: ReadonlyArray<{ team: string; updatedTs?: number; mirror?: boolean }>, projectTeamIds: readonly string[], remembered?: string): string {
   const ids = new Set(teams.map((t) => t.team));
   if (remembered && ids.has(remembered)) return remembered;
-  const recent = [...teams].sort((a, b) => (b.updatedTs || 0) - (a.updatedTs || 0));
+  const recent = [...teams].sort((a, b) => Number(!!a.mirror) - Number(!!b.mirror) || (b.updatedTs || 0) - (a.updatedTs || 0));
   return recent.find((t) => projectTeamIds.includes(t.team))?.team || recent[0]?.team || '';
 }
 

@@ -29,7 +29,21 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
+
+/// Version 3 (stage 3b, local only): teams copied from other machines by sync. Such a team is
+/// read-only here; its rows are never logged in `changes` nor pushed.
+/// `mirror_ignored`: teams of other computers dropped by the mirror cap; a pull never brings
+/// them back in part (cleared when the pull starts over).
+const SCHEMA_3: &str = "CREATE TABLE IF NOT EXISTS mirror_teams (
+  team_uid TEXT PRIMARY KEY NOT NULL,
+  home_host TEXT NOT NULL,
+  synced_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mirror_ignored (
+  team_uid TEXT PRIMARY KEY NOT NULL,
+  at INTEGER NOT NULL
+);";
 
 pub struct SqliteStore {
     path: PathBuf,
@@ -362,6 +376,9 @@ fn migrate(conn: &mut Connection, now: i64, host: &str) -> rusqlite::Result<()> 
     if version < 2 {
         migrate_to_2(&tx, now, host)?;
     }
+    if version < 3 {
+        tx.execute_batch(SCHEMA_3)?;
+    }
     if version < SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO board_meta(key, value) VALUES ('schema_version', ?1)
@@ -397,7 +414,7 @@ pub fn open_db(path: &Path) -> Result<Connection, String> {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(unavailable)?;
     }
     if version < SCHEMA_VERSION {
-        migrate(&mut conn, now_ms(), super::board_host()).map_err(unavailable)?;
+        migrate(&mut conn, now_ms(), &super::board_host()).map_err(unavailable)?;
     }
     tighten_sidecars(path);
     Ok(conn)
@@ -456,19 +473,30 @@ struct TeamRef {
     uid: String,
     name: Option<String>,
     last_post_seq: i64,
+    /// Home machine of a team copied here by sync (read-only here); None for this machine's.
+    mirror: Option<String>,
 }
 
 /// The live team row this machine uses for root tab `team`: the one homed on `host`, else any
 /// live one (most recently active first; a synced team from another machine).
 fn find_team(c: &Connection, team: &str, host: Option<&str>) -> Result<Option<TeamRef>, String> {
     c.query_row(
-        "SELECT uid, name, last_post_seq FROM teams WHERE team = ?1 AND deleted_at IS NULL
-         ORDER BY (home_host IS ?2) DESC, last_activity_at DESC LIMIT 1",
+        "SELECT t.uid, t.name, t.last_post_seq, m.home_host FROM teams t LEFT JOIN mirror_teams m ON m.team_uid = t.uid
+         WHERE t.team = ?1 AND t.deleted_at IS NULL
+         ORDER BY (m.team_uid IS NULL) DESC, (t.home_host IS ?2) DESC, t.last_activity_at DESC LIMIT 1",
         params![team, host],
-        |r| Ok(TeamRef { uid: r.get(0)?, name: r.get(1)?, last_post_seq: r.get(2)? }),
+        |r| Ok(TeamRef { uid: r.get(0)?, name: r.get(1)?, last_post_seq: r.get(2)?, mirror: r.get(3)? }),
     )
     .optional()
     .db()
+}
+
+/// Every write on a team that another machine owns is refused (stage 3b home rule).
+fn refuse_mirror(c: &Connection, team: &str, host: Option<&str>) -> Result<(), String> {
+    match find_team(c, team, host)? {
+        Some(TeamRef { mirror: Some(home), .. }) => Err(read_only_message(&home)),
+        _ => Ok(()),
+    }
 }
 
 /// The team homed on this machine for root tab `team`, created (or revived from its
@@ -626,6 +654,7 @@ fn task_id_of(tx: &Connection, team_uid: &str, team: &str, seq: i64) -> Result<S
 pub fn post(conn: &mut Connection, limits: Limits, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, String> {
     let PostSpec { kind, text, author_id, author_name, author_cli, team_name } = PostSpec::check(team, input)?;
     let tx = immediate(conn)?;
+    refuse_mirror(&tx, team, ctx.host.as_deref())?;
     let uid = ensure_team(&tx, team, team_name.as_deref(), ctx)?;
     let task_id = match input.task {
         Some(seq) => Some(task_id_of(&tx, &uid, team, seq)?),
@@ -780,7 +809,8 @@ pub fn teams(conn: &Connection) -> Result<Vec<Value>, String> {
                     count(p.id), count(DISTINCT p.author_id), min(p.ts), max(p.ts),
                     (SELECT count(*) FROM tasks k WHERE k.team_uid = t.uid AND k.deleted_at IS NULL
                        AND k.state IN ('open','claimed','blocked','review')),
-                    t.last_task_seq, t.home_host, t.uid
+                    t.last_task_seq, t.home_host, t.uid,
+                    (SELECT m.synced_at FROM mirror_teams m WHERE m.team_uid = t.uid)
              FROM teams t LEFT JOIN posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
              WHERE t.deleted_at IS NULL
              GROUP BY t.uid
@@ -808,6 +838,10 @@ pub fn teams(conn: &Connection) -> Result<Vec<Value>, String> {
             if let Some(host) = r.get::<_, Option<String>>(10)? {
                 v["homeHost"] = Value::String(host);
             }
+            if let Some(at) = r.get::<_, Option<i64>>(12)? {
+                v["mirror"] = Value::Bool(true);
+                v["syncedAt"] = json!(at);
+            }
             Ok(v)
         })
         .db()?;
@@ -821,6 +855,9 @@ pub fn clear(conn: &mut Connection, limits: Limits, team: &str, ctx: &Ctx) -> Re
     let Some(t) = find_team(&tx, team, ctx.host.as_deref())? else {
         return Ok(json!({ "team": team, "removed": 0, "lastSeq": 0 }));
     };
+    if let Some(home) = &t.mirror {
+        return Err(read_only_message(home));
+    }
     let ids = collect_ids(&tx, "SELECT id FROM posts WHERE team_uid = ?1 AND deleted_at IS NULL", &t.uid)?;
     tombstone_posts(&tx, &ids, ctx.now)?;
     touch_team(&tx, &t.uid, ctx.now)?;
@@ -838,7 +875,7 @@ pub fn prune_stale(conn: &mut Connection, limits: Limits, now: i64, max_age_ms: 
         let mut stmt = tx
             .prepare(
                 "SELECT t.uid FROM teams t LEFT JOIN posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
-                 WHERE t.deleted_at IS NULL
+                 WHERE t.deleted_at IS NULL AND t.uid NOT IN (SELECT team_uid FROM mirror_teams)
                  GROUP BY t.uid HAVING max(t.last_activity_at, coalesce(max(p.ts), 0)) < ?1",
             )
             .db()?;
@@ -861,12 +898,30 @@ pub fn prune_stale(conn: &mut Connection, limits: Limits, now: i64, max_age_ms: 
     // Tombstones go for good only while no sync consumer may still need to see them (the
     // same guard as the change-log trim in `finish`).
     let consumer: i64 = tx.query_row("SELECT count(*) FROM sync_state WHERE key = 'consumer'", [], |r| r.get(0)).db()?;
-    if consumer == 0 {
-        let purge_before = now - TOMBSTONE_RETENTION_MS;
+    let purge_before = now - TOMBSTONE_RETENTION_MS;
+    let synced = state_get(&tx, "server")?.is_some();
+    if consumer == 0 && !synced {
         for table in ["posts", "task_events", "task_deps", "tasks", "teams"] {
             tx.execute(&format!("DELETE FROM {table} WHERE deleted_at IS NOT NULL AND deleted_at < ?1"), params![purge_before])
                 .db()?;
         }
+    } else {
+        // This file has synced with a server (whatever the usage type is now): a tombstone of
+        // this computer's team goes only once the server has it — it changed before the last
+        // time every change was on the server (`caught_up`). Other computers' tombstones go
+        // any time.
+        let caught_up = state_int(&tx, "caught_up")?;
+        for (table, team_col) in [("posts", "team_uid"), ("task_events", "team_uid"), ("task_deps", "team_uid"), ("tasks", "team_uid"), ("teams", "uid")] {
+            tx.execute(
+                &format!(
+                    "DELETE FROM {table} WHERE deleted_at IS NOT NULL AND deleted_at < ?1
+                       AND ({team_col} IN (SELECT team_uid FROM mirror_teams) OR updated_at < ?2)"
+                ),
+                params![purge_before, caught_up],
+            )
+            .db()?;
+        }
+        tx.execute("DELETE FROM mirror_teams WHERE team_uid NOT IN (SELECT uid FROM teams)", []).db()?;
     }
     tx.execute("DELETE FROM cursors WHERE team_uid NOT IN (SELECT uid FROM teams)", []).db()?;
     finish(tx, limits)?;
@@ -1030,7 +1085,8 @@ fn expire_leases(tx: &Transaction, team_uid: Option<&str>, now: i64, except: Opt
             .prepare(&format!(
                 "SELECT {TASK_COLS} FROM tasks t
                  WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.lease_until IS NOT NULL AND t.lease_until < ?1
-                   AND (?2 IS NULL OR t.team_uid = ?2) AND (?3 IS NULL OR t.id <> ?3)"
+                   AND (?2 IS NULL OR t.team_uid = ?2) AND (?3 IS NULL OR t.id <> ?3)
+                   AND t.team_uid NOT IN (SELECT team_uid FROM mirror_teams)"
             ))
             .db()?;
         let it = stmt.query_map(params![now, team_uid, except], task_from_row).db()?;
@@ -1231,6 +1287,7 @@ fn add_task(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOpInput,
     let (after, priority) = (&spec.after, spec.priority);
     let now = ctx.now;
     let tx = immediate(conn)?;
+    refuse_mirror(&tx, team, ctx.host.as_deref())?;
     let uid = ensure_team(&tx, team, spec.team_name.as_deref(), ctx)?;
     let parent_id = match op.parent {
         Some(seq) => Some(task_id_of(&tx, &uid, team, seq)?),
@@ -1325,6 +1382,9 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
         }
         return Err(format!("no task #{} in team {team}", op.task.unwrap_or(0)));
     };
+    if let Some(home) = &team_ref.mirror {
+        return Err(read_only_message(home));
+    }
     let uid = team_ref.uid.as_str();
     let target: Option<TaskRow> = match op.task {
         Some(seq) => Some(load_task(&tx, uid, team, seq)?),
@@ -1630,7 +1690,8 @@ pub fn task_list(conn: &mut Connection, limits: Limits, team: &str, q: &TaskList
         return Ok(json!({ "team": team, "tasks": [], "matched": 0, "more": 0, "counts": counts, "expired": [] }));
     };
     let uid = team_ref.uid.clone();
-    let expired = expire_if_needed(conn, limits, &uid, now, ctx.host.as_deref())?;
+    // Leases are evaluated only at home: a team copied from another machine shows what it got.
+    let expired = if team_ref.mirror.is_some() { Vec::new() } else { expire_if_needed(conn, limits, &uid, now, ctx.host.as_deref())? };
     let stored_json = serde_json::to_string(&stored).unwrap_or_else(|_| "[]".into());
     let filter = format!(
         "t.team_uid = ?1 AND t.deleted_at IS NULL
@@ -1734,7 +1795,7 @@ pub fn task_show(conn: &mut Connection, limits: Limits, team: &str, seq: i64, hi
     let now = ctx.now;
     let team_ref = find_team(conn, team, ctx.host.as_deref())?.ok_or_else(|| format!("no task #{seq} in team {team}"))?;
     let uid = team_ref.uid.as_str();
-    let expired = expire_if_needed(conn, limits, uid, now, ctx.host.as_deref())?;
+    let expired = if team_ref.mirror.is_some() { Vec::new() } else { expire_if_needed(conn, limits, uid, now, ctx.host.as_deref())? };
     let tx = conn.transaction().db()?;
     let row = load_task(&tx, uid, team, seq)?;
     let task = task_out(&tx, &row, now, stale_ms(stale))?;
@@ -1929,7 +1990,8 @@ pub fn release_owner(
         let mut stmt = tx
             .prepare(&format!(
                 "SELECT {TASK_COLS} FROM tasks t
-                 WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_id = ?1 AND t.owner_instance = ?2"
+                 WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_id = ?1 AND t.owner_instance = ?2
+                   AND t.team_uid NOT IN (SELECT team_uid FROM mirror_teams)"
             ))
             .db()?;
         let it = stmt.query_map(params![owner_id, instance], task_from_row).db()?;
@@ -1946,7 +2008,8 @@ pub fn held_on_host(conn: &mut Connection, host: &str) -> Result<Vec<Value>, Str
         .prepare(
             "SELECT t.id, tm.team, t.seq, t.state, t.owner_id, t.owner_name, t.owner_instance, t.lease_until, t.heartbeat_at
              FROM tasks t JOIN teams tm ON tm.uid = t.team_uid
-             WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_host = ?1 ORDER BY tm.team, t.seq",
+             WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_host = ?1
+               AND t.team_uid NOT IN (SELECT team_uid FROM mirror_teams) ORDER BY tm.team, t.seq",
         )
         .db()?;
     let it = stmt
@@ -2000,15 +2063,21 @@ pub fn lease_apply(
             &tx,
             &a.id,
             "UPDATE tasks SET owner_instance = ?2, lease_until = ?3, heartbeat_at = ?4, row_version = row_version + 1
-             WHERE id = ?1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = ?5",
+             WHERE id = ?1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = ?5
+               AND team_uid NOT IN (SELECT team_uid FROM mirror_teams)",
             params![a.id, instance, now + lease_ms(Some(lease)), now, a.instance],
             now,
         )?;
     }
     let mut rows = Vec::new();
+    let mirrors: HashSet<String> = {
+        let mut stmt = tx.prepare("SELECT team_uid FROM mirror_teams").db()?;
+        let rows = stmt.query_map([], |r| r.get(0)).db()?;
+        rows.collect::<rusqlite::Result<HashSet<_>>>().db()?
+    };
     for r in release {
         if let Some(row) = load_task_by_id(&tx, &r.id)? {
-            if is_held(&row.state) && row.owner_instance.as_deref() == Some(r.instance.as_str()) {
+            if is_held(&row.state) && row.owner_instance.as_deref() == Some(r.instance.as_str()) && !mirrors.contains(&row.team_uid) {
                 rows.push(row);
             }
         }
@@ -2016,6 +2085,604 @@ pub fn lease_apply(
     let released = release_rows(&tx, rows, now, host, "owner tab did not come back after the app restarted")?;
     finish(tx, limits)?;
     Ok(json!({ "adopted": adopted, "released": released }))
+}
+
+// ── Sync (stage 3b; orchestration in sync.rs) ────────────────────────────
+//
+// Local side of syncing with a shared PostgreSQL: `sync_state` keys `consumer` (sync is on, so
+// `changes` is trimmed only below `pushed_seq`), `pushed_seq`, `pulled_seq`, `full_push`
+// (+ `full_pos`), `skipped`; `board_meta.instance_id` is this file's machine identity.
+
+fn state_get(c: &Connection, key: &str) -> Result<Option<String>, String> {
+    c.query_row("SELECT value FROM sync_state WHERE key = ?1", params![key], |r| r.get(0)).optional().db().map(Option::flatten)
+}
+
+fn state_int(c: &Connection, key: &str) -> Result<i64, String> {
+    Ok(state_get(c, key)?.and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+fn state_set(c: &Connection, key: &str, value: &str) -> Result<(), String> {
+    c.execute(
+        "INSERT INTO sync_state(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .db()?;
+    Ok(())
+}
+
+fn state_del(c: &Connection, key: &str) -> Result<(), String> {
+    c.execute("DELETE FROM sync_state WHERE key = ?1", params![key]).db()?;
+    Ok(())
+}
+
+/// Live teams this machine owns: not copied from elsewhere, homed on `host`.
+const HOME_UIDS: &str = "SELECT uid FROM teams WHERE home_host = ?1 AND uid NOT IN (SELECT team_uid FROM mirror_teams)";
+
+/// Every team whose home is another computer and that is not marked yet becomes read-only
+/// here (copied in from PostgreSQL, or left by an earlier name).
+fn register_mirrors(tx: &Transaction, host: &str, now: i64) -> Result<(), String> {
+    tx.execute(
+        "INSERT OR IGNORE INTO mirror_teams(team_uid, home_host, synced_at)
+         SELECT uid, home_host, ?2 FROM teams WHERE home_host IS NOT NULL AND home_host <> ?1",
+        params![host, now],
+    )
+    .db()?;
+    Ok(())
+}
+
+fn meta_get(c: &Connection, key: &str) -> Result<Option<String>, String> {
+    c.query_row("SELECT value FROM board_meta WHERE key = ?1", params![key], |r| r.get::<_, Option<String>>(0)).optional().db().map(Option::flatten)
+}
+
+fn meta_set(c: &Connection, key: &str, value: &str) -> Result<(), String> {
+    c.execute(
+        "INSERT INTO board_meta(key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )
+    .db()?;
+    Ok(())
+}
+
+/// Start of a sync round, as computer `host` on server `server` (`label|schema`):
+/// - `machine` (a hash of the OS machine id, when readable) differs from the stored one → the
+///   board file was copied to another computer: it gets a new `instance_id`, so the server's
+///   `hosts` sees a name clash instead of two computers writing as one;
+/// - the name this file's teams are homed under (`board_meta.home_name`) differs from `host`
+///   while live teams or unsent changes carry it → pause (`name_changed`) instead of orphaning
+///   them; otherwise the new name is taken;
+/// - teams homed elsewhere are marked read-only; sync is marked on (first time, after sync was
+///   off, or a new server: everything is sent again as a full snapshot); a backlog over
+///   `limits.changes` becomes a full push.
+pub fn sync_prepare(
+    conn: &mut Connection,
+    limits: Limits,
+    server: &str,
+    host: &str,
+    machine: Option<&str>,
+    now: i64,
+) -> Result<super::sync::LocalState, String> {
+    let tx = immediate(conn)?;
+    let mut instance = meta_get(&tx, "instance_id")?;
+    if let Some(m) = machine {
+        match meta_get(&tx, "machine")? {
+            Some(stored) if stored != m => {
+                instance = None;
+                meta_set(&tx, "machine", m)?;
+            }
+            None => meta_set(&tx, "machine", m)?,
+            Some(_) => {}
+        }
+    }
+    let instance = match instance {
+        Some(v) => v,
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            meta_set(&tx, "instance_id", &id)?;
+            id
+        }
+    };
+    let pushed = state_int(&tx, "pushed_seq")?;
+    match meta_get(&tx, "home_name")? {
+        None => meta_set(&tx, "home_name", host)?,
+        Some(old) if old != host => {
+            let live: i64 = tx
+                .query_row(
+                    "SELECT count(*) FROM teams WHERE deleted_at IS NULL AND home_host = ?1 AND uid NOT IN (SELECT team_uid FROM mirror_teams)",
+                    params![old],
+                    |r| r.get(0),
+                )
+                .db()?;
+            let waiting: i64 = if state_get(&tx, "consumer")?.is_some() {
+                tx.query_row("SELECT count(*) FROM changes WHERE local_seq > ?1", params![pushed], |r| r.get(0)).db()?
+            } else {
+                0
+            };
+            if live > 0 || waiting > 0 {
+                let mut out = sync_local_state(&tx, instance)?;
+                out.pause = Some((
+                    "name_changed",
+                    format!(
+                        "this computer's name changed from {old} to {host}; change it back, or wait until the teams named for {old} are gone"
+                    ),
+                ));
+                out.old_name = Some(old);
+                tx.commit().db()?;
+                return Ok(out);
+            }
+            meta_set(&tx, "home_name", host)?;
+        }
+        Some(_) => {}
+    }
+    register_mirrors(&tx, host, now)?;
+    // Another server (or schema) than last time: its numbers mean nothing here, start over.
+    if state_get(&tx, "server")?.as_deref() != Some(server) {
+        state_set(&tx, "server", server)?;
+        state_del(&tx, "pulled_seq")?;
+        state_del(&tx, "consumer")?;
+        state_del(&tx, "caught_up")?;
+        tx.execute("DELETE FROM mirror_ignored", []).db()?;
+    }
+    if state_get(&tx, "consumer")?.is_none() {
+        state_set(&tx, "consumer", &now.to_string())?;
+        state_set(&tx, "full_push", "1")?;
+        state_del(&tx, "full_pos")?;
+    }
+    let max: i64 = tx.query_row("SELECT coalesce(max(local_seq), 0) FROM changes", [], |r| r.get(0)).db()?;
+    if max - pushed > limits.changes && state_get(&tx, "full_push")?.is_none() {
+        tx.execute("DELETE FROM changes", []).db()?;
+        state_set(&tx, "full_push", "1")?;
+        state_del(&tx, "full_pos")?;
+    }
+    let out = sync_local_state(&tx, instance)?;
+    tx.commit().db()?;
+    Ok(out)
+}
+
+fn sync_local_state(c: &Connection, instance: String) -> Result<super::sync::LocalState, String> {
+    let pushed = state_int(c, "pushed_seq")?;
+    let waiting: i64 = c.query_row("SELECT count(*) FROM changes WHERE local_seq > ?1", params![pushed], |r| r.get(0)).db()?;
+    Ok(super::sync::LocalState {
+        instance,
+        full_push: state_get(c, "full_push")?.is_some(),
+        waiting,
+        pulled_seq: state_int(c, "pulled_seq")?,
+        skipped: state_int(c, "skipped")?,
+        pause: None,
+        old_name: None,
+    })
+}
+
+/// Every change up to now is on the server (no change waits, no full push pending): tombstones
+/// last changed before `now` may be purged later (`prune_stale`).
+pub fn sync_mark_caught_up(conn: &mut Connection, now: i64) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    let pushed = state_int(&tx, "pushed_seq")?;
+    let waiting: i64 = tx.query_row("SELECT count(*) FROM changes WHERE local_seq > ?1", params![pushed], |r| r.get(0)).db()?;
+    if waiting == 0 && state_get(&tx, "full_push")?.is_none() {
+        state_set(&tx, "caught_up", &now.to_string())?;
+    }
+    tx.commit().db()
+}
+
+/// Rows the server refused (a clash with its unique rules, or it holds a newer version): counted
+/// with the first reason, shown in the status.
+pub fn sync_note_refused(conn: &mut Connection, n: u64, reason: Option<&str>) -> Result<(), String> {
+    if n == 0 {
+        return Ok(());
+    }
+    let tx = immediate(conn)?;
+    let total = state_int(&tx, "refused")? + n as i64;
+    state_set(&tx, "refused", &total.to_string())?;
+    if let Some(r) = reason {
+        if state_get(&tx, "refused_reason")?.is_none() {
+            state_set(&tx, "refused_reason", r)?;
+        }
+    }
+    tx.commit().db()
+}
+
+/// Sync was turned off: stop holding the change log for it; the next time sync is turned on
+/// this computer's teams are pushed again in full. Mirrors stay, and so does `server`, so
+/// tombstones not on the server yet are kept until a later sync sends them.
+pub fn sync_release(conn: &mut Connection) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    if state_get(&tx, "consumer")?.is_some() {
+        state_del(&tx, "consumer")?;
+        state_set(&tx, "full_push", "1")?;
+        state_del(&tx, "full_pos")?;
+    }
+    tx.commit().db()
+}
+
+/// What the status shows: waiting rows, skipped and refused rows, teams per other computer.
+pub fn sync_status_local(conn: &mut Connection) -> Result<Value, String> {
+    let instance = meta_get(conn, "instance_id")?;
+    let st = sync_local_state(conn, instance.clone().unwrap_or_default())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT m.home_host, count(*), max(m.synced_at) FROM mirror_teams m JOIN teams t ON t.uid = m.team_uid
+             WHERE t.deleted_at IS NULL GROUP BY m.home_host ORDER BY m.home_host",
+        )
+        .db()?;
+    let machines = stmt
+        .query_map([], |r| Ok(json!({ "host": r.get::<_, String>(0)?, "teams": r.get::<_, i64>(1)?, "syncedAt": r.get::<_, i64>(2)? })))
+        .db()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .db()?;
+    Ok(json!({
+        "instanceId": instance,
+        "waiting": st.waiting,
+        "fullPush": st.full_push,
+        "skipped": st.skipped,
+        "refused": state_int(conn, "refused")?,
+        "refusedReason": state_get(conn, "refused_reason")?,
+        "machines": machines,
+    }))
+}
+
+/// Live teams homed on `host` (renaming the machine is refused while there are any).
+pub fn live_home_teams(conn: &mut Connection, host: &str) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT count(*) FROM teams WHERE deleted_at IS NULL AND home_host = ?1 AND uid NOT IN (SELECT team_uid FROM mirror_teams)",
+        params![host],
+        |r| r.get(0),
+    )
+    .db()
+}
+
+/// Rows as cells in `cols` order; `with_key`: the statement selects one more text column (the
+/// keyset position), appended as a last cell.
+fn read_cells(stmt: &mut rusqlite::Statement, cols: copy::Cols, args: &[&dyn rusqlite::ToSql], with_key: bool) -> Result<Vec<Vec<copy::Cell>>, String> {
+    let rows = stmt
+        .query_map(args, |r| {
+            let mut cells = Vec::with_capacity(cols.len() + 1);
+
+            for (i, (_, kind)) in cols.iter().enumerate() {
+                cells.push(match kind {
+                    copy::Kind::Int => r.get::<_, Option<i64>>(i)?.map_or(copy::Cell::Null, copy::Cell::Int),
+                    copy::Kind::Text => r.get::<_, Option<String>>(i)?.map_or(copy::Cell::Null, copy::Cell::Text),
+                });
+            }
+            if with_key {
+                cells.push(r.get::<_, Option<String>>(cols.len())?.map_or(copy::Cell::Null, copy::Cell::Text));
+            }
+            Ok(cells)
+        })
+        .db()?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().db()
+}
+
+/// Row key column (SQL) of a synced table, as `changes.row_id` stores it.
+fn key_sql(table: &str) -> &'static str {
+    match table {
+        "teams" => "uid",
+        "task_deps" => "task_id || '/' || depends_on_id",
+        _ => "id",
+    }
+}
+
+fn team_col(table: &str) -> &'static str {
+    if table == "teams" {
+        "uid"
+    } else {
+        "team_uid"
+    }
+}
+
+/// The next push batch: changes after `pushed_seq` (at most `max`), collapsed to distinct rows,
+/// loaded as they are now (tombstones included), only rows of teams homed on `host`.
+/// Returns (last change position covered, rows) or None when nothing waits.
+pub fn sync_push_batch(conn: &mut Connection, host: &str, max: i64) -> Result<Option<(i64, copy::Dump)>, String> {
+    let tx = conn.transaction().db()?;
+    let pushed = state_int(&tx, "pushed_seq")?;
+    let changes: Vec<(i64, String, String)> = {
+        let mut stmt = tx.prepare("SELECT local_seq, tbl, row_id FROM changes WHERE local_seq > ?1 ORDER BY local_seq LIMIT ?2").db()?;
+        let rows = stmt.query_map(params![pushed, max], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()?
+    };
+    let Some(upto) = changes.last().map(|c| c.0) else { return Ok(None) };
+    let mut seen = HashSet::new();
+    let mut dump = copy::Dump::default();
+    for (table, cols) in super::sync::SYNC_TABLES {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT {} FROM {table} WHERE {} = ?1 AND {} IN ({HOME_UIDS_Q})",
+                copy::col_list(cols),
+                key_sql(table),
+                team_col(table),
+                HOME_UIDS_Q = HOME_UIDS.replace("?1", "?2"),
+            ))
+            .db()?;
+        for (_, tbl, id) in &changes {
+            if tbl != table || !seen.insert((tbl.clone(), id.clone())) {
+                continue;
+            }
+            dump.rows_mut(table).extend(read_cells(&mut stmt, cols, &[id, &host], false)?);
+        }
+    }
+    Ok(Some((upto, dump)))
+}
+
+/// The next full-push batch (one table at a time, keyset order, tombstones included) of the
+/// teams homed on `host`. Returns (position after this batch or None when it was the last,
+/// rows). A full push starting marks every change so far as covered by the snapshot.
+pub fn sync_full_batch(conn: &mut Connection, host: &str, max: i64) -> Result<(Option<String>, copy::Dump), String> {
+    let tx = immediate(conn)?;
+    let pos = match state_get(&tx, "full_pos")? {
+        Some(p) => p,
+        None => {
+            let top: i64 = tx.query_row("SELECT coalesce(max(local_seq), 0) FROM changes", [], |r| r.get(0)).db()?;
+            state_set(&tx, "full_from", &top.to_string())?;
+            "0|".to_string()
+        }
+    };
+    tx.commit().db()?;
+    let (idx, last) = pos.split_once('|').map(|(i, l)| (i.parse::<usize>().unwrap_or(0), l.to_string())).unwrap_or((0, String::new()));
+    let mut dump = copy::Dump::default();
+    let Some((table, cols)) = super::sync::SYNC_TABLES.get(idx).copied() else { return Ok((None, dump)) };
+    let key = key_sql(table);
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {}, {key} FROM {table} WHERE {key} > ?1 AND {} IN ({}) ORDER BY {key} LIMIT ?3",
+            copy::col_list(cols),
+            team_col(table),
+            HOME_UIDS.replace("?1", "?2"),
+        ))
+        .db()?;
+    let mut rows = read_cells(&mut stmt, cols, &[&last, &host, &max], true)?;
+    let next_key = rows.last().and_then(|r| r.last()).and_then(|c| c.text()).map(str::to_string);
+    for r in rows.iter_mut() {
+        r.pop();
+    }
+    let n = rows.len() as i64;
+    *dump.rows_mut(table) = rows;
+    let next = if n >= max {
+        Some(format!("{idx}|{}", next_key.unwrap_or_default()))
+    } else if idx + 1 < super::sync::SYNC_TABLES.len() {
+        Some(format!("{}|", idx + 1))
+    } else {
+        None
+    };
+    Ok((next, dump))
+}
+
+/// A push batch is on the server: remember it and drop the change rows it covered.
+pub fn sync_push_done(conn: &mut Connection, upto: i64) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    let pushed = state_int(&tx, "pushed_seq")?.max(upto);
+    state_set(&tx, "pushed_seq", &pushed.to_string())?;
+    tx.execute("DELETE FROM changes WHERE local_seq <= ?1", params![pushed]).db()?;
+    tx.commit().db()
+}
+
+/// A full-push batch is on the server: move on, or finish (the changes the snapshot covered
+/// count as pushed; later ones go by the normal push).
+pub fn sync_full_done(conn: &mut Connection, next: Option<&str>) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    match next {
+        Some(p) => state_set(&tx, "full_pos", p)?,
+        None => {
+            let from = state_int(&tx, "full_from")?;
+            let pushed = state_int(&tx, "pushed_seq")?.max(from);
+            state_set(&tx, "pushed_seq", &pushed.to_string())?;
+            tx.execute("DELETE FROM changes WHERE local_seq <= ?1", params![pushed]).db()?;
+            for k in ["full_push", "full_pos", "full_from"] {
+                state_del(&tx, k)?;
+            }
+        }
+    }
+    tx.commit().db()
+}
+
+/// A local read position for a pulled post: the next change-log position, taken without adding
+/// a change row (pulled rows are never pushed back).
+fn next_arrival(tx: &Transaction) -> Result<i64, String> {
+    tx.execute("INSERT INTO sqlite_sequence(name, seq) SELECT 'changes', 0 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'changes')", [])
+        .db()?;
+    tx.query_row("UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'changes' RETURNING seq", [], |r| r.get(0)).db()
+}
+
+fn to_value(c: &copy::Cell) -> rusqlite::types::Value {
+    match c {
+        copy::Cell::Null => rusqlite::types::Value::Null,
+        copy::Cell::Int(n) => rusqlite::types::Value::Integer(*n),
+        copy::Cell::Text(s) => rusqlite::types::Value::Text(s.clone()),
+    }
+}
+
+/// Apply pulled rows (teams homed elsewhere) in one transaction, never through `log_change`:
+/// each row is checked like local input (a bad one is skipped and counted, never written),
+/// rows of teams this machine owns and team rows naming this machine as home are ignored, an
+/// existing row is replaced only by a higher `row_version` of the same team, a new post gets a
+/// local read position. Then the per-team caps and the mirror-team cap are applied locally
+/// (dropped rows are deleted, not tombstoned). `pulled_seq` moves to `cursor` in the same
+/// transaction.
+pub fn sync_apply_pull(
+    conn: &mut Connection,
+    limits: Limits,
+    host: &str,
+    rows: &copy::Dump,
+    cursor: i64,
+    now: i64,
+) -> Result<super::sync::PullApplied, String> {
+    let tx = immediate(conn)?;
+    let mut out = super::sync::PullApplied::default();
+    let mut touched: HashSet<String> = HashSet::new();
+    let is_home = |tx: &Transaction, uid: &str| -> Result<bool, String> {
+        tx.query_row(
+            "SELECT count(*) FROM teams WHERE uid = ?1 AND uid NOT IN (SELECT team_uid FROM mirror_teams)",
+            params![uid],
+            |r| r.get::<_, i64>(0),
+        )
+        .db()
+        .map(|n| n > 0)
+    };
+    for (table, cols) in super::sync::SYNC_TABLES {
+        let at = |name: &str| copy::col_index(cols, name);
+        let pk: Vec<&str> = match table {
+            "teams" => vec!["uid"],
+            "task_deps" => vec!["task_id", "depends_on_id"],
+            _ => vec!["id"],
+        };
+        let where_pk = pk.iter().enumerate().map(|(i, k)| format!("{k} = ?{}", i + 1)).collect::<Vec<_>>().join(" AND ");
+        let names = copy::col_list(cols);
+        let set = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, _))| !pk.contains(c))
+            .map(|(i, (c, _))| format!("{c} = ?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_cols = if table == "posts" { format!("{names}, arrival") } else { names.clone() };
+        let ph = (1..=cols.len() + usize::from(table == "posts")).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+        for row in rows.rows(table) {
+            if let Err(_why) = super::sync::validate_row(table, cols, row) {
+                out.skipped += 1;
+                continue;
+            }
+            let team_uid = row[at(team_col(table))].text().unwrap_or_default().to_string();
+            if table == "teams" && row[at("home_host")].text() == Some(host) {
+                continue;
+            }
+            // Dropped by the mirror cap: never brought back in part.
+            let ignored: i64 = tx.query_row("SELECT count(*) FROM mirror_ignored WHERE team_uid = ?1", params![team_uid], |r| r.get(0)).db()?;
+            if ignored > 0 {
+                continue;
+            }
+            if is_home(&tx, &team_uid)? {
+                continue;
+            }
+            if table != "teams" {
+                let mirror: i64 = tx.query_row("SELECT count(*) FROM mirror_teams WHERE team_uid = ?1", params![team_uid], |r| r.get(0)).db()?;
+                if mirror == 0 {
+                    out.skipped += 1;
+                    continue;
+                }
+            }
+            let key: Vec<rusqlite::types::Value> = pk.iter().map(|k| to_value(&row[at(k)])).collect();
+            let existing: Option<(i64, String)> = tx
+                .query_row(
+                    &format!("SELECT row_version, {} FROM {table} WHERE {where_pk}", team_col(table)),
+                    rusqlite::params_from_iter(key.iter()),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .db()?;
+            let rv = row[at("row_version")].int().unwrap_or(0);
+            let values: Vec<rusqlite::types::Value> = row.iter().map(to_value).collect();
+            let res = match existing {
+                Some((_, other_team)) if other_team != team_uid => {
+                    out.skipped += 1;
+                    continue;
+                }
+                Some((stored, _)) if stored >= rv => continue,
+                Some(_) => tx.execute(
+                    &format!("UPDATE {table} SET {set} WHERE {}", pk.iter().map(|k| format!("{k} = ?{}", at(k) + 1)).collect::<Vec<_>>().join(" AND ")),
+                    rusqlite::params_from_iter(values.iter()),
+                ),
+                None => {
+                    let mut values = values;
+                    if table == "posts" {
+                        values.push(rusqlite::types::Value::Integer(next_arrival(&tx)?));
+                    }
+                    tx.execute(&format!("INSERT INTO {table} ({insert_cols}) VALUES ({ph})"), rusqlite::params_from_iter(values.iter()))
+                }
+            };
+            match res {
+                Ok(_) => {
+                    out.written += 1;
+                    if table == "teams" {
+                        let home = row[at("home_host")].text().unwrap_or_default();
+                        tx.execute(
+                            "INSERT INTO mirror_teams(team_uid, home_host, synced_at) VALUES (?1, ?2, ?3)
+                             ON CONFLICT(team_uid) DO UPDATE SET home_host = excluded.home_host, synced_at = excluded.synced_at",
+                            params![team_uid, home, now],
+                        )
+                        .db()?;
+                    }
+                    touched.insert(team_uid);
+                }
+                // A row that breaks a local constraint (e.g. a duplicate number) is not written.
+                Err(_) => out.skipped += 1,
+            }
+        }
+    }
+    for uid in &touched {
+        tx.execute("UPDATE mirror_teams SET synced_at = ?2 WHERE team_uid = ?1", params![uid, now]).db()?;
+        // Per-team caps (the home enforces them too; this bounds a misbehaving server).
+        tx.execute(
+            "DELETE FROM posts WHERE id IN (SELECT id FROM posts WHERE team_uid = ?1 AND deleted_at IS NULL ORDER BY seq DESC LIMIT -1 OFFSET ?2)",
+            params![uid, limits.posts],
+        )
+        .db()?;
+        tx.execute(
+            "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks WHERE team_uid = ?1 AND deleted_at IS NULL ORDER BY seq DESC LIMIT -1 OFFSET ?2)",
+            params![uid, limits.tasks],
+        )
+        .db()?;
+        tx.execute(
+            "DELETE FROM task_events WHERE id IN (SELECT id FROM task_events WHERE team_uid = ?1 AND deleted_at IS NULL ORDER BY ts DESC, id DESC LIMIT -1 OFFSET ?2)",
+            params![uid, limits.events],
+        )
+        .db()?;
+        if let Some(team) = tx.query_row("SELECT team FROM teams WHERE uid = ?1", params![uid], |r| r.get::<_, String>(0)).optional().db()? {
+            out.teams.push(team);
+        }
+    }
+    // At most MAX_MIRROR_TEAMS teams from other machines: the least recently active go.
+    let over: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT m.team_uid FROM mirror_teams m LEFT JOIN teams t ON t.uid = m.team_uid
+                 ORDER BY coalesce(t.last_activity_at, 0) DESC, m.team_uid LIMIT -1 OFFSET ?1",
+            )
+            .db()?;
+        let rows = stmt.query_map(params![super::sync::MAX_MIRROR_TEAMS], |r| r.get(0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()?
+    };
+    for uid in &over {
+        drop_mirror(&tx, uid)?;
+        tx.execute("INSERT OR IGNORE INTO mirror_ignored(team_uid, at) VALUES (?1, ?2)", params![uid, now]).db()?;
+    }
+    out.dropped = over.len();
+    let skipped = state_int(&tx, "skipped")? + out.skipped as i64;
+    state_set(&tx, "skipped", &skipped.to_string())?;
+    let pulled = state_int(&tx, "pulled_seq")?.max(cursor);
+    state_set(&tx, "pulled_seq", &pulled.to_string())?;
+    tx.commit().db()?;
+    out.teams.sort();
+    out.teams.dedup();
+    Ok(out)
+}
+
+/// Remove a team copied from another machine with all its rows (locally only; no tombstones).
+fn drop_mirror(tx: &Transaction, uid: &str) -> Result<(), String> {
+    for table in ["posts", "task_events", "task_deps", "tasks", "cursors"] {
+        tx.execute(&format!("DELETE FROM {table} WHERE team_uid = ?1"), params![uid]).db()?;
+    }
+    tx.execute("DELETE FROM teams WHERE uid = ?1", params![uid]).db()?;
+    tx.execute("DELETE FROM mirror_teams WHERE team_uid = ?1", params![uid]).db()?;
+    Ok(())
+}
+
+/// Settings → "Remove other computers' teams" (offered only while sync is off): every mirror
+/// goes from this file (the server and the other computers keep theirs). The pull position and
+/// the cap's ignore list start over, so turning sync on again brings whole teams back, never a
+/// part of one.
+pub fn sync_remove_mirrors(conn: &mut Connection) -> Result<usize, String> {
+    let tx = immediate(conn)?;
+    state_del(&tx, "pulled_seq")?;
+    tx.execute("DELETE FROM mirror_ignored", []).db()?;
+    let uids: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT team_uid FROM mirror_teams").db()?;
+        let rows = stmt.query_map([], |r| r.get(0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()?
+    };
+    for uid in &uids {
+        drop_mirror(&tx, uid)?;
+    }
+    tx.commit().db()?;
+    Ok(uids.len())
 }
 
 // ── Settings: counts, copy ───────────────────────────────────────────────
@@ -2134,6 +2801,8 @@ pub fn import_dump(conn: &mut Connection, limits: Limits, dump: copy::Dump, merg
             tx.execute(&sql, rusqlite::params_from_iter(values)).db()?;
         }
     }
+    // Teams another computer owns are read-only here (their home writes them).
+    register_mirrors(&tx, &super::board_host(), now)?;
     finish(tx, limits)?;
     Ok(copy::summary(&plan, &skipped))
 }

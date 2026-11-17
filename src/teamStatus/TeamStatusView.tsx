@@ -26,7 +26,8 @@ import { AgentList, type AgentRow } from './AgentList';
 import { LimitsCard, MachinesCard } from './LimitsCard';
 import { NeedsYouList } from './NeedsYouList';
 import { Sparkline, StateBar, StateIcon, TabBar } from './parts';
-import { useTeamBoard, type HumanTaskSub, type TeamBoardSource } from './source';
+import { useSyncStatus, useTeamBoard, type HumanTaskSub, type TeamBoardSource } from './source';
+import { groupTeamsByHome } from '../terminal/agentBoardStorage';
 import { AddTaskForm, TaskBoard, TaskFilters, TaskList, emptyFilters, type FilterState } from './TaskArea';
 import { TaskDrawer } from './TaskDrawer';
 import { DependencyView } from './DependencyView';
@@ -103,12 +104,13 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   const { layout, columns } = useLayout(rootRef);
   const [team, setTeam] = useState(() => props.requested?.team || readStore(TEAM_KEY(projectId)));
   const board = useTeamBoard(source, team);
+  const sync = useSyncStatus(source.syncStatus ? () => source.syncStatus!() : undefined);
   const now = Date.now();
 
   // An entry point (badge, stop-team-side button) asked for a team.
   const requestNonce = props.requested?.nonce ?? 0;
   useEffect(() => {
-    if (props.requested?.team) setTeam(props.requested.team);
+    if (props.requested?.team) { pickedRef.current = true; setTeam(props.requested.team); }
   }, [requestNonce]);
 
   // Settle on a team once the list is known (never while the board is unavailable).
@@ -120,7 +122,16 @@ export function TeamStatusView(props: TeamStatusViewProps) {
     if (next !== team) setTeam(next);
   }, [teamIdsKey, board.error, board.loading]);
 
-  useEffect(() => { if (team) writeStore(TEAM_KEY(projectId), team); }, [team, projectId]);
+  // A team of another computer is remembered for the project only when the person picked it.
+  const pickedRef = useRef(false);
+  const teamsRef = useRef(board.teams);
+  teamsRef.current = board.teams;
+  useEffect(() => {
+    if (!team) return;
+    const row = teamsRef.current.find((x) => x.team === team);
+    if (row?.mirror && !pickedRef.current) return;
+    writeStore(TEAM_KEY(projectId), team);
+  }, [team, projectId]);
   const onTeamChangeRef = useRef(props.onTeamChange);
   onTeamChangeRef.current = props.onTeamChange;
   useEffect(() => { if (team) onTeamChangeRef.current?.(team); }, [team]);
@@ -134,7 +145,10 @@ export function TeamStatusView(props: TeamStatusViewProps) {
 
   const info = board.info;
   const teamRow = board.teams.find((x) => x.team === team);
-  const mirror = info?.mode === 'sync' && !!teamRow?.homeHost && !!info?.host && teamRow.homeHost !== info.host;
+  // Copied from another machine by sync (the host marks it): read-only here, stale not evaluated.
+  const mirror = !!teamRow?.mirror;
+  // Until the team list is known nothing says whose team this is: no actions yet.
+  const listPending = board.loading && !teamRow;
   const snap = board.snapshot?.team === team ? board.snapshot : null;
   const nowBucket = Math.floor(now / 30_000);
   const views = useMemo(() => (snap ? deriveTaskViews(snap.tasks, now, props.staleMs, { mirror }) : []), [snap, props.staleMs, mirror, nowBucket]);
@@ -214,7 +228,7 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   const labels = [...new Set(views.flatMap((v) => v.labels))].sort();
   const owners = [...new Map(views.filter((v) => v.ownerId).map((v) => [v.ownerId!, { id: v.ownerId!, name: v.ownerName || v.ownerId! }])).values()];
   const drawerView = drawer !== null ? views.find((v) => v.seq === drawer) : undefined;
-  const readOnly = mirror || !!board.error;
+  const readOnly = mirror || listPending || !!board.error;
   const greyed = !!board.error && !!snap;
   const sentence = stateBarSentence(summary, (s) => stateLabel(locale, s), (n) => t('summary.tasks', { n }));
 
@@ -230,14 +244,26 @@ export function TeamStatusView(props: TeamStatusViewProps) {
     </div>
   ) : null;
 
+  const teamGroups = groupTeamsByHome(board.teams);
+  const teamOption = (x: (typeof board.teams)[number]) => <option key={x.team} value={x.team}>{x.teamName ? `${x.teamName} (${x.team.slice(0, 10)})` : x.team}{x.mirror && x.homeHost ? ` · ${x.homeHost}` : ''}</option>;
   const header = (
     <div className="ts-header">
       <span className="ts-title">{t('team')}</span>
-      <select value={team} onChange={(e) => setTeam(e.target.value)} aria-label={t('team.select')} disabled={!board.teams.length}>
+      <select value={team} onChange={(e) => { pickedRef.current = true; setTeam(e.target.value); }} aria-label={t('team.select')} disabled={!board.teams.length}>
         {!board.teams.some((x) => x.team === team) && <option value={team}>{team || '-'}</option>}
-        {board.teams.map((x) => <option key={x.team} value={x.team}>{x.teamName ? `${x.teamName} (${x.team.slice(0, 10)})` : x.team}</option>)}
+        {teamGroups.others.length === 0
+          ? teamGroups.mine.map(teamOption)
+          : <>
+              <optgroup label={t('team.group.mine')}>{teamGroups.mine.map(teamOption)}</optgroup>
+              <optgroup label={t('team.group.others')}>{teamGroups.others.map(teamOption)}</optgroup>
+            </>}
       </select>
       {team && <span className="ts-machine">{t('team.root', { id: team.slice(0, 10) })}</span>}
+      {mirror && (
+        <span className="ts-chip ts-readonly-chip" data-testid="ts-readonly-chip" title={t('team.readOnlyHint', { host: teamRow?.homeHost ?? '?', age: teamRow?.syncedAt ? formatBoardTime(teamRow.syncedAt, now) : '-' })}>
+          <Icons.Lock size={11} aria-hidden="true" />{t('team.readOnlyChip')}
+        </span>
+      )}
       <span className="ts-machine ts-wide-only">· {info?.mode === 'postgres' ? t('machine.postgres') : info?.mode === 'sync' ? t('machine.sync') : t('machine.local')}</span>
       <span className="ts-spacer" />
       {greyed && snap && <span className="ts-asof">{t('asof', { time: formatBoardTime(snap.at, now) })}</span>}
@@ -306,7 +332,7 @@ export function TeamStatusView(props: TeamStatusViewProps) {
   let main: ReactNode;
   if (tab === 'activity') main = <section className="ts-card">{activity}</section>;
   else if (tab === 'agents') main = agentsCard;
-  else if (tab === 'limits') main = <>{limitsCard}<MachinesCard mode={info?.mode} t={t} onOpenSettings={props.onOpenSettings} /></>;
+  else if (tab === 'limits') main = <>{limitsCard}<MachinesCard mode={info?.mode} sync={sync} now={now} locale={locale} t={t} onOpenSettings={props.onOpenSettings} /></>;
   else if (tab === 'timeline') main = snap ? <TimelineView team={team} events={snap.events} tasks={snap.tasks} now={now} locale={locale} t={t} /> : null;
   else main = taskArea(tab === 'tasks');
 
@@ -348,7 +374,7 @@ export function TeamStatusView(props: TeamStatusViewProps) {
                     </section>
                   )}
                   {limitsCard}
-                  <MachinesCard mode={info?.mode} t={t} onOpenSettings={props.onOpenSettings} />
+                  <MachinesCard mode={info?.mode} sync={sync} now={now} locale={locale} t={t} onOpenSettings={props.onOpenSettings} />
                 </div>
               )}
             </div>
