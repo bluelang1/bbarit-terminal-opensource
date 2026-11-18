@@ -214,6 +214,46 @@ const en = {
   'popout.waiting': 'Waiting for the main window...',
   'popout.closed': 'The main window is not answering. Close this window and open it again from the toolbar gauge.',
   'error.action': 'Could not do that: {error}',
+  // Stage 3c: notes for another computer's team, taking over a team.
+  'outbox.waiting': 'waiting to be delivered to {home}',
+  'outbox.refused': 'not delivered: {reason}',
+  'outbox.dismiss': 'Dismiss',
+  'outbox.reason.invalid': 'the home computer did not accept the text',
+  'outbox.reason.team_gone': 'the team is gone',
+  'outbox.reason.team_full': 'too many notes were waiting for this team',
+  'outbox.reason.computer_full': 'too many notes from this computer were waiting',
+  'outbox.reason.expired': 'the home computer did not take it for 7 days',
+  'outbox.reason.other': 'refused ({code})',
+  'remote.hint': 'This team lives on {home}. A note posted here waits until {home} syncs, then appears as its numbered note.',
+  'remote.upgrade': 'Notes for teams on other computers need the server tables upgraded: Settings > Agent team board > Create / upgrade tables.',
+  'post.from': 'from {host}',
+  'takeover.button': 'Take over this team',
+  'takeover.title': 'Take over this team',
+  'takeover.confirm': 'Take over {team} from {home}? {home} last synced {hours} h ago (offered after {limit} h). This computer becomes its home: it numbers its notes and tasks from now on, and claims of agents on {home} run out. If {home} comes back, its copy becomes read-only and changes it made meanwhile are not applied. A computer that is offline may still be working on this team: its later changes are not merged, only saved to a file on that computer.',
+  'takeover.unknownAge': 'Take over {team} from {home}? {home} has not synced from this server for a long time. This computer becomes its home: it numbers its notes and tasks from now on, and claims of agents on {home} run out. A computer that is offline may still be working on this team: its later changes are not merged, only saved to a file on that computer.',
+  'takeover.timeout': 'No answer yet: the takeover may still have gone through. Check again in a moment (the view refreshes).',
+  'takeover.yes': 'Take over',
+  'takeover.cancel': 'Cancel',
+  'takeover.done': 'This computer is now the home of {team}.',
+  'takeover.refused.home_alive': '{home} synced less than {hours} hours ago; it may still be working on this team.',
+  'takeover.refused.changed': 'The team changed on the server meanwhile. Look again before taking it over.',
+  'takeover.refused.team_gone': 'The team is no longer on the server.',
+  'takeover.refused.already_home': 'This team already lives on this computer; it appears after the next sync.',
+  'takeover.refused.same_team_here': 'This computer already has a team for the same tab.',
+  'takeover.refused.upgrade_tables': 'The server tables need an upgrade first: Settings > Agent team board > Create / upgrade tables.',
+  'takeover.refused.sync_off': 'Sync is off on this computer.',
+  'outbox.reason.unknown_sender': 'the home computer did not recognise this computer',
+  'outbox.reason.rate_limited': 'too many notes from this computer for this team in the last hour',
+  'outbox.dismissFailed': 'Could not dismiss the note: {error}',
+  'takeover.refused.not_copy': 'This team is not a copy of another computer\'s team here.',
+  'takeover.refused.server_newer': 'The server tables are from a newer app version: update the app.',
+  'takeover.refused.settings': 'The PostgreSQL settings are not complete: check Settings > Agent team board.',
+  'takeover.refused.local': 'The board file on this computer cannot be used.',
+  'takeover.refused.error': 'Could not reach the server or the board file: {message}',
+  'takeover.refused.host_alive': '{home} is still syncing; it cannot be replaced.',
+  'takeover.refused.unsent': 'Changes on this computer were not sent yet; sync first.',
+  'takeover.refused.takeover_needed': 'Confirm taking the name over first.',
+  'takeover.refused.nothing': 'There is nothing to take over.',
 } as const;
 
 export type TsKey = keyof typeof en;
@@ -429,6 +469,45 @@ const ko: Partial<Record<TsKey, string>> = {
   'popout.waiting': '메인 창을 기다리는 중...',
   'popout.closed': '메인 창이 답하지 않습니다. 이 창을 닫고 상단 계기판 버튼에서 다시 여세요.',
   'error.action': '처리하지 못했습니다: {error}',
+  'outbox.waiting': '{home}에 전달 대기 중',
+  'outbox.refused': '전달 안 됨: {reason}',
+  'outbox.dismiss': '지우기',
+  'outbox.reason.invalid': '주인 컴퓨터가 내용을 받지 않았습니다',
+  'outbox.reason.team_gone': '팀이 없어졌습니다',
+  'outbox.reason.team_full': '이 팀에 전달 대기 중인 메모가 너무 많았습니다',
+  'outbox.reason.computer_full': '이 컴퓨터에서 보낸 대기 메모가 너무 많았습니다',
+  'outbox.reason.expired': '주인 컴퓨터가 7일 동안 가져가지 않았습니다',
+  'outbox.reason.other': '거절됨 ({code})',
+  'remote.hint': '이 팀은 {home}에 있습니다. 여기서 올린 메모는 {home}이(가) 동기화할 때까지 기다렸다가 번호가 붙은 메모로 나타납니다.',
+  'remote.upgrade': '다른 컴퓨터의 팀에 메모를 보내려면 서버의 표를 업그레이드해야 합니다: 설정 > 에이전트 팀 보드 > 표 만들기 / 업그레이드.',
+  'post.from': '{host}에서',
+  'takeover.button': '이 팀 넘겨받기',
+  'takeover.title': '이 팀 넘겨받기',
+  'takeover.confirm': '{home}의 {team} 팀을 넘겨받을까요? {home}은(는) {hours}시간 전에 마지막으로 동기화했습니다({limit}시간 지나면 제안). 이 컴퓨터가 주인이 되어 이제부터 메모와 할 일 번호를 매기고, {home}의 에이전트가 잡은 일은 만료되어 풀립니다. {home}이(가) 돌아오면 그쪽 팀은 읽기 전용이 되고, 그 사이 그쪽에서 바꾼 내용은 반영되지 않습니다. 연결이 끊긴 컴퓨터가 아직 이 팀으로 일하고 있을 수 있습니다: 그 뒤의 변경은 합쳐지지 않고 그 컴퓨터의 파일로만 남습니다.',
+  'takeover.unknownAge': '{home}의 {team} 팀을 넘겨받을까요? {home}은(는) 이 서버와 오랫동안 동기화하지 않았습니다. 이 컴퓨터가 주인이 되어 이제부터 메모와 할 일 번호를 매기고, {home}의 에이전트가 잡은 일은 만료되어 풀립니다. 연결이 끊긴 컴퓨터가 아직 이 팀으로 일하고 있을 수 있습니다: 그 뒤의 변경은 합쳐지지 않고 그 컴퓨터의 파일로만 남습니다.',
+  'takeover.timeout': '아직 답이 없습니다. 넘겨받기가 이미 되었을 수 있으니 잠시 뒤 다시 확인하세요(화면을 새로 읽습니다).',
+  'takeover.yes': '넘겨받기',
+  'takeover.cancel': '취소',
+  'takeover.done': '이제 이 컴퓨터가 {team} 팀의 주인입니다.',
+  'takeover.refused.home_alive': '{home}이(가) {hours}시간 안에 동기화했습니다. 아직 이 팀으로 일하고 있을 수 있습니다.',
+  'takeover.refused.changed': '그 사이 서버에서 팀이 바뀌었습니다. 다시 확인한 뒤 넘겨받으세요.',
+  'takeover.refused.team_gone': '팀이 서버에 더 이상 없습니다.',
+  'takeover.refused.already_home': '이 팀은 이미 이 컴퓨터에 있습니다. 다음 동기화 뒤에 나타납니다.',
+  'takeover.refused.same_team_here': '이 컴퓨터에 같은 탭의 팀이 이미 있습니다.',
+  'takeover.refused.upgrade_tables': '먼저 서버의 표를 업그레이드해야 합니다: 설정 > 에이전트 팀 보드 > 표 만들기 / 업그레이드.',
+  'takeover.refused.sync_off': '이 컴퓨터에서 동기화가 꺼져 있습니다.',
+  'outbox.reason.unknown_sender': '주인 컴퓨터가 이 컴퓨터를 알아보지 못했습니다',
+  'outbox.reason.rate_limited': '지난 1시간 동안 이 컴퓨터가 이 팀에 보낸 메모가 너무 많았습니다',
+  'outbox.dismissFailed': '메모를 지우지 못했습니다: {error}',
+  'takeover.refused.not_copy': '이 팀은 여기서 다른 컴퓨터 팀의 사본이 아닙니다.',
+  'takeover.refused.server_newer': '서버의 표가 더 새 앱 버전 것입니다: 앱을 업데이트하세요.',
+  'takeover.refused.settings': 'PostgreSQL 설정이 다 채워지지 않았습니다: 설정 > 에이전트 팀 보드을 확인하세요.',
+  'takeover.refused.local': '이 컴퓨터의 보드 파일을 쓸 수 없습니다.',
+  'takeover.refused.error': '서버나 보드 파일에 닿지 못했습니다: {message}',
+  'takeover.refused.host_alive': '{home}이(가) 아직 동기화하고 있어 대신할 수 없습니다.',
+  'takeover.refused.unsent': '이 컴퓨터에 아직 보내지 않은 변경이 있습니다. 먼저 동기화하세요.',
+  'takeover.refused.takeover_needed': '먼저 이름 넘겨받기를 확인하세요.',
+  'takeover.refused.nothing': '넘겨받을 것이 없습니다.',
 };
 
 const STATE_LABEL: Record<'en' | 'ko', Record<DisplayState | 'stale', string>> = {
@@ -480,4 +559,15 @@ export function eventVerb(locale: string, action: string): string {
 
 export function postKindLabel(locale: string, kind: string): string {
   return POST_KIND[tsLang(locale)][kind] ?? kind;
+}
+
+/** Every refusal code the host's takeover and outbox paths send, and the key that says it
+ * (a test checks this against the Rust source). */
+export const TAKEOVER_REFUSAL_CODES = [
+  'home_alive', 'changed', 'team_gone', 'already_home', 'same_team_here', 'upgrade_tables', 'sync_off', 'not_copy',
+  'server_newer', 'settings', 'local', 'error', 'host_alive', 'unsent', 'takeover_needed', 'nothing',
+] as const;
+export const OUTBOX_REASON_CODES = ['invalid', 'team_gone', 'team_full', 'computer_full', 'expired', 'unknown_sender', 'rate_limited'] as const;
+export function hasTsKey(lang: 'en' | 'ko', key: string): boolean {
+  return lang === 'en' ? key in en : key in ko;
 }

@@ -531,6 +531,33 @@ lease_apply`, 설정용 `agent_board_settings_status|pg_test|pg_migrate|copy|pg_
   agent_board`(픽스처마다 스키마를 따로 만들고 지운다; `BBARIT_TEST_PG_REQUIRED=1` 이면 URL 이 없을 때 건너뛰지 않고
   실패), 끝나면 `docker rm -f bbarit-board-pg-test`.
 
+#### 되살리기, 다른 컴퓨터 팀에 메모, 팀 넘겨받기 (3c)
+
+- 서버 표 버전 4: `outbox`(다른 컴퓨터 팀에 보낸 메모; `id` 가 멱등 키이자 나중의 글 id). 버전 3 서버에서도 `postgres`
+  모드와 3b 동기화는 그대로 되고, 메모 보내기·넘겨받기만 "표 만들기 / 올리기"를 기다린다. 로컬 파일 스키마 4 는
+  `outbox`(이 컴퓨터가 보낸 메모: `pending` → `sent` → `delivered` 또는 `refused`+`reason`)를 자동으로 더한다.
+- 메모 보내기: 동기화 중 사본 팀에 `agent board post`(에이전트) 나 팀 현황 메모 상자(사람)로 쓰면 거절 대신 로컬
+  `outbox` 에 넣고 `{pending: true, home}` 을 돌려준다. `note` 만, 할 일 연결 없음, 로컬 글과 같은 글자 규칙·길이, 팀당
+  20개·컴퓨터당 100개까지 대기. 라운드에서 서버 `outbox` 로 보내고(같은 id 는 한 번만), 주인은 자기 라운드에서 번호
+  붙은 글로 만든다(글 id = outbox id, `author_host` = 보낸 컴퓨터; 다시 해도 글은 하나). 보낸 쪽은 받기로 그 글을 받으면
+  대기 줄을 지운다. 주인이 거절하면(`invalid`, `team_gone`, `team_full`, `computer_full`) 또는 7일 동안 안 가져가면
+  (`expired`, 서버에서 아직 대기일 때만 회수) "전달 안 됨"으로 남고 사람이 지운다. 대기 메모는 어떤 탭에도 입력되지 않고
+  `post` 알림도 내지 않는다(`sync` 새로고침만).
+- 되살리기(설정): 같은 컴퓨터 이름으로 서버에 있는 팀·할 일·메모 수를 먼저 보여 주고 확인 뒤 내려받는다. 그 팀에 안 보낸
+  변경이 있으면 거절, 로컬이 더 새 `row_version` 이면 그대로 둔다. 이름을 다른 설치본이 쓰고 있으면 확인 칸을 체크해야
+  하고, 그 설치본이 15분 넘게 조용할 때만 서버의 `hosts` 를 바꾼다(동기화 중인 컴퓨터는 30초마다 `last_seen` 을 갱신).
+  예전 설치본 에이전트가 잡은 일은 이 앱이 갱신할 수 없으므로 보통의 임대 만료로 풀린다(임대 없는 잡음은 지금 만료).
+- 넘겨받기(팀 현황, 사본 팀): 주인의 `hosts.last_seen` 이 `agents.board.adoptAfterHours`(기본 24, 1–720, 에이전트가 못
+  바꿈) 시간보다 오래됐을 때만 버튼이 보이고, 팀 이름·예전 주인·마지막 동기화 시각을 보여 준 뒤 확인한다. 서버에서 한
+  트랜잭션(팀 행 `FOR UPDATE`, 주인과 `row_version` 이 미리보기와 같을 때만, `row_version` +1)으로 옮기므로 둘이 동시에
+  해도 하나만 된다. 예전 주인이 돌아오면 올리기는 그 팀 행을 서버에 쓰지 않고(거절로 셈), 라운드 시작에서 그 팀을
+  서버 상태의 읽기 전용 사본으로 바꾸며 안 보낸 변경은 반영하지 않고 거절 수와 이유("taken over by …")로 보고한다.
+  그 변경은 `~/.config/octo/agent-board-kept/<팀>-<ms>.json` 에 남기고 설정에 개수·경로·"파일 보기"를 보여 준다.
+- 시간 비교는 모두 서버 시계로 한다(`hosts.last_seen`, 조용한 시간). 주인은 `hosts` 에 등록된 (이름, 설치본) 이 보낸
+  메모만 받고(`unknown_sender`), 보낸 컴퓨터·팀마다 1시간에 30개까지 받는다(`rate_limited`). 팀이 아직 없으면
+  (되살리기 도중) 판단하지 않고 기다린다. 되살리기로 이름을 잃은 설치본은 `replaced` 로 멈춘다. "정리"는 끝난
+  outbox 줄을 30일 뒤 지운다.
+
 파일 `~/.config/octo/agent-board.db`(debug 빌드 `agent-board.dev.db`), 0600(db·`-wal`·`-shm`), WAL, busy_timeout
 5 s, 연결 하나를 뮤텍스 뒤에 두고 블로킹 풀에서 돌린다. 모든 쓰기는 `BEGIN IMMEDIATE`, 모든 SQL 은 바인딩 파라미터.
 버전은 `board_meta.schema_version`(같은 값을 `PRAGMA user_version` 에도 적어 1 단계 앱이 v2 파일을 "newer app
@@ -559,6 +586,7 @@ CHECK 없는 텍스트(코드가 검사).
 | `sync_state` | `key` PK, `value` — 동기화 위치(`consumer`, `server`, `pushed_seq`, `pulled_seq`, `full_push`, `skipped`; `consumer` 가 있으면 `changes` 는 `pushed_seq` 아래만 지운다) |
 | `mirror_teams` | `team_uid` PK, `home_host`, `synced_at` — 다른 컴퓨터에서 받아 온 읽기 전용 팀(스키마 3) |
 | `mirror_ignored` | `team_uid` PK, `at` — 사본 상한으로 지운 팀(받기가 처음부터 다시 시작할 때 비운다) |
+| `outbox` | `id` PK, `team_uid`, `team`, `home_host`, 작성자, `kind`, `text`, `created_at`, `state`, `reason`, `sent_at` — 다른 컴퓨터 팀에 보낸 메모(스키마 4) |
 
 동기화 열 = `origin_host`, `updated_at`, `row_version`, `deleted_at`.
 

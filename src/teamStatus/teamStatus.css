@@ -133,6 +133,10 @@
 button.ts-chip { cursor: pointer; font-family: inherit; }
 .ts-chip[aria-pressed="true"] { border-color: var(--accent-color); border-left-color: var(--ts-chip, var(--ts-open)); box-shadow: inset 0 0 0 1px var(--accent-color); }
 .ts-chip svg { color: var(--ts-chip, var(--ts-open)); flex-shrink: 0; }
+/* Stage 3c: a note sent to another computer's team, waiting to be delivered or refused. */
+.ts-chip.ts-outbox-waiting { --ts-chip: var(--ts-claimed); background-image: repeating-linear-gradient(45deg, transparent 0 3px, color-mix(in srgb, var(--ts-claimed) 30%, transparent) 3px 4px); }
+.ts-chip.ts-outbox-refused { --ts-chip: var(--ts-failed); color: var(--ts-failed-ink); }
+.ts-outbox li { opacity: 0.85; }
 .ts-chip.ts-waiting { background-image: repeating-linear-gradient(45deg, transparent 0 3px, color-mix(in srgb, var(--ts-open) 35%, transparent) 3px 4px); }
 
 .team-status [data-state="done"] { --ts-chip: var(--ts-done); --ts-chip-ink: var(--ts-done-ink); }

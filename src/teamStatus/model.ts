@@ -502,6 +502,8 @@ export interface FeedEntry {
   note?: string | null;
   postKind?: string;
   text?: string;
+  /** Posts: the computer the author wrote it on (a remote note shows it). */
+  actorHost?: string;
 }
 
 export interface FeedEvent extends EventLike {
@@ -519,7 +521,7 @@ export interface FeedPost {
   kind: string;
   text: string;
   task?: number;
-  author?: { id?: string; name?: string };
+  author?: { id?: string; name?: string; host?: string };
 }
 
 /** Task events and posts merged, newest first, at most `limit`. Done notes are left out (the done event says it). */
@@ -530,7 +532,7 @@ export function buildFeed(events: readonly FeedEvent[], posts: readonly FeedPost
   }
   for (const p of posts) {
     if (p.kind === 'done') continue;
-    out.push({ key: `p:${p.seq}`, ts: p.ts, kind: 'post', actorId: p.author?.id, actorName: p.author?.name || p.author?.id, postKind: p.kind, text: p.text, task: p.task });
+    out.push({ key: `p:${p.seq}`, ts: p.ts, kind: 'post', actorId: p.author?.id, actorName: p.author?.name || p.author?.id, postKind: p.kind, text: p.text, task: p.task, actorHost: p.author?.host });
   }
   return out.sort((a, b) => b.ts - a.ts || b.key.localeCompare(a.key)).slice(0, Math.max(0, limit));
 }

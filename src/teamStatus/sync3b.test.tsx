@@ -13,6 +13,8 @@ const task = (seq: number, state: string): BoardTask => ({ seq, title: `task ${s
 const sync: SyncStatus = {
   mode: 'sync', host: 'mac-a', hostSource: 'system', state: 'on', lastPushAt: NOW - 120_000, lastPullAt: NOW - 10_000,
   lastError: null, waiting: 4, skipped: 2, refused: 0, fullPush: false, machines: [{ host: 'mac-b', teams: 3 }],
+  // A version-3 server: notes for other computers' teams wait for "Create / upgrade tables".
+  outboxWaiting: 0, outboxRefused: 0, serverSchema: 3, codeSchema: 4, hosts: [], adoptAfterMs: 24 * 3_600_000, keptRows: 0, keptFile: null, serverEvent: null, serverEventAt: null,
 };
 
 function source(over: Partial<TeamBoardSource> = {}): TeamBoardSource {

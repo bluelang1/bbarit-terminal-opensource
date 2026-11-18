@@ -35,8 +35,11 @@ import {
   type PgDraft,
   type PgTestResult,
   checkMachineName,
+  normalizeRestorePreview,
   normalizeSyncStatus,
+  needsTableUpgrade,
   parseBoardRefusal,
+  type RestorePreview,
   type SyncStatus,
 } from '../terminal/agentBoardStorage';
 
@@ -111,6 +114,13 @@ const monoBox: CSSProperties = {
 
 const ID = 'agent-board';
 
+/** Every refusal code the host's restore and takeover commands send (a test checks this
+ * against the Rust source); each has `settings.agentBoard.restore.refused.<code>`. */
+export const RESTORE_REFUSAL_CODES = [
+  'sync_off', 'settings', 'local', 'error', 'unsent', 'host_alive', 'takeover_needed', 'nothing', 'upgrade_tables', 'server_newer',
+  'not_copy', 'team_gone', 'already_home', 'same_team_here', 'changed', 'home_alive',
+] as const;
+
 export function AgentBoardSettings() {
   const { config, updateConfig } = useConfig();
   const { t } = useTranslation();
@@ -140,6 +150,9 @@ export function AgentBoardSettings() {
   const setSync = setFresh;
   const [nameDraft, setNameDraft] = useState<string>(typeof board.hostName === 'string' ? board.hostName : '');
   const [removeAsk, setRemoveAsk] = useState<number | null>(null);
+  // Stage 3c: "Restore my teams from the server" shows what would come down first.
+  const [restoreAsk, setRestoreAsk] = useState<RestorePreview | null>(null);
+  const [takeoverOk, setTakeoverOk] = useState(false);
 
   // A saved change elsewhere (or Revert) replaces an untouched draft.
   const savedKey = JSON.stringify(savedDraft);
@@ -376,6 +389,35 @@ export function AgentBoardSettings() {
       emitAgentBoardEvent({ team: '', action: 'sync' });
       setMessage({ ok: true, lines: [fillText(t('settings.agentBoard.sync.removed'), { n: r.removed })] });
     });
+  const restorePreview = () =>
+    run('restore', async () => {
+      let raw: unknown;
+      try {
+        raw = await invoke('agent_board_restore_preview');
+      } catch (e) {
+        const r = parseBoardRefusal(e);
+        throw new Error(r.code ? refusalText(e) : fillText(t('settings.agentBoard.restore.previewFailed'), { e: r.message }));
+      }
+      const preview = normalizeRestorePreview(raw);
+      // An answer that cannot be read is an error, never an empty dialog.
+      if (!preview) throw new Error(fillText(t('settings.agentBoard.restore.previewFailed'), { e: '?' }));
+      setTakeoverOk(false);
+      setRestoreAsk(preview);
+    });
+  const runRestore = () =>
+    run('restore', async () => {
+      let r: Record<string, number>;
+      try {
+        r = await invoke<Record<string, number>>('agent_board_restore', { takeover: takeoverOk });
+      } catch (e) {
+        throw new Error(refusalText(e));
+      } finally {
+        setRestoreAsk(null);
+      }
+      setSyncNonce((n) => n + 1);
+      emitAgentBoardEvent({ team: '', action: 'sync' });
+      setMessage({ ok: true, lines: [fillText(t('settings.agentBoard.restore.done'), { teams: r.teams ?? 0, tasks: r.tasks ?? 0, notes: r.notes ?? 0, kept: r.keptNewer ?? 0 })] });
+    });
   // Host refusals carry a stable code; shown in the person's language.
   const refusalText = (e: unknown): string => {
     const r = parseBoardRefusal(e);
@@ -384,10 +426,12 @@ export function AgentBoardSettings() {
       invalid: 'settings.agentBoard.hostName.refused.invalid',
       live_teams: 'settings.agentBoard.hostName.refused.live_teams',
       sync_on: 'settings.agentBoard.sync.removeOnlyOff',
+      ...Object.fromEntries(RESTORE_REFUSAL_CODES.map((c) => [c, `settings.agentBoard.restore.refused.${c}` as TranslationKey])),
     };
-    return known[r.code] ? fillText(t(known[r.code]), r.vars) : r.message;
+    return known[r.code] ? fillText(t(known[r.code]), { ...r.vars, message: r.message }) : r.message;
   };
   const syncProblem = (st: SyncStatus): string | null => {
+    if (st.lastErrorCode === 'replaced') return fillText(t('settings.agentBoard.sync.replaced'), { host: st.host, n: st.waiting });
     if (st.lastErrorCode === 'name_changed') return t('settings.agentBoard.sync.nameChanged');
     if (st.lastErrorCode === 'name_taken') return t('settings.agentBoard.sync.nameTaken');
     return st.lastError ?? null;
@@ -477,6 +521,30 @@ export function AgentBoardSettings() {
                     {fillText(t('settings.agentBoard.sync.refused'), { n: sync.refused, reason: sync.refusedReason ?? '-' })}
                   </span>
                 )}
+                {sync.outboxWaiting > 0 && (
+                  <span className="setting-description">{fillText(t('settings.agentBoard.sync.outbox'), { n: sync.outboxWaiting })}</span>
+                )}
+                {sync.outboxRefused > 0 && (
+                  <span className="setting-description" style={{ color: WARN }}>{fillText(t('settings.agentBoard.sync.outboxRefused'), { n: sync.outboxRefused })}</span>
+                )}
+                {sync.serverEvent && (
+                  <span className="setting-description" style={{ color: WARN }} data-testid="agent-board-server-event">
+                    {fillText(t(`settings.agentBoard.sync.${sync.serverEvent === 'server_restored' ? 'serverRestored' : 'serverReplaced'}` as TranslationKey), { time: syncTime(sync.serverEventAt) })}
+                  </span>
+                )}
+                {sync.keptRows > 0 && (
+                  <span className="setting-description" style={{ color: WARN }} data-testid="agent-board-kept">
+                    {fillText(t('settings.agentBoard.sync.kept'), { n: sync.keptRows, file: sync.keptFile ?? '-' })}{' '}
+                    {sync.keptFile && (
+                      <button type="button" className="btn-secondary" onClick={() => void invoke('reveal_in_explorer', { path: sync.keptFile }).catch((e) => setMessage({ ok: false, lines: [String(e)] }))}>
+                        {t('settings.agentBoard.sync.keptReveal')}
+                      </button>
+                    )}
+                  </span>
+                )}
+                {needsTableUpgrade(sync) && (
+                  <span className="setting-description" style={{ color: WARN }} data-testid="agent-board-upgrade-3c">{t('settings.agentBoard.sync.upgradeFor3c')}</span>
+                )}
                 {syncProblem(sync) && <span className="setting-description" style={{ color: sync.state === 'paused' ? WARN : DANGER }}>{fillText(t('settings.agentBoard.status.lastError'), { e: syncProblem(sync) ?? '' })}</span>}
               </>
             )}
@@ -491,12 +559,51 @@ export function AgentBoardSettings() {
                   {busy === 'sync' ? t('settings.agentBoard.working') : t('settings.agentBoard.sync.now')}
                 </button>
               )}
+              {mode === 'sync' && (
+                <button type="button" className="btn-secondary" disabled={disabled} onClick={restorePreview}>
+                  {busy === 'restore' ? t('settings.agentBoard.working') : t('settings.agentBoard.restore')}
+                </button>
+              )}
               {otherTeams > 0 && mode !== 'sync' && (
                 <button type="button" className="btn-secondary" disabled={disabled} onClick={() => setRemoveAsk(otherTeams)}>
                   {t('settings.agentBoard.sync.remove')}
                 </button>
               )}
             </span>
+            {restoreAsk !== null && (
+              <div style={{ ...monoBox, fontFamily: 'inherit', fontSize: 12 }} role="alertdialog" aria-label={t('settings.agentBoard.restore')}>
+                {restoreAsk.teams === 0 ? (
+                  <div>{fillText(t('settings.agentBoard.restore.refused.nothing'), { host: restoreAsk.host })}</div>
+                ) : (
+                  <div>{fillText(t('settings.agentBoard.restore.preview'), { host: restoreAsk.host, teams: restoreAsk.teams, tasks: restoreAsk.tasks, notes: restoreAsk.notes })}</div>
+                )}
+                {restoreAsk.unsent > 0 && <div style={{ color: WARN }}>{fillText(t('settings.agentBoard.restore.refused.unsent'), { n: restoreAsk.unsent })}</div>}
+                {restoreAsk.takeover && (
+                  <div style={{ color: WARN, marginTop: 4 }}>
+                    {fillText(t('settings.agentBoard.restore.takeover'), { host: restoreAsk.host, min: Math.floor(restoreAsk.takeover.ageMs / 60_000) })}
+                    {restoreAsk.takeover.allowed ? (
+                      <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+                        <input type="checkbox" checked={takeoverOk} onChange={(e) => setTakeoverOk(e.target.checked)} />
+                        {fillText(t('settings.agentBoard.restore.takeoverConfirm'), { host: restoreAsk.host })}
+                      </label>
+                    ) : (
+                      <div>{fillText(t('settings.agentBoard.restore.takeoverWait'), { min: Math.round(restoreAsk.takeover.minAgeMs / 60_000) })}</div>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={disabled || restoreAsk.teams === 0 || restoreAsk.unsent > 0 || (!!restoreAsk.takeover && (!restoreAsk.takeover.allowed || !takeoverOk))}
+                    onClick={runRestore}
+                  >
+                    {t('settings.agentBoard.restore.yes')}
+                  </button>
+                  <button type="button" className="btn-secondary" disabled={disabled} onClick={() => setRestoreAsk(null)}>{t('settings.agentBoard.cancel')}</button>
+                </div>
+              </div>
+            )}
             {removeAsk !== null && (
               <div style={{ ...monoBox, fontFamily: 'inherit', fontSize: 12 }} role="alertdialog" aria-label={t('settings.agentBoard.sync.remove')}>
                 <div style={{ color: WARN }}>{fillText(t('settings.agentBoard.sync.removeConfirm'), { n: removeAsk })}</div>

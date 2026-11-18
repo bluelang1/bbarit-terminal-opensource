@@ -37,6 +37,23 @@ pub const SYNC_BATCH: i64 = 500;
 const MAX_BATCHES: usize = 40;
 /// At most this many teams from other machines are kept; the least recently active go.
 pub const MAX_MIRROR_TEAMS: i64 = 200;
+/// Stage 3c: notes waiting for a team on another computer, per team and per computer.
+pub const REMOTE_NOTES_PER_TEAM: i64 = 20;
+pub const REMOTE_NOTES_PER_COMPUTER: i64 = 100;
+/// The home takes at most this many remote notes per sending computer and team per window
+/// (a flood is refused `rate_limited` and cannot push the team's older posts out).
+pub const REMOTE_NOTES_PER_SENDER_WINDOW: i64 = 30;
+pub const REMOTE_NOTE_WINDOW_MS: i64 = 3_600_000;
+/// A sent note the home has not taken for this long is withdrawn and shown as refused (`expired`).
+pub const REMOTE_NOTE_EXPIRE_MS: i64 = 7 * 24 * 3_600_000;
+/// Restore may take over this computer's name from another installation only when that one
+/// was last seen this long ago (a syncing computer refreshes `last_seen` every round, 30 s;
+/// failures back off to at most 5 min).
+pub const RESTORE_TAKEOVER_MS: i64 = 15 * 60_000;
+/// "Take over this team": the home must not have been seen for this long
+/// (`agents.board.adoptAfterHours`, 1–720, default 24).
+pub const ADOPT_AFTER_HOURS_DEFAULT: i64 = 24;
+
 /// Regular round interval; a local write asks for a round this much later.
 pub const SYNC_INTERVAL_MS: i64 = 30_000;
 pub const WRITE_DELAY_MS: i64 = 2_000;
@@ -84,6 +101,16 @@ pub struct RoundReport {
     pub pulled: usize,
     pub skipped: usize,
     pub teams: Vec<String>,
+    /// Remote notes this home turned into posts this round.
+    pub delivered: usize,
+    /// This computer's teams that another computer took over (root tab ids).
+    pub moved: Vec<String>,
+    /// Every registered computer: (host, last_seen, age by the server's clock).
+    pub hosts: Vec<(String, i64, i64)>,
+    pub server_schema: i64,
+    /// `server_replaced` / `server_restored` when this round found another server (or one
+    /// restored from a backup) and started over.
+    pub server_event: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,6 +143,22 @@ impl SyncError {
 
 // ── Rules (pure) ─────────────────────────────────────────────────────────
 
+/// Why rows of a team were not sent: it lives on another computer now (taken over).
+pub fn moved_message(home: &str) -> String {
+    format!("a team of this computer was taken over by {home}; changes made here for it were not sent")
+}
+
+/// Folder (next to the board file) of the files that keep changes a takeover left unsent.
+/// `.dev` in debug builds, like the board file. At most `sqlite::KEPT_FILES_MAX` (50) files
+/// of `sqlite::KEPT_FILE_MAX_BYTES` (4 MiB) each are kept.
+pub const KEPT_DIR: &str = if cfg!(debug_assertions) { "agent-board-kept.dev" } else { "agent-board-kept" };
+const REPLACED: &str = "\u{1}replaced";
+
+/// This installation's name was taken over by "Restore my teams" on another installation.
+pub fn replaced_message(host: &str, unsent: i64) -> String {
+    format!("another installation restored the teams of {host} and took this computer's name over; this board file no longer syncs. {unsent} change(s) made here were not sent; they stay in this file")
+}
+
 pub fn collision_message(host: &str) -> String {
     format!("another computer uses the name {host}; set this computer's name in Settings")
 }
@@ -127,7 +170,7 @@ pub fn schema_pause(stored: Option<i64>, code: i64) -> Option<(&'static str, Str
         Some(v) if v > code => {
             Some(("server_newer", format!("the server's board tables are from a newer app version ({v}, this app knows {code}): update the app")))
         }
-        Some(v) if v < code => Some((
+        Some(v) if v < code && v < super::pg::MIN_SCHEMA_VERSION => Some((
             "server_older",
             format!("the server's board tables are at version {v}, this app needs {code}: press Create / upgrade tables in Settings"),
         )),
@@ -151,7 +194,7 @@ pub fn next_pull_cursor(upto: i64, stats: &[(usize, Option<i64>)], limit: usize)
     stats.iter().filter(|(n, _)| *n >= limit).filter_map(|(_, last)| *last).fold(upto, i64::min)
 }
 
-fn is_uuid(s: &str) -> bool {
+pub fn is_uuid(s: &str) -> bool {
     s.len() == 36
         && s.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() })
 }
@@ -325,17 +368,67 @@ pub async fn sync_round(
     if let Some((code, m)) = schema_pause(stored, super::pg::SCHEMA_VERSION) {
         return Err(SyncError::Paused(code, m));
     }
-    if server.sync_register(host, &st.instance, now).await.map_err(SyncError::Offline)?.is_some() {
+    let v4 = stored.is_some_and(|v| v >= 4);
+    // Stage 3c: is this the server this file synced with? A rebuilt server at the same address
+    // (new uid) or one restored from a backup (its sequence went back) resets the pull and
+    // sends this computer's teams again.
+    let (server_uid, server_last) = server.sync_identity().await.map_err(SyncError::Offline)?;
+    let event = local.run(move |c, _| super::sqlite::sync_check_server(c, &server_uid, server_last, now)).await.map_err(local_err)?;
+    let st = if event.is_some() {
+        let instance = st.instance.clone();
+        let mut fresh = local.run(|c, _| super::sqlite::sync_state_now(c)).await.map_err(local_err)?;
+        fresh.instance = instance;
+        fresh
+    } else {
+        st
+    };
+    if server.sync_register(host, &st.instance).await.map_err(SyncError::Offline)?.is_some() {
+        if v4 && server.replaced_by_restore(host, &st.instance).await.map_err(SyncError::Offline)? {
+            return Err(SyncError::Paused("replaced", replaced_message(host, st.waiting)));
+        }
         return Err(SyncError::Paused("name_taken", collision_message(host)));
     }
-    let mut report = RoundReport::default();
+    let mut report = RoundReport { server_schema: stored.unwrap_or(0), server_event: event, ..Default::default() };
+    report.hosts = server.sync_hosts().await.map_err(SyncError::Offline)?.into_iter().map(|(h, _, seen, age)| (h, seen, age)).collect();
+    let kept_dir = local.path().parent().map(|d| d.join(KEPT_DIR));
+    // Stage 3c: a team of this computer that another computer took over while this one was
+    // away becomes a read-only copy before anything is pushed (its unsent changes are counted
+    // as refused, never applied).
+    let h = host.to_string();
+    let mine = local.run(move |c, _| super::sqlite::home_team_uids(c, &h)).await.map_err(local_err)?;
+    if !mine.is_empty() {
+        for (uid, home, ..) in server.team_homes(&mine).await.map_err(SyncError::Offline)? {
+            let Some(home) = home.filter(|h| h != host) else { continue };
+            let dump = server.sync_fetch_teams(None, std::slice::from_ref(&uid)).await.map_err(SyncError::Offline)?;
+            let (u, hm, kd) = (uid.clone(), home.clone(), kept_dir.clone());
+            let n = local.run(move |c, _| super::sqlite::demote_team(c, &u, &hm, &dump, now, kd.as_deref())).await.map_err(local_err)?;
+            report.refused += n as u64;
+            let u = uid.clone();
+            if let Some((team, ..)) = local.run(move |c, _| super::sqlite::team_root_of(c, &u)).await.map_err(local_err)? {
+                report.moved.push(team.clone());
+                report.teams.push(team);
+            }
+        }
+    }
+    // Stage 3c: notes other computers sent to this computer's teams become numbered posts
+    // (before the push, so they leave in this round).
+    if v4 {
+        let notes = server.inbox_pending(host, 100).await.map_err(SyncError::Offline)?;
+        if !notes.is_empty() {
+            let ctx = Ctx { now, host: Some(host.to_string()), instance: super::instance_id().to_string() };
+            let (results, teams) = local.run(move |c, l| super::sqlite::inbox_apply(c, l, &notes, &ctx)).await.map_err(local_err)?;
+            server.inbox_mark(&results, now).await.map_err(SyncError::Offline)?;
+            report.delivered += results.iter().filter(|r| r.1 == "delivered").count();
+            report.teams.extend(teams);
+        }
+    }
     let mut full_done = !st.full_push;
     if st.full_push {
         for _ in 0..MAX_BATCHES {
             let h = host.to_string();
             let (next, rows) = local.run(move |c, _| super::sqlite::sync_full_batch(c, &h, SYNC_BATCH)).await.map_err(local_err)?;
             let o = server.sync_push(host, &st.instance, &rows, now).await.map_err(SyncError::Offline)?;
-            note_refused(local, &mut report, o).await.map_err(local_err)?;
+            note_refused(local, &mut report, o).await.map_err(|e| if e == REPLACED { SyncError::Paused("replaced", replaced_message(host, st.waiting)) } else { local_err(e) })?;
             let n = next.clone();
             local.run(move |c, _| super::sqlite::sync_full_done(c, n.as_deref())).await.map_err(local_err)?;
             if next.is_none() {
@@ -351,12 +444,15 @@ pub async fn sync_round(
                 break;
             };
             let o = server.sync_push(host, &st.instance, &rows, now).await.map_err(SyncError::Offline)?;
-            note_refused(local, &mut report, o).await.map_err(local_err)?;
+            note_refused(local, &mut report, o).await.map_err(|e| if e == REPLACED { SyncError::Paused("replaced", replaced_message(host, st.waiting)) } else { local_err(e) })?;
             local.run(move |c, _| super::sqlite::sync_push_done(c, upto)).await.map_err(local_err)?;
         }
         local.run(move |c, _| super::sqlite::sync_mark_caught_up(c, now)).await.map_err(local_err)?;
     }
     note(|s| s.last_push_at = Some(now));
+    if v4 {
+        send_outbox(local, server, host, &st.instance, now).await?;
+    }
     let upto = server.sync_watermark().await.map_err(SyncError::Offline)?.ok_or(SyncError::Busy)?;
     let mut after = st.pulled_seq;
     for _ in 0..MAX_BATCHES {
@@ -381,7 +477,38 @@ pub async fn sync_round(
     Ok(report)
 }
 
+/// Stage 3c, the sending side of remote notes: queued notes go to the server outbox (its id
+/// keeps a note single however often it is sent), then the outcome of sent ones is read back;
+/// a note the home has not taken for `REMOTE_NOTE_EXPIRE_MS` is withdrawn (only while still
+/// pending on the server) and shown as refused (`expired`).
+async fn send_outbox(local: &SqliteStore, server: &PgStore, host: &str, instance: &str, now: i64) -> Result<(), SyncError> {
+    let local_err = |e: String| SyncError::Paused("local", format!("the board file on this computer: {e}"));
+    let h = host.to_string();
+    let queued = local.run(move |c, _| super::sqlite::outbox_to_send(c, &h, 100)).await.map_err(local_err)?;
+    if !queued.is_empty() {
+        let res = server.outbox_send(instance, &queued, REMOTE_NOTES_PER_TEAM, REMOTE_NOTES_PER_COMPUTER).await.map_err(SyncError::Offline)?;
+        local.run(move |c, _| super::sqlite::outbox_after_send(c, &res, now)).await.map_err(local_err)?;
+    }
+    let sent = local.run(|c, _| super::sqlite::outbox_sent(c)).await.map_err(local_err)?;
+    if sent.is_empty() {
+        return Ok(());
+    }
+    for (id, _) in sent.iter().filter(|(_, at)| now - at >= REMOTE_NOTE_EXPIRE_MS) {
+        if server.outbox_withdraw(id, now).await.map_err(SyncError::Offline)? {
+            let id = id.clone();
+            local.run(move |c, _| super::sqlite::outbox_mark_refused(c, &id, "expired")).await.map_err(local_err)?;
+        }
+    }
+    let ids: Vec<String> = sent.into_iter().map(|(i, _)| i).collect();
+    let states = server.outbox_states(&ids).await.map_err(SyncError::Offline)?;
+    local.run(move |c, _| super::sqlite::outbox_apply_states(c, &states, &ids)).await.map_err(local_err)?;
+    Ok(())
+}
+
 async fn note_refused(local: &SqliteStore, report: &mut RoundReport, o: super::pg::PushOutcome) -> Result<(), String> {
+    if o.replaced {
+        return Err(REPLACED.to_string());
+    }
     report.pushed += o.written;
     report.refused += o.refused;
     if o.refused > 0 {
@@ -434,6 +561,9 @@ struct Status {
     last_error_code: Option<&'static str>,
     last_error_at: Option<i64>,
     last_round_at: Option<i64>,
+    hosts: Vec<(String, i64, i64)>,
+    hosts_at: Option<i64>,
+    server_schema: Option<i64>,
 }
 
 static STATUS: Mutex<Status> = Mutex::new(Status {
@@ -444,6 +574,9 @@ static STATUS: Mutex<Status> = Mutex::new(Status {
     last_error_code: None,
     last_error_at: None,
     last_round_at: None,
+    hosts: Vec::new(),
+    hosts_at: None,
+    server_schema: None,
 });
 
 fn note(f: impl FnOnce(&mut Status)) {
@@ -518,7 +651,10 @@ async fn run_round(sel: &super::Selection) -> Result<RoundReport, SyncError> {
     note(|s| {
         s.last_round_at = Some(now);
         match &res {
-            Ok(_) => {
+            Ok(r) => {
+                s.hosts = r.hosts.clone();
+                s.hosts_at = Some(now);
+                s.server_schema = Some(r.server_schema);
                 s.state = "on";
                 s.last_error = None;
                 s.last_error_code = None;
@@ -598,6 +734,7 @@ pub fn start_sync_worker(app: tauri::AppHandle) {
             match run_round(&sel).await {
                 Ok(r) => {
                     failures = 0;
+                    // `sync`, never `post`: views refresh, nothing notifies or types into a tab.
                     for team in &r.teams {
                         let _ = app.emit("octo-agent-board", json!({ "team": team, "action": "sync" }));
                     }
@@ -632,11 +769,20 @@ pub async fn agent_board_sync_status() -> Result<Value, String> {
         "refusedReason": null,
         "fullPush": false,
         "machines": [],
+        "outboxWaiting": 0,
+        "outboxRefused": 0,
+        "serverSchema": st.server_schema,
+        "codeSchema": super::pg::SCHEMA_VERSION,
+        // `ageMs` is by the server's clock at `hostsAt` (this computer's clock), so the view
+        // never compares two computers' clocks.
+        "hosts": st.hosts.iter().map(|(h, seen, age)| json!({ "host": h, "lastSeen": seen, "ageMs": age })).collect::<Vec<_>>(),
+        "hostsAt": st.hosts_at,
+        "adoptAfterMs": adopt_after_ms(),
     });
     let path = super::db_path()?;
     if !sel.uses_postgres() && path.exists() {
         let local = SqliteStore::new(path).run(|c, _| super::sqlite::sync_status_local(c)).await?;
-        for k in ["waiting", "skipped", "refused", "refusedReason", "fullPush", "machines"] {
+        for k in ["waiting", "skipped", "refused", "refusedReason", "fullPush", "machines", "outboxWaiting", "outboxRefused", "keptRows", "keptFile", "serverEvent", "serverEventAt"] {
             out[k] = local[k].clone();
         }
     }
@@ -657,6 +803,8 @@ pub async fn agent_board_sync_now() -> Result<Value, String> {
         status["pushed"] = json!(r.pushed);
         status["pulled"] = json!(r.pulled);
         status["refusedNow"] = json!(r.refused);
+        status["delivered"] = json!(r.delivered);
+        status["moved"] = json!(r.moved);
     }
     Ok(status)
 }
@@ -719,6 +867,236 @@ fn refusal(code: &str, vars: Value, message: &str) -> String {
     json!({ "code": code, "vars": vars, "message": message }).to_string()
 }
 
+// ── Stage 3c: restore, take over a team, remote notes (Settings / viewer only) ──
+
+/// `agents.board.adoptAfterHours` (1–720, default 24) in ms: how long a team's home must have
+/// been silent before another computer may take the team over. Protected from agents
+/// (`config.patch` refuses it, like `hostName`).
+pub fn adopt_after_ms() -> i64 {
+    let hours = crate::read_octo_config_json()
+        .and_then(|c| c.get("agents")?.get("board")?.get("adoptAfterHours")?.as_f64())
+        .map(|h| h.round() as i64)
+        .unwrap_or(ADOPT_AFTER_HOURS_DEFAULT);
+    hours.clamp(1, 720) * 3_600_000
+}
+
+fn server_schema_refusal(stored: Option<i64>, need: i64) -> Option<String> {
+    match stored {
+        Some(v) if v > super::pg::SCHEMA_VERSION => Some(refusal("server_newer", json!({}), "the server's board tables are from a newer app version: update the app")),
+        Some(v) if v >= need => None,
+        _ => Some(refusal("upgrade_tables", json!({ "need": need }), "the server's board tables need an upgrade: press Create / upgrade tables in Settings")),
+    }
+}
+
+/// What "Restore my teams from the server" would bring down for computer `host`: live teams
+/// homed on that name with their live tasks and notes, whether the name must be taken over from
+/// another installation (its last-seen age and whether the guard allows it), and how many
+/// local changes of those teams are still unsent (restore is refused while there are any).
+pub async fn restore_preview(local: &SqliteStore, server: &PgStore, host: &str, now: i64) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, super::pg::MIN_SCHEMA_VERSION) {
+        return Err(r);
+    }
+    let (teams, tasks, notes) = server.restore_counts(host).await?;
+    let mine = local.run(|c, _| super::sqlite::sync_instance(c)).await?;
+    let _ = now;
+    let holder = server.sync_hosts().await?.into_iter().find(|(h, ..)| h == host);
+    let takeover = holder.as_ref().filter(|(_, inst, ..)| *inst != mine).map(|(_, _, seen, age)| {
+        json!({ "lastSeen": seen, "ageMs": age, "minAgeMs": RESTORE_TAKEOVER_MS, "allowed": *age >= RESTORE_TAKEOVER_MS })
+    });
+    let uids = server.teams_homed_on(host).await?;
+    let unsent = local.run(move |c, _| super::sqlite::sync_unsent_for(c, &uids)).await?;
+    Ok(json!({ "host": host, "teams": teams, "tasks": tasks, "notes": notes, "takeover": takeover, "unsent": unsent }))
+}
+
+/// Restore (after the person confirmed the preview): refused while changes of those teams wait
+/// here; a name held by another installation moves to this one only with `takeover` and only
+/// when that one was silent for `RESTORE_TAKEOVER_MS` (guarded on the server); then the rows
+/// come down (row_version guard) and the teams are this computer's again.
+pub async fn restore_teams(local: &SqliteStore, server: &PgStore, host: &str, takeover: bool, now: i64) -> Result<Value, String> {
+    let pre = restore_preview(local, server, host, now).await?;
+    if pre["teams"].as_i64() == Some(0) {
+        return Err(refusal("nothing", json!({ "host": host }), &format!("the server has no teams homed on {host}")));
+    }
+    let unsent = pre["unsent"].as_i64().unwrap_or(0);
+    if unsent > 0 {
+        return Err(refusal("unsent", json!({ "n": unsent }), &format!("{unsent} change(s) of these teams on this computer were not sent yet; sync first")));
+    }
+    let mine = local.run(|c, _| super::sqlite::sync_instance(c)).await?;
+    if !pre["takeover"].is_null() {
+        let mins = RESTORE_TAKEOVER_MS / 60_000;
+        if !takeover {
+            return Err(refusal("takeover_needed", json!({ "host": host }), &format!("another installation holds the name {host}; confirm taking it over")));
+        }
+        let old = server.sync_hosts().await?.into_iter().find(|(h, ..)| h == host).map(|(_, i, ..)| i).unwrap_or_default();
+        let v4 = server.stored_schema_version().await?.is_some_and(|v| v >= 4);
+        if !server.take_over_host(host, &old, &mine, RESTORE_TAKEOVER_MS, v4).await? {
+            return Err(refusal(
+                "host_alive",
+                json!({ "host": host, "minutes": mins }),
+                &format!("the computer named {host} synced less than {mins} minutes ago; restore only replaces a computer that is gone"),
+            ));
+        }
+    } else if server.sync_register(host, &mine).await?.is_some() {
+        return Err(refusal("host_alive", json!({ "host": host, "minutes": RESTORE_TAKEOVER_MS / 60_000 }), &collision_message(host)));
+    }
+    let dump = server.sync_fetch_teams(Some(host), &[]).await?;
+    let h = host.to_string();
+    local.run(move |c, _| super::sqlite::restore_apply(c, &h, &dump, now)).await.map_err(|e| match e.strip_prefix("unsent:") {
+        Some(n) => refusal("unsent", json!({ "n": n.parse::<i64>().unwrap_or(0) }), &format!("{n} change(s) of these teams were not sent yet; sync first")),
+        None => e,
+    })
+}
+
+/// What "Take over this team" shows for the copy of root tab `team`: name, home, the server's
+/// row_version, the home's last-seen time and age, the threshold and whether it is met.
+pub async fn adopt_preview(local: &SqliteStore, server: &PgStore, team: &str, host: &str, now: i64, min_age: i64) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, 4) {
+        return Err(r);
+    }
+    let t = team.to_string();
+    let Some((uid, name, _, _)) = local.run(move |c, _| super::sqlite::mirror_of(c, &t)).await? else {
+        return Err(refusal("not_copy", json!({}), "this team is not a copy of another computer's team here"));
+    };
+    let _ = now;
+    let Some((_, Some(home), version, None, age, seen)) = server.team_homes(std::slice::from_ref(&uid)).await?.into_iter().next() else {
+        return Err(refusal("team_gone", json!({}), "the team is no longer on the server"));
+    };
+    if home == host {
+        return Err(refusal("already_home", json!({}), "this team already lives on this computer; sync to see it"));
+    }
+    // Age by the server's clock since the latest of the home's last sync and the team's last
+    // change (the same rule the takeover transaction checks).
+    Ok(json!({
+        "team": team, "teamName": name, "uid": uid, "home": home, "version": version,
+        "lastSeen": seen, "ageMs": age, "adoptAfterMs": min_age, "allowed": age >= min_age,
+    }))
+}
+
+/// "Take over this team" (after the person confirmed the preview's team, home and version):
+/// one guarded server transaction moves the home here; the team's rows come down as the server
+/// has them and it is this computer's team from then on.
+#[allow(clippy::too_many_arguments)]
+pub async fn adopt_team(
+    local: &SqliteStore,
+    server: &PgStore,
+    host: &str,
+    team: &str,
+    uid: &str,
+    home: &str,
+    version: i64,
+    now: i64,
+    min_age: i64,
+) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, 4) {
+        return Err(r);
+    }
+    let (t, h) = (team.to_string(), host.to_string());
+    if local.run(move |c, _| super::sqlite::has_own_team(c, &t, &h)).await? {
+        return Err(refusal("same_team_here", json!({}), "this computer already has a team for the same tab"));
+    }
+    match server.adopt_team(uid, home, version, host, super::instance_id(), min_age).await? {
+        Ok(_) => {}
+        Err((code, msg)) => return Err(refusal(code, json!({ "home": home, "hours": min_age / 3_600_000 }), &msg)),
+    }
+    let dump = server.sync_fetch_teams(None, &[uid.to_string()]).await?;
+    let (u, h) = (uid.to_string(), host.to_string());
+    local.run(move |c, _| super::sqlite::adopt_apply(c, &u, &h, &dump, now)).await
+}
+
+/// The parts the 3c commands need: the sync server and the local file (sync mode only).
+fn parts3c(sel: &super::Selection) -> Result<(Arc<PgStore>, Arc<super::BoardStore>), String> {
+    if sel.mode.mode != BoardMode::Sync {
+        return Err(refusal("sync_off", json!({}), "sync is off: choose \"Both (sync)\" first"));
+    }
+    let (_, server) = server_for(sel).map_err(|e| refusal("settings", json!({}), &clean_message(&e)))?;
+    let store = super::current_store()?;
+    if !matches!(&*store, super::BoardStore::Sqlite(_)) {
+        return Err(refusal("local", json!({}), "sync needs the board file on this computer"));
+    }
+    Ok((server, store))
+}
+
+fn lite(store: &super::BoardStore) -> &SqliteStore {
+    match store {
+        super::BoardStore::Sqlite(s) => s,
+        super::BoardStore::Pg(_) => unreachable!("parts3c checked the engine"),
+    }
+}
+
+/// A refusal passes as it is; any other error (server, file) has secrets removed.
+fn clean_err3c(e: String) -> String {
+    if e.starts_with('{') {
+        e
+    } else {
+        refusal("error", json!({}), &clean_message(&e))
+    }
+}
+
+/// Settings → "Restore my teams from the server": the preview (nothing changes).
+#[tauri::command]
+pub async fn agent_board_restore_preview() -> Result<Value, String> {
+    let sel = super::read_selection();
+    let (server, store) = parts3c(&sel)?;
+    let _one = ROUND.lock().await;
+    restore_preview(lite(&store), &server, &super::board_host(), now_ms()).await.map_err(clean_err3c)
+}
+
+/// Settings → "Restore my teams from the server", after the person confirmed the preview.
+#[tauri::command]
+pub async fn agent_board_restore(takeover: bool) -> Result<Value, String> {
+    let sel = super::read_selection();
+    let (server, store) = parts3c(&sel)?;
+    let _one = ROUND.lock().await;
+    let out = restore_teams(lite(&store), &server, &super::board_host(), takeover, now_ms()).await.map_err(clean_err3c)?;
+    note_local_write();
+    Ok(out)
+}
+
+/// Team status → "Take over this team": the preview for a copy (nothing changes).
+#[tauri::command]
+pub async fn agent_board_adopt_preview(team: String) -> Result<Value, String> {
+    let sel = super::read_selection();
+    let (server, store) = parts3c(&sel)?;
+    let _one = ROUND.lock().await;
+    adopt_preview(lite(&store), &server, team.trim(), &super::board_host(), now_ms(), adopt_after_ms()).await.map_err(clean_err3c)
+}
+
+/// Team status → "Take over this team", with the team, home and version the person confirmed.
+#[tauri::command]
+pub async fn agent_board_adopt(team: String, uid: String, home: String, version: i64) -> Result<Value, String> {
+    let sel = super::read_selection();
+    let (server, store) = parts3c(&sel)?;
+    let _one = ROUND.lock().await;
+    let out = adopt_team(lite(&store), &server, &super::board_host(), team.trim(), &uid, &home, version, now_ms(), adopt_after_ms())
+        .await
+        .map_err(clean_err3c)?;
+    note_local_write();
+    Ok(out)
+}
+
+/// Team status: this computer's notes for a team on another computer that are not posts yet
+/// (waiting to be delivered, or refused with a code). Local only; never creates the file.
+#[tauri::command]
+pub async fn agent_board_outbox(team: String) -> Result<Vec<Value>, String> {
+    let path = super::db_path()?;
+    if super::read_selection().uses_postgres() || !path.exists() {
+        return Ok(Vec::new());
+    }
+    let t = team.trim().to_string();
+    SqliteStore::new(path).run(move |c, _| super::sqlite::outbox_list(c, &t)).await
+}
+
+/// Team status: a person dismisses a refused note.
+#[tauri::command]
+pub async fn agent_board_outbox_dismiss(id: String) -> Result<Value, String> {
+    let path = super::db_path()?;
+    if !path.exists() {
+        return Ok(json!({ "removed": 0 }));
+    }
+    let n = SqliteStore::new(path).run(move |c, _| super::sqlite::outbox_dismiss(c, &id)).await?;
+    Ok(json!({ "removed": n }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +1123,10 @@ mod tests {
         assert_eq!(schema_pause(Some(4), 3).unwrap().0, "server_newer");
         assert!(schema_pause(Some(2), 3).unwrap().1.contains("version 2, this app needs 3"));
         assert_eq!(schema_pause(Some(3), 3), None);
+        // A version-3 server keeps 3b sync going under a version-4 app (remote notes and
+        // takeovers wait for "Create / upgrade tables").
+        assert_eq!(schema_pause(Some(3), 4), None);
+        assert_eq!(schema_pause(Some(2), 4).unwrap().0, "server_older");
         assert_eq!(collision_message("mac-a"), "another computer uses the name mac-a; set this computer's name in Settings");
         assert_eq!(read_only_message("mac-a"), "this team lives on mac-a; it is read-only here");
     }

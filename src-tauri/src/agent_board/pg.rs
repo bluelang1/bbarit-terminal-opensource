@@ -33,7 +33,17 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 /// Schema version this code reads and writes (the same number as the SQLite store's).
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+/// The oldest server tables this app still works with: version 3 lacks only the remote-note
+/// outbox (stage 3c), so `postgres` mode and 3b sync keep working until "Create / upgrade
+/// tables" moves it to 4; remote notes and "Take over this team" wait for that.
+pub const MIN_SCHEMA_VERSION: i64 = 3;
+/// The server's clock in ms. Every `hosts.last_seen` write and every "silent for" guard uses
+/// it, so computers with different clocks compare like with like (stage 3c review R1).
+pub const SERVER_NOW_MS: &str = "(extract(epoch from clock_timestamp()) * 1000)::bigint";
+/// Remote-note outbox rows that are finished (delivered, refused, withdrawn) are removed by
+/// "Clean up" after this long.
+pub const OUTBOX_RETENTION_MS: i64 = 30 * 24 * 3_600_000;
 
 /// Longest a board command may wait on the server (a network drop mid-query must not stall
 /// the lease worker or a command): "team board unavailable: …" after that.
@@ -95,8 +105,8 @@ pub fn plan_versions(stored: Option<i64>, code: i64) -> Result<Vec<i64>, String>
 }
 
 /// Everything the migration creates in the schema besides `board_meta`.
-const BOARD_RELATIONS: [&str; 9] =
-    ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "hosts", "board_server_seq", "board_arrival_seq"];
+const BOARD_RELATIONS: [&str; 10] =
+    ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "hosts", "outbox", "board_server_seq", "board_arrival_seq"];
 
 pub fn foreign_message(schema: &str, found: &[String]) -> String {
     format!("schema {schema} already contains tables named {} that the board did not create: choose an empty schema", found.join(", "))
@@ -113,7 +123,7 @@ pub fn version_check(stored: Option<i64>, schema: &str, code: i64) -> Result<(),
             "no board tables in PostgreSQL schema {schema} yet: Settings → Agent team board → Create / upgrade tables"
         )),
         Some(v) if v > code => Err(newer_message(v, code)),
-        Some(v) if v < code => Err(format!(
+        Some(v) if v < code && !(MIN_SCHEMA_VERSION..code).contains(&v) => Err(format!(
             "the board tables in schema {schema} are at version {v}, this app needs {code}: Settings → Agent team board → Create / upgrade tables"
         )),
         Some(_) => Ok(()),
@@ -222,6 +232,25 @@ $fn$"
         .into()]
 }
 
+/// Version 4 (stage 3c): the remote-note outbox. A computer that holds only a copy of a team
+/// inserts a note here (its UUID is the idempotency key and becomes the post id); the team's
+/// home turns it into a numbered post on its next round and marks it `delivered` or `refused`
+/// (`reason` is a stable code). The poster may withdraw a note still `pending`. No
+/// `server_seq`: rows are found by state, never by a pull cursor.
+fn v4_sql() -> Vec<String> {
+    vec![
+        "CREATE TABLE IF NOT EXISTS @@.outbox (
+  id TEXT PRIMARY KEY, team_uid TEXT NOT NULL, from_host TEXT NOT NULL, from_instance TEXT NOT NULL,
+  author_id TEXT NOT NULL, author_name TEXT, author_cli TEXT, kind TEXT NOT NULL, text TEXT NOT NULL,
+  created_at BIGINT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', reason TEXT, handled_at BIGINT)"
+            .into(),
+        "CREATE INDEX IF NOT EXISTS outbox_team_state ON @@.outbox (team_uid, state)".into(),
+        "CREATE INDEX IF NOT EXISTS outbox_from_state ON @@.outbox (from_instance, state)".into(),
+        // The installation a restore replaced (it is told so instead of "name taken").
+        "ALTER TABLE @@.hosts ADD COLUMN IF NOT EXISTS replaced_instance TEXT".into(),
+    ]
+}
+
 /// Text hashed into the server_seq lock key (`hashtext(...)`; the trigger builds the same text
 /// from `TG_TABLE_SCHEMA`).
 pub fn seq_lock_key(schema: &str) -> String {
@@ -243,6 +272,11 @@ pub fn migration_steps(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, S
                 version: 3,
                 description: "server_seq numbers are drawn under a shared lock, so syncing machines never miss a row that commits late",
                 sql: v3_sql().into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
+            }),
+            4 => Ok(Step {
+                version: 4,
+                description: "add the outbox for notes sent to a team whose home is another computer",
+                sql: v4_sql().into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
             }),
             other => Err(format!("no PostgreSQL migration to version {other}")),
         })
@@ -511,6 +545,13 @@ impl PgStore {
             "upToDate": steps.is_empty(),
             "applied": false,
         });
+        if apply && steps.is_empty() {
+            sqlx::query(&self.s("INSERT INTO @@.board_meta (key, value) VALUES ('server_uid', $1) ON CONFLICT (key) DO NOTHING"))
+                .bind(uuid::Uuid::new_v4().to_string())
+                .execute(&mut *c)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
         if !apply || steps.is_empty() {
             return Ok(out);
         }
@@ -533,6 +574,8 @@ impl PgStore {
             let now = now_ms();
             for (key, value, overwrite) in [
                 ("schema_version", SCHEMA_VERSION.to_string(), true),
+                // This server's identity: a rebuilt server at the same address gets a new one.
+                ("server_uid", uuid::Uuid::new_v4().to_string(), false),
                 ("created_at", now.to_string(), false),
                 ("created_by_app_version", env!("CARGO_PKG_VERSION").to_string(), false),
             ] {
@@ -601,7 +644,8 @@ impl PgStore {
             out["schemaVersion"] = json!(stored);
             let can_rw: Option<bool> = if stored.is_some() {
                 let mut all = true;
-                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta", "hosts"] {
+                let outbox: &[&str] = if stored.is_some_and(|v| v >= 4) { &["outbox"] } else { &[] };
+                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta", "hosts"].iter().chain(outbox) {
                     let ok: bool = sqlx::query_scalar("SELECT has_table_privilege($1, 'SELECT, INSERT, UPDATE, DELETE')")
                         .bind(format!("{}{t}", store.prefix))
                         .fetch_one(&mut c)
@@ -638,7 +682,7 @@ impl PgStore {
                 None => format!("this user cannot create tables here: ask the database owner to create schema {schema} or grant CREATE"),
                 Some(v) if v < SCHEMA_VERSION => format!("press Create / upgrade tables (version {v} → {SCHEMA_VERSION})"),
                 Some(_) if can_rw == Some(false) => {
-                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them (hosts included), USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
+                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them (hosts and outbox included), USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
                 }
                 Some(_) => "ready: choose \"PostgreSQL only\" as the usage type; to bring the boards of this computer, use Copy data from this computer (SQLite) to PostgreSQL first".to_string(),
             };
@@ -1135,6 +1179,19 @@ impl PgStore {
         for table in ["posts", "task_events", "task_deps", "tasks", "teams"] {
             sqlx::query(&self.s(&format!("DELETE FROM @@.{table} WHERE deleted_at IS NOT NULL AND deleted_at < $1")))
                 .bind(purge_before)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
+        // Finished remote notes (stage 3c) after OUTBOX_RETENTION_MS; only where the table exists.
+        let has_outbox: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("{}outbox", self.prefix))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        if has_outbox {
+            sqlx::query(&self.s("DELETE FROM @@.outbox WHERE state <> 'pending' AND coalesce(handled_at, created_at) < $1"))
+                .bind(now - OUTBOX_RETENTION_MS)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| self.err(e))?;
@@ -2405,6 +2462,11 @@ pub struct PushOutcome {
     pub written: u64,
     pub refused: u64,
     pub reason: Option<String>,
+    /// Teams in the batch whose home on the server is now another computer (taken over):
+    /// (uid, new home). Their rows were not written and are counted in `refused`.
+    pub moved: Vec<(String, String)>,
+    /// This installation no longer holds its name on the server: nothing was written.
+    pub replaced: bool,
 }
 
 /// Primary key columns of a synced table.
@@ -2453,15 +2515,14 @@ impl PgStore {
 
     /// Register this machine in `hosts` (first sync) or find who holds its name. Returns the
     /// other instance id when the name belongs to another machine.
-    pub async fn sync_register(&self, host: &str, instance: &str, now: i64) -> Result<Option<String>, String> {
+    pub async fn sync_register(&self, host: &str, instance: &str) -> Result<Option<String>, String> {
         let pool = self.pool().await?;
-        sqlx::query(&self.s(
-            "INSERT INTO @@.hosts (host, instance_id, first_seen, last_seen, app_version) VALUES ($1, $2, $3, $3, $4)
+        sqlx::query(&self.s(&format!(
+            "INSERT INTO @@.hosts (host, instance_id, first_seen, last_seen, app_version) VALUES ($1, $2, {SERVER_NOW_MS}, {SERVER_NOW_MS}, $3)
              ON CONFLICT (host) DO NOTHING",
-        ))
+        )))
         .bind(host)
         .bind(instance)
-        .bind(now)
         .bind(env!("CARGO_PKG_VERSION"))
         .execute(pool)
         .await
@@ -2471,7 +2532,18 @@ impl PgStore {
             .fetch_one(pool)
             .await
             .map_err(|e| self.err(e))?;
-        Ok(if owner == instance { None } else { Some(owner) })
+        if owner != instance {
+            return Ok(Some(owner));
+        }
+        // Every round says this computer is alive (takeover guards read last_seen).
+        sqlx::query(&self.s(&format!("UPDATE @@.hosts SET last_seen = {SERVER_NOW_MS}, app_version = $3 WHERE host = $1 AND instance_id = $2")))
+            .bind(host)
+            .bind(instance)
+            .bind(env!("CARGO_PKG_VERSION"))
+            .execute(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(None)
     }
 
     /// Push one batch of this computer's rows in one transaction, parents before children. Each
@@ -2485,6 +2557,68 @@ impl PgStore {
         let pool = self.pool().await?;
         let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
         let mut out = PushOutcome::default();
+        // Stage 3c: this installation must still hold its name (a restore elsewhere may have
+        // replaced it). The row is held FOR SHARE until commit, so a takeover waits for an
+        // in-flight push, and a push after the takeover writes nothing.
+        let holds: Option<i32> = sqlx::query_scalar(&self.s("SELECT 1 FROM @@.hosts WHERE host = $1 AND instance_id = $2 FOR SHARE"))
+            .bind(host)
+            .bind(instance)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        if holds.is_none() {
+            let _ = tx.rollback().await;
+            out.replaced = true;
+            return Ok(out);
+        }
+        // Stage 3c: a team whose home on the server is now another computer (it was taken over
+        // while this one was away) gets nothing from here. The team rows are read FOR SHARE, so
+        // a takeover committing meanwhile is either seen here or waits for this push.
+        let batch_uids: Vec<String> = {
+            let mut v: Vec<String> = Vec::new();
+            for (table, cols) in super::sync::SYNC_TABLES {
+                let i = copy::col_index(cols, if table == "teams" { "uid" } else { "team_uid" });
+                for r in rows.rows(table) {
+                    if let Some(u) = r[i].text() {
+                        if !v.iter().any(|x| x == u) {
+                            v.push(u.to_string());
+                        }
+                    }
+                }
+            }
+            v
+        };
+        let homes: Vec<(String, Option<String>)> = sqlx::query_as(&self.s("SELECT uid, home_host FROM @@.teams WHERE uid = ANY($1) FOR SHARE"))
+            .bind(&batch_uids)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        let moved: std::collections::HashMap<String, String> =
+            homes.into_iter().filter(|(_, h)| h.as_deref() != Some(host)).map(|(u, h)| (u, h.unwrap_or_default())).collect();
+        out.moved = moved.iter().map(|(u, h)| (u.clone(), h.clone())).collect();
+        out.moved.sort();
+        let filtered: Dump;
+        let rows = if moved.is_empty() {
+            rows
+        } else {
+            let mut d = Dump::default();
+            for (table, cols) in super::sync::SYNC_TABLES {
+                let i = copy::col_index(cols, if table == "teams" { "uid" } else { "team_uid" });
+                for r in rows.rows(table) {
+                    match r[i].text().and_then(|u| moved.get(u)) {
+                        Some(home) => {
+                            out.refused += 1;
+                            if out.reason.is_none() {
+                                out.reason = Some(super::sync::moved_message(home));
+                            }
+                        }
+                        None => d.rows_mut(table).push(r.clone()),
+                    }
+                }
+            }
+            filtered = d;
+            &filtered
+        };
         for (table, cols) in super::sync::SYNC_TABLES {
             let rows = rows.rows(table);
             if rows.is_empty() {
@@ -2601,9 +2735,9 @@ impl PgStore {
                 }
             }
         }
-        sqlx::query(&self.s("UPDATE @@.hosts SET last_seen = $2, app_version = $3 WHERE host = $1 AND instance_id = $4"))
+        let _ = now;
+        sqlx::query(&self.s(&format!("UPDATE @@.hosts SET last_seen = {SERVER_NOW_MS}, app_version = $2 WHERE host = $1 AND instance_id = $3")))
             .bind(host)
-            .bind(now)
             .bind(env!("CARGO_PKG_VERSION"))
             .bind(instance)
             .execute(&mut *tx)
@@ -2734,6 +2868,405 @@ impl PgStore {
     }
 }
 
+// ── Stage 3c: restore, take over a team, remote notes (orchestration in sync.rs) ──
+
+/// A note sent to a team whose home is another computer, as the outbox holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboxNote {
+    pub id: String,
+    pub team_uid: String,
+    pub from_host: String,
+    pub author_id: String,
+    pub author_name: Option<String>,
+    pub author_cli: Option<String>,
+    pub kind: String,
+    pub text: String,
+    pub created_at: i64,
+    /// Home side only: the team is tombstoned on the server.
+    pub team_deleted: bool,
+    /// Home side only: (from_host, from_instance) is a registered computer.
+    pub sender_known: bool,
+}
+
+/// Why a takeover was refused on the server: (stable code, English message).
+pub type Refused = (&'static str, String);
+
+impl PgStore {
+    /// This server's identity and the last value of its `board_server_seq`. The uid is
+    /// `board_meta.server_uid`: written when the tables are created (and by "Create / upgrade
+    /// tables"); a server made before it existed gets one here, on the first round, with
+    /// `INSERT … ON CONFLICT DO NOTHING` (no table change; `board_meta` INSERT is already part
+    /// of the privilege check), and two computers doing it at once read the same winner.
+    pub async fn sync_identity(&self) -> Result<(String, i64), String> {
+        let pool = self.pool().await?;
+        sqlx::query(&self.s("INSERT INTO @@.board_meta (key, value) VALUES ('server_uid', $1) ON CONFLICT (key) DO NOTHING"))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .execute(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        let uid: Option<String> = sqlx::query_scalar(&self.s("SELECT value FROM @@.board_meta WHERE key = 'server_uid'"))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        let last: Option<i64> = sqlx::query_scalar("SELECT pg_sequence_last_value($1::regclass)")
+            .bind(format!("{}board_server_seq", self.prefix))
+            .fetch_one(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok((uid.unwrap_or_default(), last.unwrap_or(0)))
+    }
+
+    /// Every registered computer: (host, instance_id, last_seen, age by the server's clock).
+    pub async fn sync_hosts(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let pool = self.pool().await?;
+        sqlx::query_as(&self.s(&format!("SELECT host, instance_id, last_seen, {SERVER_NOW_MS} - last_seen FROM @@.hosts ORDER BY host")))
+            .fetch_all(pool)
+            .await
+            .map_err(|e| self.err(e))
+    }
+
+    /// Was `instance` replaced on name `host` by a restore (version-4 tables only)?
+    pub async fn replaced_by_restore(&self, host: &str, instance: &str) -> Result<bool, String> {
+        let pool = self.pool().await?;
+        let r: Option<Option<String>> = sqlx::query_scalar(&self.s("SELECT replaced_instance FROM @@.hosts WHERE host = $1"))
+            .bind(host)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(r.flatten().as_deref() == Some(instance))
+    }
+
+    /// The server's home and row_version of the teams `uids` (missing ones are left out).
+    /// Also: how long ago (server clock) the home was last heard of — the largest of its
+    /// `hosts.last_seen`, the team's `last_activity_at` and `updated_at` — and `last_seen`.
+    #[allow(clippy::type_complexity)]
+    pub async fn team_homes(&self, uids: &[String]) -> Result<Vec<(String, Option<String>, i64, Option<i64>, i64, Option<i64>)>, String> {
+        let pool = self.pool().await?;
+        sqlx::query_as(&self.s(&format!(
+            "SELECT t.uid, t.home_host, t.row_version, t.deleted_at,
+                    {SERVER_NOW_MS} - greatest(coalesce(h.last_seen, 0), t.last_activity_at, t.updated_at), h.last_seen
+             FROM @@.teams t LEFT JOIN @@.hosts h ON h.host = t.home_host WHERE t.uid = ANY($1)"
+        )))
+            .bind(uids)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| self.err(e))
+    }
+
+    /// Live teams homed on `host` (uids).
+    pub async fn teams_homed_on(&self, host: &str) -> Result<Vec<String>, String> {
+        let pool = self.pool().await?;
+        sqlx::query_scalar(&self.s("SELECT uid FROM @@.teams WHERE home_host = $1 AND deleted_at IS NULL")).bind(host).fetch_all(pool).await.map_err(|e| self.err(e))
+    }
+
+    /// Live teams homed on `host`, with their live tasks and notes (the restore preview).
+    pub async fn restore_counts(&self, host: &str) -> Result<(i64, i64, i64), String> {
+        let pool = self.pool().await?;
+        sqlx::query_as(&self.s(
+            "SELECT (SELECT count(*) FROM @@.teams WHERE home_host = $1 AND deleted_at IS NULL),
+                    (SELECT count(*) FROM @@.tasks x JOIN @@.teams t ON t.uid = x.team_uid
+                      WHERE t.home_host = $1 AND t.deleted_at IS NULL AND x.deleted_at IS NULL),
+                    (SELECT count(*) FROM @@.posts x JOIN @@.teams t ON t.uid = x.team_uid
+                      WHERE t.home_host = $1 AND t.deleted_at IS NULL AND x.deleted_at IS NULL)",
+        ))
+        .bind(host)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| self.err(e))
+    }
+
+    /// Every row (tombstones included) of the live teams homed on `home`, or of the teams
+    /// `uids`, in one snapshot; posts in the server's read order.
+    pub async fn sync_fetch_teams(&self, home: Option<&str>, uids: &[String]) -> Result<Dump, String> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+        let team_uids: Vec<String> = match home {
+            Some(h) => sqlx::query_scalar(&self.s("SELECT uid FROM @@.teams WHERE home_host = $1 AND deleted_at IS NULL"))
+                .bind(h)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?,
+            None => uids.to_vec(),
+        };
+        let mut dump = Dump::default();
+        for (table, cols) in super::sync::SYNC_TABLES {
+            let key = if table == "teams" { "uid" } else { "team_uid" };
+            let order = if table == "posts" { "arrival" } else { "server_seq" };
+            let sql = self.s(&format!("SELECT {} FROM @@.{table} WHERE {key} = ANY($1) ORDER BY {order}", copy::col_list(cols)));
+            let rows = sqlx::query(&sql).bind(&team_uids).fetch_all(&mut *tx).await.map_err(|e| self.err(e))?;
+            for r in &rows {
+                dump.rows_mut(table).push(self.cells(r, cols)?);
+            }
+        }
+        tx.commit().await.map_err(|e| self.err(e))?;
+        Ok(dump)
+    }
+
+    /// Restore on a new installation: the name `host` moves from instance `old` to `new`, only
+    /// while `old` still holds it and was last seen at least `min_age_ms` ago (a computer that
+    /// is still syncing is never impersonated). False when either guard failed.
+    pub async fn take_over_host(&self, host: &str, old: &str, new: &str, min_age_ms: i64, v4: bool) -> Result<bool, String> {
+        let pool = self.pool().await?;
+        let mark = if v4 { ", replaced_instance = $2" } else { "" };
+        let r = sqlx::query(&self.s(&format!(
+            "UPDATE @@.hosts SET instance_id = $3, last_seen = {SERVER_NOW_MS}, app_version = $5{mark}
+             WHERE host = $1 AND instance_id = $2 AND last_seen <= {SERVER_NOW_MS} - $4",
+        )))
+        .bind(host)
+        .bind(old)
+        .bind(new)
+        .bind(min_age_ms)
+        .bind(env!("CARGO_PKG_VERSION"))
+        .execute(pool)
+        .await
+        .map_err(|e| self.err(e))?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    /// "Take over this team": one transaction that moves team `uid` to (`host`, `instance`)
+    /// only while its home is still `expect_home` at `expect_version` (the values the person
+    /// confirmed) and that home was last seen at least `min_age_ms` ago. The team row is
+    /// locked FOR UPDATE, so of two computers adopting at once exactly one succeeds; the
+    /// row_version bump draws a server_seq under the shared writer lock (trigger), so the old
+    /// home and every copy pull the change. Returns the new row_version, or a refusal.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn adopt_team(
+        &self,
+        uid: &str,
+        expect_home: &str,
+        expect_version: i64,
+        host: &str,
+        instance: &str,
+        min_age_ms: i64,
+    ) -> Result<Result<i64, Refused>, String> {
+        let pool = self.pool().await?;
+        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+        let row: Option<(String, Option<String>, i64, Option<i64>, i64)> = sqlx::query_as(&self.s(
+            "SELECT team, home_host, row_version, deleted_at, greatest(last_activity_at, updated_at) FROM @@.teams WHERE uid = $1 FOR UPDATE",
+        ))
+        .bind(uid)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| self.err(e))?;
+        let Some((team, home, version, deleted, activity)) = row else {
+            return Ok(Err(("team_gone", "the team is no longer on the server".into())));
+        };
+        if deleted.is_some() {
+            return Ok(Err(("team_gone", "the team is no longer on the server".into())));
+        }
+        let home = home.unwrap_or_default();
+        if home == host {
+            return Ok(Err(("already_home", "this team already lives on this computer".into())));
+        }
+        if home != expect_home || version != expect_version {
+            return Ok(Err(("changed", format!("the team changed on the server (it now lives on {home}); look again before taking it over"))));
+        }
+        // Server clock; the latest sign of life is the home's last sync or the team's own last
+        // change, whichever is later (a team still changing is never taken).
+        let (seen, server_now): (Option<i64>, i64) =
+            sqlx::query_as(&self.s(&format!("SELECT (SELECT last_seen FROM @@.hosts WHERE host = $1), {SERVER_NOW_MS}")))
+                .bind(&home)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+        let seen = seen.unwrap_or(0).max(activity);
+        if server_now - seen < min_age_ms {
+            return Ok(Err(("home_alive", format!("{home} was seen less than {} hours ago; it may still be working on this team", min_age_ms / 3_600_000))));
+        }
+        let clash: Option<Option<i64>> = sqlx::query_scalar(&self.s("SELECT deleted_at FROM @@.teams WHERE team = $1 AND home_host = $2 AND uid <> $3"))
+            .bind(&team)
+            .bind(host)
+            .bind(uid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| self.err(e))?;
+        match clash {
+            Some(None) => return Ok(Err(("same_team_here", "this computer already has a live team for the same tab".into()))),
+            Some(Some(_)) => {
+                // This computer's own retired team with the same root id: removed for good (as a push does).
+                let old: Vec<String> = sqlx::query_scalar(&self.s("SELECT uid FROM @@.teams WHERE team = $1 AND home_host = $2 AND uid <> $3"))
+                    .bind(&team)
+                    .bind(host)
+                    .bind(uid)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| self.err(e))?;
+                for t in copy::PURGE_TABLES {
+                    sqlx::query(&self.s(&format!("DELETE FROM @@.{t} WHERE team_uid = ANY($1)"))).bind(&old).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                }
+                sqlx::query(&self.s("DELETE FROM @@.teams WHERE uid = ANY($1)")).bind(&old).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+            }
+            None => {}
+        }
+        let next: Option<i64> = sqlx::query_scalar(&self.s(
+            "UPDATE @@.teams SET home_host = $2, home_instance = $3, origin_host = $2, updated_at = $4, row_version = row_version + 1
+             WHERE uid = $1 AND home_host = $5 AND row_version = $6 RETURNING row_version",
+        ))
+        .bind(uid)
+        .bind(host)
+        .bind(instance)
+        .bind(server_now)
+        .bind(&home)
+        .bind(version)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| self.err(e))?;
+        let Some(next) = next else {
+            return Ok(Err(("changed", "the team changed on the server; look again before taking it over".into())));
+        };
+        tx.commit().await.map_err(|e| self.err(e))?;
+        Ok(Ok(next))
+    }
+
+    /// Send notes to the outbox. Idempotent by id: a note already there is reported as stored.
+    /// Each note is checked under a per-team lock: the team must be live with another home than
+    /// the sender, and the pending caps per team and per sending computer must have room.
+    /// Returns per note None (stored) or a refusal code.
+    pub async fn outbox_send(&self, instance: &str, notes: &[OutboxNote], per_team: i64, per_computer: i64) -> Result<Vec<(String, Option<&'static str>)>, String> {
+        let pool = self.pool().await?;
+        let mut out = Vec::new();
+        for n in notes {
+            let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("bbarit-board-outbox:{}:{}", self.target.schema, n.team_uid))
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            let there: bool = sqlx::query_scalar(&self.s("SELECT EXISTS (SELECT 1 FROM @@.outbox WHERE id = $1)"))
+                .bind(&n.id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            if there {
+                tx.commit().await.map_err(|e| self.err(e))?;
+                out.push((n.id.clone(), None));
+                continue;
+            }
+            // A note for the sender's own team (it took the team over after queuing it) is
+            // stored too: the sender, now the home, delivers it like any other.
+            let home: Option<(Option<String>, Option<i64>)> = sqlx::query_as(&self.s("SELECT home_host, deleted_at FROM @@.teams WHERE uid = $1"))
+                .bind(&n.team_uid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            let refusal = match home {
+                None | Some((_, Some(_))) => Some("team_gone"),
+                _ => {
+                    let (team_n, mine_n): (i64, i64) = sqlx::query_as(&self.s(
+                        "SELECT (SELECT count(*) FROM @@.outbox WHERE team_uid = $1 AND state = 'pending'),
+                                (SELECT count(*) FROM @@.outbox WHERE from_instance = $2 AND state = 'pending')",
+                    ))
+                    .bind(&n.team_uid)
+                    .bind(instance)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| self.err(e))?;
+                    if team_n >= per_team {
+                        Some("team_full")
+                    } else if mine_n >= per_computer {
+                        Some("computer_full")
+                    } else {
+                        None
+                    }
+                }
+            };
+            if refusal.is_none() {
+                sqlx::query(&self.s(
+                    "INSERT INTO @@.outbox (id, team_uid, from_host, from_instance, author_id, author_name, author_cli, kind, text, created_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (id) DO NOTHING",
+                ))
+                .bind(&n.id)
+                .bind(&n.team_uid)
+                .bind(&n.from_host)
+                .bind(instance)
+                .bind(&n.author_id)
+                .bind(&n.author_name)
+                .bind(&n.author_cli)
+                .bind(&n.kind)
+                .bind(&n.text)
+                .bind(n.created_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| self.err(e))?;
+            }
+            tx.commit().await.map_err(|e| self.err(e))?;
+            out.push((n.id.clone(), refusal));
+        }
+        Ok(out)
+    }
+
+    /// The server's state of sent notes: (id, state, reason); ids the server does not have are
+    /// left out.
+    pub async fn outbox_states(&self, ids: &[String]) -> Result<Vec<(String, String, Option<String>)>, String> {
+        let pool = self.pool().await?;
+        sqlx::query_as(&self.s("SELECT id, state, reason FROM @@.outbox WHERE id = ANY($1)")).bind(ids).fetch_all(pool).await.map_err(|e| self.err(e))
+    }
+
+    /// The poster gives up on a note the home has not taken yet. False: the home already took it.
+    pub async fn outbox_withdraw(&self, id: &str, now: i64) -> Result<bool, String> {
+        let pool = self.pool().await?;
+        let r = sqlx::query(&self.s("UPDATE @@.outbox SET state = 'withdrawn', reason = 'expired', handled_at = $2 WHERE id = $1 AND state = 'pending'"))
+            .bind(id)
+            .bind(now)
+            .execute(pool)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(r.rows_affected() == 1)
+    }
+
+    /// Notes waiting for teams homed on `host` (oldest first).
+    pub async fn inbox_pending(&self, host: &str, limit: i64) -> Result<Vec<OutboxNote>, String> {
+        let pool = self.pool().await?;
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, String, String, Option<String>, Option<String>, String, String, i64, bool, bool)> = sqlx::query_as(&self.s(
+            "SELECT o.id, o.team_uid, o.from_host, o.author_id, o.author_name, o.author_cli, o.kind, o.text, o.created_at,
+                    t.deleted_at IS NOT NULL,
+                    EXISTS (SELECT 1 FROM @@.hosts h WHERE h.host = o.from_host AND h.instance_id = o.from_instance)
+             FROM @@.outbox o JOIN @@.teams t ON t.uid = o.team_uid
+             WHERE o.state = 'pending' AND t.home_host = $1 ORDER BY o.created_at, o.id LIMIT $2",
+        ))
+        .bind(host)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| self.err(e))?;
+        Ok(rows
+            .into_iter()
+            .map(|(id, team_uid, from_host, author_id, author_name, author_cli, kind, text, created_at, team_deleted, sender_known)| OutboxNote {
+                team_deleted,
+                sender_known,
+                id,
+                team_uid,
+                from_host,
+                author_id,
+                author_name,
+                author_cli,
+                kind,
+                text,
+                created_at,
+            })
+            .collect())
+    }
+
+    /// The home's verdicts: (id, `delivered`|`refused`, reason code). Only a note still pending
+    /// changes (a withdrawn one stays withdrawn).
+    pub async fn inbox_mark(&self, results: &[(String, &'static str, Option<&'static str>)], now: i64) -> Result<(), String> {
+        let pool = self.pool().await?;
+        for (id, state, reason) in results {
+            sqlx::query(&self.s("UPDATE @@.outbox SET state = $2, reason = $3, handled_at = $4 WHERE id = $1 AND state = 'pending'"))
+                .bind(id)
+                .bind(*state)
+                .bind(*reason)
+                .bind(now)
+                .execute(pool)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2755,10 +3288,14 @@ mod tests {
     #[test]
     fn migration_sql_names_only_the_quoted_schema() {
         let steps = migration_steps("team_board", None).unwrap();
-        assert_eq!(steps.len(), 2, "version 2 creates, version 3 adds the late-commit lock");
+        assert_eq!(steps.len(), 3, "version 2 creates, version 3 adds the late-commit lock, version 4 the outbox");
+        assert!(steps[2].sql[0].starts_with("CREATE TABLE IF NOT EXISTS \"team_board\".outbox "));
         assert!(steps[1].sql[0].contains("pg_advisory_xact_lock_shared(hashtext('bbarit-board-seq:' || TG_TABLE_SCHEMA))"));
         assert!(steps[1].sql[0].contains("nextval('\"team_board\".board_server_seq')"));
-        assert_eq!(migration_steps("team_board", Some(2)).unwrap().iter().map(|s| s.version).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(migration_steps("team_board", Some(2)).unwrap().iter().map(|s| s.version).collect::<Vec<_>>(), vec![3, 4]);
+        // A version-3 server still serves `postgres` mode; version 2 must be upgraded.
+        assert!(version_check(Some(3), "s", 4).is_ok());
+        assert!(version_check(Some(2), "s", 4).unwrap_err().contains("version 2, this app needs 4"));
         let sql = &steps[0].sql;
         assert_eq!(sql[0], "CREATE SCHEMA IF NOT EXISTS \"team_board\"");
         for s in sql {

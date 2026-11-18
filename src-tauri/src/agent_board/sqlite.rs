@@ -29,7 +29,28 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
+
+/// Version 4 (stage 3c, local only): notes this computer sent to a team whose home is another
+/// computer. `state`: `pending` (not on the server yet) → `sent` (in the server outbox) →
+/// `delivered` (the home numbered it; the row goes when the post arrives by pull) or `refused`
+/// (`reason` is a stable code; the person dismisses it).
+const SCHEMA_4: &str = "CREATE TABLE IF NOT EXISTS outbox (
+  id TEXT PRIMARY KEY NOT NULL,
+  team_uid TEXT NOT NULL,
+  team TEXT NOT NULL,
+  home_host TEXT NOT NULL,
+  author_id TEXT NOT NULL,
+  author_name TEXT,
+  author_cli TEXT,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  reason TEXT,
+  sent_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS outbox_team_state ON outbox(team_uid, state);";
 
 /// Version 3 (stage 3b, local only): teams copied from other machines by sync. Such a team is
 /// read-only here; its rows are never logged in `changes` nor pushed.
@@ -54,6 +75,11 @@ pub struct SqliteStore {
 impl SqliteStore {
     pub fn new(path: PathBuf) -> Self {
         Self::with_limits(path, Limits::default())
+    }
+
+    /// The board file this store opens.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn with_limits(path: PathBuf, limits: Limits) -> Self {
@@ -379,6 +405,9 @@ fn migrate(conn: &mut Connection, now: i64, host: &str) -> rusqlite::Result<()> 
     if version < 3 {
         tx.execute_batch(SCHEMA_3)?;
     }
+    if version < 4 {
+        tx.execute_batch(SCHEMA_4)?;
+    }
     if version < SCHEMA_VERSION {
         tx.execute(
             "INSERT INTO board_meta(key, value) VALUES ('schema_version', ?1)
@@ -591,6 +620,10 @@ fn post_from_row(team: &str, r: &rusqlite::Row) -> rusqlite::Result<Value> {
 }
 
 struct NewPost<'a> {
+    /// A given id (a remote note keeps its outbox id); None: a new one.
+    id: Option<&'a str>,
+    /// The computer the author typed it on, when not this one (a remote note).
+    author_host: Option<&'a str>,
     team_uid: &'a str,
     author_id: &'a str,
     author_name: Option<&'a str>,
@@ -605,12 +638,12 @@ struct NewPost<'a> {
 fn insert_post(tx: &Transaction, limits: Limits, p: &NewPost, ctx: &Ctx) -> Result<(String, i64), String> {
     let now = ctx.now;
     let seq = next_seq(tx, p.team_uid, false, now)?;
-    let id = new_id();
+    let id = p.id.map(str::to_string).unwrap_or_else(new_id);
     let arrival = log_change(tx, "posts", &id, now)?;
     tx.execute(
         "INSERT INTO posts(id, team_uid, seq, ts, author_id, author_name, author_cli, author_host, kind, text, task_id, arrival, origin_host, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?8, ?4)",
-        params![id, p.team_uid, seq, now, p.author_id, p.author_name, p.author_cli, ctx.host, p.kind, p.text, p.task_id, arrival],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?4)",
+        params![id, p.team_uid, seq, now, p.author_id, p.author_name, p.author_cli, p.author_host.or(ctx.host.as_deref()), p.kind, p.text, p.task_id, arrival, ctx.host],
     )
     .db()?;
     let over: Vec<String> = {
@@ -664,6 +697,8 @@ pub fn post(conn: &mut Connection, limits: Limits, team: &str, input: &PostInput
         &tx,
         limits,
         &NewPost {
+            id: None,
+            author_host: None,
             team_uid: &uid,
             author_id: &author_id,
             author_name: author_name.as_deref(),
@@ -1635,6 +1670,8 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
             &tx,
             limits,
             &NewPost {
+                id: None,
+                author_host: None,
                 team_uid: uid,
                 author_id: &actor.id,
                 author_name: actor.name.as_deref(),
@@ -2220,6 +2257,7 @@ pub fn sync_prepare(
         state_del(&tx, "pulled_seq")?;
         state_del(&tx, "consumer")?;
         state_del(&tx, "caught_up")?;
+        state_del(&tx, "server_uid")?;
         tx.execute("DELETE FROM mirror_ignored", []).db()?;
     }
     if state_get(&tx, "consumer")?.is_none() {
@@ -2250,6 +2288,53 @@ fn sync_local_state(c: &Connection, instance: String) -> Result<super::sync::Loc
         pause: None,
         old_name: None,
     })
+}
+
+/// The server this file syncs with, by identity (`server_uid`) and position: a different uid
+/// (or a uid on a server this file synced with before it had one, while cursors are non-zero)
+/// is `server_replaced`; the same uid with `board_server_seq` below `pulled_seq` is
+/// `server_restored` (from a backup). Either resets this file's side: the pull starts at 0, a
+/// full push of this computer's teams is due, the mirror-cap ignore list is cleared; notes on
+/// their way are sent again (`sent` → `pending`; `delivered` whose post is not here →
+/// `pending`, so the home delivers it again or, if its post exists there, reports it
+/// delivered; a delivered one whose post is here goes). Copies of other computers' teams stay
+/// as they are. The event is stored once (`server_event`, `server_event_at`) for the status.
+/// Returns the event code, if any.
+pub fn sync_check_server(conn: &mut Connection, uid: &str, server_last: i64, now: i64) -> Result<Option<&'static str>, String> {
+    let tx = immediate(conn)?;
+    let stored = state_get(&tx, "server_uid")?;
+    let pulled = state_int(&tx, "pulled_seq")?;
+    let pushed = state_int(&tx, "pushed_seq")?;
+    let event = match stored.as_deref() {
+        _ if uid.is_empty() => None,
+        Some(s) if s != uid => Some("server_replaced"),
+        None if pulled > 0 || pushed > 0 => Some("server_replaced"),
+        _ if server_last < pulled => Some("server_restored"),
+        _ => None,
+    };
+    if !uid.is_empty() {
+        state_set(&tx, "server_uid", uid)?;
+    }
+    if let Some(code) = event {
+        state_set(&tx, "pulled_seq", "0")?;
+        state_set(&tx, "full_push", "1")?;
+        state_del(&tx, "full_pos")?;
+        state_del(&tx, "caught_up")?;
+        tx.execute("DELETE FROM mirror_ignored", []).db()?;
+        tx.execute("UPDATE outbox SET state = 'pending', sent_at = NULL WHERE state = 'sent'", []).db()?;
+        tx.execute("DELETE FROM outbox WHERE state = 'delivered' AND id IN (SELECT id FROM posts)", []).db()?;
+        tx.execute("UPDATE outbox SET state = 'pending', sent_at = NULL WHERE state = 'delivered'", []).db()?;
+        state_set(&tx, "server_event", code)?;
+        state_set(&tx, "server_event_at", &now.to_string())?;
+    }
+    tx.commit().db()?;
+    Ok(event)
+}
+
+/// The local sync facts as they are now (after `sync_check_server` reset them).
+pub fn sync_state_now(conn: &mut Connection) -> Result<super::sync::LocalState, String> {
+    let instance = meta_get(conn, "instance_id")?.unwrap_or_default();
+    sync_local_state(conn, instance)
 }
 
 /// Every change up to now is on the server (no change waits, no full push pending): tombstones
@@ -2309,8 +2394,21 @@ pub fn sync_status_local(conn: &mut Connection) -> Result<Value, String> {
         .db()?
         .collect::<rusqlite::Result<Vec<_>>>()
         .db()?;
+    let (outbox_waiting, outbox_refused): (i64, i64) = conn
+        .query_row(
+            "SELECT count(*) FILTER (WHERE state IN ('pending','sent','delivered')), count(*) FILTER (WHERE state = 'refused') FROM outbox",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .db()?;
     Ok(json!({
         "instanceId": instance,
+        "outboxWaiting": outbox_waiting,
+        "outboxRefused": outbox_refused,
+        "keptRows": state_int(conn, "kept_rows")?,
+        "serverEvent": state_get(conn, "server_event")?,
+        "serverEventAt": state_get(conn, "server_event_at")?.and_then(|v| v.parse::<i64>().ok()),
+        "keptFile": state_get(conn, "kept_file")?,
         "waiting": st.waiting,
         "fullPush": st.full_push,
         "skipped": st.skipped,
@@ -2584,6 +2682,10 @@ pub fn sync_apply_pull(
                     let mut values = values;
                     if table == "posts" {
                         values.push(rusqlite::types::Value::Integer(next_arrival(&tx)?));
+                        // A note this computer sent arrived as the home's numbered post.
+                        if let Some(id) = row[at("id")].text() {
+                            tx.execute("DELETE FROM outbox WHERE id = ?1", params![id]).db()?;
+                        }
                     }
                     tx.execute(&format!("INSERT INTO {table} ({insert_cols}) VALUES ({ph})"), rusqlite::params_from_iter(values.iter()))
                 }
@@ -2662,6 +2764,8 @@ fn drop_mirror(tx: &Transaction, uid: &str) -> Result<(), String> {
     }
     tx.execute("DELETE FROM teams WHERE uid = ?1", params![uid]).db()?;
     tx.execute("DELETE FROM mirror_teams WHERE team_uid = ?1", params![uid]).db()?;
+    // Notes queued for a copy that is gone go with it (the server still has the sent ones).
+    tx.execute("DELETE FROM outbox WHERE team_uid = ?1", params![uid]).db()?;
     Ok(())
 }
 
@@ -2683,6 +2787,685 @@ pub fn sync_remove_mirrors(conn: &mut Connection) -> Result<usize, String> {
     }
     tx.commit().db()?;
     Ok(uids.len())
+}
+
+// ── Stage 3c: remote notes, restore, take over (orchestration in sync.rs) ──
+
+/// This file's sync identity (`board_meta.instance_id`), created when missing.
+pub fn sync_instance(conn: &mut Connection) -> Result<String, String> {
+    let tx = immediate(conn)?;
+    let id = match meta_get(&tx, "instance_id")? {
+        Some(v) => v,
+        None => {
+            let id = uuid::Uuid::new_v4().to_string();
+            meta_set(&tx, "instance_id", &id)?;
+            id
+        }
+    };
+    tx.commit().db()?;
+    Ok(id)
+}
+
+/// A post on root tab `team`. On a team copied from another computer (sync), a note is not
+/// refused but queued for that team's home (stage 3c remote note): only `note`, no task link,
+/// the same text rules and limits as a local post, at most `REMOTE_NOTES_PER_TEAM` waiting per
+/// team and `REMOTE_NOTES_PER_COMPUTER` in all. Everything else is `post`.
+pub fn post_or_queue(conn: &mut Connection, limits: Limits, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, String> {
+    {
+        let spec = PostSpec::check(team, input)?;
+        let tx = immediate(conn)?;
+        if let Some(TeamRef { mirror: Some(home), uid, .. }) = find_team(&tx, team, ctx.host.as_deref())? {
+            if spec.kind != "note" {
+                return Err(format!("only notes can be sent to a team that lives on {home}"));
+            }
+            if input.task.is_some() {
+                return Err(format!("a note for a team that lives on {home} cannot link a task"));
+            }
+            let (team_n, all_n): (i64, i64) = tx
+                .query_row(
+                    "SELECT count(*) FILTER (WHERE team_uid = ?1), count(*) FROM outbox WHERE state = 'pending'",
+                    params![uid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .db()?;
+            if team_n >= super::sync::REMOTE_NOTES_PER_TEAM {
+                return Err(format!(
+                    "{team_n} notes for this team are still waiting to be delivered to {home}; wait until it takes them"
+                ));
+            }
+            if all_n >= super::sync::REMOTE_NOTES_PER_COMPUTER {
+                return Err(format!("{all_n} notes from this computer are still waiting to be delivered; wait until their teams take them"));
+            }
+            let id = new_id();
+            tx.execute(
+                "INSERT INTO outbox(id, team_uid, team, home_host, author_id, author_name, author_cli, kind, text, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![id, uid, team, home, spec.author_id, spec.author_name, spec.author_cli, spec.kind, spec.text, ctx.now],
+            )
+            .db()?;
+            tx.commit().db()?;
+            let mut author = json!({ "id": spec.author_id });
+            if let Some(n) = &spec.author_name {
+                author["name"] = json!(n);
+            }
+            if let Some(h) = &ctx.host {
+                author["host"] = json!(h);
+            }
+            return Ok(json!({
+                "id": id, "team": team, "pending": true, "home": home, "state": "pending",
+                "kind": spec.kind, "text": spec.text, "ts": ctx.now, "author": author,
+            }));
+        }
+    }
+    post(conn, limits, team, input, ctx)
+}
+
+/// Notes waiting to go to the server (oldest first), as this computer `host` sends them.
+pub fn outbox_to_send(conn: &mut Connection, host: &str, max: i64) -> Result<Vec<super::pg::OutboxNote>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, team_uid, author_id, author_name, author_cli, kind, text, created_at FROM outbox
+             WHERE state = 'pending' ORDER BY created_at, id LIMIT ?1",
+        )
+        .db()?;
+    let rows = stmt
+        .query_map(params![max], |r| {
+            Ok(super::pg::OutboxNote {
+                id: r.get(0)?,
+                team_uid: r.get(1)?,
+                from_host: host.to_string(),
+                author_id: r.get(2)?,
+                author_name: r.get(3)?,
+                author_cli: r.get(4)?,
+                kind: r.get(5)?,
+                text: r.get(6)?,
+                created_at: r.get(7)?,
+                ..Default::default()
+            })
+        })
+        .db()?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().db()
+}
+
+/// The server took (None) or refused (a code) these notes.
+pub fn outbox_after_send(conn: &mut Connection, results: &[(String, Option<&'static str>)], now: i64) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    for (id, refusal) in results {
+        match refusal {
+            None => tx.execute("UPDATE outbox SET state = 'sent', sent_at = ?2 WHERE id = ?1 AND state = 'pending'", params![id, now]),
+            Some(code) => tx.execute("UPDATE outbox SET state = 'refused', reason = ?2 WHERE id = ?1 AND state = 'pending'", params![id, code]),
+        }
+        .db()?;
+    }
+    tx.commit().db()
+}
+
+/// Notes on the server whose outcome is not known here yet: (id, sent_at).
+pub fn outbox_sent(conn: &mut Connection) -> Result<Vec<(String, i64)>, String> {
+    let mut stmt = conn.prepare("SELECT id, coalesce(sent_at, created_at) FROM outbox WHERE state IN ('sent','delivered') ORDER BY created_at").db()?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).db()?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().db()
+}
+
+/// What the server says about sent notes: `delivered` waits for the post to arrive by pull,
+/// `refused` / `withdrawn` become refused here (with the code), a note the server no longer
+/// has goes back to `pending` (sent again; its id keeps it single) unless its post is here.
+pub fn outbox_apply_states(conn: &mut Connection, states: &[(String, String, Option<String>)], asked: &[String]) -> Result<(), String> {
+    let tx = immediate(conn)?;
+    for (id, state, reason) in states {
+        match state.as_str() {
+            "delivered" => tx.execute("UPDATE outbox SET state = 'delivered' WHERE id = ?1 AND state = 'sent'", params![id]),
+            "refused" | "withdrawn" => tx.execute(
+                "UPDATE outbox SET state = 'refused', reason = ?2 WHERE id = ?1 AND state IN ('sent','delivered')",
+                params![id, reason.as_deref().unwrap_or("refused")],
+            ),
+            _ => Ok(0),
+        }
+        .db()?;
+    }
+    for id in asked {
+        // Its post is here already (pulled, restored or taken over): the entry is done.
+        let have: i64 = tx.query_row("SELECT count(*) FROM posts WHERE id = ?1", params![id], |r| r.get(0)).db()?;
+        if have > 0 {
+            tx.execute("DELETE FROM outbox WHERE id = ?1", params![id]).db()?;
+            continue;
+        }
+        if states.iter().any(|(s, _, _)| s == id) {
+            continue;
+        }
+        {
+            tx.execute("UPDATE outbox SET state = 'pending', sent_at = NULL WHERE id = ?1 AND state IN ('sent','delivered')", params![id]).db()?;
+        }
+    }
+    tx.commit().db()
+}
+
+/// A note the poster gave up on (`expired`) or the server refused before sending.
+pub fn outbox_mark_refused(conn: &mut Connection, id: &str, reason: &str) -> Result<(), String> {
+    conn.execute("UPDATE outbox SET state = 'refused', reason = ?2 WHERE id = ?1 AND state <> 'refused'", params![id, reason]).db()?;
+    Ok(())
+}
+
+/// This computer's notes for root tab `team` that are not numbered posts yet (oldest first).
+pub fn outbox_list(conn: &mut Connection, team: &str) -> Result<Vec<Value>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, team, home_host, author_id, author_name, kind, text, created_at, state, reason FROM outbox
+             WHERE team = ?1 ORDER BY created_at, id",
+        )
+        .db()?;
+    let rows = stmt
+        .query_map(params![team], |r| {
+            Ok(json!({
+                "id": r.get::<_, String>(0)?, "team": r.get::<_, String>(1)?, "home": r.get::<_, String>(2)?,
+                "author": { "id": r.get::<_, String>(3)?, "name": r.get::<_, Option<String>>(4)? },
+                "kind": r.get::<_, String>(5)?, "text": r.get::<_, String>(6)?, "ts": r.get::<_, i64>(7)?,
+                "state": r.get::<_, String>(8)?, "reason": r.get::<_, Option<String>>(9)?,
+            }))
+        })
+        .db()?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().db()
+}
+
+/// A person dismisses a refused note (only refused ones can go).
+pub fn outbox_dismiss(conn: &mut Connection, id: &str) -> Result<usize, String> {
+    conn.execute("DELETE FROM outbox WHERE id = ?1 AND state = 'refused'", params![id]).db()
+}
+
+/// The home turns notes from the server outbox into numbered posts, one transaction each.
+/// Exactly once: the outbox id becomes the post id, so a note whose post is already here (a
+/// crash before the server heard back) is only reported delivered again. A note for a team
+/// that is gone is refused (`team_gone`); one that fails the local post rules is refused
+/// (`invalid`); one for a team that is not homed here (anymore) gets no verdict.
+/// Returns (id, state, reason) for the server.
+pub fn inbox_apply(
+    conn: &mut Connection,
+    limits: Limits,
+    notes: &[super::pg::OutboxNote],
+    ctx: &Ctx,
+) -> Result<(Vec<(String, &'static str, Option<&'static str>)>, Vec<String>), String> {
+    let mut out = Vec::new();
+    let mut teams: Vec<String> = Vec::new();
+    for n in notes {
+        let tx = immediate(conn)?;
+        let existing: Option<String> = tx.query_row("SELECT team_uid FROM posts WHERE id = ?1", params![n.id], |r| r.get(0)).optional().db()?;
+        if let Some(team_uid) = existing {
+            out.push((n.id.clone(), if team_uid == n.team_uid { "delivered" } else { "refused" }, (team_uid != n.team_uid).then_some("invalid")));
+            tx.execute("DELETE FROM outbox WHERE id = ?1", params![n.id]).db()?;
+            tx.commit().db()?;
+            continue;
+        }
+        let team: Option<(String, Option<i64>, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT t.team, t.deleted_at, t.home_host, m.home_host FROM teams t LEFT JOIN mirror_teams m ON m.team_uid = t.uid WHERE t.uid = ?1",
+                params![n.team_uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .db()?;
+        // Not here (yet): a restore that registered the name but has not copied the rows, for
+        // example. No verdict; the note waits.
+        let Some((team, deleted, home, mirror)) = team else { continue };
+        if mirror.is_some() || home.as_deref() != ctx.host.as_deref() {
+            continue;
+        }
+        if deleted.is_some() || n.team_deleted {
+            out.push((n.id.clone(), "refused", Some("team_gone")));
+            continue;
+        }
+        // Only a registered computer under its own identity may send (stage 3c review R4).
+        if !n.sender_known {
+            out.push((n.id.clone(), "refused", Some("unknown_sender")));
+            continue;
+        }
+        // At most REMOTE_NOTES_PER_SENDER_WINDOW notes per sending computer and team per
+        // REMOTE_NOTE_WINDOW_MS, so a flood cannot push the team's older posts out.
+        let recent: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM posts WHERE team_uid = ?1 AND author_host = ?2 AND origin_host IS NOT author_host AND ts > ?3",
+                params![n.team_uid, n.from_host, ctx.now - super::sync::REMOTE_NOTE_WINDOW_MS],
+                |r| r.get(0),
+            )
+            .db()?;
+        if recent >= super::sync::REMOTE_NOTES_PER_SENDER_WINDOW {
+            out.push((n.id.clone(), "refused", Some("rate_limited")));
+            continue;
+        }
+        let input = PostInput {
+            team_name: None,
+            author_id: n.author_id.clone(),
+            author_name: n.author_name.clone(),
+            author_cli: n.author_cli.clone(),
+            kind: n.kind.clone(),
+            text: n.text.clone(),
+            task: None,
+            root: false,
+        };
+        let valid = super::sync::is_uuid(&n.id)
+            && n.kind == "note"
+            && clean_label(Some(&n.from_host), 120).as_deref() == Some(n.from_host.as_str())
+            && PostSpec::check(&team, &input).is_ok_and(|spec| {
+                spec.text == n.text
+                    && spec.author_id == n.author_id
+                    && spec.author_name == n.author_name
+                    && spec.author_cli == n.author_cli
+            });
+        if !valid {
+            out.push((n.id.clone(), "refused", Some("invalid")));
+            continue;
+        }
+        insert_post(
+            &tx,
+            limits,
+            &NewPost {
+                id: Some(&n.id),
+                author_host: Some(&n.from_host),
+                team_uid: &n.team_uid,
+                author_id: &n.author_id,
+                author_name: n.author_name.as_deref(),
+                author_cli: n.author_cli.as_deref(),
+                kind: "note",
+                text: &n.text,
+                task_id: None,
+            },
+            ctx,
+        )?;
+        // This computer's own note (it sent it before it became the home) is a post now.
+        tx.execute("DELETE FROM outbox WHERE id = ?1", params![n.id]).db()?;
+        finish(tx, limits)?;
+        out.push((n.id.clone(), "delivered", None));
+        if !teams.contains(&team) {
+            teams.push(team);
+        }
+    }
+    Ok((out, teams))
+}
+
+/// The key of a synced row (as `changes.row_id` stores it) over alias `x`.
+fn key_sql_x(table: &str) -> &'static str {
+    match table {
+        "teams" => "x.uid",
+        "task_deps" => "x.task_id || '/' || x.depends_on_id",
+        _ => "x.id",
+    }
+}
+
+/// Changes of the teams `uids` that were not sent to the server yet.
+pub fn sync_unsent_for(conn: &mut Connection, uids: &[String]) -> Result<i64, String> {
+    let pushed = state_int(conn, "pushed_seq")?;
+    let list = serde_json::to_string(uids).unwrap_or_else(|_| "[]".into());
+    let mut n = 0i64;
+    for (table, _) in super::sync::SYNC_TABLES {
+        let c: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT count(DISTINCT c.local_seq) FROM changes c JOIN {table} x ON {} = c.row_id
+                     WHERE c.tbl = ?1 AND c.local_seq > ?2 AND x.{} IN (SELECT value FROM json_each(?3))",
+                    key_sql_x(table),
+                    team_col(table)
+                ),
+                params![table, pushed, list],
+                |r| r.get(0),
+            )
+            .db()?;
+        n += c;
+    }
+    Ok(n)
+}
+
+/// Rows of the teams `uids` as the server has them, without the change log (they are on the
+/// server already): checked like pulled rows, a missing row inserted (a post gets a local read
+/// position), an existing one replaced only by a higher `row_version` of the same team.
+/// Returns (written, skipped, kept because the local row is newer).
+fn upsert_server_rows(tx: &Transaction, rows: &copy::Dump, uids: &HashSet<String>) -> Result<(usize, usize, usize), String> {
+    let (mut written, mut skipped, mut newer) = (0usize, 0usize, 0usize);
+    for (table, cols) in super::sync::SYNC_TABLES {
+        let at = |name: &str| copy::col_index(cols, name);
+        let pk: Vec<&str> = match table {
+            "teams" => vec!["uid"],
+            "task_deps" => vec!["task_id", "depends_on_id"],
+            _ => vec!["id"],
+        };
+        let where_pk = pk.iter().enumerate().map(|(i, k)| format!("{k} = ?{}", i + 1)).collect::<Vec<_>>().join(" AND ");
+        let names = copy::col_list(cols);
+        let set = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, (c, _))| !pk.contains(c))
+            .map(|(i, (c, _))| format!("{c} = ?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let insert_cols = if table == "posts" { format!("{names}, arrival") } else { names.clone() };
+        let ph = (1..=cols.len() + usize::from(table == "posts")).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
+        let update_where = pk.iter().map(|k| format!("{k} = ?{}", at(k) + 1)).collect::<Vec<_>>().join(" AND ");
+        for row in rows.rows(table) {
+            if super::sync::validate_row(table, cols, row).is_err() {
+                skipped += 1;
+                continue;
+            }
+            let team_uid = row[at(team_col(table))].text().unwrap_or_default().to_string();
+            if !uids.contains(&team_uid) {
+                continue;
+            }
+            let key: Vec<rusqlite::types::Value> = pk.iter().map(|k| to_value(&row[at(k)])).collect();
+            let existing: Option<(i64, String)> = tx
+                .query_row(
+                    &format!("SELECT row_version, {} FROM {table} WHERE {where_pk}", team_col(table)),
+                    rusqlite::params_from_iter(key.iter()),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .db()?;
+            let rv = row[at("row_version")].int().unwrap_or(0);
+            let values: Vec<rusqlite::types::Value> = row.iter().map(to_value).collect();
+            let res = match existing {
+                Some((_, other)) if other != team_uid => {
+                    skipped += 1;
+                    continue;
+                }
+                Some((stored, _)) if stored > rv => {
+                    newer += 1;
+                    continue;
+                }
+                Some((stored, _)) if stored == rv => continue,
+                Some(_) => tx.execute(&format!("UPDATE {table} SET {set} WHERE {update_where}"), rusqlite::params_from_iter(values.iter())),
+                None => {
+                    let mut values = values;
+                    if table == "posts" {
+                        values.push(rusqlite::types::Value::Integer(next_arrival(tx)?));
+                    }
+                    tx.execute(&format!("INSERT INTO {table} ({insert_cols}) VALUES ({ph})"), rusqlite::params_from_iter(values.iter()))
+                }
+            };
+            match res {
+                Ok(_) => written += 1,
+                Err(_) => skipped += 1,
+            }
+        }
+    }
+    Ok((written, skipped, newer))
+}
+
+/// Claims held by agents of another installation: a claim without a lease gets one that ends
+/// now, so the normal lazy expiry (and the lease worker) releases it; a claim with a lease
+/// keeps it — only its own app instance could renew it, so it runs out within the lease.
+fn orphan_claims_expire(tx: &Transaction, uid: &str, now: i64) -> Result<(), String> {
+    tx.execute(
+        "UPDATE tasks SET lease_until = ?2 WHERE team_uid = ?1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND lease_until IS NULL",
+        params![uid, now],
+    )
+    .db()?;
+    Ok(())
+}
+
+/// Remove every local row of team `uid` (no tombstones, nothing logged).
+fn purge_team_rows(tx: &Transaction, uid: &str) -> Result<(), String> {
+    for table in copy::PURGE_TABLES {
+        tx.execute(&format!("DELETE FROM {table} WHERE team_uid = ?1"), params![uid]).db()?;
+    }
+    tx.execute("DELETE FROM teams WHERE uid = ?1", params![uid]).db()?;
+    Ok(())
+}
+
+/// "Restore my teams from the server": the rows of the teams homed on `host` (as the server
+/// has them) become this computer's teams again. Refused while any of them has a change here
+/// that was not sent. A local row with a higher `row_version` is kept. A team that clashes
+/// with a live local team of the same tab is skipped (a retired local one is removed).
+pub fn restore_apply(conn: &mut Connection, host: &str, dump: &copy::Dump, now: i64) -> Result<Value, String> {
+    let at = |n: &str| copy::col_index(copy::TEAMS, n);
+    let mut uids: HashSet<String> = HashSet::new();
+    let mut clashes = 0usize;
+    let all: Vec<String> = dump.rows("teams").iter().filter_map(|r| r[at("uid")].text().map(str::to_string)).collect();
+    let unsent = sync_unsent_for(conn, &all)?;
+    if unsent > 0 {
+        return Err(format!("unsent:{unsent}"));
+    }
+    let tx = immediate(conn)?;
+    for row in dump.rows("teams") {
+        if super::sync::validate_row("teams", copy::TEAMS, row).is_err() || row[at("home_host")].text() != Some(host) {
+            continue;
+        }
+        let (uid, team) = (row[at("uid")].text().unwrap_or_default().to_string(), row[at("team")].text().unwrap_or_default().to_string());
+        let other: Option<(String, Option<i64>)> = tx
+            .query_row(
+                "SELECT uid, deleted_at FROM teams WHERE team = ?1 AND home_host = ?2 AND uid <> ?3",
+                params![team, host, uid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .db()?;
+        match other {
+            Some((_, None)) => {
+                clashes += 1;
+                continue;
+            }
+            Some((old, Some(_))) => purge_team_rows(&tx, &old)?,
+            None => {}
+        }
+        tx.execute("DELETE FROM mirror_teams WHERE team_uid = ?1", params![uid]).db()?;
+        tx.execute("DELETE FROM mirror_ignored WHERE team_uid = ?1", params![uid]).db()?;
+        tx.execute("DELETE FROM outbox WHERE team_uid = ?1 AND state <> 'pending'", params![uid]).db()?;
+        uids.insert(uid);
+    }
+    let (written, skipped, newer) = upsert_server_rows(&tx, dump, &uids)?;
+    for uid in &uids {
+        orphan_claims_expire(&tx, uid, now)?;
+    }
+    let live = |table: &str| {
+        let i = copy::col_index(super::sync::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "team_uid");
+        let d = copy::col_index(super::sync::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "deleted_at");
+        dump.rows(table).iter().filter(|r| r[i].text().is_some_and(|u| uids.contains(u)) && matches!(r[d], copy::Cell::Null)).count()
+    };
+    let out = json!({
+        "teams": uids.len(), "tasks": live("tasks"), "notes": live("posts"),
+        "written": written, "skipped": skipped, "keptNewer": newer, "clashes": clashes,
+    });
+    tx.commit().db()?;
+    Ok(out)
+}
+
+/// After a successful takeover on the server: team `uid` is homed here now. Its rows are
+/// brought to the server's state (they were a read-only copy), it stops being a copy, and
+/// claims of the old home's agents run out through the normal lease expiry.
+pub fn adopt_apply(conn: &mut Connection, uid: &str, host: &str, dump: &copy::Dump, now: i64) -> Result<Value, String> {
+    let tx = immediate(conn)?;
+    // A retired team of this computer for the same tab is in the way of (team, home_host):
+    // removed for good, as the server does.
+    let retired: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT o.uid FROM teams o JOIN teams t ON t.uid = ?1
+                 WHERE o.team = t.team AND o.home_host = ?2 AND o.uid <> ?1 AND o.deleted_at IS NOT NULL",
+            )
+            .db()?;
+        let rows = stmt.query_map(params![uid, host], |r| r.get(0)).db()?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().db()?
+    };
+    for old in &retired {
+        purge_team_rows(&tx, old)?;
+    }
+    tx.execute("DELETE FROM mirror_teams WHERE team_uid = ?1", params![uid]).db()?;
+    tx.execute("DELETE FROM mirror_ignored WHERE team_uid = ?1", params![uid]).db()?;
+    // Sent notes are posts on the server already (they come down with the rows) or wait in the
+    // server outbox, where this computer, now the home, delivers them; queued ones stay queued.
+    tx.execute("DELETE FROM outbox WHERE team_uid = ?1 AND state <> 'pending'", params![uid]).db()?;
+    let set: HashSet<String> = [uid.to_string()].into_iter().collect();
+    let (written, skipped, _) = upsert_server_rows(&tx, dump, &set)?;
+    orphan_claims_expire(&tx, uid, now)?;
+    let team: Option<(String, Option<String>)> =
+        tx.query_row("SELECT team, name FROM teams WHERE uid = ?1", params![uid], |r| Ok((r.get(0)?, r.get(1)?))).optional().db()?;
+    tx.commit().db()?;
+    Ok(json!({ "team": team.as_ref().map(|t| t.0.clone()), "teamName": team.and_then(|t| t.1), "written": written, "skipped": skipped }))
+}
+
+/// Live teams this file owns (not copies), by uid: the round asks the server whether any of
+/// them was taken over by another computer.
+pub fn home_team_uids(conn: &mut Connection, host: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn.prepare(&format!("{HOME_UIDS} AND deleted_at IS NULL")).db()?;
+    let rows = stmt.query_map(params![host], |r| r.get(0)).db()?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().db()
+}
+
+/// This computer's team `uid` was taken over by `home` while it was away: it becomes a
+/// read-only copy equal to the server's rows. Changes made here that were not sent are
+/// dropped from the change log and counted as refused (with the reason), never applied.
+/// Returns how many were refused.
+pub fn demote_team(conn: &mut Connection, uid: &str, home: &str, dump: &copy::Dump, now: i64, kept_dir: Option<&Path>) -> Result<i64, String> {
+    let unsent = sync_unsent_for(conn, &[uid.to_string()])?;
+    let tx = immediate(conn)?;
+    let pushed = state_int(&tx, "pushed_seq")?;
+    // Rows written here that never reached the server are kept in a file before they go.
+    if unsent > 0 {
+        if let Some(dir) = kept_dir {
+            let (rows, file) = keep_unsent(&tx, uid, home, pushed, dir, now)?;
+            state_set(&tx, "kept_rows", &(state_int(&tx, "kept_rows")? + rows).to_string())?;
+            state_set(&tx, "kept_file", &file)?;
+        }
+    }
+    for (table, _) in super::sync::SYNC_TABLES {
+        tx.execute(
+            &format!(
+                "DELETE FROM changes WHERE local_seq > ?1 AND tbl = ?2 AND row_id IN (SELECT {} FROM {table} x WHERE x.{} = ?3)",
+                key_sql_x(table),
+                team_col(table)
+            ),
+            params![pushed, table, uid],
+        )
+        .db()?;
+    }
+    purge_team_rows(&tx, uid)?;
+    tx.execute(
+        "INSERT INTO mirror_teams(team_uid, home_host, synced_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(team_uid) DO UPDATE SET home_host = excluded.home_host, synced_at = excluded.synced_at",
+        params![uid, home, now],
+    )
+    .db()?;
+    let set: HashSet<String> = [uid.to_string()].into_iter().collect();
+    upsert_server_rows(&tx, dump, &set)?;
+    if unsent > 0 {
+        let total = state_int(&tx, "refused")? + unsent;
+        state_set(&tx, "refused", &total.to_string())?;
+        if state_get(&tx, "refused_reason")?.is_none() {
+            state_set(&tx, "refused_reason", &super::sync::moved_message(home))?;
+        }
+    }
+    tx.commit().db()?;
+    Ok(unsent)
+}
+
+/// At most this many kept-changes files (the oldest go) and this many bytes per file.
+pub const KEPT_FILES_MAX: usize = 50;
+pub const KEPT_FILE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// The unsent rows of team `uid` (as stored: every column, text unchanged) as one JSON file
+/// `<dir>/<team>-<now>.json` (0600). Rows past `KEPT_FILE_MAX_BYTES` are left out and counted
+/// (`leftOut`). Returns (rows kept, path).
+fn keep_unsent(tx: &Transaction, uid: &str, home: &str, pushed: i64, dir: &Path, now: i64) -> Result<(i64, String), String> {
+    let team: String = tx.query_row("SELECT team FROM teams WHERE uid = ?1", params![uid], |r| r.get(0)).db()?;
+    let mut tables = serde_json::Map::new();
+    let (mut kept, mut left_out, mut size) = (0i64, 0i64, 0usize);
+    for (table, cols) in super::sync::SYNC_TABLES {
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT {} FROM {table} x WHERE x.{} = ?1 AND {} IN (SELECT row_id FROM changes WHERE tbl = ?2 AND local_seq > ?3)",
+                cols.iter().map(|(c, _)| format!("x.{c}")).collect::<Vec<_>>().join(", "),
+                team_col(table),
+                key_sql_x(table)
+            ))
+            .db()?;
+        let rows = read_cells(&mut stmt, cols, &[&uid, &table, &pushed], false)?;
+        let mut out = Vec::new();
+        for r in rows {
+            let obj: serde_json::Map<String, Value> = cols
+                .iter()
+                .zip(r.iter())
+                .map(|((c, _), cell)| {
+                    (c.to_string(), match cell {
+                        copy::Cell::Null => Value::Null,
+                        copy::Cell::Int(n) => json!(n),
+                        copy::Cell::Text(s) => json!(s),
+                    })
+                })
+                .collect();
+            let v = Value::Object(obj);
+            let n = v.to_string().len();
+            if size + n > KEPT_FILE_MAX_BYTES {
+                left_out += 1;
+                continue;
+            }
+            size += n;
+            kept += 1;
+            out.push(v);
+        }
+        if !out.is_empty() {
+            tables.insert(table.to_string(), Value::Array(out));
+        }
+    }
+    let doc = json!({
+        "team": team, "teamUid": uid, "takenOverBy": home, "keptAt": now,
+        "note": "changes made on this computer after another computer took the team over; they were not sent",
+        "rows": tables, "leftOut": left_out,
+    });
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let safe: String = team.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).take(80).collect();
+    let path = dir.join(format!("{safe}-{now}.json"));
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        f.write_all(serde_json::to_string_pretty(&doc).unwrap_or_default().as_bytes()).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    }
+    // Keep only the newest KEPT_FILES_MAX files.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let mut files: Vec<(std::time::SystemTime, PathBuf)> = rd
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        files.sort();
+        let over = files.len().saturating_sub(KEPT_FILES_MAX);
+        for (_, p) in files.into_iter().take(over) {
+            if p != path {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+    }
+    Ok((kept, path.display().to_string()))
+}
+
+/// The copy of root tab `team` (another computer's): (uid, name, home, row_version).
+pub fn mirror_of(conn: &mut Connection, team: &str) -> Result<Option<(String, Option<String>, String, i64)>, String> {
+    conn.query_row(
+        "SELECT t.uid, t.name, m.home_host, t.row_version FROM teams t JOIN mirror_teams m ON m.team_uid = t.uid
+         WHERE t.team = ?1 AND t.deleted_at IS NULL ORDER BY t.last_activity_at DESC LIMIT 1",
+        params![team],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
+    .db()
+}
+
+/// Root tab id and name of team `uid`.
+pub fn team_root_of(conn: &mut Connection, uid: &str) -> Result<Option<(String, Option<String>)>, String> {
+    conn.query_row("SELECT team, name FROM teams WHERE uid = ?1", params![uid], |r| Ok((r.get(0)?, r.get(1)?))).optional().db()
+}
+
+/// A live or retired team of this computer for the same tab (a takeover would clash with it).
+pub fn has_own_team(conn: &mut Connection, team: &str, host: &str) -> Result<bool, String> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM teams WHERE team = ?1 AND home_host = ?2 AND deleted_at IS NULL AND uid NOT IN (SELECT team_uid FROM mirror_teams)",
+            params![team, host],
+            |r| r.get(0),
+        )
+        .db()?;
+    Ok(n > 0)
 }
 
 // ── Settings: counts, copy ───────────────────────────────────────────────
