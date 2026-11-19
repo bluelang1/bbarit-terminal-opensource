@@ -10,6 +10,16 @@
           }
         ]
       }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -z \"$BBARIT_CLAUDE_HOOK\" ] || sh \"${BBARIT_CLAUDE_HOOK%/*}/stop-failure.sh\""
+          }
+        ]
+      }
     ]
   }
 }

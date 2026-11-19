@@ -10,6 +10,8 @@ import {
   noteAgentStatus,
   setLastCommandHost,
   setLastCommandMode,
+  subscribeCommittedCommands,
+  hasPendingInput,
 } from './lastCommand';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
@@ -204,6 +206,29 @@ describe('last command: agent tabs', () => {
     feedTerminalInput(T, 'next' + CMD_ENTER);
     noteAgentStatus(T, 'working');
     expect(lastCommandOf(T)).toBe('next');
+  });
+
+  it('reports a half-typed prompt until it is sent or cleared', () => {
+    agent();
+    expect(hasPendingInput(T)).toBe(false);
+    feedTerminalInput(T, 'half typ');
+    expect(hasPendingInput(T)).toBe(true);
+    feedTerminalInput(T, '\x15'); // Ctrl+U clears the agent input
+    expect(hasPendingInput(T)).toBe(false);
+    feedTerminalInput(T, 'go');
+    noteAgentStatus(T, 'working');
+    expect(hasPendingInput(T)).toBe(false);
+  });
+
+  it('tells commit listeners about every committed command, repeats included', () => {
+    agent();
+    const seen: string[] = [];
+    const off = subscribeCommittedCommands((id, cmd) => seen.push(`${id}:${cmd}`));
+    feedTerminalInput(T, '/model sonnet' + SHIFT_ENTER);
+    feedTerminalInput(T, '/model sonnet' + SHIFT_ENTER);
+    off();
+    feedTerminalInput(T, '/model opus' + SHIFT_ENTER);
+    expect(seen).toEqual(['t:/model sonnet', 't:/model sonnet']);
   });
 
   it('commits slash and bang commands on any Enter variant', () => {

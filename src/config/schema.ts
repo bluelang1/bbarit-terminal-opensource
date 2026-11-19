@@ -100,6 +100,12 @@ export interface AgentConfig {
   bbaritPersona: string;
   bbaritFlags: string[];
   resumeLastSession: boolean;
+  /** Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md). */
+  claudeLimitFallback: boolean;
+  claudeLimitPrimaryModel: string;
+  claudeLimitFallbackModel: string;
+  /** Usage file written by the user's status line; '' = not used. */
+  claudeLimitUsageFile: string;
   playSoundWhenDone: boolean;
   playOsNotifySound: boolean;
   osNotifySoundName: string;
@@ -449,6 +455,10 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   bbaritPersona: '',
   bbaritFlags: [],
   resumeLastSession: false,
+  claudeLimitFallback: false,
+  claudeLimitPrimaryModel: 'claude-fable-5-2',
+  claudeLimitFallbackModel: 'opus',
+  claudeLimitUsageFile: '~/.claude/logs/model-usage.json',
   playSoundWhenDone: false,
   playOsNotifySound: true,
   osNotifySoundName: 'Glass',

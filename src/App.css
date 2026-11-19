@@ -10408,6 +10408,28 @@ input[type="range"]::-webkit-slider-thumb {
   overflow: hidden;
 }
 
+/* Model limit fallback icon in Claude tabs (docs/MODEL_LIMIT_FALLBACK.md). */
+.terminal-model-switch.is-off {
+  color: color-mix(in srgb, var(--text-color) 40%, transparent);
+}
+.terminal-model-switch.is-on {
+  color: color-mix(in srgb, var(--text-color) 80%, transparent);
+}
+.terminal-model-switch.is-human,
+.terminal-model-switch.is-preset {
+  color: color-mix(in srgb, var(--accent-color) 75%, var(--text-color));
+}
+.terminal-model-switch.is-switched,
+.terminal-model-switch.is-unconfirmed {
+  /* Same amber as the tab's blocked glyph, mixed toward the text colour so it reads in both themes. */
+  color: color-mix(in srgb, #f59e0b 85%, var(--text-color));
+  background: color-mix(in srgb, #f59e0b 16%, transparent);
+}
+.terminal-model-switch.is-unconfirmed {
+  outline: 1px dashed color-mix(in srgb, #f59e0b 70%, transparent);
+  outline-offset: -1px;
+}
+
 .terminal-tab-name {
   min-width: 0;
   overflow: hidden;
@@ -12306,6 +12328,41 @@ textarea,
   min-height: 28px !important;
   max-width: 190px !important;
   padding: 0 6px 0 8px !important;
+}
+
+/* Claude tabs carry the model-switch icon (docs/MODEL_LIMIT_FALLBACK.md). Their tab has a fixed
+   width (it was always at the cap anyway, since hidden buttons used to reserve their width), and on
+   an inactive, unhovered tab the hidden buttons leave the layout instead of sitting at opacity 0, so
+   the name gets their room. Hover/active brings them back and the name shrinks: the width never
+   jumps. Other tabs keep their old behaviour. */
+.terminal-tab.has-model-switch {
+  width: 190px;
+  flex: 0 0 auto;
+}
+.terminal-tab.has-model-switch .terminal-tab-name {
+  flex: 1 1 auto;
+}
+.terminal-tab.has-model-switch:not(:hover):not(.active) .terminal-telegram-badge:not(.is-switched):not(.is-unconfirmed) {
+  display: none !important;
+}
+/* Active or hovered: the tab grows by exactly the buttons it reveals (27 px each: 20 px button,
+   2 px margin, 5 px gap), so the name keeps its inactive width. Capture + pop-out + model icon,
+   or only capture + pop-out when the switched icon was already showing. */
+.terminal-tab.has-model-switch:hover,
+.terminal-tab.has-model-switch.active {
+  width: 271px;
+  max-width: 271px !important;
+}
+.terminal-tab.has-model-switch.model-switch-shown:hover,
+.terminal-tab.has-model-switch.model-switch-shown.active {
+  width: 244px;
+  max-width: 244px !important;
+}
+
+/* The switched state stays visible on inactive tabs; the other states follow the hover rule. */
+.terminal-tab .terminal-model-switch.is-switched,
+.terminal-tab .terminal-model-switch.is-unconfirmed {
+  opacity: 0.9;
 }
 
 .terminal-wrapper {

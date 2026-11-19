@@ -66,6 +66,9 @@ import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
 import { type GridSize } from './terminal/ptySize';
 import { createResizeSequencer, waitForQuietWrites, browserTimers, type ResizeJob, type ResizeSequencer } from './terminal/resizeSequencer';
 import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
+import { applyLaunchDecision, claudeLaunchDecision, noteModelLimitStatus, registerModelLimitTab, setModelLimitHost } from './terminal/modelLimitRuntime';
+import type { LaunchDecision } from './terminal/modelLimitFallback';
+import { personChoseModel } from './terminal/modelLimitFallback';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
@@ -451,7 +454,7 @@ if (typeof window !== 'undefined') (window as any).__bbaritAgentStatusLog = read
 const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
   const st = terminalStates.get(terminalId);
   if (!st) return true;
-  return handleProgramStatusOscCore(st, data, {
+  const handled = handleProgramStatusOscCore(st, data, {
     onChange: (change) => {
       const handler = programStatusHandlers.get(terminalId);
       if (handler) handler(change);
@@ -459,6 +462,10 @@ const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
     },
     onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore(), { reset: true }),
   });
+  // Model limit fallback: only `state=error` reports of registered Claude tabs, never while
+  // replaying saved output (docs/MODEL_LIMIT_FALLBACK.md).
+  noteModelLimitStatus(terminalId, data, !!st.replayingOutput);
+  return handled;
 };
 
 /**
@@ -535,6 +542,23 @@ setInputGateHost({
   getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
   getAgentState: getTerminalAgentState,
   isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
+// Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md): 7501 state, replay flag and the last
+// rows of the buffer (only to confirm Claude Code printed "Set model to …" after `/model`).
+setModelLimitHost({
+  getAgentState: getTerminalAgentState,
+  isReplaying: (terminalId) => !!terminalStates.get(terminalId)?.replayingOutput,
+  screenText: (terminalId) => {
+    try {
+      const buf = terminalStates.get(terminalId)?.term?.buffer?.active;
+      if (!buf) return '';
+      const end = buf.baseY + buf.cursorY + 1;
+      const rows: string[] = [];
+      for (let i = Math.max(0, end - 60); i < Math.min(buf.length, end + 20); i++) rows.push(buf.getLine(i)?.translateToString(true) ?? '');
+      return rows.join('\n');
+    } catch { return ''; }
+  },
 });
 
 // Logical line under the cursor (wrapped rows joined). Read when Enter is typed, before the shell
@@ -1701,6 +1725,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (st?.onOutputChunk === handler) st.onOutputChunk = undefined;
     };
   }, [cliType, playBeep, playSoundWhenDone, terminalId]);
+
+  // Model limit fallback: register Claude tabs; a model set by settings (modelId) or flags
+  // (--model) means a person chose it and the app never switches the tab.
+  const limitPersonModel = personChoseModel(modelId, (extraFlags || []).flatMap((f) => String(f).trim().split(/\s+/)));
+  useEffect(() => {
+    if (cliType !== 'claude') return;
+    return registerModelLimitTab(terminalId, { isClaude: true, personModel: limitPersonModel, sessionId: () => claudeSessionIdRef.current });
+  }, [terminalId, cliType, limitPersonModel]);
 
   // OSC 7501 상태 전이 → 알림 결정(decideAgentAlert) + App 으로 상태 이벤트.
   // done 알림은 기존 완료 토스트(octo-task-toast)를 그대로 쓴다.
@@ -3782,6 +3814,17 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           } catch { /* older host or missing resource: launch without the hook */ }
         }
       }
+      // Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md): only for a tab nobody gave a model.
+      // Gives a model when the tab is marked auto-switched or the usage file says the primary
+      // is at its limit; otherwise the launch command stays as it was. Pure: the mark changes
+      // only where the startup command is actually typed (applyLaunchDecision below), never on
+      // a remount or a PTY holder reattach.
+      let limitDecision: LaunchDecision = {};
+      if (cliType === 'claude') {
+        const personModel = !!modelId || hasFlag('--model') || normalizedFlags.some(f => f.startsWith('--model'));
+        try { limitDecision = await claudeLaunchDecision(terminalId, personModel); } catch { limitDecision = {}; }
+      }
+      const limitModel = limitDecision.model ?? null;
 
       const cliCommands: Record<string, string> = {
         claude: (() => {
@@ -3794,6 +3837,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // Inject --model if set and not already in flags
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             cmd += ` --model ${shellQuoteArg(modelId, argShell)}`;
+          } else if (limitModel && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
+            cmd += ` --model ${shellQuoteArg(limitModel, argShell)}`;
           }
           // Inject --mcp-config if set and not already in flags
           if (mcpConfigPath && !hasFlag('--mcp-config') && !normalizedFlags.some(f => f.startsWith('--mcp-config'))) {
@@ -4190,6 +4235,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // autoStartedCliType is the once-gate in shouldRunStartupCommand above.
           if (stateBeforeStartup) stateBeforeStartup.autoStartedCliType = cliType;
           startupGatePreset = true;
+          if (cliType === 'claude') applyLaunchDecision(terminalId, limitDecision);
           if (existingRawShell && stateBeforeStartup) stateBeforeStartup.startupRepairAttemptedCliType = cliType;
           const markCliAutoStarted = () => {
             const st = terminalStates.get(terminalId);

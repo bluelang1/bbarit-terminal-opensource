@@ -16,7 +16,7 @@ export const MIN_SUBMIT_DELAY_MS = 200;
 
 export type AutoInputSource =
   | 'ctl' | 'scheduler' | 'telegram' | 'discord' | 'slack'
-  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'agent' | 'other';
+  | 'devreview' | 'hub' | 'editor' | 'kanban' | 'button' | 'agent' | 'model-fallback' | 'other';
 
 export type PtyWriter = (data: string) => void;
 
@@ -25,6 +25,12 @@ export interface AutoInputOptions {
   submit?: boolean;
   /** blocked 상태여도 쓴다(사용자가 직접 누른 버튼 등). */
   force?: boolean;
+  /**
+   * Narrow exception for the model limit fallback (docs/MODEL_LIMIT_FALLBACK.md): a lone Esc with
+   * `submit: false` may pass while the tab is blocked, to close Claude Code's rate-limit dialog
+   * right after the limit event. Any other text still gets 'blocked'.
+   */
+  closeLimitDialog?: boolean;
   quietMs?: number;
   maxWaitMs?: number;
   /** 본문과 Enter 사이 간격. 기본 max(200, terminalSubmitDelayMs(text)) — 에이전트 TUI 용. 셸은 200. */
@@ -41,7 +47,7 @@ export interface AutoInputOptions {
 
 export type AutoInputResult =
   | { ok: true; waitedMs: number }
-  | { ok: false; reason: 'blocked' | 'typing' | 'no-writer' | 'disposed' | 'cancelled' };
+  | { ok: false; reason: 'blocked' | 'typing' | 'no-writer' | 'disposed' | 'cancelled' | 'not-blocked' };
 
 /** XTerminal 이 등록한다 — 마운트된 터미널의 writer, 7501 상태, bracketed paste 모드. */
 export interface InputGateHost {
@@ -271,6 +277,12 @@ function isBlocked(terminalId: string): boolean {
   return host?.getAgentState?.(terminalId) === 'blocked';
 }
 
+/** force, or the limit-dialog Esc exception (a lone Esc, no submit). */
+function mayWriteWhileBlocked(text: string, opts: AutoInputOptions): boolean {
+  if (opts.force) return true;
+  return opts.closeLimitDialog === true && opts.submit === false && text === '\x1b';
+}
+
 async function runAutoInput(terminalId: string, text: string, opts: AutoInputOptions, epoch: number): Promise<AutoInputResult> {
   const quietMs = opts.quietMs ?? QUIET_MS;
   const maxWaitMs = opts.maxWaitMs ?? MAX_WAIT_MS;
@@ -289,7 +301,7 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
   }
 
   // 2. blocked 검사
-  if (!opts.force && isBlocked(terminalId)) return { ok: false, reason: 'blocked' };
+  if (!mayWriteWhileBlocked(text, opts) && isBlocked(terminalId)) return { ok: false, reason: 'blocked' };
 
   // 3. 사람이 조용할 때까지 대기
   const quietStart = clock.now();
@@ -300,9 +312,12 @@ async function runAutoInput(terminalId: string, text: string, opts: AutoInputOpt
   }
   if (dropped()) return { ok: false, reason: 'cancelled' };
   // 기다리는 동안 에이전트가 승인 대기로 바뀌었을 수 있다.
-  if (!opts.force && isBlocked(terminalId)) return { ok: false, reason: 'blocked' };
+  if (!mayWriteWhileBlocked(text, opts) && isBlocked(terminalId)) return { ok: false, reason: 'blocked' };
   write = resolveWriter(terminalId, opts);
   if (!write) return { ok: false, reason: 'disposed' };
+  // The limit-dialog Esc only makes sense while the dialog is still open: if the person closed
+  // it or picked an option meanwhile, the Esc would land in their prompt.
+  if (opts.closeLimitDialog && !opts.force && !isBlocked(terminalId)) return { ok: false, reason: 'not-blocked' };
 
   const waitedMs = clock.now() - startedAt;
   const g = gateFor(terminalId);
@@ -361,6 +376,7 @@ export function autoInputRefusalMessage(reason: Extract<AutoInputResult, { ok: f
     case 'no-writer': return '터미널이 준비되지 않아 보내지 않았습니다';
     case 'disposed': return '터미널이 닫혀 보내지 않았습니다';
     case 'cancelled': return '사용자가 Ctrl-C 로 멈춰 Enter 를 보내지 않았습니다';
+    case 'not-blocked': return '안내 창이 이미 닫혀 보내지 않았습니다';
     default: return '보내지 않았습니다';
   }
 }

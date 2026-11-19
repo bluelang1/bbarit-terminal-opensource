@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
+import { modelDisplayName } from '../terminal/modelLimitFallback';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
@@ -2837,6 +2838,30 @@ export function SettingsPanel({
                   <label>{t('settings.agent.resumeLastSession')}</label>
                   <input type="checkbox" checked={agentSettings.resumeLastSession ?? false} onChange={(e) => setAgentSettings(prev => ({ ...prev, resumeLastSession: e.target.checked }))} />
                 </div>
+                {/* Model limit fallback — docs/MODEL_LIMIT_FALLBACK.md */}
+                <div className="setting-item toggle">
+                  <label>{t('settings.agent.limitFallback').replace('{primary}', modelDisplayName(agentSettings.claudeLimitPrimaryModel || 'claude-fable-5-2')).replace('{fallback}', modelDisplayName(agentSettings.claudeLimitFallbackModel || 'opus'))}</label>
+                  <input type="checkbox" checked={agentSettings.claudeLimitFallback ?? false} onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitFallback: e.target.checked }))} />
+                </div>
+                <span className="setting-description" style={{ display: 'block', marginBottom: 8 }}>
+                  {t('settings.agent.limitFallback.desc')}
+                </span>
+                {agentSettings.claudeLimitFallback && (
+                  <>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.primary')}</label>
+                      <input type="text" value={agentSettings.claudeLimitPrimaryModel ?? 'claude-fable-5-2'} placeholder="claude-fable-5-2" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitPrimaryModel: e.target.value }))} />
+                    </div>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.fallback')}</label>
+                      <input type="text" value={agentSettings.claudeLimitFallbackModel ?? 'opus'} placeholder="opus" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitFallbackModel: e.target.value }))} />
+                    </div>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.usageFile')}</label>
+                      <input type="text" value={agentSettings.claudeLimitUsageFile ?? '~/.claude/logs/model-usage.json'} placeholder="~/.claude/logs/model-usage.json" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitUsageFile: e.target.value }))} />
+                    </div>
+                  </>
+                )}
                 <div className="setting-item">
                   <label>{t('settings.agent.claudeModel')}</label>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

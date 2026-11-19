@@ -3489,6 +3489,75 @@ fn claude_hook_settings_path(app: AppHandle) -> Option<String> {
     claude_hook_file(&app, "bbarit-session.json")
 }
 
+/// Largest usage file the model limit fallback reads (docs/MODEL_LIMIT_FALLBACK.md).
+const USAGE_FILE_MAX_BYTES: u64 = 64 * 1024;
+
+/// Read a local regular file of at most 64 KB. `~/` is the home dir; ssh paths, FIFOs,
+/// devices and directories are refused, so a misconfigured path can never block.
+fn read_small_local_file(path: &str, home: Option<std::path::PathBuf>) -> Result<String, String> {
+    let path = path.trim();
+    if path.is_empty() || path.contains("://") || path.starts_with("ssh:") {
+        return Err("not a local path".into());
+    }
+    let full = match path.strip_prefix("~/") {
+        Some(rest) => home.ok_or("no home dir")?.join(rest),
+        None => std::path::PathBuf::from(path),
+    };
+    if !full.is_absolute() {
+        return Err("path must be absolute".into());
+    }
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > USAGE_FILE_MAX_BYTES {
+        return Err("file too large".into());
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::fs::File::open(&full)
+        .map_err(|e| e.to_string())?
+        .take(USAGE_FILE_MAX_BYTES)
+        .read_to_string(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// The model limit fallback's usage file (written by the user's status line; read only).
+/// Async so the file read never runs on the main thread.
+#[tauri::command(async)]
+fn read_usage_file(path: String) -> Result<String, String> {
+    read_small_local_file(&path, dirs::home_dir())
+}
+
+#[cfg(test)]
+mod usage_file_tests {
+    use super::read_small_local_file;
+
+    #[test]
+    fn reads_small_regular_files_and_expands_home() {
+        let dir = std::env::temp_dir().join(format!("bbarit-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("u.json");
+        std::fs::write(&file, "[{\"name\":\"Fable\",\"pct\":100}]").unwrap();
+        assert!(read_small_local_file(file.to_str().unwrap(), None).unwrap().contains("Fable"));
+        assert!(read_small_local_file("~/u.json", Some(dir.clone())).unwrap().contains("Fable"));
+        std::fs::write(&file, vec![b'x'; 64 * 1024 + 1]).unwrap();
+        assert_eq!(read_small_local_file(file.to_str().unwrap(), None), Err("file too large".into()));
+        assert_eq!(read_small_local_file(dir.to_str().unwrap(), None), Err("not a regular file".into()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refuses_remote_relative_and_special_paths() {
+        assert_eq!(read_small_local_file("ssh://host/x.json", None), Err("not a local path".into()));
+        assert_eq!(read_small_local_file("rel/x.json", None), Err("path must be absolute".into()));
+        assert_eq!(read_small_local_file("", None), Err("not a local path".into()));
+        #[cfg(unix)]
+        assert_eq!(read_small_local_file("/dev/null", None), Err("not a regular file".into()));
+    }
+}
+
 /// Env vars the frontend may read. Kept to an allowlist so the webview cannot read secrets.
 const READABLE_ENV_VARS: [&str; 1] = ["CLAUDE_CONFIG_DIR"];
 
@@ -10546,6 +10615,7 @@ fn main() {
             resolve_bundled_agent,
             resolve_browser_cli,
             claude_hook_settings_path,
+            read_usage_file,
             read_env_var,
             claude_chat_keybindings,
             agent_relay_log::agent_relay_log_append,

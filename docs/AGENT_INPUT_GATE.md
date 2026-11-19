@@ -146,6 +146,10 @@ Rust 쪽 게이트가 필요해지면 `write_to_pty` 에 `origin` 을 추가하�
 
 ## 구현 메모
 
+- 모델 한도 전환(docs/MODEL_LIMIT_FALLBACK.md)만 `closeLimitDialog: true` 로 blocked 거부의 좁은 예외를
+  쓴다: `submit: false` 인 Esc 한 글자만 blocked 탭에 쓴다(Claude Code 의 `/rate-limit-options` 창 닫기).
+  다른 글자에 이 옵션을 붙여도 그대로 'blocked' 로 거부한다. 출처는 `model-fallback`.
+
 구현: `src/terminal/inputGate.ts`, `src/terminal/pasteChunks.ts`(사람 붙여넣기에서 추출, 동작 동일),
 테스트 `inputGate.test.ts`, `pasteChunks.test.ts`.
 

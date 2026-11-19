@@ -121,6 +121,30 @@ describe('queueAutoInput', () => {
     expect(t.text()).toBe('go on');
   });
 
+  it('lets only a lone Esc through a blocked tab for the limit dialog exception', async () => {
+    const t = fakeTerminal({ state: 'blocked' });
+    expect(await queueAutoInput(T, '/model opus', { source: 'model-fallback', closeLimitDialog: true })).toEqual({ ok: false, reason: 'blocked' });
+    expect(await queueAutoInput(T, '\x1b', { source: 'model-fallback', closeLimitDialog: true })).toEqual({ ok: false, reason: 'blocked' });
+    expect(await queueAutoInput(T, '1', { source: 'model-fallback', closeLimitDialog: true, submit: false })).toEqual({ ok: false, reason: 'blocked' });
+    expect(await queueAutoInput(T, '\x1b', { source: 'model-fallback', submit: false })).toEqual({ ok: false, reason: 'blocked' });
+    expect(t.writes).toHaveLength(0);
+
+    const esc = queueAutoInput(T, '\x1b', { source: 'model-fallback', closeLimitDialog: true, submit: false });
+    await vi.advanceTimersByTimeAsync(100);
+    expect((await esc).ok).toBe(true);
+    expect(t.text()).toBe('\x1b');
+  });
+
+  it('refuses the limit-dialog Esc when the dialog closed before the write', async () => {
+    const t = fakeTerminal({ state: 'blocked' });
+    noteHumanInput(T); // the person is typing: the gate waits for quiet
+    const esc = queueAutoInput(T, '\x1b', { source: 'model-fallback', closeLimitDialog: true, submit: false });
+    t.env.state = 'idle'; // they picked an option meanwhile
+    await vi.advanceTimersByTimeAsync(QUIET_MS + 200);
+    expect(await esc).toEqual({ ok: false, reason: 'not-blocked' });
+    expect(t.writes).toHaveLength(0);
+  });
+
   it('re-checks blocked after waiting for quiet', async () => {
     const t = fakeTerminal({ state: 'working' });
     noteHumanInput(T);
