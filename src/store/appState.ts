@@ -103,6 +103,10 @@ export interface AgentSettings {
   bbaritLanguage: 'ko' | 'en' | 'ja' | 'zh' | 'auto';
   bbaritFlags: string[];
   resumeLastSession: boolean;
+  claudeLimitFallback?: boolean;
+  claudeLimitPrimaryModel?: string;
+  claudeLimitFallbackModel?: string;
+  claudeLimitUsageFile?: string;
   playSoundWhenDone: boolean;
   useModifierToSend: boolean;
   alwaysAllowToolActions: boolean;

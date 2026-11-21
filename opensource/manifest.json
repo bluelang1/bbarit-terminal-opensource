@@ -121,6 +121,7 @@
   "extra_files": [
     "src-tauri/resources/claude-hooks/bbarit-session.json",
     "src-tauri/resources/claude-hooks/session-start.sh",
+    "src-tauri/resources/claude-hooks/stop-failure.sh",
     "agent-browser-cli/package.json",
     "agent-browser-cli/LICENSE",
     "agent-browser-cli/README.md",

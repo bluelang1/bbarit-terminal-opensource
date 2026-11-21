@@ -183,3 +183,9 @@ tmux 안에서는 tmux 가 지원해야만 보고한다. 백그라운드 세션�
 - split/mix 화면에서는 `isActive` 인 창 하나만 "보고 있다" 로 친다. 화면에 보이는 다른 창의
   done 도 알림이 간다.
 - 실기 확인(macOS + Claude Code)은 하지 않았다. 단위 테스트, `npm run build`, `npm run lint` 만 통과.
+
+## Model limit fallback
+
+`state=error` reports whose msg is the primary model's limit text (`You've hit your Fable limit ·
+resets …`) start the model limit fallback for Claude tabs; replayed reports never do. See
+docs/MODEL_LIMIT_FALLBACK.md.

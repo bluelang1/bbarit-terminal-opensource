@@ -51,7 +51,7 @@ import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
 import { GATEWAY_UI_COMMAND_DOCS } from './gatewayUiCommands';
-import { useTranslation } from './i18n';
+import { useTranslation, type Locale } from './i18n';
 import './App.css';
 
 // Agents selectable for either broker role (developer/reviewer) — swappable any time.
@@ -170,6 +170,8 @@ import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } 
 import { isClaudeSessionId, newClaudeSessionId, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { dedicatedCodexSessionFields, restoredCodexFreshSession } from './terminal/codexSession';
 import { applyReportedClaudeSessionToProjects, CLAUDE_SESSION_REPORTED_EVENT, isDedicatedClaudeTab, type ClaudeSessionReport } from './terminal/claudeSessionReport';
+import { sanitizeModelFallbackMark, type ModelFallbackMark } from './terminal/modelLimitFallback';
+import { CLAUDE_LIMIT_REPORTED_EVENT, MODEL_FALLBACK_EVENT, MODEL_FALLBACK_MARK_EVENT, modelLimitTabsVersion, modelSwitchIndicator, releaseHumanModelChoice, subscribeModelLimitTabs, noteModelLimitHook, syncModelFallbackMarks, type ClaudeLimitReport, type ModelFallbackEventDetail } from './terminal/modelLimitRuntime';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
@@ -647,6 +649,8 @@ interface TerminalInstance {
   codexFreshSession?: boolean;
   /** Set on the two terminals opened by the Broker Agent, for strong visual distinction. */
   brokerRole?: 'developer' | 'reviewer';
+  /** Switched to the fallback model by the app after the primary's limit (docs/MODEL_LIMIT_FALLBACK.md). */
+  modelFallback?: ModelFallbackMark;
 }
 
 type TerminalGitStatus = {
@@ -1935,6 +1939,7 @@ function saveProjects(projects: Project[], activeId: string | null, agentLinks?:
         claudeSessionId: t.claudeSessionId || undefined,
         claudeSessionSource: t.claudeSessionId ? (t.claudeSessionSource || undefined) : undefined,
         codexFreshSession: restoredCodexFreshSession(t),
+        modelFallback: t.cliType === 'claude' ? sanitizeModelFallbackMark(t.modelFallback) : undefined,
       })),
       activeTerminalId: p.activeTerminalId,
     })),
@@ -1983,6 +1988,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
               claudeSessionId: isClaudeSessionId(t?.claudeSessionId) ? t.claudeSessionId : undefined,
               claudeSessionSource: isClaudeSessionId(t?.claudeSessionId) ? (t?.claudeSessionSource === 'hook' ? 'hook' : 'app') : undefined,
               codexFreshSession: restoredCodexFreshSession({ cliType, codexFreshSession: t?.codexFreshSession }),
+              modelFallback: cliType === 'claude' ? sanitizeModelFallbackMark(t?.modelFallback) : undefined,
             } as TerminalInstance;
           })
         : [createTerminal()];
@@ -15968,6 +15974,93 @@ Office project scaffold created by BBARIT Terminal.
       if (unlisten) unlisten();
     };
   }, [isHarnessWindow]);
+  // Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md). The StopFailure hook report goes to
+  // the runtime, which acts only on Claude tabs mounted in this window.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tauriListen<ClaudeLimitReport>(CLAUDE_LIMIT_REPORTED_EVENT, (event) => {
+      noteModelLimitHook(event.payload);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+  // Tab model-switch icons re-render when a tab registers or a person takes its model over.
+  const modelLimitTabsVer = useSyncExternalStore(subscribeModelLimitTabs, modelLimitTabsVersion, modelLimitTabsVersion);
+  // Marks live on the terminals (persisted with them); the runtime gets a copy keyed on a string.
+  const modelFallbackMarksKey = useMemo(() => JSON.stringify(
+    projects.flatMap((p) => p.terminals.filter((tt) => tt.modelFallback).map((tt) => [tt.id, tt.modelFallback])),
+  ), [projects]);
+  useEffect(() => {
+    try { syncModelFallbackMarks(JSON.parse(modelFallbackMarksKey)); } catch { /* ignore */ }
+  }, [modelFallbackMarksKey]);
+  // Mark changes are stored on the terminal by the main window, which persists tabs. Marks are
+  // broadcast as a Tauri event so a change made in a harness/pop-out window reaches it too.
+  const storeModelFallbackMark = useCallback((terminalId: string, markIn: ModelFallbackMark | null | undefined) => {
+        const mark = sanitizeModelFallbackMark(markIn ?? undefined);
+        const d = { terminalId };
+        setProjects((prev) => {
+          let changed = false;
+          const next = prev.map((p) => {
+            const idx = p.terminals.findIndex((tt) => tt.id === d.terminalId);
+            if (idx < 0) return p;
+            const cur = p.terminals[idx];
+            if (JSON.stringify(cur.modelFallback ?? null) === JSON.stringify(mark ?? null)) return p;
+            changed = true;
+            const terminals = p.terminals.slice();
+            terminals[idx] = { ...cur, modelFallback: mark };
+            return { ...p, terminals };
+          });
+          return changed ? next : prev;
+        });
+  }, []);
+  useEffect(() => {
+    if (isHarnessWindow) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tauriListen<{ terminalId: string; mark: ModelFallbackMark | null }>(MODEL_FALLBACK_MARK_EVENT, (event) => {
+      if (event.payload?.terminalId) storeModelFallbackMark(event.payload.terminalId, event.payload.mark);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, [isHarnessWindow, storeModelFallbackMark]);
+  // Notices become a toast (in the window where the tab runs).
+  useEffect(() => {
+    const onFallback = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as ModelFallbackEventDetail | undefined;
+      if (!d) return;
+      // Fallback path when the Tauri event could not be sent (main window only).
+      if (d.terminalId && d.mark !== undefined && !isHarnessWindow) storeModelFallbackMark(d.terminalId, d.mark);
+      if (d.notice && d.text) {
+        const { projects: projs } = taskNotifyRef.current;
+        let projectId = '', title = '';
+        for (const p of projs) {
+          const term = p.terminals.find((tt) => tt.id === d.terminalId);
+          if (term) {
+            projectId = p.id;
+            title = [p.displayName || p.name || '', term.name || ''].filter(Boolean).join(' - ');
+            break;
+          }
+        }
+        const id = `model-fallback-${d.terminalId}-${Date.now()}`;
+        const toast: TaskToast = { id, projectId, terminalId: d.terminalId, title: title || 'Claude', prompt: d.text, duration: '' };
+        setTaskToasts((prev) => [...prev.filter((tt) => tt.id !== id), toast].slice(-4));
+        taskToastTimersRef.current[id] = window.setTimeout(() => dismissTaskToast(id), 12000);
+      }
+    };
+    window.addEventListener(MODEL_FALLBACK_EVENT, onFallback as EventListener);
+    return () => window.removeEventListener(MODEL_FALLBACK_EVENT, onFallback as EventListener);
+  }, [dismissTaskToast, isHarnessWindow, storeModelFallbackMark]);
   // Main window: tab-close warns about unsaved edits, but window-close used to
   // discard every dirty office/document tab silently. Intercept and ask once.
   useEffect(() => {
@@ -22478,7 +22571,7 @@ Office project scaffold created by BBARIT Terminal.
                       key={terminal.id}
                       data-terminal-tab-id={terminal.id}
                       data-hint="tab"
-                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminalStatusClass(terminal.id)}`}
+                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminal.cliType === 'claude' ? `has-model-switch${['switched', 'unconfirmed'].includes(modelSwitchIndicator(terminal.id, terminal.modelFallback, locale as Locale).state) ? ' model-switch-shown' : ''}` : ''} ${terminalStatusClass(terminal.id)}`}
                       title={terminal.name}
                       style={isTerminalFiltered(terminal.id) ? { opacity: 0.25, pointerEvents: 'none' } : undefined}
                       onMouseDown={(e) => {
@@ -22568,6 +22661,33 @@ Office project scaffold created by BBARIT Terminal.
                             <span className="terminal-telegram-dot" />
                           </button>
                         )}
+                        {terminal.cliType === 'claude' && (() => {
+                          // Model limit fallback state (docs/MODEL_LIMIT_FALLBACK.md); depends on modelLimitTabsVer.
+                          void modelLimitTabsVer;
+                          const ind = modelSwitchIndicator(terminal.id, terminal.modelFallback, locale as Locale);
+                          const Icon = ind.state === 'off' ? LucideIcons.RefreshCwOff
+                            : ind.state === 'human' || ind.state === 'preset' ? LucideIcons.UserLock
+                            : ind.state === 'on' ? LucideIcons.RefreshCw
+                            : LucideIcons.ArrowRightLeft;
+                          return (
+                            <button
+                              type="button"
+                              className={`terminal-telegram-badge terminal-model-switch is-${ind.state}`}
+                              title={ind.tooltip}
+                              aria-label={ind.tooltip}
+                              data-model-switch={ind.state}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                // A typed /model choice is released here (no input, model unchanged).
+                                if (ind.state === 'human' && releaseHumanModelChoice(terminal.id)) return;
+                                setSettingsInitialTab({ tab: 'agent', nonce: Date.now() });
+                                setShowGlobalSettings(true);
+                              }}
+                            >
+                              <Icon size={12} aria-hidden="true" />
+                            </button>
+                          );
+                        })()}
                         <button
                           type="button"
                           className="terminal-telegram-badge"
