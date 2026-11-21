@@ -3,6 +3,10 @@
 Status: approved by the maintainer on 2026-11-16. This document is the source of truth for
 the remaining work; update the "Progress" table when a stage lands.
 
+Next step (proposal): `2026-11-22-agent-mesh-design.md` extends this board to many leads on
+many computers. It keeps this document's sync mode for solo and offline use and builds the
+shared network on the server-direct mode.
+
 Supersedes the storage and scope parts of `2026-11-16-agent-team-board-design.md` (stage 1,
 notes only). Related: `2026-11-16-agent-limits-and-log-design.md`,
 `2026-11-16-agent-caller-verification-design.md`, `docs/AGENT_RELAY.md`.
@@ -529,10 +533,12 @@ the maintainer in the dev app before merge.
 | 1 | done: implemented, reviewed, checked in the dev app | first PR from branch `feat/agent-board` (stages 1+2 together) |
 | 2 | done: implemented, reviewed twice (store; app/CLI), checked in the dev app (claim, deps, review flow, fail/retry, tab-close release, lease renewal, claims surviving quit/relaunch with the PTY holder) | same PR; notes in "Stage 2 notes" below |
 | 1+2 | merged | PR #79 (5f3f900) |
-| 3a | implemented and tested (SQLite + PostgreSQL 16 in Docker); waiting for code review and the dev-app check | branch `feat/agent-board-pg`, worktree `.claude/worktrees/agent-board-pg`; notes in "Stage 3a notes" below |
-| 3b | implemented and tested (two SQLite files + PostgreSQL 16 in Docker); not yet tried in a running app; waiting for code review and the dev-app check | branch `feat/board-sync`, worktree `.claude/worktrees/board-sync`; notes in "Stage 3b notes" below |
-| 3c | implemented and tested (SQLite + two/three computers on PostgreSQL 16 in Docker: restore with takeover guard and newer local rows, remote note exactly-once across crashes, double adopt race, old home returning); not yet tried in a running app; waiting for code review and the dev-app check | branch `feat/board-3c`, worktree `.claude/worktrees/board-3c`; notes in "Stage 3c notes" below |
-| 4 | not started | |
+| 3a | merged | PR #81 (210264c): PostgreSQL store, usage types, Settings |
+| 3b | merged; sync round checked in the dev app against PostgreSQL 16 in Docker | PR #84 (fdbcadb); notes in "Stage 3b notes" below |
+| 3c | merged; copy, waiting note and takeover checked in the dev app; a rebuilt or restored server is detected | PR #85 (429438a); notes in "Stage 3c notes" below |
+| 4 | merged as the team status view (design in `2026-11-16-team-status-view-design.md`) | PR #82 (2e01cb4) |
+| after 4 | merged: agent team switch `agents.enabled`, lead mode phrase with a `UserPromptSubmit` hook, `agent task claim --next --label <role>`, refresh of app-owned bundled skills | PR #88 (256ff0d); `docs/AGENT_RELAY.md` |
+| next | proposal, not approved: many leads on many computers, identities, task types, pooled workers, takeover, product-neutral packaging | `2026-11-22-agent-mesh-design.md` |
 
 ## Stage 2 notes (builder's choices inside the rules)
 
