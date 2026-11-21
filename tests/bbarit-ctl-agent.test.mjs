@@ -7,6 +7,7 @@ import {
   evaluateAgentWait,
   mcpPortFromEnv,
   waitForAgents,
+  agentStatusError,
   isAppUnreachable,
   unreachableWaitPolicy,
   BRIDGE_UNREACHABLE,
@@ -69,6 +70,14 @@ test('waitForAgents times out with the last snapshot', async () => {
   assert.equal(res.timedOut, true);
   assert.deepEqual(res.agents, [working]);
   assert.equal(calls, 4); // t = 0, 2000, 4000, 6000
+});
+
+test('waitForAgents stops at once when the agent team is turned off', async () => {
+  let calls = 0;
+  const off = async () => { calls++; throw agentStatusError({ ok: false, code: 'agents_disabled', error: 'agent team is turned off: …' }); };
+  await assert.rejects(waitForAgents({ fetchAgents: off, timeoutMs: 60000, ...fakeClock() }), /agent team is turned off/);
+  assert.equal(calls, 1);
+  assert.equal(agentStatusError({ ok: false, error: 'reload' }).fatal, undefined);
 });
 
 test('waitForAgents retries transient failures, then gives up', async () => {
@@ -343,6 +352,15 @@ test('parseBoardArgs post: text words and --kind', () => {
   assert.deepEqual(parseBoardArgs('post', ['--kind', 'announce', 'plan']), { text: 'plan', kind: 'announce' });
   assert.deepEqual(parseBoardArgs('post', ['--task', '#3', 'found it']), { text: 'found it', task: 3 });
   assert.throws(() => parseBoardArgs('post', ['--task', 'x', 'y']), /invalid task number/);
+});
+
+test('parseTaskArgs claim --next --label: repeatable or comma list, only with --next', () => {
+  assert.deepEqual(parseTaskArgs('claim', ['--next']), { next: true });
+  assert.deepEqual(parseTaskArgs('claim', ['--next', '--label', 'impl']), { next: true, labels: ['impl'] });
+  assert.deepEqual(parseTaskArgs('claim', ['--label', 'test,review', '--next', '--label=docs']), { next: true, labels: ['test', 'review', 'docs'] });
+  assert.deepEqual(parseTaskArgs('claim', ['3']), { task: 3 });
+  assert.throws(() => parseTaskArgs('claim', ['3', '--label', 'impl']), /--label goes with --next/);
+  assert.throws(() => parseTaskArgs('claim', ['--next', '--label']), /usage: agent task claim/);
 });
 
 test('parseTaskArgs add: title words, options before --, repeatable labels and deps', () => {

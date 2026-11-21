@@ -79,3 +79,35 @@ describe('TeamStatusOverlay pop-out', () => {
     expect(onFront).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('TeamStatusOverlay with the agent team turned off', () => {
+  it('has no Team status tab, opens on Dashboard even when asked for the team, never reads the board', async () => {
+    const teams = vi.spyOn(src, 'teams');
+    teams.mockClear();
+    const onTab = vi.fn();
+    const onPopOut = vi.fn();
+    render(<TeamStatusOverlay teamEnabled={false} initialTab="team" onClose={() => {}} onOpenExternal={() => {}} onTabChange={onTab} onPopOut={onPopOut} view={view} />);
+    await settle();
+    expect(screen.queryByRole('tab', { name: 'Team status' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Dashboard' }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByRole('button', { name: 'Open in its own window' })).toBeNull();
+    expect(document.querySelector('iframe')).toBeTruthy();
+    expect(onTab).toHaveBeenLastCalledWith('dashboard');
+    expect(teams).not.toHaveBeenCalled();
+  });
+
+  it('switches to Dashboard when turned off while Team status is open, and back when turned on', async () => {
+    const onTab = vi.fn();
+    const { rerender } = render(<TeamStatusOverlay initialTab="team" onClose={() => {}} onOpenExternal={() => {}} onTabChange={onTab} view={view} />);
+    await settle();
+    expect(screen.getByRole('tab', { name: 'Team status' }).getAttribute('aria-selected')).toBe('true');
+    rerender(<TeamStatusOverlay teamEnabled={false} initialTab="team" onClose={() => {}} onOpenExternal={() => {}} onTabChange={onTab} view={view} />);
+    await settle();
+    expect(screen.queryByRole('tab', { name: 'Team status' })).toBeNull();
+    expect(onTab).toHaveBeenLastCalledWith('dashboard');
+    rerender(<TeamStatusOverlay initialTab="team" onClose={() => {}} onOpenExternal={() => {}} onTabChange={onTab} view={view} />);
+    await settle();
+    expect(screen.getByRole('tab', { name: 'Team status' }).getAttribute('aria-selected')).toBe('true');
+    expect(onTab).toHaveBeenLastCalledWith('team');
+  });
+});

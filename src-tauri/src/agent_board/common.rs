@@ -348,6 +348,8 @@ pub struct WriteSpec {
     pub reason: Option<String>,
     pub result: Option<TaskResult>,
     pub claim_next: bool,
+    /// claim --next --label: only tasks carrying one of these (empty = any task).
+    pub next_labels: Vec<String>,
     pub lease: i64,
 }
 
@@ -372,7 +374,12 @@ impl WriteSpec {
         if op.task.is_none() && !claim_next {
             return Err(format!("task number required (agent task {name} <#>)"));
         }
-        Ok(WriteSpec { action, reason, result, claim_next, lease: lease_ms(op.lease_ms) })
+        let next_labels = match (&op.labels, action) {
+            (Some(l), Action::Claim) if claim_next => clean_labels(l)?,
+            (Some(l), Action::Claim) if !l.is_empty() => return Err("agent task claim: --label goes with --next".into()),
+            _ => Vec::new(),
+        };
+        Ok(WriteSpec { action, reason, result, claim_next, next_labels, lease: lease_ms(op.lease_ms) })
     }
 }
 

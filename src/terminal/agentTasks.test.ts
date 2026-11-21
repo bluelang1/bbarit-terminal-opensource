@@ -87,6 +87,8 @@ describe('buildTaskOp', () => {
     expect(buildTaskOp('claim', { task: '#3' }, { leaseMs: 300000 })).toEqual({ ok: true, value: { op: 'claim', task: 3, leaseMs: 300000 } });
     expect(buildTaskOp('claim', { next: true })).toEqual({ ok: true, value: { op: 'claim', next: true } });
     expect(buildTaskOp('claim', { next: true, task: 3 }).ok).toBe(false);
+    expect(buildTaskOp('claim', { next: true, labels: ['impl', ' test '] })).toEqual({ ok: true, value: { op: 'claim', next: true, labels: ['impl', 'test'] } });
+    expect(buildTaskOp('claim', { task: 3, labels: ['impl'] })).toEqual({ ok: false, error: 'agent task claim: --label goes with --next' });
     const none = buildTaskOp('claim', {});
     expect(!none.ok && none.error).toMatch(/agent task claim <#>/);
   });

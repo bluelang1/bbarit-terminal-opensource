@@ -44,6 +44,7 @@ import BBARIT_CTL_SOURCE from '../../scripts/bbarit-ctl.mjs?raw';
 import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from '../dashboard/dashboardUrl';
 import { PetSettings } from './PetSettings';
 import { AgentBoardSettings } from './AgentBoardSettings';
+import { AgentTeamSwitch } from './AgentTeamSwitch';
 import './SettingsPanel.css';
 
 // Control CLI 탭에서 버스 명령 → 복사용 CLI 예시 매핑 (bbarit-ctl 서브커맨드).
@@ -3629,6 +3630,7 @@ export function SettingsPanel({
                   />
                 </div>
               </div>
+              <AgentTeamSwitch />
               <AgentBoardSettings />
 
             </div>

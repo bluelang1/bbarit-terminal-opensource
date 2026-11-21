@@ -54,6 +54,7 @@
       "resources/claude-hooks/bbarit-session.json",
       "resources/claude-hooks/session-start.sh",
       "resources/claude-hooks/stop-failure.sh",
+      "resources/claude-hooks/user-prompt-submit.sh",
       "../agent-browser-cli/bin/bbarit-browser-control.mjs",
       "../bbarit-agent/personas/**/*",
       "../scripts/tauri-dev-screen.mjs",

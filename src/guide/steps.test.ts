@@ -14,6 +14,14 @@ describe('GUIDE_STEPS', () => {
     expect(GUIDE_STEPS.map(s => s.id)).toEqual(['project', 'ai-terminal', 'status', 'keep-running', 'git-keys', 'hints', 'window-pin', 'team-status', 'pet']);
   });
 
+  it('team-status hidden while the agent team is off (Settings → Agent team in tabs)', () => {
+    expect(visibleSteps(true).map(s => s.id)).toContain('team-status');
+    expect(visibleSteps(true, true).map(s => s.id)).toContain('team-status');
+    const off = visibleSteps(true, false).map(s => s.id);
+    expect(off).not.toContain('team-status');
+    expect(off).toHaveLength(GUIDE_STEPS.length - 1);
+  });
+
   it('pet hidden off macOS', () => {
     expect(visibleSteps(false).map(s => s.id)).not.toContain('pet');
     expect(visibleSteps(true).map(s => s.id)).toContain('pet');

@@ -92,6 +92,59 @@ pub fn env_host() -> Option<String> {
     std::env::var("BBARIT_BOARD_HOST").ok().filter(|v| !v.trim().is_empty())
 }
 
+/// `agents.enabled` (Settings → "Agent team in tabs", src/terminal/agentTeamSwitch.ts): only an
+/// explicit `false` is off; missing or any other value is on (old config files).
+pub fn agents_enabled_in(cfg: Option<&Value>) -> bool {
+    cfg.and_then(|c| c.get("agents")).and_then(|a| a.get("enabled")).and_then(Value::as_bool) != Some(false)
+}
+
+/// `agents.enabled` from config.json, re-read on every call (the switch takes effect at once).
+pub fn agents_enabled() -> bool {
+    agents_enabled_in(crate::read_octo_config_json().as_ref())
+}
+
+/// Default `agents.leadPhrase` (Settings → "Lead agent phrase", src/terminal/agentTeamSwitch.ts).
+pub const DEFAULT_LEAD_PHRASE: &str = "리드 에이전트로 진행해줘";
+/// Always accepted next to the configured phrase (English default).
+pub const ENGLISH_LEAD_PHRASE: &str = "proceed as the lead agent";
+
+/// Trim and collapse whitespace; `None` unless one line of 2–60 characters without control or
+/// format characters (the same rule as `normalizeLeadPhrase` in agentTeamSwitch.ts).
+pub fn normalize_lead_phrase(raw: &str) -> Option<String> {
+    if raw.chars().any(|c| c.is_control() || is_format_char(c)) {
+        return None;
+    }
+    let v = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (2..=60).contains(&v.chars().count()).then_some(v)
+}
+
+/// `agents.leadPhrase`, or the default when missing or invalid.
+pub fn lead_phrase_in(cfg: Option<&Value>) -> String {
+    cfg.and_then(|c| c.get("agents"))
+        .and_then(|a| a.get("leadPhrase"))
+        .and_then(Value::as_str)
+        .and_then(normalize_lead_phrase)
+        .unwrap_or_else(|| DEFAULT_LEAD_PHRASE.to_string())
+}
+
+/// What `GET /api/agent-lead` answers for the UserPromptSubmit hook: nothing while the agent
+/// team is off, else the configured and the English phrase, one per line, in the form the hook
+/// compares against the raw JSON prompt: whitespace collapsed, ASCII lower-cased, `\` and `"`
+/// JSON-escaped.
+pub fn lead_hook_phrases(cfg: Option<&Value>) -> Vec<String> {
+    if !agents_enabled_in(cfg) {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for p in [lead_phrase_in(cfg), ENGLISH_LEAD_PHRASE.to_string()] {
+        let v = p.to_ascii_lowercase().replace('\\', "\\\\").replace('"', "\\\"");
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
 /// `agents.board.hostName` from config.json, when set.
 fn setting_host() -> Option<String> {
     let cfg = crate::read_octo_config_json()?;

@@ -12,6 +12,8 @@ import CHANGELOG_EN from '../../CHANGELOG.en.md?raw';
 import { useTranslation, type TranslationKey } from '../i18n';
 import { kvGetJSON } from '../hooks/useKV';
 import { RELEASE_REPO_MAC } from '../config/endpoints';
+import { useConfig } from '../config/ConfigContext';
+import { agentTeamEnabled } from '../terminal/agentTeamSwitch';
 import {
   inlineTokens,
   localizedSections,
@@ -94,7 +96,9 @@ function firstOpenStep(steps: GuideStep[], progress: GuideProgress): GuideStepId
 
 export default function GuidePage() {
   const { t, locale } = useTranslation();
-  const steps = useMemo(() => visibleSteps(IS_MAC), []);
+  const { config } = useConfig();
+  const agentTeam = agentTeamEnabled(config.agents);
+  const steps = useMemo(() => visibleSteps(IS_MAC, agentTeam), [agentTeam]);
   const initial = useMemo(() => readQuery(), []);
   const [mode, setMode] = useState<Mode>(initial.mode);
   const [from, setFrom] = useState<string | null>(initial.from ?? null);

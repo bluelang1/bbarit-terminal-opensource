@@ -693,8 +693,31 @@ async fn release_local() {
     let _ = store.run(|c, _| super::sqlite::sync_release(c)).await;
 }
 
+/// What one worker tick does: nothing while the agent team is turned off (Settings → "Agent team
+/// in tabs"; the change log, mirrors and settings stay as they are, so turning it back on carries
+/// on where it stopped), release when the usage type left `sync`, else a round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerStep {
+    Paused,
+    Off,
+    Round,
+}
+
+pub fn worker_step(agents_enabled: bool, mode: BoardMode) -> WorkerStep {
+    if !agents_enabled {
+        WorkerStep::Paused
+    } else if mode != BoardMode::Sync {
+        WorkerStep::Off
+    } else {
+        WorkerStep::Round
+    }
+}
+
+/// The status line while the agent team is turned off.
+pub const AGENTS_DISABLED_MESSAGE: &str = "agent team in tabs is turned off in Settings; sync resumes when it is turned on";
+
 /// The sync worker (app setup): a host task, never in the webview. Active only while the usage
-/// type is `sync`: a round on start, every 30 s and 2 s after a local write; failures back off
+/// type is `sync` and the agent team is on: a round on start, every 30 s and 2 s after a local write; failures back off
 /// 5 s → 5 min and never affect board commands. Stops on app exit; leaving `sync` closes the
 /// server connection and releases the change log. Emits `octo-agent-board` for teams of other
 /// machines that changed, so open views refresh.
@@ -719,7 +742,22 @@ pub fn start_sync_worker(app: tauri::AppHandle) {
             }
             DUE.store(0, Ordering::SeqCst);
             let sel = super::read_selection();
-            if sel.mode.mode != BoardMode::Sync {
+            let step = worker_step(super::agents_enabled(), sel.mode.mode);
+            if step == WorkerStep::Paused {
+                // Paused, not released: nothing is pushed, pulled or cleaned up. A local write
+                // while paused stays in the change log for the next round.
+                if sel.mode.mode == BoardMode::Sync {
+                    note(|s| {
+                        s.state = "paused";
+                        s.last_error = Some(AGENTS_DISABLED_MESSAGE.into());
+                        s.last_error_code = Some("agents_disabled");
+                    });
+                }
+                failures = 0;
+                next_at = now + WRITE_DELAY_MS;
+                continue;
+            }
+            if step == WorkerStep::Off {
                 if was_sync {
                     stop_server().await;
                     release_local().await;
@@ -795,6 +833,9 @@ pub async fn agent_board_sync_now() -> Result<Value, String> {
     let sel = super::read_selection();
     if sel.mode.mode != BoardMode::Sync {
         return Err("sync is off: choose \"Both (sync)\" first".into());
+    }
+    if !super::agents_enabled() {
+        return Err(AGENTS_DISABLED_MESSAGE.into());
     }
     let res = run_round(&sel).await;
     let mut status = agent_board_sync_status().await?;
@@ -1100,6 +1141,45 @@ pub async fn agent_board_outbox_dismiss(id: String) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_does_not_run_while_the_agent_team_is_off() {
+        for mode in [BoardMode::Sync, BoardMode::Sqlite, BoardMode::Postgres] {
+            assert_eq!(worker_step(false, mode), WorkerStep::Paused);
+        }
+        assert_eq!(worker_step(true, BoardMode::Sync), WorkerStep::Round);
+        assert_eq!(worker_step(true, BoardMode::Sqlite), WorkerStep::Off);
+        assert_eq!(worker_step(true, BoardMode::Postgres), WorkerStep::Off);
+    }
+
+    #[test]
+    fn agents_enabled_reads_only_an_explicit_false_as_off() {
+        use super::super::agents_enabled_in;
+        assert!(agents_enabled_in(None));
+        assert!(agents_enabled_in(Some(&json!({}))));
+        assert!(agents_enabled_in(Some(&json!({ "agents": { "maxChildren": 3 } }))));
+        assert!(agents_enabled_in(Some(&json!({ "agents": { "enabled": true } }))));
+        assert!(agents_enabled_in(Some(&json!({ "agents": { "enabled": "false" } }))));
+        assert!(!agents_enabled_in(Some(&json!({ "agents": { "enabled": false } }))));
+    }
+
+    #[test]
+    fn lead_phrases_for_the_prompt_hook() {
+        use super::super::{lead_hook_phrases, lead_phrase_in, normalize_lead_phrase, DEFAULT_LEAD_PHRASE};
+        assert_eq!(lead_hook_phrases(None), vec![DEFAULT_LEAD_PHRASE.to_string(), "proceed as the lead agent".to_string()]);
+        assert!(lead_hook_phrases(Some(&json!({ "agents": { "enabled": false } }))).is_empty());
+        let cfg = json!({ "agents": { "leadPhrase": "  Run   as \"LEAD\"  " } });
+        assert_eq!(lead_phrase_in(Some(&cfg)), "Run as \"LEAD\"");
+        assert_eq!(lead_hook_phrases(Some(&cfg))[0], "run as \\\"lead\\\"");
+        // Invalid saved values fall back to the default.
+        let long = "y".repeat(61);
+        for bad in ["x", "a\nb", "zero\u{200b}width", long.as_str()] {
+            assert_eq!(normalize_lead_phrase(bad), None, "{bad:?}");
+            assert_eq!(lead_phrase_in(Some(&json!({ "agents": { "leadPhrase": bad } }))), DEFAULT_LEAD_PHRASE);
+        }
+        // The English default only once when it is also the configured phrase.
+        assert_eq!(lead_hook_phrases(Some(&json!({ "agents": { "leadPhrase": "Proceed as the lead agent" } }))).len(), 1);
+    }
 
     #[test]
     fn backoff_grows_from_five_seconds_to_five_minutes() {

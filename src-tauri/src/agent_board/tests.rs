@@ -781,6 +781,36 @@ fn next_picks_priority_then_number_and_skips_waiting_tasks(e: Engine) {
     assert_eq!(next("d"), Some(waiting), "ready once its dependency is done");
 }
 
+fn next_with_labels_only_takes_tasks_carrying_one_of_them(e: Engine) {
+    let fx = Fixture::new(e, "labels");
+    let s = fx.store();
+    let add = |title: &str, labels: &[&str], priority: i64| {
+        s.w("l", TaskOpInput { title: Some(title.into()), priority: Some(priority), labels: Some(labels.iter().map(|l| l.to_string()).collect()), ..op("add") }, &member("lead"), cx(1)).unwrap()["task"]["seq"].as_i64().unwrap()
+    };
+    let impl_low = add("impl low", &["impl"], 1);
+    let test_high = add("test high", &["test", "ci"], 3);
+    let impl_high = add("impl high", &["impl", "backend"], 2);
+    let review = add("review", &["review"], 3);
+    let plain = add("no label", &[], 3);
+    let next = |who: &str, labels: &[&str]| {
+        s.w("l", TaskOpInput { next: true, labels: Some(labels.iter().map(|l| l.to_string()).collect()), ..op("claim") }, &member(who), cx(5)).unwrap()
+    };
+    // Same order rules (priority, then number) within the matching tasks.
+    assert_eq!(next("i1", &["impl"])["task"]["seq"].as_i64(), Some(impl_high));
+    assert_eq!(next("i2", &["impl"])["task"]["seq"].as_i64(), Some(impl_low));
+    let none = next("i3", &["impl"]);
+    assert_eq!(none["task"], Value::Null);
+    assert_eq!(none["none"], "no open task to claim", "other roles' open tasks do not count");
+    // Several labels: any of them; labels are trimmed like stored ones.
+    assert_eq!(next("t1", &[" ci ", "review"])["task"]["seq"].as_i64(), Some(test_high));
+    assert_eq!(next("t2", &["ci", "review"])["task"]["seq"].as_i64(), Some(review));
+    // No label filter: any ready task, the unlabeled one included.
+    assert_eq!(next("any", &[])["task"]["seq"].as_i64(), Some(plain));
+    // --label without --next is refused.
+    let e = s.w("l", TaskOpInput { labels: Some(vec!["impl".into()]), ..on("claim", impl_low) }, &member("x"), cx(6)).unwrap_err();
+    assert_eq!(e, "agent task claim: --label goes with --next");
+}
+
 fn dependencies_gate_claims_and_cycles_are_refused(e: Engine) {
     let fx = Fixture::new(e, "deps");
     let s = fx.store();
@@ -1566,6 +1596,7 @@ shared_tests!(
     eight_claimers_on_one_task_exactly_one_wins,
     eight_next_claimers_over_eight_tasks_all_get_different_ones,
     next_picks_priority_then_number_and_skips_waiting_tasks,
+    next_with_labels_only_takes_tasks_carrying_one_of_them,
     dependencies_gate_claims_and_cycles_are_refused,
     a_dependency_chain_deeper_than_the_bound_is_refused,
     retries_are_limited_for_members_but_not_for_root,

@@ -47,8 +47,9 @@ export const GUIDE_STEPS: GuideStep[] = [
   { id: 'pet', ...keys('pet'), action: 'pet-tour', macOnly: true },
 ];
 
-export function visibleSteps(isMac: boolean): GuideStep[] {
-  return GUIDE_STEPS.filter(s => isMac || !s.macOnly);
+/** `agentTeam` false (Settings → "Agent team in tabs" off) leaves out the team-status step. */
+export function visibleSteps(isMac: boolean, agentTeam = true): GuideStep[] {
+  return GUIDE_STEPS.filter(s => (isMac || !s.macOnly) && (agentTeam || s.id !== 'team-status'));
 }
 
 export function isGuideStepId(v: unknown): v is GuideStepId {

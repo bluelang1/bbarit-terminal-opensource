@@ -83,8 +83,11 @@ export function missingPgFields(pg: BoardPgSettings): Array<'host' | 'database' 
 
 // ── Keeping agents away from the storage settings ───────────────────────
 
-/** Config paths agents may neither read nor change through `config.get` / `config.patch`. */
-export const PROTECTED_CONFIG_PATHS = ['agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName', 'agents.board.adoptAfterHours'] as const;
+/**
+ * Config paths agents may neither read nor change through `config.get` / `config.patch`.
+ * `agents.enabled` / `agents.leadPhrase` are Settings → Agent team (src/terminal/agentTeamSwitch.ts).
+ */
+export const PROTECTED_CONFIG_PATHS = ['agents.enabled', 'agents.leadPhrase', 'agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName', 'agents.board.adoptAfterHours'] as const;
 
 function splitPath(path: string): string[] {
   return path.split('.').map((k) => k.trim()).filter((k) => k.length > 0);
@@ -98,6 +101,14 @@ function isPrefix(a: string[], b: string[]): boolean {
 export function isProtectedConfigPath(path: string): boolean {
   const p = splitPath(path);
   return PROTECTED_CONFIG_PATHS.some((prot) => isPrefix(prot.split('.'), p));
+}
+
+/** `config.patch`'s refusal for a protected path (only Settings changes these). */
+export function protectedConfigRefusal(path: string): string {
+  const p = splitPath(path);
+  return isPrefix(['agents', 'enabled'], p) || isPrefix(['agents', 'leadPhrase'], p)
+    ? 'the agent team switch and the lead agent phrase can only be changed in Settings → Agent team'
+    : 'the team board storage settings can only be changed in Settings → Agent team board';
 }
 
 /**

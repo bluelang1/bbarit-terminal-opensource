@@ -434,6 +434,7 @@ export function AgentBoardSettings() {
     if (st.lastErrorCode === 'replaced') return fillText(t('settings.agentBoard.sync.replaced'), { host: st.host, n: st.waiting });
     if (st.lastErrorCode === 'name_changed') return t('settings.agentBoard.sync.nameChanged');
     if (st.lastErrorCode === 'name_taken') return t('settings.agentBoard.sync.nameTaken');
+    if (st.lastErrorCode === 'agents_disabled') return t('settings.agentBoard.sync.agentsDisabled');
     return st.lastError ?? null;
   };
   const syncTime = (ms?: number | null) => (ms ? new Date(ms).toLocaleString() : t('settings.agentBoard.sync.never'));

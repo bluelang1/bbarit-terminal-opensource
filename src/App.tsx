@@ -192,6 +192,7 @@ import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlert
 import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './terminal/busyAgentTabs';
 import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
 import { useGuideHost } from './guide/useGuideHost';
+import { agentTeamEnabled, agentTeamRefusal, gaugeButtonLabel, refusalAfterWorktree, showStopTeamButton, showTeamStatusButton, teamBadgeCount, teamGatedNoteSend } from './terminal/agentTeamSwitch';
 import { Spotlight } from './guide/Spotlight';
 import { anyRelayChildWorking, effectiveAgentState, markLinkStopped, restoreStopMark, selectStopTargets, stopAgentTerminal, type AgentStopResult } from './terminal/agentRelay';
 import { UNREPORTED_SETTLE_MS, orphanAgentLink, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
@@ -200,7 +201,7 @@ import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
 import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, onAgentBoardChange, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
-import { isProtectedConfigPath, keepProtectedConfig, redactProtectedConfig } from './terminal/agentBoardStorage';
+import { isProtectedConfigPath, keepProtectedConfig, protectedConfigRefusal, redactProtectedConfig } from './terminal/agentBoardStorage';
 import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
@@ -5968,6 +5969,8 @@ Office project scaffold created by BBARIT Terminal.
   const relayChildState = (terminalId: string): AgentTabState => effectiveAgentState(getTerminalAgentState(terminalId), isTerminalBusy(terminalId));
   /** Stop-team button: shown while a relay child is working (agent stop design). */
   const [relayTeamWorking, setRelayTeamWorking] = useState(false);
+  /** Settings → "Agent team in tabs" (agents.enabled). Off hides the team UI and stops notes. */
+  const agentTeamOn = agentTeamEnabled(appConfig.agents);
   /** Live relay child ids, joined — keys the activity poll below. */
   const [relayChildKey, setRelayChildKey] = useState('');
   const refreshRelayTeamWorking = () => {
@@ -6203,7 +6206,7 @@ Office project scaffold created by BBARIT Terminal.
   };
   // Badges: read while relay children exist or the Team status tab is open (never for the
   // Dashboard tab alone). The hook re-renders only when a badge-relevant key changes.
-  const teamWatch = useTeamWatch(teamBoardSource, !!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open, boardConfig().staleMinutes * 60_000);
+  const teamWatch = useTeamWatch(teamBoardSource, agentTeamOn && (!!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open), boardConfig().staleMinutes * 60_000);
   const teamMembersOf = (team: string): TeamMember[] => teamMemberIds(agentLinksRef.current, team).map((id) => {
     const term = findTerminalAnywhere(id);
     const link = agentLinksRef.current.get(id);
@@ -6225,6 +6228,7 @@ Office project scaffold created by BBARIT Terminal.
   const projectNeeds = (projectId: string): NeedsYouItem[] => (projectTeamMap.get(projectId) || []).flatMap(teamNeeds);
   /** Open Team status for `team`; `projectId` is the project the request came from (the team is remembered there). */
   const openTeamStatus = (team?: string, projectId?: string) => {
+    if (!agentTeamOn) return;
     setGaugeRequest({ tab: 'team', team, projectId, nonce: Date.now() });
     setShowDashboard(true);
   };
@@ -6311,6 +6315,7 @@ Office project scaffold created by BBARIT Terminal.
     const focusMain = () => { void me.unminimize().catch(() => {}); void me.show().catch(() => {}); void me.setFocus().catch(() => {}); };
     const offs = [
       me.listen<unknown>(POPOUT_EVENT.req, async (e) => {
+        if (!agentTeamEnabled(getConfigSnapshot().agents)) return;
         const res = await serveRequest(popoutHandlersRef.current.source, e.payload, popoutTokenRef.current);
         if (res) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.res, res).catch(() => {});
       }),
@@ -6378,6 +6383,7 @@ Office project scaffold created by BBARIT Terminal.
   };
   /** Open (or focus) Team status in its own window for `team`. */
   const openTeamStatusPopout = async (team: string, projectId: string) => {
+    if (!agentTeamOn) return;
     setTeamPopout((p) => ({ open: true, team: team || p.team, projectId, nonce: p.nonce + 1 }));
     setShowDashboard(false);
     const markClosed = () => { void confirmTeamPopoutClosed(); };
@@ -6425,8 +6431,17 @@ Office project scaffold created by BBARIT Terminal.
       void confirmTeamPopoutClosed();
     }
   };
+  // Agent team turned off: the pop-out team status window closes (board data stays).
+  useEffect(() => {
+    if (agentTeamOn || !teamPopout.open || !isTauri()) return;
+    void (async () => {
+      try { await (await WebviewWindow.getByLabel(POPOUT_LABEL))?.close(); } catch { /* already gone */ }
+      void confirmTeamPopoutClosed();
+    })();
+  }, [agentTeamOn, teamPopout.open]);
   const renderTeamBadge = (items: NeedsYouItem[], className = 'ts-badge', onClick?: () => void) => {
-    const n = badgeCount(items);
+    // Agent team off: no badges on project tabs or the gauge button.
+    const n = teamBadgeCount(agentTeamOn, badgeCount(items));
     if (!n) return null;
     const label = badgeLabel(items, locale);
     return (
@@ -6486,12 +6501,15 @@ Office project scaffold created by BBARIT Terminal.
     void invoke('write_to_pty', { terminalId, data }).catch(() => {});
   };
   const flushAgentNotes = async (parentId: string): Promise<void> => {
+    // Agent team off: queued notes are dropped quietly (child tabs stay as they are).
+    if (!agentTeamEnabled(getConfigSnapshot().agents)) { dropParent(agentNoteQueueRef.current, parentId); return; }
     if (agentNoteFlushingRef.current.has(parentId)) return;
     if (!canDeliverToParent(getTerminalAgentState(parentId))) return;
     agentNoteFlushingRef.current.add(parentId);
     let again = false;
     try {
-      const res = await flushNotes(agentNoteQueueRef.current, parentId, async (note) => {
+      // Turned off mid-flush: the rest of this batch (already out of the queue) is dropped.
+      const res = await flushNotes(agentNoteQueueRef.current, parentId, teamGatedNoteSend(() => agentTeamEnabled(getConfigSnapshot().agents), async (note) => {
         const parent = findTerminalAnywhere(parentId);
         if (!parent) return { ok: false, reason: 'disposed' };
         // A stopped child gets no queued notes from its own children (they would restart it).
@@ -6503,7 +6521,7 @@ Office project scaffold created by BBARIT Terminal.
           fallbackWrite: agentPtyFallbackWrite(parentId),
         });
         return r.ok ? { ok: true } : { ok: false, reason: r.reason };
-      });
+      }));
       // 사람이 치는 중이었거나 터미널이 아직 준비되지 않았다 → 잠시 뒤 다시. blocked 는 부모가
       // blocked 를 벗어나는 상태 보고에서 다시 보낸다.
       if (res.stoppedBy === 'typing' || res.stoppedBy === 'no-writer' || res.stoppedBy === 'cancelled') {
@@ -6517,7 +6535,7 @@ Office project scaffold created by BBARIT Terminal.
     if (again) void flushAgentNotes(parentId);
   };
   const deliverAgentNote = async (link: AgentLink, state: AgentNoteState, snap?: AgentStatusSnapshot): Promise<void> => {
-    if (!link.parentId) return;
+    if (!link.parentId || !agentTeamEnabled(getConfigSnapshot().agents)) return;
     // 부모가 셸 탭이거나 최근 7501 보고(working/blocked/done)가 없으면 넣지 않는다 — 에이전트가
     // 떠난 셸 프롬프트에 명령으로 들어갈 수 있다.
     const parent = findTerminalAnywhere(link.parentId);
@@ -6600,6 +6618,8 @@ Office project scaffold created by BBARIT Terminal.
       window.removeEventListener(PTY_REPLAYED_EVENT, onPtyReplayed as EventListener);
     };
   }, []);
+  // Agent team turned off: notes waiting for parents are dropped quietly; links and tabs stay.
+  useEffect(() => { if (!agentTeamOn) agentNoteQueueRef.current.clear(); }, [agentTeamOn]);
   // 탭이 닫히면: 부모가 사라진 링크와 대기열은 버린다(자식 탭은 그대로 둔다). 닫힌 자식의 링크도 버린다.
   useEffect(() => {
     const alive = new Set(projects.flatMap((p) => p.terminals.map((tt) => tt.id)));
@@ -7256,7 +7276,7 @@ Office project scaffold created by BBARIT Terminal.
     statusTabCount: agentStatus.size,
     gitPanelOpen: showGitPanel,
     hintModeOpen: hintMode.active,
-    teamStatusOpen: (showDashboard && gaugeTab === 'team') || teamPopout.open,
+    teamStatusOpen: agentTeamOn && ((showDashboard && gaugeTab === 'team') || teamPopout.open),
   });
   guideStartupRef.current = guide.runStartup;
 
@@ -7965,6 +7985,11 @@ Office project scaffold created by BBARIT Terminal.
 
     const cmd = String(request?.cmd || '').trim();
     if (!cmd) return { ok: false, error: 'missing cmd' };
+    // Settings → "Agent team in tabs" off: every agent.* command that starts, messages or
+    // controls child tabs, and every board/task command, is refused here — the one dispatcher
+    // ctl and the gateway reach (src/terminal/agentTeamSwitch.ts). Read per command.
+    const teamOff = agentTeamRefusal(cmd, getConfigSnapshot().agents);
+    if (teamOff) return teamOff;
 
     switch (cmd) {
       case 'status':
@@ -8109,9 +8134,7 @@ Office project scaffold created by BBARIT Terminal.
       case 'config.patch': {
         const path = String(request?.path || '').trim();
         if (!path) return { ok: false, error: 'path required' };
-        if (isProtectedConfigPath(path)) {
-          return { ok: false, error: 'the team board storage settings can only be changed in Settings → Agent team board' };
-        }
+        if (isProtectedConfigPath(path)) return { ok: false, error: protectedConfigRefusal(path) };
         updateConfig((prev) => keepProtectedConfig(prev, setByPath(prev, path, request?.value)));
         return { ok: true };
       }
@@ -8362,9 +8385,12 @@ Office project scaffold created by BBARIT Terminal.
           }),
           name: worktreeReq.name || (request?.name ? String(request.name) : ''),
           fallback: cliType,
-        }).then((prepared): Record<string, unknown> => (prepared.ok
-          ? launch({ path: prepared.path, branch: prepared.branch })
-          : { ok: false, error: prepared.error }))
+        }).then((prepared): Record<string, unknown> => {
+          if (!prepared.ok) return { ok: false, error: prepared.error };
+          // Turned off while git ran: no tab, no brief (the slot is released below).
+          const off = refusalAfterWorktree(getConfigSnapshot().agents, prepared);
+          return off || launch({ path: prepared.path, branch: prepared.branch });
+        })
           .catch((e): Record<string, unknown> => ({ ok: false, error: `worktree: ${String(e instanceof Error ? e.message : e)}` }))
           .then((result) => {
             // Worktree failed (or launch threw): the slot is free again. Idempotent after launch.
@@ -18372,7 +18398,7 @@ Office project scaffold created by BBARIT Terminal.
               </span>
 
               {/* 팀 현황 — 이 프로젝트에 팀 보드가 있을 때 (게이지 오버레이의 팀 현황 탭) */}
-              {(projectTeamMap.get(activeProjectId || '') || []).length > 0 && (
+              {showTeamStatusButton(agentTeamOn, (projectTeamMap.get(activeProjectId || '') || []).length) && (
                 <button
                   className="view-mode-apply-all ts-badge-host"
                   data-guide="team-status"
@@ -18401,7 +18427,7 @@ Office project scaffold created by BBARIT Terminal.
               )}
 
               {/* 팀 멈춤 — 릴레이 자식이 하나라도 작업 중일 때만 (agent stop 과 같은 경로) */}
-              {relayTeamWorking && (
+              {showStopTeamButton(agentTeamOn, relayTeamWorking) && (
                 <button
                   className="view-mode-apply-all"
                   data-guide="stop-team"
@@ -19083,7 +19109,7 @@ Office project scaffold created by BBARIT Terminal.
             {isToolbarVisible('hub') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
               <LucideIcons.Waypoints size={14} />
             </button>}
-            {isToolbarVisible('dashboard') && <button data-hint="tool" data-guide="team-status" className={`btn-top-small toolbar-tool tool-dashboard ts-badge-host${showDashboard ? ' active' : ''}`} onClick={() => { setGaugeRequest({ nonce: Date.now() }); setShowDashboard((v) => !v); }} title={locale === 'ko' ? '팀 현황 · 에이전트 대시보드 (대시보드 주소는 설정 > Hub)' : 'Team status · Agent Dashboard (dashboard URL in Settings > Hub)'}><LucideIcons.Gauge size={14} />{renderTeamBadge(activeProjectId ? projectNeeds(activeProjectId) : [])}</button>}
+            {isToolbarVisible('dashboard') && <button data-hint="tool" data-guide={gaugeButtonLabel(agentTeamOn, locale).guide} className={`btn-top-small toolbar-tool tool-dashboard ts-badge-host${showDashboard ? ' active' : ''}`} onClick={() => { setGaugeRequest({ nonce: Date.now() }); setShowDashboard((v) => !v); }} title={gaugeButtonLabel(agentTeamOn, locale).title}><LucideIcons.Gauge size={14} />{renderTeamBadge(activeProjectId ? projectNeeds(activeProjectId) : [])}</button>}
             {isToolbarVisible('skills') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
             {isToolbarVisible('mcp') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
               <LucideIcons.ServerCog size={14} />
@@ -24725,6 +24751,7 @@ Office project scaffold created by BBARIT Terminal.
       {showDashboard && (
         <React.Suspense fallback={null}>
           <TeamStatusOverlay
+            teamEnabled={agentTeamOn}
             initialTab={gaugeRequest.tab}
             onClose={() => setShowDashboard(false)}
             onOpenExternal={(url: string) => { void openExternalUrl(url); }}

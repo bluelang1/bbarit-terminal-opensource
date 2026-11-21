@@ -20,6 +20,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 1,
+            "command": "[ -z \"$BBARIT_CLAUDE_HOOK\" ] || { f=\"${BBARIT_CLAUDE_HOOK%/*}/user-prompt-submit.sh\"; [ ! -f \"$f\" ] || sh \"$f\"; }"
+          }
+        ]
+      }
     ]
   }
 }
