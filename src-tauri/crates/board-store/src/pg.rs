@@ -81,6 +81,8 @@ pub struct PgStore {
     pool: OnceCell<PgPool>,
     /// The schema version was checked (and matched) once.
     ready: AtomicBool,
+    /// The version of the program using this store (`created_by_app_version`, `hosts.app_version`).
+    app_version: String,
 }
 
 // ── Migrations ───────────────────────────────────────────────────────────
@@ -426,13 +428,15 @@ macro_rules! retrying {
 /// `claim --next --label`: the task carries one of the labels in text[] `$2` (empty = any task).
 const PG_LABEL_MATCH: &str = "(cardinality($2::text[]) = 0 OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.labels::jsonb) l(v) WHERE l.v = ANY($2::text[])))";
 impl PgStore {
-    pub fn new(target: PgTarget) -> Self {
-        Self::with_limits(target, Limits::default())
+    /// A store on `target`; `app_version` is the version of the program using it (recorded on
+    /// the server).
+    pub fn new(target: PgTarget, app_version: &str) -> Self {
+        Self::with_limits(target, Limits::default(), app_version)
     }
 
-    pub fn with_limits(target: PgTarget, limits: Limits) -> Self {
+    pub fn with_limits(target: PgTarget, limits: Limits, app_version: &str) -> Self {
         let prefix = format!("{}.", quote_ident(&target.schema));
-        PgStore { target, prefix, limits, pool: OnceCell::new(), ready: AtomicBool::new(false) }
+        PgStore { target, prefix, limits, pool: OnceCell::new(), ready: AtomicBool::new(false), app_version: app_version.to_string() }
     }
 
     /// SQL text with every `@@.` replaced by the quoted schema.
@@ -580,7 +584,7 @@ impl PgStore {
                 // This server's identity: a rebuilt server at the same address gets a new one.
                 ("server_uid", uuid::Uuid::new_v4().to_string(), false),
                 ("created_at", now.to_string(), false),
-                ("created_by_app_version", env!("CARGO_PKG_VERSION").to_string(), false),
+                ("created_by_app_version", self.app_version.clone(), false),
             ] {
                 let sql = if overwrite {
                     "INSERT INTO @@.board_meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value"
@@ -599,7 +603,7 @@ impl PgStore {
 
     /// Test connection for Settings: reachable, server version, TLS, schema and its version,
     /// privileges and what to do next. Never fails; problems are in `error` / `next`.
-    pub async fn diagnose(target: &PgTarget) -> Value {
+    pub async fn diagnose(target: &PgTarget, app_version: &str) -> Value {
         let schema = target.schema.clone();
         let mut out = json!({ "reachable": false, "target": target.label, "schema": schema, "codeVersion": SCHEMA_VERSION });
         let conn = tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), PgConnection::connect_with(&target.opts)).await;
@@ -617,7 +621,7 @@ impl PgStore {
             Ok(Ok(c)) => c,
         };
         out["reachable"] = json!(true);
-        let store = PgStore::new(target.clone());
+        let store = PgStore::new(target.clone(), app_version);
         let res: Result<(), String> = async {
             let e = |e: sqlx::Error| target.redact(&e.to_string());
             let version: String = sqlx::query_scalar("SHOW server_version").fetch_one(&mut c).await.map_err(e)?;
@@ -2529,7 +2533,7 @@ impl PgStore {
         )))
         .bind(host)
         .bind(instance)
-        .bind(env!("CARGO_PKG_VERSION"))
+        .bind(&self.app_version)
         .execute(pool)
         .await
         .map_err(|e| self.err(e))?;
@@ -2545,7 +2549,7 @@ impl PgStore {
         sqlx::query(&self.s(&format!("UPDATE @@.hosts SET last_seen = {SERVER_NOW_MS}, app_version = $3 WHERE host = $1 AND instance_id = $2")))
             .bind(host)
             .bind(instance)
-            .bind(env!("CARGO_PKG_VERSION"))
+            .bind(&self.app_version)
             .execute(pool)
             .await
             .map_err(|e| self.err(e))?;
@@ -2582,7 +2586,7 @@ impl PgStore {
         // a takeover committing meanwhile is either seen here or waits for this push.
         let batch_uids: Vec<String> = {
             let mut v: Vec<String> = Vec::new();
-            for (table, cols) in super::sync::SYNC_TABLES {
+            for (table, cols) in super::sync_core::SYNC_TABLES {
                 let i = copy::col_index(cols, if table == "teams" { "uid" } else { "team_uid" });
                 for r in rows.rows(table) {
                     if let Some(u) = r[i].text() {
@@ -2608,14 +2612,14 @@ impl PgStore {
             rows
         } else {
             let mut d = Dump::default();
-            for (table, cols) in super::sync::SYNC_TABLES {
+            for (table, cols) in super::sync_core::SYNC_TABLES {
                 let i = copy::col_index(cols, if table == "teams" { "uid" } else { "team_uid" });
                 for r in rows.rows(table) {
                     match r[i].text().and_then(|u| moved.get(u)) {
                         Some(home) => {
                             out.refused += 1;
                             if out.reason.is_none() {
-                                out.reason = Some(super::sync::moved_message(home));
+                                out.reason = Some(super::sync_core::moved_message(home));
                             }
                         }
                         None => d.rows_mut(table).push(r.clone()),
@@ -2625,7 +2629,7 @@ impl PgStore {
             filtered = d;
             &filtered
         };
-        for (table, cols) in super::sync::SYNC_TABLES {
+        for (table, cols) in super::sync_core::SYNC_TABLES {
             let rows = rows.rows(table);
             if rows.is_empty() {
                 continue;
@@ -2744,7 +2748,7 @@ impl PgStore {
         let _ = now;
         sqlx::query(&self.s(&format!("UPDATE @@.hosts SET last_seen = {SERVER_NOW_MS}, app_version = $2 WHERE host = $1 AND instance_id = $3")))
             .bind(host)
-            .bind(env!("CARGO_PKG_VERSION"))
+            .bind(&self.app_version)
             .bind(instance)
             .execute(&mut *tx)
             .await
@@ -2824,7 +2828,7 @@ impl PgStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
         let mut dump = Dump::default();
         let mut stats = Vec::new();
-        for (table, cols) in super::sync::SYNC_TABLES {
+        for (table, cols) in super::sync_core::SYNC_TABLES {
             let list = cols.iter().map(|(n, _)| format!("x.{n}")).collect::<Vec<_>>().join(", ");
             let elsewhere = if table == "teams" {
                 "x.home_host IS DISTINCT FROM $3".to_string()
@@ -2847,7 +2851,7 @@ impl PgStore {
         let have: std::collections::HashSet<String> =
             dump.teams.iter().filter_map(|r| r.first().and_then(|c| c.text()).map(str::to_string)).collect();
         let mut missing: Vec<String> = Vec::new();
-        for (table, cols) in super::sync::SYNC_TABLES.iter().skip(1) {
+        for (table, cols) in super::sync_core::SYNC_TABLES.iter().skip(1) {
             let i = copy::col_index(cols, "team_uid");
             for r in dump.rows(table) {
                 if let Some(uid) = r[i].text() {
@@ -2874,25 +2878,10 @@ impl PgStore {
     }
 }
 
-// ── Stage 3c: restore, take over a team, remote notes (orchestration in sync.rs) ──
+// ── Stage 3c: restore, take over a team, remote notes (orchestration in sync_core.rs) ──
 
-/// A note sent to a team whose home is another computer, as the outbox holds it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OutboxNote {
-    pub id: String,
-    pub team_uid: String,
-    pub from_host: String,
-    pub author_id: String,
-    pub author_name: Option<String>,
-    pub author_cli: Option<String>,
-    pub kind: String,
-    pub text: String,
-    pub created_at: i64,
-    /// Home side only: the team is tombstoned on the server.
-    pub team_deleted: bool,
-    /// Home side only: (from_host, from_instance) is a registered computer.
-    pub sender_known: bool,
-}
+/// The outbox row both engines exchange (defined with the sync rules).
+pub use super::sync_core::OutboxNote;
 
 /// Why a takeover was refused on the server: (stable code, English message).
 pub type Refused = (&'static str, String);
@@ -2996,7 +2985,7 @@ impl PgStore {
             None => uids.to_vec(),
         };
         let mut dump = Dump::default();
-        for (table, cols) in super::sync::SYNC_TABLES {
+        for (table, cols) in super::sync_core::SYNC_TABLES {
             let key = if table == "teams" { "uid" } else { "team_uid" };
             let order = if table == "posts" { "arrival" } else { "server_seq" };
             let sql = self.s(&format!("SELECT {} FROM @@.{table} WHERE {key} = ANY($1) ORDER BY {order}", copy::col_list(cols)));
@@ -3023,7 +3012,7 @@ impl PgStore {
         .bind(old)
         .bind(new)
         .bind(min_age_ms)
-        .bind(env!("CARGO_PKG_VERSION"))
+        .bind(&self.app_version)
         .execute(pool)
         .await
         .map_err(|e| self.err(e))?;

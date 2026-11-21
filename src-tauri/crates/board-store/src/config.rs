@@ -9,10 +9,14 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(feature = "pg")]
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use std::path::Path;
+#[cfg(feature = "pg")]
 use std::str::FromStr;
 
+/// The local board file in the app's config directory.
+pub const DB_FILE: &str = if cfg!(debug_assertions) { "agent-board.dev.db" } else { "agent-board.db" };
 pub const SECRET_FILE: &str = if cfg!(debug_assertions) { "agent-board.dev.secret" } else { "agent-board.secret" };
 pub const URL_ENV: &str = "BBARIT_BOARD_DATABASE_URL";
 pub const DEFAULT_SCHEMA: &str = "bbarit_board";
@@ -176,7 +180,12 @@ impl PgSettings {
         if self.port == 0 {
             return Err("PostgreSQL port must be 1-65535".to_string());
         }
+        #[cfg(feature = "pg")]
         ssl_mode(&self.ssl_mode)?;
+        #[cfg(not(feature = "pg"))]
+        if !SSL_MODES.contains(&self.ssl_mode.trim()) {
+            return Err(format!("invalid SSL mode: {} ({})", short(&self.ssl_mode), SSL_MODES.join("|")));
+        }
         check_schema_name(&self.schema)
     }
 
@@ -186,6 +195,7 @@ impl PgSettings {
     }
 }
 
+#[cfg(feature = "pg")]
 pub fn ssl_mode(raw: &str) -> Result<PgSslMode, String> {
     PgSslMode::from_str(raw.trim()).map_err(|_| format!("invalid SSL mode: {} ({})", short(raw), SSL_MODES.join("|")))
 }
@@ -370,6 +380,7 @@ fn redact_password_pairs(msg: &str) -> String {
 
 // ── Connection ───────────────────────────────────────────────────────────
 
+#[cfg(feature = "pg")]
 /// Where a PostgreSQL board lives: connection options (may hold the password; never
 /// printed), the schema and the secrets every error from it must be scrubbed of.
 #[derive(Clone)]
@@ -384,6 +395,7 @@ pub struct PgTarget {
     pub host: String,
 }
 
+#[cfg(feature = "pg")]
 impl std::fmt::Debug for PgTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PgTarget").field("schema", &self.schema).field("label", &self.label).field("from_env", &self.from_env).finish()
@@ -396,6 +408,7 @@ pub fn is_loopback(host: &str) -> bool {
     h.is_empty() || h == "localhost" || h.starts_with("127.") || h == "::1" || h.starts_with('/')
 }
 
+#[cfg(feature = "pg")]
 impl PgTarget {
     pub fn redact(&self, msg: &str) -> String {
         let s: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
@@ -403,11 +416,13 @@ impl PgTarget {
     }
 }
 
+#[cfg(feature = "pg")]
 fn session_options(opts: PgConnectOptions) -> PgConnectOptions {
     let timeout = STATEMENT_TIMEOUT_MS.to_string();
     opts.application_name("bbarit-board").options([("statement_timeout", timeout.as_str())])
 }
 
+#[cfg(feature = "pg")]
 /// The board's PostgreSQL target: `BBARIT_BOARD_DATABASE_URL` when set (it replaces the
 /// connection fields and the saved password; the schema still comes from the settings), else
 /// the settings plus the saved password — only when it was saved for this same server
@@ -462,7 +477,7 @@ pub fn url_password(url: &str) -> Option<String> {
     Some(urlencoding::decode(pw).map(|c| c.into_owned()).unwrap_or_else(|_| pw.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "pg"))]
 mod tests {
     use super::*;
     use serde_json::json;

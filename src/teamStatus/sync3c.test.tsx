@@ -208,10 +208,12 @@ describe('stage 3c review fixes', () => {
     const { RESTORE_REFUSAL_CODES } = await import('../components/AgentBoardSettings');
     const { en } = await import('../i18n/en');
     const { ko } = await import('../i18n/ko');
-    const dir = path.resolve(__dirname, '../../src-tauri/src/agent_board');
-    const sync = fs.readFileSync(path.join(dir, 'sync.rs'), 'utf8');
-    const pg = fs.readFileSync(path.join(dir, 'pg.rs'), 'utf8');
-    const sqlite = fs.readFileSync(path.join(dir, 'sqlite.rs'), 'utf8');
+    // The app keeps the sync worker; the board store library holds the engines and the sync core.
+    const app = path.resolve(__dirname, '../../src-tauri/src/agent_board');
+    const lib = path.resolve(__dirname, '../../src-tauri/crates/board-store/src');
+    const sync = fs.readFileSync(path.join(app, 'sync.rs'), 'utf8') + fs.readFileSync(path.join(lib, 'sync_core.rs'), 'utf8');
+    const pg = fs.readFileSync(path.join(lib, 'pg.rs'), 'utf8');
+    const sqlite = fs.readFileSync(path.join(lib, 'sqlite.rs'), 'utf8');
     // Host-name refusals and "remove copies" have their own texts elsewhere in Settings.
     const other = new Set(['env_set', 'invalid', 'live_teams', 'sync_on']);
     const host = new Set<string>([

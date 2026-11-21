@@ -1,0 +1,28 @@
+[package]
+name = "board-store"
+description = "BBARIT agent team board store: model, SQLite and PostgreSQL engines, sync core"
+# Not the app version: the program using the store passes its own version to the stores.
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["sqlite", "pg"]
+# The local board file (bundled SQLite).
+sqlite = ["dep:rusqlite"]
+# The PostgreSQL engine (sqlx).
+pg = ["dep:sqlx"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "v7"] }
+rand = "0.8"
+libc = "0.2"
+urlencoding = "2"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

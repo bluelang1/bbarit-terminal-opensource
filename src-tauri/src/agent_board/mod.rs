@@ -5,7 +5,8 @@
 //! src/terminal/agentBoard.ts, which also decides who the caller is and whether it is the
 //! team's root tab). Nothing here ever types into a tab.
 //!
-//! Layout:
+//! Layout (everything but `admin` and the sync worker lives in the board-store crate,
+//! src-tauri/crates/board-store, re-exported here under the same module names):
 //! - `model`: limits, text cleaning, request types, actors and the task state machine
 //!   (engine independent); `common`: the task row, its JSON and the input checks both
 //!   engines share;
@@ -23,16 +24,8 @@
 //! Design: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md
 
 pub mod admin;
-pub mod common;
-pub mod config;
-pub mod copy;
-pub mod model;
-pub mod pg;
-pub mod sqlite;
-pub mod store;
+pub use board_store::{config, model, pg, sqlite, store};
 pub mod sync;
-#[cfg(test)]
-mod tests;
 
 pub use model::*;
 use serde_json::{json, Value};
@@ -41,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 pub use store::BoardStore;
 
-pub const DB_FILE: &str = if cfg!(debug_assertions) { "agent-board.dev.db" } else { "agent-board.db" };
+pub use config::DB_FILE;
 
 /// `~/.config/octo` (directory of `config_file_path()`).
 fn config_dir() -> Result<PathBuf, String> {
@@ -85,11 +78,6 @@ pub fn board_host() -> String {
         }
     };
     host_id(setting.as_deref(), &raw_host_name_cached())
-}
-
-/// `BBARIT_BOARD_HOST`, when set.
-pub fn env_host() -> Option<String> {
-    std::env::var("BBARIT_BOARD_HOST").ok().filter(|v| !v.trim().is_empty())
 }
 
 /// `agents.enabled` (Settings → "Agent team in tabs", src/terminal/agentTeamSwitch.ts): only an
@@ -173,21 +161,18 @@ fn raw_host_name_cached() -> String {
     RAW.get_or_init(raw_host_name).clone()
 }
 
-#[cfg(unix)]
-fn raw_host_name() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: gethostname writes at most buf.len() bytes into the buffer we own.
-    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-    if rc != 0 {
-        return String::new();
-    }
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..end]).into_owned()
+/// This app's version, recorded by the stores (`created_by_app_version`, the server's `hosts`).
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The local board file at `path` as this app opens it: a migration or an import names this
+/// machine with `board_host` (Settings name included). Every app-side SQLite store comes from here.
+pub fn local_store(path: PathBuf) -> sqlite::SqliteStore {
+    sqlite::SqliteStore::new(path, Arc::new(board_host), APP_VERSION)
 }
 
-#[cfg(not(unix))]
-fn raw_host_name() -> String {
-    std::env::var("COMPUTERNAME").unwrap_or_default()
+/// A PostgreSQL store on `target` as this app uses it. Every app-side PostgreSQL store comes from here.
+pub fn pg_store(target: config::PgTarget) -> pg::PgStore {
+    pg::PgStore::new(target, APP_VERSION)
 }
 
 fn ctx() -> Ctx {
@@ -251,9 +236,9 @@ pub fn current_store() -> Result<Arc<BoardStore>, String> {
         }
     }
     let store = if sel.uses_postgres() {
-        Arc::new(BoardStore::Pg(pg::PgStore::new(sel.pg_target().map_err(unavailable)?)))
+        Arc::new(BoardStore::Pg(pg_store(sel.pg_target().map_err(unavailable)?)))
     } else {
-        Arc::new(BoardStore::Sqlite(sqlite::SqliteStore::new(db_path()?)))
+        Arc::new(BoardStore::Sqlite(local_store(db_path()?)))
     };
     *guard = Some((key, store.clone()));
     Ok(store)
@@ -540,4 +525,51 @@ pub async fn agent_task_lease_apply(adopt: Vec<LeaseItem>, release: Vec<LeaseIte
     }
     audit_released(&res, "task_auto_release", "owner tab did not come back after the app restarted");
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A board file from before stage 3b migrates through `local_store`, so its teams' home is
+    /// this app's machine name (here the `BBARIT_BOARD_HOST` override; the Settings name takes
+    /// the same path through `board_host`), not the bare host name.
+    #[test]
+    fn local_store_migrates_an_old_file_with_the_configured_name() {
+        let dir = std::env::temp_dir().join(format!("bbarit-local-store-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(DB_FILE);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE posts (id INTEGER PRIMARY KEY, team TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL,
+                   author_id TEXT, author_name TEXT, author_cli TEXT, kind TEXT NOT NULL, text TEXT NOT NULL, UNIQUE(team, seq));
+                 CREATE TABLE teams (team TEXT PRIMARY KEY NOT NULL, name TEXT, last_seq INTEGER NOT NULL DEFAULT 0, updated_ts INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE cursors (team TEXT NOT NULL, tab_id TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(team, tab_id));
+                 INSERT INTO posts(team, seq, ts, author_id, kind, text) VALUES ('r1', 1, 100, 't1', 'note', 'first');
+                 INSERT INTO teams(team, name, last_seq, updated_ts) VALUES ('r1', 'lead', 1, 100);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        // Only this test reads BBARIT_BOARD_HOST in the app's test binary.
+        let before = std::env::var_os("BBARIT_BOARD_HOST");
+        std::env::set_var("BBARIT_BOARD_HOST", "configured-mac");
+        let store = local_store(path.clone());
+        let homes = tauri::async_runtime::block_on(store.run(|c, _| {
+            let mut stmt = c.prepare("SELECT home_host FROM teams").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+        }));
+        match before {
+            Some(v) => std::env::set_var("BBARIT_BOARD_HOST", v),
+            None => std::env::remove_var("BBARIT_BOARD_HOST"),
+        }
+        let version: String = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT value FROM board_meta WHERE key = 'created_by_app_version'", [], |r| r.get(0))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(homes.unwrap(), vec!["configured-mac".to_string()]);
+        assert_eq!(version, APP_VERSION);
+    }
 }
