@@ -13,8 +13,10 @@ use serde_json::Value;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
+/// One runtime for the whole test binary (a PostgreSQL pool stays on the runtime it was made on).
 fn run<T>(f: impl Future<Output = T>) -> T {
-    tauri::async_runtime::block_on(f)
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("test runtime")).block_on(f)
 }
 
 /// Which engine a shared test runs on. PostgreSQL runs only when `BBARIT_TEST_PG_URL` is set
@@ -45,6 +47,38 @@ fn pg_enabled() -> bool {
     false
 }
 
+/// The app instance id the sync tests run as (the app passes its own, random per start).
+const TEST_INSTANCE: &str = "i-test-instance";
+
+/// The program version the tests pass to the stores (recorded in the board).
+const TEST_APP_VERSION: &str = "9.8.7-test";
+
+/// The stores take the machine name and program version explicitly; the tests name this
+/// machine `default_board_host()` (environment override or host name), like `here()`.
+fn test_host() -> super::sqlite::HostFn {
+    std::sync::Arc::new(super::model::default_board_host)
+}
+
+fn test_sqlite(path: PathBuf) -> SqliteStore {
+    SqliteStore::new(path, test_host(), TEST_APP_VERSION)
+}
+
+fn test_sqlite_limits(path: PathBuf, limits: Limits) -> SqliteStore {
+    SqliteStore::with_limits(path, limits, test_host(), TEST_APP_VERSION)
+}
+
+fn test_pg(target: PgTarget) -> PgStore {
+    PgStore::new(target, TEST_APP_VERSION)
+}
+
+fn test_pg_limits(target: PgTarget, limits: Limits) -> PgStore {
+    PgStore::with_limits(target, limits, TEST_APP_VERSION)
+}
+
+fn test_open_db(path: &Path) -> Result<rusqlite::Connection, String> {
+    super::sqlite::open_db(path, &here(), TEST_APP_VERSION)
+}
+
 static FIXTURE_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// A fresh board. `store()` opens a new store (its own connection or pool) on the same board,
@@ -73,7 +107,7 @@ impl Fixture {
             Engine::Sqlite => None,
             Engine::Pg => {
                 let target = pg_test_target(&test_schema(tag, n));
-                run(PgStore::with_limits(target.clone(), limits).migrate(true)).expect("create the test schema");
+                run(test_pg_limits(target.clone(), limits).migrate(true)).expect("create the test schema");
                 Some(target)
             }
         };
@@ -81,13 +115,13 @@ impl Fixture {
     }
 
     fn db(&self) -> PathBuf {
-        self.dir.join(super::DB_FILE)
+        self.dir.join(super::config::DB_FILE)
     }
 
     fn store(&self) -> B {
         match self.engine {
-            Engine::Sqlite => B(BoardStore::Sqlite(SqliteStore::with_limits(self.db(), self.limits))),
-            Engine::Pg => B(BoardStore::Pg(PgStore::with_limits(self.pg.clone().expect("pg target"), self.limits))),
+            Engine::Sqlite => B(BoardStore::Sqlite(test_sqlite_limits(self.db(), self.limits))),
+            Engine::Pg => B(BoardStore::Pg(test_pg_limits(self.pg.clone().expect("pg target"), self.limits))),
         }
     }
 
@@ -188,7 +222,7 @@ macro_rules! shared_tests {
 
 /// This machine's host id (what the app records, and what a migrated team's home is).
 fn here() -> String {
-    super::board_host().to_string()
+    super::model::default_board_host()
 }
 
 fn cx(now: i64) -> Ctx {
@@ -287,7 +321,7 @@ impl B {
 
 #[test]
 fn dev_build_uses_the_dev_database() {
-    assert_eq!(super::DB_FILE, "agent-board.dev.db", "tests are debug builds");
+    assert_eq!(super::config::DB_FILE, "agent-board.dev.db", "tests are debug builds");
 }
 
 fn posts_get_increasing_seqs_and_read_back_in_order(e: Engine) {
@@ -1485,6 +1519,15 @@ mod sqlite_only {
     }
 
     #[test]
+    fn a_new_file_records_the_program_version_it_was_given() {
+        let fx = Fixture::new(Engine::Sqlite, "appver");
+        fx.store().post("r1", input("t1", "note", "hi"), 1_000).unwrap();
+        let conn = Connection::open(fx.db()).unwrap();
+        let v: String = conn.query_row("SELECT value FROM board_meta WHERE key = 'created_by_app_version'", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, TEST_APP_VERSION);
+    }
+
+    #[test]
     fn a_stage1_database_migrates_forward_without_losing_data() {
         let fx = Fixture::new(Engine::Sqlite, "migrate");
         write_stage1_db(&fx.db());
@@ -1524,11 +1567,11 @@ mod sqlite_only {
     #[test]
     fn opening_needs_no_write_lock_and_refuses_a_newer_schema() {
         let fx = Fixture::new(Engine::Sqlite, "version");
-        drop(super::super::sqlite::open_db(&fx.db()).unwrap());
+        drop(test_open_db(&fx.db()).unwrap());
         let mut holder = Connection::open(fx.db()).unwrap();
         let tx = holder.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
         let start = std::time::Instant::now();
-        let conn = super::super::sqlite::open_db(&fx.db()).unwrap();
+        let conn = test_open_db(&fx.db()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(2), "open waited for the write lock");
         drop(conn);
         tx.rollback().unwrap();
@@ -1536,7 +1579,7 @@ mod sqlite_only {
         let newer = Connection::open(fx.db()).unwrap();
         newer.execute("UPDATE board_meta SET value = ?1 WHERE key = 'schema_version'", [(SCHEMA_VERSION + 1).to_string()]).unwrap();
         drop(newer);
-        let err = super::super::sqlite::open_db(&fx.db()).err().expect("must refuse");
+        let err = test_open_db(&fx.db()).err().expect("must refuse");
         assert!(err.starts_with("team board unavailable: database is from a newer app version"), "{err}");
         let e = fx.store().post("t", input("t1", "note", "x"), 1).unwrap_err();
         assert!(e.starts_with("team board unavailable:"), "{e}");
@@ -1560,7 +1603,7 @@ mod sqlite_only {
         assert_eq!(mode("-shm"), Some(0o600));
         drop(s);
         std::fs::set_permissions(fx.db(), std::fs::Permissions::from_mode(0o644)).unwrap();
-        drop(super::super::sqlite::open_db(&fx.db()).unwrap());
+        drop(test_open_db(&fx.db()).unwrap());
         assert_eq!(mode(""), Some(0o600), "a wider file is tightened");
     }
 
@@ -1569,7 +1612,7 @@ mod sqlite_only {
         let fx = Fixture::new(Engine::Sqlite, "corrupt");
         std::fs::create_dir_all(&fx.dir).unwrap();
         std::fs::write(fx.db(), b"this is not a sqlite database, just bytes........................................................").unwrap();
-        let err = super::super::sqlite::open_db(&fx.db()).err().expect("must fail");
+        let err = test_open_db(&fx.db()).err().expect("must fail");
         assert!(err.starts_with("team board unavailable:"), "{err}");
     }
 }
@@ -1680,13 +1723,13 @@ fn copy_keeps_read_cursors_when_posts_are_stored_out_of_read_order(e: Engine) {
     let (_src, a) = out_of_order_board(e, "oosrc");
     let dst = Fixture::new(Engine::Sqlite, "oodst");
     let b = dst.store();
-    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    run(super::store::copy_between(&a.0, &b.0, false)).unwrap();
     assert_eq!(unread_texts(&b), vec!["p2", "p3"], "the cursor did not jump past unread posts");
     // …and from an out-of-order SQLite file into the engine under test.
     let (_src2, a2) = out_of_order_board(Engine::Sqlite, "oosrc2");
     let dst2 = Fixture::new(e, "oodst2");
     let b2 = dst2.store();
-    run(super::admin::copy_between(&a2.0, &b2.0, false)).unwrap();
+    run(super::store::copy_between(&a2.0, &b2.0, false)).unwrap();
     assert_eq!(unread_texts(&b2), vec!["p2", "p3"]);
 }
 
@@ -1698,14 +1741,14 @@ fn copy_ignores_cleaned_up_teams_in_the_target(e: Engine) {
     // The target once had the same team (copied earlier), then cleaned it up.
     let dst = Fixture::new(e, "deaddst");
     let b = dst.store();
-    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    run(super::store::copy_between(&a.0, &b.0, false)).unwrap();
     if let BoardStore::Pg(p) = &b.0 {
         assert_eq!(run(p.stale_count(200 * day, STALE_AFTER_MS)).unwrap(), 1, "the dry run counts what cleanup retires");
     }
     assert_eq!(run(b.0.prune_stale(200 * day, STALE_AFTER_MS)).unwrap(), 1);
     assert!(b.teams().is_empty());
     // A cleaned-up team does not make the target "not empty" and does not block the copy.
-    let r = run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    let r = run(super::store::copy_between(&a.0, &b.0, false)).unwrap();
     assert_eq!(r["teams"], 1);
     assert_eq!(b.read("r1", ReadQuery::default()).unwrap()["total"], 1);
     assert_eq!(dst.raw_count("SELECT count(*) FROM teams"), 1, "the tombstone was replaced");
@@ -1753,7 +1796,7 @@ fn copy_data_moves_every_team_and_refuses_or_merges_into_a_board_with_data(e: En
     // SQLite → the engine under test → a fresh SQLite file: what readers see is the same.
     let mid = Fixture::new(e, "copymid");
     let m = mid.store();
-    let res = run(super::admin::copy_between(&a.0, &m.0, false)).unwrap();
+    let res = run(super::store::copy_between(&a.0, &m.0, false)).unwrap();
     assert_eq!(res["teams"], 2);
     assert_eq!(res["posts"], 5, "r1: 3 notes and the done note; r2: one note");
     assert_eq!(res["tasks"], 2);
@@ -1767,17 +1810,17 @@ fn copy_data_moves_every_team_and_refuses_or_merges_into_a_board_with_data(e: En
     assert_eq!(m.post("r1", input("t2", "note", "after the copy"), 50).unwrap()["seq"], 5);
     assert_eq!(m.add("r1", "third", &member("lead"), 50), 3);
     // A board with data refuses a plain copy and skips existing teams on merge.
-    let err = run(super::admin::copy_between(&a.0, &m.0, false)).unwrap_err();
+    let err = run(super::store::copy_between(&a.0, &m.0, false)).unwrap_err();
     assert!(err.starts_with("the target board is not empty (2 teams)"), "{err}");
     a.post("r3", input("y", "note", "new team on the source"), 60).unwrap();
-    let merged = run(super::admin::copy_between(&a.0, &m.0, true)).unwrap();
+    let merged = run(super::store::copy_between(&a.0, &m.0, true)).unwrap();
     assert_eq!(merged["teams"], 1);
     assert_eq!(merged["skippedTeams"], serde_json::json!(["r1", "r2"]));
     assert_eq!(m.read("r3", ReadQuery::default()).unwrap()["total"], 1);
     // Back into a fresh SQLite file.
     let back = Fixture::new(Engine::Sqlite, "copyback");
     let k = back.store();
-    run(super::admin::copy_between(&m.0, &k.0, false)).unwrap();
+    run(super::store::copy_between(&m.0, &k.0, false)).unwrap();
     assert_eq!(snapshot(&k), snapshot(&m));
     // The source never changes.
     assert_eq!(a.read("r1", ReadQuery { limit: Some(500), ..Default::default() }).unwrap()["total"], 4);
@@ -1791,7 +1834,7 @@ fn a_copied_sqlite_board_logs_every_row_for_a_later_sync() {
     let dst = Fixture::new(Engine::Sqlite, "copylog2");
     let b = dst.store();
     b.teams(); // opens (creates) the file
-    run(super::admin::copy_between(&a.0, &b.0, false)).unwrap();
+    run(super::store::copy_between(&a.0, &b.0, false)).unwrap();
     let logged = |tbl: &str| dst.raw_count(&format!("SELECT count(DISTINCT row_id) FROM changes WHERE tbl = '{tbl}'"));
     let live = |sql: &str| dst.raw_count(sql);
     assert_eq!(logged("teams"), live("SELECT count(*) FROM teams"));
@@ -1827,12 +1870,31 @@ mod pg_only {
     }
 
     #[test]
+    fn the_server_records_the_program_version_it_was_given() {
+        if !pg() {
+            return;
+        }
+        let bare = Bare::new("appver");
+        let store = test_pg(bare.0.clone());
+        run(store.migrate(true)).unwrap();
+        assert_eq!(run(store.sync_register("mac-v", "inst-v")).unwrap(), None);
+        let (created, host): (String, Option<String>) = run(async {
+            let mut c = pg_raw(&bare.0).await;
+            let created = sqlx::query_scalar("SELECT value FROM board_meta WHERE key = 'created_by_app_version'").fetch_one(&mut c).await.unwrap();
+            let host = sqlx::query_scalar("SELECT app_version FROM hosts WHERE host = 'mac-v'").fetch_one(&mut c).await.unwrap();
+            (created, host)
+        });
+        assert_eq!(created, TEST_APP_VERSION);
+        assert_eq!(host.as_deref(), Some(TEST_APP_VERSION));
+    }
+
+    #[test]
     fn tables_are_created_only_on_request_and_a_newer_schema_is_refused() {
         if !pg() {
             return;
         }
         let bare = Bare::new("migrate");
-        let store = PgStore::new(bare.0.clone());
+        let store = test_pg(bare.0.clone());
         // Nothing exists: commands fail clearly, nothing is created by them.
         let e = run(store.post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
         assert!(e.starts_with("team board unavailable: no board tables in PostgreSQL schema"), "{e}");
@@ -1847,7 +1909,7 @@ mod pg_only {
         let done = run(store.migrate(true)).unwrap();
         assert_eq!(done["applied"], true);
         assert_eq!(run(store.migrate(true)).unwrap()["upToDate"], true, "running it again is a no-op");
-        let s = B(BoardStore::Pg(PgStore::new(bare.0.clone())));
+        let s = B(BoardStore::Pg(test_pg(bare.0.clone())));
         assert_eq!(s.post("t", input("t1", "note", "works"), 2).unwrap()["seq"], 1);
         // Every write stamps server_seq for a later sync; an update stamps a newer one.
         let f = Fixture { dir: std::env::temp_dir(), limits: Limits::default(), engine: Engine::Pg, pg: Some(bare.0.clone()) };
@@ -1860,7 +1922,7 @@ mod pg_only {
         // A schema from a newer app: refused by commands and by the migration.
         f.raw_exec(&format!("UPDATE board_meta SET value = '{}' WHERE key = 'schema_version'", super::super::pg::SCHEMA_VERSION + 1));
         std::mem::forget(f); // the Bare guard removes the schema
-        let fresh = PgStore::new(bare.0.clone());
+        let fresh = test_pg(bare.0.clone());
         let e = run(fresh.post("t".into(), input("t1", "note", "x"), cx(4))).unwrap_err();
         let v = super::super::pg::SCHEMA_VERSION;
         assert!(e.contains(&format!("database is from a newer app version (schema {}, this app knows {v})", v + 1)), "{e}");
@@ -1879,11 +1941,11 @@ mod pg_only {
             let mut c = sqlx::PgConnection::connect_with(&bare.0.opts).await.unwrap();
             sqlx::raw_sql(&format!("CREATE SCHEMA {q}; CREATE TABLE {q}.tasks (id int, what text)")).execute(&mut c).await.unwrap();
         });
-        let store = PgStore::new(bare.0.clone());
+        let store = test_pg(bare.0.clone());
         let e = run(store.migrate(false)).unwrap_err();
         assert_eq!(e, format!("schema {} already contains tables named tasks that the board did not create: choose an empty schema", bare.0.schema));
         assert!(run(store.migrate(true)).is_err());
-        let d = run(PgStore::diagnose(&bare.0));
+        let d = run(PgStore::diagnose(&bare.0, TEST_APP_VERSION));
         assert_eq!(d["foreignTables"], serde_json::json!(["tasks"]));
         assert!(d["next"].as_str().unwrap().contains("choose an empty schema"), "{d}");
     }
@@ -1895,7 +1957,7 @@ mod pg_only {
         }
         let fx = Fixture::new(Engine::Pg, "diag");
         let t = fx.pg.clone().unwrap();
-        let d = run(PgStore::diagnose(&t));
+        let d = run(PgStore::diagnose(&t, TEST_APP_VERSION));
         assert_eq!(d["reachable"], true, "{d}");
         assert!(d["serverVersion"].as_str().is_some_and(|v| !v.is_empty()));
         assert_eq!(d["schemaExists"], true);
@@ -1905,7 +1967,7 @@ mod pg_only {
         assert!(d["next"].as_str().unwrap().starts_with("ready"), "{d}");
         // A schema that does not exist yet.
         let bare = Bare::new("diagbare");
-        let d = run(PgStore::diagnose(&bare.0));
+        let d = run(PgStore::diagnose(&bare.0, TEST_APP_VERSION));
         assert_eq!(d["schemaExists"], false);
         assert_eq!(d["schemaVersion"], Value::Null);
         assert!(d["next"].as_str().unwrap().contains("Create / upgrade tables"), "{d}");
@@ -1914,10 +1976,10 @@ mod pg_only {
         let wrong = super::super::config::url_password(&url).map(|p| url.replacen(&format!(":{p}@"), ":wrong-pass-x@", 1)).unwrap_or(url);
         let settings = super::super::config::PgSettings { schema: "bbarit_board".into(), ..Default::default() };
         let bad = super::super::config::pg_target(&settings, Some(&wrong), None).unwrap();
-        let d = run(PgStore::diagnose(&bad));
+        let d = run(PgStore::diagnose(&bad, TEST_APP_VERSION));
         assert_eq!(d["reachable"], false, "{d}");
         assert!(!d.to_string().contains("wrong-pass-x"), "{d}");
-        let e = run(PgStore::new(bad).teams()).unwrap_err();
+        let e = run(test_pg(bad).teams()).unwrap_err();
         assert!(e.starts_with("team board unavailable:") && !e.contains("wrong-pass-x"), "{e}");
     }
 
@@ -1927,7 +1989,7 @@ mod pg_only {
         let settings = super::super::config::PgSettings { host: "127.0.0.1".into(), port: 1, database: "x".into(), user: "u".into(), ..Default::default() };
         let sec = super::super::config::Secret { password: "test".into(), label: Some(settings.label()) };
         let t = super::super::config::pg_target(&settings, None, Some(&sec)).unwrap();
-        let e = run(PgStore::new(t).post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
+        let e = run(test_pg(t).post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
         assert!(e.starts_with("team board unavailable:"), "{e}");
     }
 }
@@ -1937,7 +1999,7 @@ mod pg_only {
 // Two SQLite files act as two machines ("mac-a", "mac-b") syncing through one PostgreSQL
 // schema. Runs only with `BBARIT_TEST_PG_URL` (fails without it under BBARIT_TEST_PG_REQUIRED=1).
 mod sync_two_machines {
-    use super::super::sync::{self, SyncError};
+    use super::super::sync_core::{self as sync, SyncError};
     use super::*;
 
     const A: &str = "mac-a";
@@ -1969,9 +2031,9 @@ mod sync_two_machines {
         let dir = std::env::temp_dir().join(format!("bbarit-sync-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let target = pg_test_target(&test_schema(&format!("sync{tag}"), n));
-        run(PgStore::new(target.clone()).migrate(true)).expect("create the test schema");
-        let a = BoardStore::Sqlite(SqliteStore::with_limits(dir.join("a.db"), limits));
-        let b = BoardStore::Sqlite(SqliteStore::with_limits(dir.join("b.db"), limits));
+        run(test_pg(target.clone()).migrate(true)).expect("create the test schema");
+        let a = BoardStore::Sqlite(test_sqlite_limits(dir.join("a.db"), limits));
+        let b = BoardStore::Sqlite(test_sqlite_limits(dir.join("b.db"), limits));
         Some(Two { dir, target, a, b })
     }
 
@@ -1992,18 +2054,18 @@ mod sync_two_machines {
 
     impl Two {
         fn server(&self) -> PgStore {
-            PgStore::new(self.target.clone())
+            test_pg(self.target.clone())
         }
         fn sync(&self, which: &str, now: i64) -> Result<sync::RoundReport, SyncError> {
             let store = if which == A { &self.a } else { &self.b };
             let server = self.server();
-            let r = run(sync::sync_round(lite(store), &server, "test-server", which, None, now));
+            let r = run(sync::sync_round(lite(store), &server, "test-server", which, TEST_INSTANCE, None, now, &|_| {}));
             run(server.close());
             r
         }
         fn sync_with(&self, which: &str, server: &PgStore, machine: Option<&str>, now: i64) -> Result<sync::RoundReport, SyncError> {
             let store = if which == A { &self.a } else { &self.b };
-            run(sync::sync_round(lite(store), server, "test-server", which, machine, now))
+            run(sync::sync_round(lite(store), server, "test-server", which, TEST_INSTANCE, machine, now, &|_| {}))
         }
         fn post(&self, which: &str, team: &str, author: &str, text: &str, now: i64) -> Result<Value, String> {
             let store = if which == A { &self.a } else { &self.b };
@@ -2151,7 +2213,7 @@ mod sync_two_machines {
             ..Default::default()
         };
         let dead = super::super::config::pg_target(&settings, None, None).unwrap();
-        let err = run(sync::sync_round(lite(&t.a), &PgStore::new(dead), "test-server", A, None, 1_500)).unwrap_err();
+        let err = run(sync::sync_round(lite(&t.a), &test_pg(dead), "test-server", A, TEST_INSTANCE, None, 1_500, &|_| {})).unwrap_err();
         assert!(matches!(err, SyncError::Offline(_)), "{err:?}");
         t.post(A, "lead", "t1", "while offline", 1_600).unwrap();
         t.add(A, "lead", "offline task", 1_601).unwrap();
@@ -2200,7 +2262,7 @@ mod sync_two_machines {
     fn a_row_committed_late_is_not_skipped_by_the_pull_cursor() {
         let Some(t) = two("late") else { return };
         // Two teams written directly on the server (`postgres` usage type, machine mac-c).
-        let direct = PgStore::new(t.target.clone());
+        let direct = test_pg(t.target.clone());
         run(direct.post("slow".into(), input("c1", "note", "slow team"), at("mac-c", 1_000))).unwrap();
         run(direct.post("fast".into(), input("c2", "note", "fast team"), at("mac-c", 1_001))).unwrap();
         t.sync(B, 1_500).unwrap();
@@ -2373,9 +2435,9 @@ mod sync_two_machines {
         ));
         let mut target = t.target.clone();
         target.opts = target.opts.clone().username(&role).password("test");
-        let d = run(PgStore::diagnose(&target));
+        let d = run(PgStore::diagnose(&target, TEST_APP_VERSION));
         assert_eq!(d["canReadWrite"], true, "{d}");
-        let server = PgStore::new(target);
+        let server = test_pg(target);
         t.post(A, "lead", "t1", "as a plain role", 1_000).unwrap();
         t.sync_with(A, &server, None, 2_000).unwrap();
         t.sync_with(B, &server, None, 2_001).unwrap();
@@ -2389,7 +2451,7 @@ mod sync_two_machines {
         let Some(t) = two("direct") else { return };
         t.add(A, "lead", "work", 1_000).unwrap();
         t.sync(A, 2_000).unwrap();
-        let direct = PgStore::new(t.target.clone());
+        let direct = test_pg(t.target.clone());
         let refusal = "this team lives on mac-a; it is read-only here";
         assert_eq!(run(direct.task_write("lead".into(), on("claim", 1), agent("c1", "mac-c"), at("mac-c", 2_100))).unwrap_err(), refusal);
         assert_eq!(run(direct.clear("lead".into(), at("mac-c", 2_100))).unwrap_err(), refusal);
@@ -2409,19 +2471,29 @@ mod sync_two_machines {
         t.sync(A, 1_500).unwrap();
         let target = t.target.clone();
         let (tx_started, started) = std::sync::mpsc::channel::<()>();
+        let (tx_release, release) = std::sync::mpsc::channel::<()>();
         let slow = std::thread::spawn(move || {
             run(async {
                 let mut c = pg_raw(&target).await;
                 let mut tx = c.begin().await.unwrap();
                 sqlx::query("UPDATE teams SET name = 'held', row_version = row_version + 1").execute(&mut *tx).await.unwrap();
                 tx_started.send(()).unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(4_000)).await;
+                // Hold the lock until the pull has answered (not for a fixed time: a slow
+                // machine could otherwise let the pull's wait outlast the writer), 30 s at most.
+                for _ in 0..600 {
+                    if release.try_recv().is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
                 tx.rollback().await.unwrap();
             })
         });
         started.recv().unwrap();
-        assert_eq!(t.sync(B, 2_000).unwrap_err(), SyncError::Busy);
+        let pulled = t.sync(B, 2_000);
+        tx_release.send(()).unwrap();
         slow.join().unwrap();
+        assert_eq!(pulled.unwrap_err(), SyncError::Busy);
         t.sync(B, 3_000).unwrap();
         assert_eq!(seqs(&t.read(B, "lead", ReadQuery::default())), vec![1]);
     }
@@ -2444,11 +2516,11 @@ mod sync_two_machines {
 
     impl Two {
         fn extra(&self, name: &str) -> BoardStore {
-            BoardStore::Sqlite(SqliteStore::new(self.dir.join(format!("{name}.db"))))
+            BoardStore::Sqlite(test_sqlite(self.dir.join(format!("{name}.db"))))
         }
         fn sync_store(&self, store: &BoardStore, host: &str, now: i64) -> Result<sync::RoundReport, SyncError> {
             let server = self.server();
-            let r = run(sync::sync_round(lite(store), &server, "test-server", host, None, now));
+            let r = run(sync::sync_round(lite(store), &server, "test-server", host, TEST_INSTANCE, None, now, &|_| {}));
             run(server.close());
             r
         }
@@ -2482,7 +2554,7 @@ mod sync_two_machines {
         assert_eq!(pre["home"], A);
         assert_eq!(pre["allowed"], false);
         let (uid, version) = (pre["uid"].as_str().unwrap().to_string(), pre["version"].as_i64().unwrap());
-        let early = run(sync::adopt_team(lite(&t.b), &server, B, "lead", &uid, A, version, 3_000, 24 * HOUR)).unwrap_err();
+        let early = run(sync::adopt_team(lite(&t.b), &server, B, TEST_INSTANCE, "lead", &uid, A, version, 3_000, 24 * HOUR)).unwrap_err();
         assert_eq!(code(&early), "home_alive");
         // A clock far ahead on this computer changes nothing: ages are by the server's clock.
         let skewed = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, i64::MAX / 4, 24 * HOUR)).unwrap();
@@ -2491,11 +2563,11 @@ mod sync_two_machines {
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
         let later = 2_000 + 25 * HOUR;
         let (rb, rc) = run(async {
-            let s1 = PgStore::new(t.target.clone());
-            let s2 = PgStore::new(t.target.clone());
+            let s1 = test_pg(t.target.clone());
+            let s2 = test_pg(t.target.clone());
             let out = tokio::join!(
-                sync::adopt_team(lite(&t.b), &s1, B, "lead", &uid, A, version, later, 24 * HOUR),
-                sync::adopt_team(lite(&c), &s2, C, "lead", &uid, A, version, later, 24 * HOUR)
+                sync::adopt_team(lite(&t.b), &s1, B, TEST_INSTANCE, "lead", &uid, A, version, later, 24 * HOUR),
+                sync::adopt_team(lite(&c), &s2, C, TEST_INSTANCE, "lead", &uid, A, version, later, 24 * HOUR)
             );
             s1.close().await;
             s2.close().await;
@@ -2540,6 +2612,7 @@ mod sync_two_machines {
             lite(&t.b),
             &server,
             B,
+            TEST_INSTANCE,
             "lead",
             pre["uid"].as_str().unwrap(),
             A,
@@ -2627,7 +2700,7 @@ mod sync_two_machines {
         t.post_remote(B, "lead", "b1", "nobody home", 2_011).unwrap();
         t.pg_exec(&format!("UPDATE {}.teams SET home_host = 'mac-gone'", t.target.schema));
         t.sync(B, 2_012).unwrap();
-        t.sync(B, 2_013 + super::super::sync::REMOTE_NOTE_EXPIRE_MS).unwrap();
+        t.sync(B, 2_013 + super::super::sync_core::REMOTE_NOTE_EXPIRE_MS).unwrap();
         let ob = t.outbox(B, "lead");
         assert!(ob.iter().any(|n| n["text"] == "nobody home" && n["state"] == "refused" && n["reason"] == "expired"), "{ob:?}");
     }
@@ -2650,7 +2723,7 @@ mod sync_two_machines {
         assert_eq!(t.outbox(B, "lead")[0]["state"], "delivered");
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
         let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 3_000, 24 * HOUR)).unwrap();
-        run(sync::adopt_team(lite(&t.b), &server, B, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 3_000, 24 * HOUR)).unwrap();
+        run(sync::adopt_team(lite(&t.b), &server, B, TEST_INSTANCE, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 3_000, 24 * HOUR)).unwrap();
         run(server.close());
         assert!(t.outbox(B, "lead").is_empty(), "{:?}", t.outbox(B, "lead"));
         let texts: Vec<String> = t.read(B, "lead", ReadQuery::default())["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect();
@@ -2674,7 +2747,7 @@ mod sync_two_machines {
         let old = t.status(A)["instanceId"].as_str().unwrap().to_string();
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
         let server = t.server();
-        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync::RESTORE_TAKEOVER_MS, true)).unwrap());
+        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync_core::RESTORE_TAKEOVER_MS, true)).unwrap());
         t.sync_store(&fresh, A, 2_100).unwrap();
         assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {}.outbox WHERE state = 'pending'", t.target.schema)), 1, "no verdict yet");
         run(sync::restore_teams(lite(&fresh), &server, A, false, 2_200)).unwrap();
@@ -2709,9 +2782,9 @@ mod sync_two_machines {
             ));
         }
         let r = t.sync(A, 3_000).unwrap();
-        assert_eq!(r.delivered as i64, super::super::sync::REMOTE_NOTES_PER_SENDER_WINDOW);
+        assert_eq!(r.delivered as i64, super::super::sync_core::REMOTE_NOTES_PER_SENDER_WINDOW);
         assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox WHERE reason = 'unknown_sender'")), 1);
-        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox WHERE reason = 'rate_limited'")), 40 - super::super::sync::REMOTE_NOTES_PER_SENDER_WINDOW);
+        assert_eq!(t.pg_count(&format!("SELECT count(*) FROM {s}.outbox WHERE reason = 'rate_limited'")), 40 - super::super::sync_core::REMOTE_NOTES_PER_SENDER_WINDOW);
         let texts: Vec<String> = t.read(A, "lead", ReadQuery { limit: Some(100), ..Default::default() })["posts"].as_array().unwrap().iter().map(|p| p["text"].as_str().unwrap().to_string()).collect();
         assert!(texts.contains(&"the first post".to_string()), "older posts stay");
         assert!(!texts.iter().any(|x| x == "spoofed"));
@@ -2748,7 +2821,7 @@ mod sync_two_machines {
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
         let server = t.server();
         let pre = run(sync::adopt_preview(lite(&t.b), &server, "lead", B, 4_000, 24 * HOUR)).unwrap();
-        run(sync::adopt_team(lite(&t.b), &server, B, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 4_000, 24 * HOUR)).unwrap();
+        run(sync::adopt_team(lite(&t.b), &server, B, TEST_INSTANCE, "lead", pre["uid"].as_str().unwrap(), A, pre["version"].as_i64().unwrap(), 4_000, 24 * HOUR)).unwrap();
         let a_inst = t.status(A)["instanceId"].as_str().unwrap().to_string();
         let posts_before = t.pg_count(&format!("SELECT count(*) FROM {}.posts", t.target.schema));
         // Only child rows (the new note), then only tombstones: both refused, nothing written.
@@ -2758,7 +2831,7 @@ mod sync_two_machines {
         let o = run(server.sync_push(A, &a_inst, &only_children, 4_001)).unwrap();
         assert_eq!((o.written, o.refused as usize), (0, only_children.posts.len()));
         let mut only_tombstones = super::super::copy::Dump::default();
-        let del = super::super::copy::col_index(super::super::sync::POSTS_SYNC, "deleted_at");
+        let del = super::super::copy::col_index(super::super::sync_core::POSTS_SYNC, "deleted_at");
         only_tombstones.posts = all.posts.iter().filter(|r| !matches!(r[del], super::super::copy::Cell::Null)).cloned().collect();
         assert!(!only_tombstones.posts.is_empty());
         let o = run(server.sync_push(A, &a_inst, &only_tombstones, 4_002)).unwrap();
@@ -2790,8 +2863,8 @@ mod sync_two_machines {
             let q = super::super::config::quote_ident(&target.schema);
             sqlx::raw_sql(&format!("INSERT INTO {q}.board_meta (key, value) VALUES ('schema_version', '3')")).execute(&mut c).await.unwrap();
         });
-        let a = BoardStore::Sqlite(SqliteStore::new(dir.join("a.db")));
-        let b = BoardStore::Sqlite(SqliteStore::new(dir.join("b.db")));
+        let a = BoardStore::Sqlite(test_sqlite(dir.join("a.db")));
+        let b = BoardStore::Sqlite(test_sqlite(dir.join("b.db")));
         Some(Two { dir, target, a, b })
     }
 
@@ -2816,7 +2889,7 @@ mod sync_two_machines {
         t.sync(B, 2_005).unwrap();
         assert_eq!(t.outbox(B, "lead")[0]["state"], "sent");
         let before = t.pg_count(&format!("SELECT count(*) FROM {}.outbox", t.target.schema));
-        let again = run(PgStore::new(t.target.clone()).migrate(true)).unwrap();
+        let again = run(test_pg(t.target.clone()).migrate(true)).unwrap();
         assert_eq!(again["upToDate"], true);
         // The version-4 statements themselves are safe to run twice.
         let v4 = super::super::pg::migration_steps(&t.target.schema, Some(3)).unwrap();
@@ -2841,7 +2914,7 @@ mod sync_two_machines {
         ));
         let mut target = t.target.clone();
         target.opts = target.opts.clone().username(&role).password("test");
-        let d = run(PgStore::diagnose(&target));
+        let d = run(PgStore::diagnose(&target, TEST_APP_VERSION));
         assert_eq!(d["canReadWrite"], false, "{d}");
         assert!(d["next"].as_str().unwrap().contains("hosts and outbox included"), "{d}");
         t.pg_exec(&format!("REVOKE ALL ON ALL TABLES IN SCHEMA {s} FROM {role}; REVOKE ALL ON ALL SEQUENCES IN SCHEMA {s} FROM {role}; REVOKE ALL ON SCHEMA {s} FROM {role}; REVOKE ALL ON FUNCTION {s}.board_set_server_seq() FROM {role}; DROP ROLE {role};"));
@@ -2859,7 +2932,7 @@ mod sync_two_machines {
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = 0 WHERE host = 'mac-a'", t.target.schema));
         let server = t.server();
         // First attempt: the name moved, then the app stopped before any row came down.
-        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync::RESTORE_TAKEOVER_MS, true)).unwrap());
+        assert!(run(server.take_over_host(A, &old, &mine, super::super::sync_core::RESTORE_TAKEOVER_MS, true)).unwrap());
         assert!(run(fresh.teams()).unwrap().is_empty());
         // Retry: no takeover is needed any more; the rows come down.
         let pre = run(sync::restore_preview(lite(&fresh), &server, A, 3_000)).unwrap();
@@ -2883,12 +2956,12 @@ mod sync_two_machines {
     fn other_server(tag: &str) -> Other {
         let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let target = pg_test_target(&test_schema(&format!("new{tag}"), n));
-        run(PgStore::new(target.clone()).migrate(true)).expect("create the second schema");
+        run(test_pg(target.clone()).migrate(true)).expect("create the second schema");
         Other(target)
     }
     fn sync_to(store: &BoardStore, target: &PgTarget, host: &str, now: i64) -> Result<sync::RoundReport, SyncError> {
-        let server = PgStore::new(target.clone());
-        let r = run(sync::sync_round(lite(store), &server, "test-server", host, None, now));
+        let server = test_pg(target.clone());
+        let r = run(sync::sync_round(lite(store), &server, "test-server", host, TEST_INSTANCE, None, now, &|_| {}));
         run(server.close());
         r
     }
@@ -2992,7 +3065,7 @@ mod sync_two_machines {
         assert_eq!(code(&run(sync::restore_teams(lite(&fresh), &server, A, false, 2_200)).unwrap_err()), "takeover_needed");
         // A computer seen minutes ago is never impersonated.
         assert_eq!(code(&run(sync::restore_teams(lite(&fresh), &server, A, true, 2_200)).unwrap_err()), "host_alive");
-        let later = 2_000 + super::super::sync::RESTORE_TAKEOVER_MS;
+        let later = 2_000 + super::super::sync_core::RESTORE_TAKEOVER_MS;
         t.pg_exec(&format!("UPDATE {}.hosts SET last_seen = last_seen - 16 * 60000 WHERE host = 'mac-a'", t.target.schema));
         let out = run(sync::restore_teams(lite(&fresh), &server, A, true, later)).unwrap();
         assert_eq!((out["teams"].as_i64(), out["tasks"].as_i64(), out["notes"].as_i64()), (Some(1), Some(2), Some(1)));
@@ -3034,7 +3107,7 @@ mod sync_two_machines {
 mod sync_local {
     use super::super::copy::{self, Cell, Dump};
     use super::super::sqlite;
-    use super::super::sync;
+    use super::super::sync_core as sync;
     use super::*;
 
     const A: &str = "mac-a";
@@ -3056,7 +3129,7 @@ mod sync_local {
         let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("bbarit-synclocal-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        Files { a: BoardStore::Sqlite(SqliteStore::new(dir.join("a.db"))), b: BoardStore::Sqlite(SqliteStore::new(dir.join("b.db"))), dir }
+        Files { a: BoardStore::Sqlite(test_sqlite(dir.join("a.db"))), b: BoardStore::Sqlite(test_sqlite(dir.join("b.db"))), dir }
     }
 
     fn lite(s: &BoardStore) -> &SqliteStore {
@@ -3295,7 +3368,7 @@ mod stage3c_local {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("board.db");
-        (dir, SqliteStore::new(path))
+        (dir, test_sqlite(path))
     }
 
     fn at(host: &str, now: i64) -> Ctx {
@@ -3311,7 +3384,7 @@ mod stage3c_local {
     fn a_note_for_a_copy_is_queued_with_the_local_rules_and_caps() {
         let (dir, s) = file("queue");
         // A team homed on mac-a that this file holds as a copy.
-        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        run(BoardStore::Sqlite(test_sqlite(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
         let raw = rusqlite::Connection::open(s_path(&dir)).unwrap();
         raw.execute("INSERT INTO mirror_teams(team_uid, home_host, synced_at) SELECT uid, home_host, 1 FROM teams", []).unwrap();
         let q = queue(&s, input("b1", "note", "  from b \u{200B}"), 10).unwrap();
@@ -3320,13 +3393,13 @@ mod stage3c_local {
         assert_eq!(queue(&s, PostInput { root: true, ..input("b1", "announce", "x") }, 11).unwrap_err(), "only notes can be sent to a team that lives on mac-a");
         assert!(queue(&s, PostInput { task: Some(1), ..input("b1", "note", "x") }, 11).unwrap_err().contains("cannot link a task"));
         assert!(queue(&s, input("b1", "note", ""), 11).is_err(), "empty text is refused like a local post");
-        for i in 1..super::super::sync::REMOTE_NOTES_PER_TEAM {
+        for i in 1..super::super::sync_core::REMOTE_NOTES_PER_TEAM {
             queue(&s, input("b1", "note", &format!("n{i}")), 20 + i).unwrap();
         }
         let full = queue(&s, input("b1", "note", "one too many"), 100).unwrap_err();
         assert!(full.contains("waiting to be delivered to mac-a"), "{full}");
         let list = run(s.run(|c, _| sqlite::outbox_list(c, "lead"))).unwrap();
-        assert_eq!(list.len() as i64, super::super::sync::REMOTE_NOTES_PER_TEAM);
+        assert_eq!(list.len() as i64, super::super::sync_core::REMOTE_NOTES_PER_TEAM);
         assert!(list.iter().all(|n| n["state"] == "pending"));
         // Nothing was written to the copy itself.
         let posts: i64 = raw.query_row("SELECT count(*) FROM posts", [], |r| r.get(0)).unwrap();
@@ -3364,7 +3437,7 @@ mod stage3c_local {
     #[test]
     fn the_home_numbers_a_remote_note_once_and_refuses_bad_or_orphaned_ones() {
         let (dir, s) = file("inbox");
-        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        run(BoardStore::Sqlite(test_sqlite(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
         let raw = rusqlite::Connection::open(s_path(&dir)).unwrap();
         let uid: String = raw.query_row("SELECT uid FROM teams", [], |r| r.get(0)).unwrap();
         let ok = "01900000-0000-7000-8000-00000000000a";
@@ -3411,7 +3484,7 @@ mod stage3c_local {
         raw.execute_batch("INSERT INTO sync_state(key, value) VALUES ('pulled_seq', '63'), ('pushed_seq', '136')").unwrap();
         assert_eq!(check("srv-one", 100).unwrap(), None, "unchanged server");
         // Notes on their way: sent and delivered-without-post go again; delivered-with-post goes.
-        run(BoardStore::Sqlite(SqliteStore::new(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
+        run(BoardStore::Sqlite(test_sqlite(s_path(&dir))).post("lead".into(), input("t1", "note", "hi"), at("mac-a", 1))).unwrap();
         let (uid, post): (String, String) = raw.query_row("SELECT team_uid, id FROM posts", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         for (id, st) in [("o-sent", "sent"), ("o-deliv", "delivered"), (post.as_str(), "delivered"), ("o-ref", "refused")] {
             raw.execute(

@@ -83,6 +83,35 @@ pub fn host_id(env_override: Option<&str>, hostname: &str) -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// `BBARIT_BOARD_HOST`, when set.
+pub fn env_host() -> Option<String> {
+    std::env::var("BBARIT_BOARD_HOST").ok().filter(|v| !v.trim().is_empty())
+}
+
+/// The operating system's host name (not cached; the app caches it).
+#[cfg(unix)]
+pub fn raw_host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most buf.len() bytes into the buffer we own.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
+}
+
+#[cfg(not(unix))]
+pub fn raw_host_name() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+/// This machine's host id without an app setting: `BBARIT_BOARD_HOST` when set, else the host
+/// name. The app's `board_host` also honours the Settings name and passes itself to the stores.
+pub fn default_board_host() -> String {
+    host_id(env_host().as_deref(), &raw_host_name())
+}
+
 /// Refusal for any write on a team another machine owns (sync home rule).
 pub fn read_only_message(home: &str) -> String {
     format!("this team lives on {home}; it is read-only here")

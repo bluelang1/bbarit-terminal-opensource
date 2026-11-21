@@ -66,15 +66,30 @@ CREATE TABLE IF NOT EXISTS mirror_ignored (
   at INTEGER NOT NULL
 );";
 
+/// Names this machine (`*_host`, `home_host`) when the file is migrated or data is imported;
+/// called only then. The app passes its `board_host` (Settings name, environment, host name);
+/// there is no default, so no store can ignore the Settings name.
+pub type HostFn = Arc<dyn Fn() -> String + Send + Sync>;
+
 pub struct SqliteStore {
     path: PathBuf,
     conn: Arc<Mutex<Option<Connection>>>,
     limits: Limits,
+    host: HostFn,
+    /// Recorded as `created_by_app_version` when the file is created.
+    app_version: Arc<str>,
 }
 
 impl SqliteStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self::with_limits(path, Limits::default())
+    /// A store on the board file at `path`; `host` names this machine, `app_version` is the
+    /// version of the program using it (both recorded in the file).
+    pub fn new(path: PathBuf, host: HostFn, app_version: &str) -> Self {
+        Self::with_limits(path, Limits::default(), host, app_version)
+    }
+
+    /// This machine's host id as the store records it.
+    pub fn host(&self) -> String {
+        (self.host)()
     }
 
     /// The board file this store opens.
@@ -82,11 +97,13 @@ impl SqliteStore {
         &self.path
     }
 
-    pub fn with_limits(path: PathBuf, limits: Limits) -> Self {
-        SqliteStore { path, conn: Arc::new(Mutex::new(None)), limits }
+    pub fn with_limits(path: PathBuf, limits: Limits, host: HostFn, app_version: &str) -> Self {
+        SqliteStore { path, conn: Arc::new(Mutex::new(None)), limits, host, app_version: Arc::from(app_version) }
     }
 
-    /// Run `f` on the (lazily opened) connection on the blocking pool.
+    /// Run `f` on the (lazily opened) connection on the blocking pool. Needs a Tokio runtime
+    /// (it uses `tokio::task::spawn_blocking`): call it from a task on one, or inside
+    /// `Runtime::block_on`.
     pub async fn run<T: Send + 'static>(
         &self,
         f: impl FnOnce(&mut Connection, Limits) -> Result<T, String> + Send + 'static,
@@ -94,10 +111,12 @@ impl SqliteStore {
         let conn = self.conn.clone();
         let path = self.path.clone();
         let limits = self.limits;
-        tauri::async_runtime::spawn_blocking(move || {
+        let host = self.host.clone();
+        let app_version = self.app_version.clone();
+        tokio::task::spawn_blocking(move || {
             let mut guard = conn.lock().unwrap_or_else(|e| e.into_inner());
             if guard.is_none() {
-                *guard = Some(open_db(&path)?);
+                *guard = Some(open_db(&path, &host(), &app_version)?);
             }
             match guard.as_mut() {
                 Some(c) => f(c, limits),
@@ -396,7 +415,7 @@ fn migrate_to_2(tx: &Transaction, now: i64, host: &str) -> rusqlite::Result<()> 
 
 /// Bring the schema up to SCHEMA_VERSION. Only called when the stored version is older, so a
 /// normal open takes no write lock; the version is re-read under the lock.
-fn migrate(conn: &mut Connection, now: i64, host: &str) -> rusqlite::Result<()> {
+fn migrate(conn: &mut Connection, now: i64, host: &str, app_version: &str) -> rusqlite::Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version = stored_version(&tx)?;
     if version < 2 {
@@ -417,15 +436,17 @@ fn migrate(conn: &mut Connection, now: i64, host: &str) -> rusqlite::Result<()> 
         tx.execute("INSERT OR IGNORE INTO board_meta(key, value) VALUES ('created_at', ?1)", params![now.to_string()])?;
         tx.execute(
             "INSERT OR IGNORE INTO board_meta(key, value) VALUES ('created_by_app_version', ?1)",
-            params![env!("CARGO_PKG_VERSION")],
+            params![app_version],
         )?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     tx.commit()
 }
 
-/// Open (creating when missing) and migrate the board database at `path`.
-pub fn open_db(path: &Path) -> Result<Connection, String> {
+/// Open (creating when missing) and migrate the board database at `path`; `host` names this
+/// machine in a migration (the home of teams the file already had), `app_version` is recorded
+/// as `created_by_app_version` in a new file.
+pub fn open_db(path: &Path, host: &str, app_version: &str) -> Result<Connection, String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(unavailable)?;
     }
@@ -443,7 +464,7 @@ pub fn open_db(path: &Path) -> Result<Connection, String> {
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(unavailable)?;
     }
     if version < SCHEMA_VERSION {
-        migrate(&mut conn, now_ms(), &super::board_host()).map_err(unavailable)?;
+        migrate(&mut conn, now_ms(), host, app_version).map_err(unavailable)?;
     }
     tighten_sidecars(path);
     Ok(conn)
@@ -2203,7 +2224,7 @@ pub fn sync_prepare(
     host: &str,
     machine: Option<&str>,
     now: i64,
-) -> Result<super::sync::LocalState, String> {
+) -> Result<super::sync_core::LocalState, String> {
     let tx = immediate(conn)?;
     let mut instance = meta_get(&tx, "instance_id")?;
     if let Some(m) = machine {
@@ -2282,10 +2303,10 @@ pub fn sync_prepare(
     Ok(out)
 }
 
-fn sync_local_state(c: &Connection, instance: String) -> Result<super::sync::LocalState, String> {
+fn sync_local_state(c: &Connection, instance: String) -> Result<super::sync_core::LocalState, String> {
     let pushed = state_int(c, "pushed_seq")?;
     let waiting: i64 = c.query_row("SELECT count(*) FROM changes WHERE local_seq > ?1", params![pushed], |r| r.get(0)).db()?;
-    Ok(super::sync::LocalState {
+    Ok(super::sync_core::LocalState {
         instance,
         full_push: state_get(c, "full_push")?.is_some(),
         waiting,
@@ -2338,7 +2359,7 @@ pub fn sync_check_server(conn: &mut Connection, uid: &str, server_last: i64, now
 }
 
 /// The local sync facts as they are now (after `sync_check_server` reset them).
-pub fn sync_state_now(conn: &mut Connection) -> Result<super::sync::LocalState, String> {
+pub fn sync_state_now(conn: &mut Connection) -> Result<super::sync_core::LocalState, String> {
     let instance = meta_get(conn, "instance_id")?.unwrap_or_default();
     sync_local_state(conn, instance)
 }
@@ -2487,7 +2508,7 @@ pub fn sync_push_batch(conn: &mut Connection, host: &str, max: i64) -> Result<Op
     let Some(upto) = changes.last().map(|c| c.0) else { return Ok(None) };
     let mut seen = HashSet::new();
     let mut dump = copy::Dump::default();
-    for (table, cols) in super::sync::SYNC_TABLES {
+    for (table, cols) in super::sync_core::SYNC_TABLES {
         let mut stmt = tx
             .prepare(&format!(
                 "SELECT {} FROM {table} WHERE {} = ?1 AND {} IN ({HOME_UIDS_Q})",
@@ -2523,7 +2544,7 @@ pub fn sync_full_batch(conn: &mut Connection, host: &str, max: i64) -> Result<(O
     tx.commit().db()?;
     let (idx, last) = pos.split_once('|').map(|(i, l)| (i.parse::<usize>().unwrap_or(0), l.to_string())).unwrap_or((0, String::new()));
     let mut dump = copy::Dump::default();
-    let Some((table, cols)) = super::sync::SYNC_TABLES.get(idx).copied() else { return Ok((None, dump)) };
+    let Some((table, cols)) = super::sync_core::SYNC_TABLES.get(idx).copied() else { return Ok((None, dump)) };
     let key = key_sql(table);
     let mut stmt = conn
         .prepare(&format!(
@@ -2542,7 +2563,7 @@ pub fn sync_full_batch(conn: &mut Connection, host: &str, max: i64) -> Result<(O
     *dump.rows_mut(table) = rows;
     let next = if n >= max {
         Some(format!("{idx}|{}", next_key.unwrap_or_default()))
-    } else if idx + 1 < super::sync::SYNC_TABLES.len() {
+    } else if idx + 1 < super::sync_core::SYNC_TABLES.len() {
         Some(format!("{}|", idx + 1))
     } else {
         None
@@ -2608,9 +2629,9 @@ pub fn sync_apply_pull(
     rows: &copy::Dump,
     cursor: i64,
     now: i64,
-) -> Result<super::sync::PullApplied, String> {
+) -> Result<super::sync_core::PullApplied, String> {
     let tx = immediate(conn)?;
-    let mut out = super::sync::PullApplied::default();
+    let mut out = super::sync_core::PullApplied::default();
     let mut touched: HashSet<String> = HashSet::new();
     let is_home = |tx: &Transaction, uid: &str| -> Result<bool, String> {
         tx.query_row(
@@ -2621,7 +2642,7 @@ pub fn sync_apply_pull(
         .db()
         .map(|n| n > 0)
     };
-    for (table, cols) in super::sync::SYNC_TABLES {
+    for (table, cols) in super::sync_core::SYNC_TABLES {
         let at = |name: &str| copy::col_index(cols, name);
         let pk: Vec<&str> = match table {
             "teams" => vec!["uid"],
@@ -2640,7 +2661,7 @@ pub fn sync_apply_pull(
         let insert_cols = if table == "posts" { format!("{names}, arrival") } else { names.clone() };
         let ph = (1..=cols.len() + usize::from(table == "posts")).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
         for row in rows.rows(table) {
-            if let Err(_why) = super::sync::validate_row(table, cols, row) {
+            if let Err(_why) = super::sync_core::validate_row(table, cols, row) {
                 out.skipped += 1;
                 continue;
             }
@@ -2745,7 +2766,7 @@ pub fn sync_apply_pull(
                  ORDER BY coalesce(t.last_activity_at, 0) DESC, m.team_uid LIMIT -1 OFFSET ?1",
             )
             .db()?;
-        let rows = stmt.query_map(params![super::sync::MAX_MIRROR_TEAMS], |r| r.get(0)).db()?;
+        let rows = stmt.query_map(params![super::sync_core::MAX_MIRROR_TEAMS], |r| r.get(0)).db()?;
         rows.collect::<rusqlite::Result<Vec<_>>>().db()?
     };
     for uid in &over {
@@ -2834,12 +2855,12 @@ pub fn post_or_queue(conn: &mut Connection, limits: Limits, team: &str, input: &
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .db()?;
-            if team_n >= super::sync::REMOTE_NOTES_PER_TEAM {
+            if team_n >= super::sync_core::REMOTE_NOTES_PER_TEAM {
                 return Err(format!(
                     "{team_n} notes for this team are still waiting to be delivered to {home}; wait until it takes them"
                 ));
             }
-            if all_n >= super::sync::REMOTE_NOTES_PER_COMPUTER {
+            if all_n >= super::sync_core::REMOTE_NOTES_PER_COMPUTER {
                 return Err(format!("{all_n} notes from this computer are still waiting to be delivered; wait until their teams take them"));
             }
             let id = new_id();
@@ -2867,7 +2888,7 @@ pub fn post_or_queue(conn: &mut Connection, limits: Limits, team: &str, input: &
 }
 
 /// Notes waiting to go to the server (oldest first), as this computer `host` sends them.
-pub fn outbox_to_send(conn: &mut Connection, host: &str, max: i64) -> Result<Vec<super::pg::OutboxNote>, String> {
+pub fn outbox_to_send(conn: &mut Connection, host: &str, max: i64) -> Result<Vec<super::sync_core::OutboxNote>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, team_uid, author_id, author_name, author_cli, kind, text, created_at FROM outbox
@@ -2876,7 +2897,7 @@ pub fn outbox_to_send(conn: &mut Connection, host: &str, max: i64) -> Result<Vec
         .db()?;
     let rows = stmt
         .query_map(params![max], |r| {
-            Ok(super::pg::OutboxNote {
+            Ok(super::sync_core::OutboxNote {
                 id: r.get(0)?,
                 team_uid: r.get(1)?,
                 from_host: host.to_string(),
@@ -2987,7 +3008,7 @@ pub fn outbox_dismiss(conn: &mut Connection, id: &str) -> Result<usize, String> 
 pub fn inbox_apply(
     conn: &mut Connection,
     limits: Limits,
-    notes: &[super::pg::OutboxNote],
+    notes: &[super::sync_core::OutboxNote],
     ctx: &Ctx,
 ) -> Result<(Vec<(String, &'static str, Option<&'static str>)>, Vec<String>), String> {
     let mut out = Vec::new();
@@ -3029,11 +3050,11 @@ pub fn inbox_apply(
         let recent: i64 = tx
             .query_row(
                 "SELECT count(*) FROM posts WHERE team_uid = ?1 AND author_host = ?2 AND origin_host IS NOT author_host AND ts > ?3",
-                params![n.team_uid, n.from_host, ctx.now - super::sync::REMOTE_NOTE_WINDOW_MS],
+                params![n.team_uid, n.from_host, ctx.now - super::sync_core::REMOTE_NOTE_WINDOW_MS],
                 |r| r.get(0),
             )
             .db()?;
-        if recent >= super::sync::REMOTE_NOTES_PER_SENDER_WINDOW {
+        if recent >= super::sync_core::REMOTE_NOTES_PER_SENDER_WINDOW {
             out.push((n.id.clone(), "refused", Some("rate_limited")));
             continue;
         }
@@ -3047,7 +3068,7 @@ pub fn inbox_apply(
             task: None,
             root: false,
         };
-        let valid = super::sync::is_uuid(&n.id)
+        let valid = super::sync_core::is_uuid(&n.id)
             && n.kind == "note"
             && clean_label(Some(&n.from_host), 120).as_deref() == Some(n.from_host.as_str())
             && PostSpec::check(&team, &input).is_ok_and(|spec| {
@@ -3101,7 +3122,7 @@ pub fn sync_unsent_for(conn: &mut Connection, uids: &[String]) -> Result<i64, St
     let pushed = state_int(conn, "pushed_seq")?;
     let list = serde_json::to_string(uids).unwrap_or_else(|_| "[]".into());
     let mut n = 0i64;
-    for (table, _) in super::sync::SYNC_TABLES {
+    for (table, _) in super::sync_core::SYNC_TABLES {
         let c: i64 = conn
             .query_row(
                 &format!(
@@ -3125,7 +3146,7 @@ pub fn sync_unsent_for(conn: &mut Connection, uids: &[String]) -> Result<i64, St
 /// Returns (written, skipped, kept because the local row is newer).
 fn upsert_server_rows(tx: &Transaction, rows: &copy::Dump, uids: &HashSet<String>) -> Result<(usize, usize, usize), String> {
     let (mut written, mut skipped, mut newer) = (0usize, 0usize, 0usize);
-    for (table, cols) in super::sync::SYNC_TABLES {
+    for (table, cols) in super::sync_core::SYNC_TABLES {
         let at = |name: &str| copy::col_index(cols, name);
         let pk: Vec<&str> = match table {
             "teams" => vec!["uid"],
@@ -3145,7 +3166,7 @@ fn upsert_server_rows(tx: &Transaction, rows: &copy::Dump, uids: &HashSet<String
         let ph = (1..=cols.len() + usize::from(table == "posts")).map(|i| format!("?{i}")).collect::<Vec<_>>().join(", ");
         let update_where = pk.iter().map(|k| format!("{k} = ?{}", at(k) + 1)).collect::<Vec<_>>().join(" AND ");
         for row in rows.rows(table) {
-            if super::sync::validate_row(table, cols, row).is_err() {
+            if super::sync_core::validate_row(table, cols, row).is_err() {
                 skipped += 1;
                 continue;
             }
@@ -3228,7 +3249,7 @@ pub fn restore_apply(conn: &mut Connection, host: &str, dump: &copy::Dump, now: 
     }
     let tx = immediate(conn)?;
     for row in dump.rows("teams") {
-        if super::sync::validate_row("teams", copy::TEAMS, row).is_err() || row[at("home_host")].text() != Some(host) {
+        if super::sync_core::validate_row("teams", copy::TEAMS, row).is_err() || row[at("home_host")].text() != Some(host) {
             continue;
         }
         let (uid, team) = (row[at("uid")].text().unwrap_or_default().to_string(), row[at("team")].text().unwrap_or_default().to_string());
@@ -3258,8 +3279,8 @@ pub fn restore_apply(conn: &mut Connection, host: &str, dump: &copy::Dump, now: 
         orphan_claims_expire(&tx, uid, now)?;
     }
     let live = |table: &str| {
-        let i = copy::col_index(super::sync::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "team_uid");
-        let d = copy::col_index(super::sync::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "deleted_at");
+        let i = copy::col_index(super::sync_core::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "team_uid");
+        let d = copy::col_index(super::sync_core::SYNC_TABLES.iter().find(|(t, _)| *t == table).map(|(_, c)| *c).unwrap_or(copy::TEAMS), "deleted_at");
         dump.rows(table).iter().filter(|r| r[i].text().is_some_and(|u| uids.contains(u)) && matches!(r[d], copy::Cell::Null)).count()
     };
     let out = json!({
@@ -3328,7 +3349,7 @@ pub fn demote_team(conn: &mut Connection, uid: &str, home: &str, dump: &copy::Du
             state_set(&tx, "kept_file", &file)?;
         }
     }
-    for (table, _) in super::sync::SYNC_TABLES {
+    for (table, _) in super::sync_core::SYNC_TABLES {
         tx.execute(
             &format!(
                 "DELETE FROM changes WHERE local_seq > ?1 AND tbl = ?2 AND row_id IN (SELECT {} FROM {table} x WHERE x.{} = ?3)",
@@ -3352,7 +3373,7 @@ pub fn demote_team(conn: &mut Connection, uid: &str, home: &str, dump: &copy::Du
         let total = state_int(&tx, "refused")? + unsent;
         state_set(&tx, "refused", &total.to_string())?;
         if state_get(&tx, "refused_reason")?.is_none() {
-            state_set(&tx, "refused_reason", &super::sync::moved_message(home))?;
+            state_set(&tx, "refused_reason", &super::sync_core::moved_message(home))?;
         }
     }
     tx.commit().db()?;
@@ -3370,7 +3391,7 @@ fn keep_unsent(tx: &Transaction, uid: &str, home: &str, pushed: i64, dir: &Path,
     let team: String = tx.query_row("SELECT team FROM teams WHERE uid = ?1", params![uid], |r| r.get(0)).db()?;
     let mut tables = serde_json::Map::new();
     let (mut kept, mut left_out, mut size) = (0i64, 0i64, 0usize);
-    for (table, cols) in super::sync::SYNC_TABLES {
+    for (table, cols) in super::sync_core::SYNC_TABLES {
         let mut stmt = tx
             .prepare(&format!(
                 "SELECT {} FROM {table} x WHERE x.{} = ?1 AND {} IN (SELECT row_id FROM changes WHERE tbl = ?2 AND local_seq > ?3)",
@@ -3529,7 +3550,7 @@ pub fn export_dump(conn: &mut Connection) -> Result<copy::Dump, String> {
 /// Insert a dump (Copy data) in one IMMEDIATE transaction: refused unless the board is empty
 /// or `merge` is set; teams it already has are skipped. Every inserted synced row is logged
 /// in the change log; posts get this file's arrival order and cursors are converted to it.
-pub fn import_dump(conn: &mut Connection, limits: Limits, dump: copy::Dump, merge: bool, now: i64) -> Result<Value, String> {
+pub fn import_dump(conn: &mut Connection, limits: Limits, dump: copy::Dump, merge: bool, now: i64, host: &str) -> Result<Value, String> {
     let tx = immediate(conn)?;
     let mut existing = copy::Existing::default();
     {
@@ -3591,7 +3612,7 @@ pub fn import_dump(conn: &mut Connection, limits: Limits, dump: copy::Dump, merg
         }
     }
     // Teams another computer owns are read-only here (their home writes them).
-    register_mirrors(&tx, &super::board_host(), now)?;
+    register_mirrors(&tx, host, now)?;
     finish(tx, limits)?;
     Ok(copy::summary(&plan, &skipped))
 }
