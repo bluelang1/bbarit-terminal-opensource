@@ -6,6 +6,7 @@ import {
   keepProtectedConfig,
   missingPgFields,
   normalizeBoardPg,
+  protectedConfigRefusal,
   readBoardMode,
   redactProtectedConfig,
 } from './agentBoardStorage';
@@ -77,6 +78,36 @@ describe('agents cannot reach the storage settings through config.get / config.p
     expect(redactProtectedConfig(config.agents.board, 'agents.board')).toEqual({ leaseSeconds: 300 });
     expect(redactProtectedConfig('db', 'agents.board.postgres.host')).toBeUndefined();
     expect(redactProtectedConfig(300, 'agents.board.leaseSeconds')).toBe(300);
+  });
+});
+
+describe('agents cannot read or flip the agent team switch (agents.enabled)', () => {
+  const config: { agents: { enabled: boolean; maxChildren: number; board: Record<string, unknown> } } = { agents: { enabled: false, maxChildren: 4, board: { leaseSeconds: 300, hostName: 'mac' } } };
+
+  it('config.patch refuses agents.enabled with its own message', () => {
+    expect(isProtectedConfigPath('agents.enabled')).toBe(true);
+    expect(isProtectedConfigPath(' agents . enabled ')).toBe(true);
+    expect(isProtectedConfigPath('agents.maxChildren')).toBe(false);
+    expect(isProtectedConfigPath('agents')).toBe(false);
+    expect(protectedConfigRefusal('agents.enabled')).toMatch(/Settings → Agent team$/);
+    expect(isProtectedConfigPath('agents.leadPhrase')).toBe(true);
+    expect(protectedConfigRefusal('agents.leadPhrase')).toMatch(/lead agent phrase/);
+    expect(keepProtectedConfig<unknown>({ agents: { leadPhrase: '리드' } }, { agents: { leadPhrase: 'hijack' } })).toEqual({ agents: { leadPhrase: '리드' } });
+    expect(redactProtectedConfig({ leadPhrase: '리드', maxTotal: 1 }, 'agents')).toEqual({ maxTotal: 1 });
+    expect(protectedConfigRefusal('agents.board.hostName')).toMatch(/Agent team board/);
+  });
+
+  it('a patch of agents or the root keeps the switch as it was', () => {
+    expect(keepProtectedConfig(config, { agents: { enabled: true, maxChildren: 9, board: { leaseSeconds: 300 } } }).agents)
+      .toEqual({ enabled: false, maxChildren: 9, board: { leaseSeconds: 300, hostName: 'mac' } });
+    expect(keepProtectedConfig<unknown>({ agents: { enabled: true } }, {})).toEqual({ agents: { enabled: true } });
+  });
+
+  it('config.get leaves it out like agents.board.hostName', () => {
+    expect(redactProtectedConfig(config, '')).toEqual({ agents: { maxChildren: 4, board: { leaseSeconds: 300 } } });
+    expect(redactProtectedConfig(config.agents, 'agents')).toEqual({ maxChildren: 4, board: { leaseSeconds: 300 } });
+    expect(redactProtectedConfig(false, 'agents.enabled')).toBeUndefined();
+    expect(config.agents.enabled).toBe(false);
   });
 });
 

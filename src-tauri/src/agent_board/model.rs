@@ -442,7 +442,8 @@ pub struct TaskOpInput {
     pub team_name: Option<String>,
     #[serde(default)]
     pub task: Option<i64>,
-    /// claim: the best ready task (priority, then lowest number).
+    /// claim: the best ready task (priority, then lowest number); with `labels`, only tasks
+    /// carrying one of them (`agent task claim --next --label <role>`).
     #[serde(default)]
     pub next: bool,
     #[serde(default)]

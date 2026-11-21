@@ -422,6 +422,9 @@ macro_rules! retrying {
     }};
 }
 
+
+/// `claim --next --label`: the task carries one of the labels in text[] `$2` (empty = any task).
+const PG_LABEL_MATCH: &str = "(cardinality($2::text[]) = 0 OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.labels::jsonb) l(v) WHERE l.v = ANY($2::text[])))";
 impl PgStore {
     pub fn new(target: PgTarget) -> Self {
         Self::with_limits(target, Limits::default())
@@ -1547,7 +1550,7 @@ impl PgStore {
         if name == "add" {
             return self.add_task(team, op, actor, ctx).await;
         }
-        let WriteSpec { action, reason, result, claim_next, lease } = WriteSpec::check(name, op)?;
+        let WriteSpec { action, reason, result, claim_next, next_labels, lease } = WriteSpec::check(name, op)?;
         let now = ctx.now;
         let host = ctx.host.as_deref();
         let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
@@ -1572,9 +1575,11 @@ impl PgStore {
             None => {
                 let next: Option<i64> = sqlx::query_scalar(&self.s(&format!(
                     "SELECT t.seq FROM @@.tasks t WHERE t.team_uid = $1 AND t.deleted_at IS NULL AND t.state = 'open' AND NOT {UNMET}
+                     AND {PG_LABEL_MATCH}
                      ORDER BY t.priority DESC, t.seq LIMIT 1 FOR UPDATE OF t SKIP LOCKED"
                 )))
                 .bind(uid)
+                .bind(&next_labels)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|e| self.err(e))?;
@@ -1583,9 +1588,10 @@ impl PgStore {
                     None => {
                         let (open, waiting): (i64, i64) = sqlx::query_as(&self.s(&format!(
                             "SELECT count(*), count(*) FILTER (WHERE {UNMET}) FROM @@.tasks t
-                             WHERE t.team_uid = $1 AND t.deleted_at IS NULL AND t.state = 'open'"
+                             WHERE t.team_uid = $1 AND t.deleted_at IS NULL AND t.state = 'open' AND {PG_LABEL_MATCH}"
                         )))
                         .bind(uid)
+                        .bind(&next_labels)
                         .fetch_one(&mut *tx)
                         .await
                         .map_err(|e| self.err(e))?;

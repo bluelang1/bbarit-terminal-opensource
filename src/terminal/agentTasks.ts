@@ -244,7 +244,12 @@ export function buildTaskOp(sub: string, request: Record<string, unknown> | null
   if (sub === 'claim' && r.next === true) {
     if (present(r.task)) return { ok: false, error: 'agent task claim takes a task number or --next, not both' };
     op.next = true;
+    // --next --label <role>…: only tasks carrying one of these labels.
+    const labels = labelList(r.labels);
+    if (!labels.ok) return fail(labels);
+    if (labels.value?.length) op.labels = labels.value;
   } else {
+    if (sub === 'claim' && present(r.labels)) return { ok: false, error: 'agent task claim: --label goes with --next' };
     const task = parseTaskNumber(r.task);
     if (!task.ok) return { ok: false, error: `${task.error}: agent task ${sub} <#>` };
     op.task = task.value;

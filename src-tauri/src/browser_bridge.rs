@@ -94,6 +94,7 @@ pub async fn start_browser_bridge(
         .route("/editor", post(handle_editor))
         .route("/api/claude-session", post(handle_claude_session))
         .route("/api/claude-limit", post(handle_claude_limit))
+        .route("/api/agent-lead", get(handle_agent_lead))
         .with_state(bridge_ctx.clone())
         // POST /gateway/ui — the agent's app_control tool drives the app UI. It
         // authenticates with the internal UI token, and lives on the LOCAL port
@@ -490,6 +491,15 @@ async fn handle_claude_session(
         );
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
+// GET /api/agent-lead — the bundled UserPromptSubmit hook (claude-hooks/user-prompt-submit.sh)
+// reads the lead phrases here (text/plain, one per line; empty while the agent team is off).
+// The hook never sends the prompt; matching happens in the hook. docs/AGENT_RELAY.md "Lead mode".
+async fn handle_agent_lead() -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let cfg = crate::read_octo_config_json();
+    let body = crate::agent_board::lead_hook_phrases(cfg.as_ref()).join("\n");
+    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
 }
 
 #[cfg(test)]

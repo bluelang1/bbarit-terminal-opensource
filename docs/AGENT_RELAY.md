@@ -434,6 +434,83 @@ agent 커맨드로 리뷰어를 띄워" 처럼 언급하면 Claude 가 `node "$B
   메인 창이 에이전트 탭 상태·제한·팀이 속한 프로젝트 테마를 `ts-pop:ctx` 로 보내고, 창 사이를 건너지 못하는 DOM 이벤트
   `octo-agent-board` 는 `ts-pop:board` 로 넘겨 준다. 하네스 창은 같은 App 을 띄우지만 `main` 창만 응답한다.
 
+- **탭 에이전트 팀 스위치**(`agents.enabled`, 설정 → 에이전트 → "탭으로 에이전트 팀 쓰기", 기본 켬, `src/terminal/agentTeamSwitch.ts`):
+  끄면 앱의 에이전트 팀(앱 탭으로 여는 자식, 팀 보드·할 일, 팀 현황 보기)이 꺼진다. Claude Code 자체 서브에이전트(한 탭 안)는 상관없다.
+  - 거부 위치: UI 커맨드 디스패처(`App.tsx` `gatewayUiHandlerRef`) 맨 앞, `switch` 전. ctl(mcp-bridge `__BBARIT_CTL__.dispatch`)과
+    게이트웨이(`gateway-ui-command`) 모두 이 한 함수로 들어오고 `agent.*` 는 호스트에서 처리되지 않으므로(Rust 는 이벤트로 넘길 뿐,
+    비서 허용 목록에도 없다) 이 한 곳이면 빠지는 길이 없다. 설정은 명령마다 `getConfigSnapshot()` 으로 다시 읽는다(바꾸면 다음 명령부터,
+    이미 돌던 명령은 끝까지 간다). `agent.*` 전부를 거부하되 `agent.run.result`(이미 시작한 워크트리 run 의 결과)와 `agent.log`(읽기)만
+    받는다 — 새 `agent.*` 명령은 기본으로 거부된다. 답은 `{ ok: false, code: "agents_disabled", error: "agent team is turned off: …
+    Do the work yourself in this tab … do not retry …" }`. `agent wait`(ctl 이 `agent.status` 폴링)는 이 코드를 받으면 다시 묻지 않고 바로
+    끝난다(`agentStatusError`·`fatal`, 종료 코드 1). 같은 사용자 프로세스가 Tauri 커맨드(`agent_board_post` 등)를 직접 부르는 것은
+    막지 않는다(위 "알려진 한계"와 같은 경계).
+  - 노트: 부모 대기열은 끄는 순간 비우고(`agentNoteQueueRef.clear`), `deliverAgentNote`·`flushAgentNotes` 는 꺼져 있으면 쌓지도 보내지도
+    않는다. 링크·자식 탭은 그대로다. 이미 대기열에서 꺼낸 묶음도 보내는 함수가 노트마다 스위치를 다시 보고(`teamGatedNoteSend`)
+    꺼졌으면 나머지를 버린다. 게이트에 이미 넘어가 조용함을 기다리는 노트 하나만 그대로 간다(진행 중인 명령).
+    꺼진 동안 끝난 자식은 나중에 다시 켜도 done 노트를 보내지 않는다(그 전이는 지나갔다). 상태는 다시 켠 뒤
+    `agent wait`·`agent status` 로 보인다.
+  - 이미 돌던 `agent run --worktree`: 워크트리가 준비된 순간 스위치가 꺼져 있으면 탭을 열지 않고 브리프도 넣지 않으며 자리를 돌려주고,
+    `agent.run.result` 가 `agents_disabled` 와 이미 만든 워크트리·브랜치(남아 있음)를 돌려준다(`refusalAfterWorktree`).
+  - 팀 멈춤 버튼은 숨기지 않는다: 릴레이 자식이 아직 일하면 꺼진 동안에도 보여 사람이 멈출 수 있다(`showStopTeamButton`;
+    끄는 것은 돌던 자식을 멈추지 않는다 — 설정 문구도 그렇게 안내한다). 에이전트의 `agent stop` 은 거부된다.
+  - 계기판 버튼: 꺼지면 툴팁에서 팀 현황을 빼고 `data-guide="team-status"` 를 달지 않는다(`gaugeButtonLabel`). 보드 설정의 동기화
+    상태는 `agents_disabled` 코드를 사람 말로 보여 준다(`settings.agentBoard.sync.agentsDisabled`).
+  - 숨김: 프로젝트 막대의 팀 현황 버튼(`showTeamStatusButton`), 프로젝트 탭·계기판 배지
+    (`teamBadgeCount`), 계기판 오버레이의 팀 현황 탭(`TeamStatusOverlay teamEnabled={false}` → 대시보드만, 열린 중에 꺼도 대시보드로),
+    따로 연 팀 현황 창(닫는다; 그 창의 요청에도 답하지 않는다), 시작 안내 `team-status` 단계(`visibleSteps(isMac, agentTeam)`).
+    배지용 보드 폴링(`useTeamWatch`)도 멈춘다.
+  - 동기화 작업자(3b): `worker_step(agents_enabled, mode)` 가 `Paused` 면 그 틱은 아무것도 하지 않는다(올리기·받기·정리·변경 기록 해제 없음,
+    상태 `paused` + `agents_disabled`). "지금 동기화" 도 거부한다. 보드 파일·설정·임대 갱신은 그대로다. Rust 는 `agents_enabled()` 로
+    config.json 을 틱마다 다시 읽는다(명시적 `false` 만 꺼짐).
+  - `config get|set` 은 `agents.enabled` 를 보여 주지도 바꾸지도 않는다(`PROTECTED_CONFIG_PATHS`, 부모 경로 패치도 값 유지).
+  - 번들 스킬 `bbarit-agents` 는 그대로 두고, "agent team is turned off" 를 받으면 이 탭에서 직접 하라는 문장만 더했다.
+  - 다시 켜면 재시작 없이 다음 명령·다음 틱·다음 렌더부터 돌아온다.
+
+- **Lead mode**(리드 에이전트 모드): 사람이 목표만 말하면 한 Claude 탭이 팀 전체를 돌린다.
+  - 문구: 설정 → 에이전트 → 에이전트 팀의 "리드 에이전트 문구"(`agents.leadPhrase`, 기본 "리드 에이전트로 진행해줘",
+    한 줄 2~60자, 제어·서식 문자 금지 — `normalizeLeadPhrase`/Rust `normalize_lead_phrase` 같은 규칙, 틀린 저장값은 기본값).
+    영어 "proceed as the lead agent" 는 늘 함께 받는다. `agents.enabled` 처럼 `config get|set` 으로 읽거나 바꾸지 못한다.
+  - 전달: 번들 `bbarit-session.json` 의 `UserPromptSubmit` 훅(`timeout: 1`)이 `$BBARIT_CLAUDE_HOOK` 옆
+    `user-prompt-submit.sh` 를 돌린다(파일이 없는 예전 번들이면 아무것도 안 함). 스크립트는 stdin JSON 의 `prompt` 만 떼어
+    JSON 공백 이스케이프(`\n` `\t` `\r`)·연속 공백을 하나로, ASCII 대문자를 소문자로 바꾼 뒤, `GET /api/agent-lead`
+    (`with_local_guard` 안의 로컬 브리지, curl 0.7 s)가 돌려준 문구(한 줄에 하나, 같은 정규화 + `\`·`"` JSON 이스케이프,
+    `lead_hook_phrases`)가 들어 있는지 본다. 스위치가 꺼져 있으면 브리지는 빈 본문을 주고, 앱이 꺼져 있으면 curl 이
+    실패한다 — 둘 다 아무것도 붙이지 않는다. 맞으면 stdout 에 `{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit",
+    "additionalContext":"BBARIT lead mode: …"}}` 한 줄. 모든 경로가 exit 0, 프롬프트는 브리지로 보내지도 기록하지도 않는다.
+    설정에서 문구를 바꾸면 다음 프롬프트부터 쓰인다(스킬을 다시 설치할 필요 없음). 형식 근거: Claude Code hooks 문서의
+    UserPromptSubmit 절("`additionalContext` | String added to Claude's context alongside the submitted prompt",
+    `hookSpecificOutput.hookEventName` 필수, 입력 필드 `prompt`, timeout 단위 초).
+  - 안전 규칙은 훅의 `additionalContext` 에도 직접 들어 있다(설치된 스킬이 예전 판이어도 적용): push·PR·main 머지는
+    요청에 있을 때만, 자식의 권한·로그인 요청은 대신 승인하지 말고 사람에게, 앱 제한 안에서(우회 금지), `agents_disabled`
+    면 이 탭에서 직접, 정말 모호하거나 사람 승인이 필요할 때만 묻기.
+  - 릴레이가 탭에 넣는 글(자식 브리프, `<bbarit from=… state=…>` 노트, 다른 탭의 `agent send`)은 모두 `<bbarit` 로
+    시작하므로, 앞 공백을 뺀 프롬프트가 `<bbarit` 로 시작하면 훅은 아무것도 하지 않는다. caller 없는 `agent send`
+    (탭 밖에서 사람이 실행)는 감싸지 않으므로 사람이 친 글로 본다.
+  - 정규화: 이스케이프된 역슬래시(`\\`)는 따로 두고 `\n`·`\r`·`\t`, 탭, NBSP(U+00A0), U+3000 을 공백으로 바꾼다(문구 쪽은
+    TS `\s`·Rust `is_whitespace` 가 같은 글자를 공백으로 본다).
+  - 설치된 스킬 갱신(`src-tauri/src/bundled_skills.rs`): 앱이 쓴 스킬 폴더에는 `.bbarit-bundled`(쓴 파일들의 해시)를 둔다.
+    시작 때(백그라운드 스레드) 폴더가 없으면 설치·표시, 표시가 있고 지금 파일이 그 해시와 같으면(아무도 안 고침) 번들이
+    바뀐 경우 새 판으로 바꾼다(옆에 복사한 뒤 rename). 표시가 없는 예전 설치본은 번들과 같으면 표시만 하고, 예전 앱이
+    실은 판(`KNOWN_SHIPPED`, git 기록의 bbarit-agents 해시)과 같으면 바꾼다. 그 밖(사람이 고쳤거나 직접 만든 폴더)은
+    건드리지 않고 시작마다 로그 한 줄. 번들 스킬을 고치면 이전 판의 해시를 `KNOWN_SHIPPED` 에 넣을 필요는 없다(새 설치본은
+    표시가 있다).
+  - 플레이북: `bbarit-agents` 스킬의 "Lead mode" 절(계획 → 인원 → 진행 → 관문 → 마무리), 당겨 가기(pull) 방식이다.
+    리드는 할 일마다 역할 라벨(`impl`·`test`·`review`, 그 밖도 가능)과 필요하면 `--review`·`--after` 를 달아 올리고, 역할마다
+    자식 하나(병렬 구현이면 `impl` 둘)를 띄운다. 브리프에 할 일 번호는 넣지 않는다. 자식은 "Working from the list" 절을
+    따른다: `claim --next --label <역할>` → 일 → 보드에 발견·질문 → `done --summary --checks` 또는 검수가 필요하면 `submit`
+    → 기다리는 동안 다음 할 일 → 반려면 이유를 읽고 다시 잡아 고친 뒤 다시 submit → `claim --next` 가 4 로 끝나고 기다리는
+    자기 일이 없으면 몇 번 짧게 다시 해 보고 `done` 글을 올리고 멈춘다. 리드는 결과·검사 출력·diff 를 읽고 approve 또는
+    이유를 단 reject 를 한다(자기가 낸 것은 앱이 승인을 막는다).
+  - 반려(`reject`, `check_transition` → `open`): 상태 `open`, 주인·임대·`submitted_at` 비움, `attempt` +1, `last_error` =
+    `rejected: <이유>`, 이전 결과 필드는 남는다. 누구든(그 라벨의 자식 포함) 다시 잡을 수 있다.
+  - `agent task claim --next --label <역할>`(여러 번 또는 쉼표 목록): 그 라벨 중 하나를 단 할 일만 고른다. 순서(우선순위,
+    번호)와 종료 코드 4 는 그대로이고, "없음" 개수도 그 라벨 안에서 센다. 라벨은 저장 라벨처럼 다듬는다(`clean_labels`).
+    번호를 준 claim 에 `--label` 은 거부. SQLite 는 `json_each(t.labels)`, PostgreSQL 은 `jsonb_array_elements_text(t.labels::jsonb)
+    = ANY($2::text[])` 로 같은 규칙을 쓰고 공용 테스트(`next_with_labels_only_takes_tasks_carrying_one_of_them`)가 두 엔진에서 돈다. 스킬 설명에도 두 문구를 넣어
+    훅이 없을 때의 대비로 둔다. 스위치가 꺼져 있으면 그 탭에서 직접 한다.
+  - 한계: 비교는 바이트 단위라 한글 문구의 띄어쓰기는 문구와 같아야 한다(연속 공백만 하나로 본다). JSON 이 `\uXXXX`
+    로 이스케이프한 글자는 맞지 않는다(Claude Code 는 UTF-8 그대로 보낸다). 사람이 붙여 넣은 긴 글 안에 문구가 있어도 켜진다.
+
 ### 팀 할 일과 보드 저장소 (스키마 2, 외부에서 읽는 사람용)
 
 Rust 모듈 `src-tauri/src/agent_board/`: `model.rs`(한도·글자 규칙·actor·상태 기계, 엔진과 무관), `common.rs`(두 엔진이

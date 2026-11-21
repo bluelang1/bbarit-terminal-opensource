@@ -66,6 +66,14 @@ describe('Agent team board settings: sync', () => {
     expect(n).toBeGreaterThanOrEqual(2);
   });
 
+  it('says why sync paused when the agent team is turned off', async () => {
+    answer({ agent_board_sync_status: () => status({ state: 'paused', lastErrorCode: 'agents_disabled', lastError: 'agent team in tabs is turned off in Settings; sync resumes when it is turned on' }) });
+    render(<AgentBoardSettings />);
+    await settle();
+    expect(screen.getByText('State: paused')).toBeTruthy();
+    expect(screen.getByText(/Sync is paused because "Agent team in tabs" is turned off/)).toBeTruthy();
+  });
+
   it('runs Sync now once at a time and reports the counts', async () => {
     let release: () => void = () => {};
     const now = vi.fn(() => new Promise((r) => { release = () => r({ ...status(), ok: true, pushed: 4, pulled: 7 }); }));

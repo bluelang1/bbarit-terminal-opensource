@@ -1397,6 +1397,9 @@ fn add_task(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOpInput,
     Ok(json!({ "action": "add", "from": Value::Null, "to": "open", "task": task, "expired": [] }))
 }
 
+/// `claim --next --label`: the task carries one of the labels in JSON array `?2` (`[]` = any task).
+const LABEL_MATCH: &str = "(?2 = '[]' OR EXISTS (SELECT 1 FROM json_each(t.labels) l WHERE l.value IN (SELECT value FROM json_each(?2))))";
+
 /// One task write (`TaskOpInput.op`): add, or a transition / edit / dependency change. Each
 /// is one IMMEDIATE transaction: lazy lease expiry for the team, the rule check
 /// (model::check_transition), a guarded UPDATE (expected state, and owner where it matters)
@@ -1407,7 +1410,9 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
     if name == "add" {
         return add_task(conn, limits, team, op, actor, ctx);
     }
-    let WriteSpec { action, reason, result, claim_next, lease } = WriteSpec::check(name, op)?;
+    let WriteSpec { action, reason, result, claim_next, next_labels, lease } = WriteSpec::check(name, op)?;
+    // claim --next --label: only tasks carrying one of these labels ('[]' = any).
+    let label_filter = serde_json::to_string(&next_labels).unwrap_or_else(|_| "[]".into());
     let now = ctx.now;
     let host = ctx.host.as_deref();
     let tx = immediate(conn)?;
@@ -1434,9 +1439,10 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
                 .query_row(
                     &format!(
                         "SELECT t.seq FROM tasks t WHERE t.team_uid = ?1 AND t.deleted_at IS NULL AND t.state = 'open' AND NOT {UNMET}
+                         AND {LABEL_MATCH}
                          ORDER BY t.priority DESC, t.seq LIMIT 1"
                     ),
-                    params![uid],
+                    params![uid, label_filter],
                     |r| r.get(0),
                 )
                 .optional()
@@ -1448,9 +1454,9 @@ pub fn task_write(conn: &mut Connection, limits: Limits, team: &str, op: &TaskOp
                         .query_row(
                             &format!(
                                 "SELECT count(*), coalesce(sum({UNMET}), 0) FROM tasks t
-                                 WHERE t.team_uid = ?1 AND t.deleted_at IS NULL AND t.state = 'open'"
+                                 WHERE t.team_uid = ?1 AND t.deleted_at IS NULL AND t.state = 'open' AND {LABEL_MATCH}"
                             ),
-                            params![uid],
+                            params![uid, label_filter],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
                         .db()?;

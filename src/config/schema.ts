@@ -8,9 +8,11 @@
 import { DEFAULT_WINDOW_PIN, readWindowPin, type WindowPinState } from '../window/windowPin';
 import { DEFAULT_AGENT_LIMITS, normalizeAgentLimits, type AgentLimits } from '../terminal/agentLimits';
 import { DEFAULT_AGENT_BOARD_CONFIG, normalizeAgentBoardConfig, type AgentBoardConfig } from '../terminal/agentTasks';
+import { DEFAULT_LEAD_PHRASE, agentTeamEnabled, readLeadPhrase } from '../terminal/agentTeamSwitch';
 
-/** config.agents: relay limits plus `board` (team board lease timing, src/terminal/agentTasks.ts). */
-export type AgentsConfig = AgentLimits & { board: AgentBoardConfig & Record<string, unknown> };
+/** config.agents: relay limits plus `board` (team board lease timing, src/terminal/agentTasks.ts)
+ *  and `enabled` (Settings → "Agent team in tabs", src/terminal/agentTeamSwitch.ts; default on). */
+export type AgentsConfig = AgentLimits & { enabled: boolean; leadPhrase: string; board: AgentBoardConfig & Record<string, unknown> };
 
 // ───────────────────────── Sub-types ─────────────────────────
 
@@ -561,7 +563,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   hints: { ...DEFAULT_HINTS_CONFIG },
   regionKeys: true,
   window: { ...DEFAULT_WINDOW_PIN },
-  agents: { ...DEFAULT_AGENT_LIMITS, board: { ...DEFAULT_AGENT_BOARD_CONFIG } },
+  agents: { enabled: true, leadPhrase: DEFAULT_LEAD_PHRASE, ...DEFAULT_AGENT_LIMITS, board: { ...DEFAULT_AGENT_BOARD_CONFIG } },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -653,6 +655,8 @@ export function validateConfig(raw: unknown): OctoConfig {
     regionKeys: input.regionKeys !== false,
     window: readWindowPin(input.window),
     agents: {
+      enabled: agentTeamEnabled(input.agents),
+      leadPhrase: readLeadPhrase(input.agents),
       ...normalizeAgentLimits(input.agents),
       board: normalizeAgentBoardConfig((input.agents as { board?: unknown } | undefined)?.board),
     },

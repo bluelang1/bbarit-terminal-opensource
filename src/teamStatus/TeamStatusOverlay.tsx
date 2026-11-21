@@ -3,7 +3,8 @@
 // inside, Esc closes the innermost open part first, then the overlay (capture phase, so it
 // never reaches the terminal as \x1b). The Dashboard iframe stays mounted (hidden) once
 // opened, so switching tabs does not reload it. Team status can open in its own window
-// (pop-out); while it is open there, this tab shows that with [Bring to front].
+// (pop-out); while it is open there, this tab shows that with [Bring to front]. With the agent
+// team turned off (Settings → "Agent team in tabs", `teamEnabled` false) only Dashboard is shown.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as Icons from 'lucide-react';
 import { useDialogFocus } from '../a11y/dialogFocus';
@@ -26,7 +27,9 @@ export function readGaugeTab(): GaugeTab {
   }
 }
 
-export function TeamStatusOverlay({ initialTab, onClose, onOpenExternal, onTabChange, restoreFocus, poppedOut, onPopOut, onBringToFront, view }: {
+export function TeamStatusOverlay({ teamEnabled = true, initialTab, onClose, onOpenExternal, onTabChange, restoreFocus, poppedOut, onPopOut, onBringToFront, view }: {
+  /** Agent team on (config agents.enabled). False: no Team status tab; opens on Dashboard. */
+  teamEnabled?: boolean;
   /** Opened from a team entry point: the Team status tab; otherwise the last tab used. */
   initialTab?: GaugeTab;
   onClose: () => void;
@@ -43,9 +46,12 @@ export function TeamStatusOverlay({ initialTab, onClose, onOpenExternal, onTabCh
   view: TeamStatusViewProps;
 }) {
   const t = useMemo(() => makeT(view.locale), [view.locale]);
-  const [tab, setTabState] = useState<GaugeTab>(() => initialTab || readGaugeTab());
+  const [chosenTab, setTabState] = useState<GaugeTab>(() => (teamEnabled ? initialTab || readGaugeTab() : 'dashboard'));
+  // Turned off while open: Dashboard; the remembered tab is left as it was.
+  const tab: GaugeTab = teamEnabled ? chosenTab : 'dashboard';
   const openedOnDashboard = useRef(tab === 'dashboard').current;
   const [dashboardMounted, setDashboardMounted] = useState(tab === 'dashboard');
+  if (tab === 'dashboard' && !dashboardMounted) setDashboardMounted(true);
   const setTab = (next: GaugeTab) => {
     setTabState(next);
     if (next === 'dashboard') setDashboardMounted(true);
@@ -77,7 +83,9 @@ export function TeamStatusOverlay({ initialTab, onClose, onOpenExternal, onTabCh
           <div className="ts-shell-bar">
             <span id="ts-shell-title" className="ts-sr">{t('shell.label')}</span>
             <TabBar
-              tabs={[{ key: 'team', label: t('tab.team') }, { key: 'dashboard', label: t('tab.dashboard') }]}
+              tabs={teamEnabled
+                ? [{ key: 'team', label: t('tab.team') }, { key: 'dashboard', label: t('tab.dashboard') }]
+                : [{ key: 'dashboard', label: t('tab.dashboard') }]}
               value={tab}
               onChange={setTab}
               label={t('shell.label')}

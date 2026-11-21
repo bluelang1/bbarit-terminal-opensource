@@ -334,6 +334,9 @@ const AGENT_HELP = `
 bbarit-ctl agent — delegate work to another agent tab and get the result back
 ════════════════════════════════════════════════════════════════════════
 Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs node)
+If the user turned the agent team off (Settings → "Agent team in tabs"), every agent
+command except agent log fails at once (exit code 1, code agents_disabled) with
+"agent team is turned off…": do the work yourself in this tab and do not retry.
 
   agent run <cliType> <prompt…> [--bg] [--workdir <dir>] [--name <n>] [--worktree [name]] [--timeout <s>=600]
       Open a background tab running <cliType> (claude|codex|gemini|…|shell) in this
@@ -440,9 +443,11 @@ Inside a BBARIT tab call it as:  node "$BBARIT_CTL" agent <sub> …   (needs nod
         states: open claimed blocked review done failed cancelled waiting ready stale;
         default: everything not done or cancelled
     show <#> [--history]          details, dependencies, result and (--history) every change
-    claim <#> | --next            take a task (--next: highest priority, then lowest number,
-                                  among open tasks whose dependencies are done). Exit code 4
-                                  when nothing is ready. The claim is a lease the app renews
+    claim <#> | --next [--label <role>]…
+                                  take a task (--next: highest priority, then lowest number,
+                                  among open tasks whose dependencies are done; --label impl,
+                                  repeatable or comma list: only tasks carrying one of those
+                                  labels). Exit code 4 when nothing is ready. The claim is a lease the app renews
                                   while this tab is open; closing or exiting the tab hands the
                                   task back, and an abandoned lease expires (5 min default).
     block <#> --reason <text>     stop and say why (still yours) · unblock <#>
@@ -503,6 +508,13 @@ export function evaluateAgentWait(agents, mode = 'all') {
  * app is unreachable (closed — its terminals live on in the PTY holder — or loading) it
  * keeps polling until the timeout and calls onUnreachable once.
  */
+/** agent.status refused: `fatal` when retrying cannot help (agent team turned off). */
+export function agentStatusError(parsed) {
+  const e = new Error((parsed && parsed.error) || 'agent.status failed');
+  if (parsed && parsed.code === 'agents_disabled') e.fatal = true;
+  return e;
+}
+
 export async function waitForAgents({
   fetchAgents,
   mode = 'all',
@@ -523,6 +535,8 @@ export async function waitForAgents({
       failures = 0;
       if (evaluateAgentWait(agents, mode)) return { timedOut: false, agents };
     } catch (e) {
+      // The app refused for good (agent team turned off): no point polling again.
+      if (e && e.fatal) throw e;
       if (isUnreachable(e)) {
         if (!warned) { warned = true; onUnreachable(e); }
       } else {
@@ -854,7 +868,7 @@ const TASK_USAGE = {
   add: 'usage: agent task add [--body <text>|-] [--parent <#>] [--after <#,#>] [--priority 0-3] [--review] [--label <x>]… [--max-attempts <n>] [--] <title…>',
   list: 'usage: agent task list [--state <s,…>] [--mine] [--ready] [--tree] [--search <text>] [--all] [--limit N] [--team <rootTabId>]',
   show: 'usage: agent task show <#> [--history] [--team <rootTabId>]',
-  claim: 'usage: agent task claim <#> | --next',
+  claim: 'usage: agent task claim <#> | --next [--label <role>]…',
   block: 'usage: agent task block <#> --reason <text>',
   reject: 'usage: agent task reject <#> --reason <text>',
   fail: 'usage: agent task fail <#> --error <text>',
@@ -960,10 +974,13 @@ export function parseTaskArgs(sub, list) {
     }
     case 'claim': {
       const next = takeBool(rest, '--next');
+      const labels = takeAllValues(rest, '--label', usage).flatMap((x) => x.split(',')).map((x) => x.trim()).filter(Boolean);
       const words = finish();
+      if (labels.length && !next) throw new Error(`--label goes with --next (${usage})`);
       if (next) {
         if (words.length) throw new Error(usage);
         out.next = true;
+        if (labels.length) out.labels = labels;
       } else {
         out.task = oneNumber(words);
       }
@@ -1109,7 +1126,7 @@ async function agentCommand(list) {
   flags.timeout = 20000;
   const statusOf = async (payload) => {
     const { parsed } = await dispatch({ cmd: 'agent.status', ...payload });
-    if (parsed.ok === false) throw new Error(parsed.error || 'agent.status failed');
+    if (parsed.ok === false) throw agentStatusError(parsed);
     return parsed.agents || [];
   };
   const waitsOut = unreachableWaitPolicy(flags.port);

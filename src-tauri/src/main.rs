@@ -21,6 +21,7 @@ mod agent_caller;
 mod agent_gateway;
 mod agent_relay_log;
 mod browser_bridge;
+mod bundled_skills;
 mod chrome_import;
 mod claude_design;
 mod code_search;
@@ -6186,7 +6187,7 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -6202,8 +6203,9 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 
 // Ship the bundled SEO/GEO skills to EVERY user: on startup, copy them from the app's bundled
 // resources into the user's ~/.claude/skills so the in-app coding agents (Claude/Codex/…) can use
-// them on any installed copy — not just the dev machine. Idempotent: a skill that already exists
-// is left untouched so the user's own edits/customizations are never clobbered.
+// them on any installed copy — not just the dev machine. A folder the app wrote (marker file) is
+// refreshed when the bundle changed; a folder the user created or edited is never overwritten
+// (bundled_skills.rs).
 fn install_bundled_skills(app: &AppHandle) {
     let src = match app
         .path()
@@ -6227,21 +6229,25 @@ fn install_bundled_skills(app: &AppHandle) {
         Ok(e) => e,
         Err(_) => return,
     };
-    let mut installed = 0u32;
+    let (mut installed, mut updated) = (0u32, 0u32);
+    let mut kept: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let target = dest_root.join(entry.file_name());
-        if target.exists() {
-            continue;
-        }
-        if copy_dir_all(&entry.path(), &target).is_ok() {
-            installed += 1;
+        match bundled_skills::sync_skill(&entry.path(), &target) {
+            bundled_skills::Outcome::Installed => installed += 1,
+            bundled_skills::Outcome::Updated => updated += 1,
+            bundled_skills::Outcome::KeptUserCopy => kept.push(entry.file_name().to_string_lossy().into_owned()),
+            _ => {}
         }
     }
-    if installed > 0 {
-        safe_eprintln!("[skills] installed {} bundled SEO/GEO skills into ~/.claude/skills", installed);
+    if installed > 0 || updated > 0 {
+        safe_eprintln!("[skills] bundled skills in ~/.claude/skills: {} installed, {} updated", installed, updated);
+    }
+    if !kept.is_empty() {
+        safe_eprintln!("[skills] kept your own or edited copies (not updated): {}", kept.join(", "));
     }
 }
 
