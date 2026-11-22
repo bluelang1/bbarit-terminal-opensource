@@ -3,6 +3,7 @@
 //! PostgreSQL in stage 3) call these, so the rules live in one place and the stores only hold
 //! SQL. Design: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md
 
+use super::error::StoreError;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -663,35 +664,42 @@ pub fn describe_state(t: &TaskFacts) -> String {
 /// Rules: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md "States and
 /// transitions". Dependency checks (claim) need the store and are done there.
 pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<&'static str, String> {
+    check_transition_typed(action, t, actor).map_err(String::from)
+}
+
+/// `check_transition` with the refusal's kind: a wrong state is `Conflict`; someone who may
+/// not do it (not the owner, not the creator, a person working on a task, self-review) is
+/// `Forbidden`.
+pub fn check_transition_typed(action: Action, t: &TaskFacts, actor: &Actor) -> Result<&'static str, StoreError> {
     let n = t.seq;
     let desc = describe_state(t);
     let is_owner = !actor.id.is_empty() && t.owner_id == Some(actor.id.as_str());
-    let owner_only = |verb: &str| -> Result<(), String> {
+    let owner_only = |verb: &str| -> Result<(), StoreError> {
         if is_owner {
             Ok(())
         } else {
-            Err(format!("#{n} is {desc}: only its owner can {verb} it"))
+            Err(StoreError::Forbidden(format!("#{n} is {desc}: only its owner can {verb} it")))
         }
     };
-    let need = |states: &[&str], hint: &str| -> Result<(), String> {
+    let need = |states: &[&str], hint: &str| -> Result<(), StoreError> {
         if states.contains(&t.state) {
             Ok(())
         } else {
-            Err(format!("#{n} is {desc}{hint}"))
+            Err(StoreError::Conflict(format!("#{n} is {desc}{hint}")))
         }
     };
     // A person (the viewer) manages tasks but never works on one.
     if actor.human
         && matches!(action, Action::Claim | Action::Block | Action::Unblock | Action::Release | Action::Done | Action::Submit | Action::Fail)
     {
-        return Err(format!("a person cannot {} a task: agents claim and work on tasks", action.event()));
+        return Err(StoreError::Forbidden(format!("a person cannot {} a task: agents claim and work on tasks", action.event())));
     }
     match action {
         Action::Claim => {
             match t.state {
                 "open" => {}
-                "claimed" | "blocked" | "review" => return Err(format!("#{n} is already {desc}")),
-                _ => return Err(format!("#{n} is {desc}: nothing to claim (retry or reopen it first)")),
+                "claimed" | "blocked" | "review" => return Err(StoreError::Conflict(format!("#{n} is already {desc}"))),
+                _ => return Err(StoreError::Conflict(format!("#{n} is {desc}: nothing to claim (retry or reopen it first)"))),
             }
             Ok("claimed")
         }
@@ -714,7 +722,7 @@ pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<
             need(&["claimed"], if t.state == "blocked" { ": unblock it first" } else { ": claim it first" })?;
             owner_only("finish")?;
             if t.needs_review {
-                return Err(format!("#{n} needs review: use agent task submit (someone else approves it)"));
+                return Err(StoreError::Conflict(format!("#{n} needs review: use agent task submit (someone else approves it)")));
             }
             Ok("done")
         }
@@ -722,7 +730,7 @@ pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<
             need(&["claimed"], if t.state == "blocked" { ": unblock it first" } else { ": claim it first" })?;
             owner_only("submit")?;
             if !t.needs_review {
-                return Err(format!("#{n} does not need review: use agent task done"));
+                return Err(StoreError::Conflict(format!("#{n} does not need review: use agent task done")));
             }
             Ok("review")
         }
@@ -730,7 +738,7 @@ pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<
             need(&["review"], ": only a task in review can be approved or rejected")?;
             // Nobody reviews their own work, the root tab included; only a person is exempt.
             if is_owner && !actor.human {
-                return Err(format!("#{n} was submitted by you: someone else (another member, the root tab or a person) reviews it"));
+                return Err(StoreError::Forbidden(format!("#{n} was submitted by you: someone else (another member, the root tab or a person) reviews it")));
             }
             Ok(if action == Action::Approve { "done" } else { "open" })
         }
@@ -742,39 +750,39 @@ pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<
         Action::Retry => {
             need(&["failed"], ": only a failed task can be retried")?;
             if t.attempt >= t.max_attempts && !actor.privileged() {
-                return Err(format!(
+                return Err(StoreError::Forbidden(format!(
                     "#{n} has used its retries (attempt {} of {}): only the root tab or a person can retry it again",
                     t.attempt, t.max_attempts
-                ));
+                )));
             }
             Ok("open")
         }
         Action::Reopen => {
             need(&["done"], ": only a done task can be reopened")?;
             if !actor.privileged() {
-                return Err(format!("#{n} is done: only the root tab or a person can reopen it"));
+                return Err(StoreError::Forbidden(format!("#{n} is done: only the root tab or a person can reopen it")));
             }
             Ok("open")
         }
         Action::Cancel => {
             if t.state == "done" || t.state == "cancelled" {
-                return Err(format!("#{n} is {desc}: it cannot be cancelled"));
+                return Err(StoreError::Conflict(format!("#{n} is {desc}: it cannot be cancelled")));
             }
             let creator = !actor.id.is_empty() && t.created_by_id == Some(actor.id.as_str());
             if !creator && !actor.privileged() {
-                return Err(format!("#{n} can be cancelled only by who added it ({}), the root tab or a person", who(t.created_by_id, None)));
+                return Err(StoreError::Forbidden(format!("#{n} can be cancelled only by who added it ({}), the root tab or a person", who(t.created_by_id, None))));
             }
             Ok("cancelled")
         }
         Action::Edit => {
-            check_edit(t, actor, false)?;
+            check_edit_typed(t, actor, false)?;
             Ok(state_static(t.state))
         }
         Action::DepAdd | Action::DepRemove => {
             if !is_live(t.state) || t.state == "review" {
-                return Err(format!("#{n} is {desc}: dependencies change only on open, claimed or blocked tasks"));
+                return Err(StoreError::Conflict(format!("#{n} is {desc}: dependencies change only on open, claimed or blocked tasks")));
             }
-            check_edit(t, actor, false)?;
+            check_edit_typed(t, actor, false)?;
             Ok(state_static(t.state))
         }
     }
@@ -788,28 +796,33 @@ pub fn check_transition(action: Action, t: &TaskFacts, actor: &Actor) -> Result<
 ///   the current owner (a person excepted) and never while the task is in review — so an
 ///   owner cannot drop the review step and finish the task unreviewed.
 pub fn check_edit(t: &TaskFacts, actor: &Actor, review_change: bool) -> Result<(), String> {
+    check_edit_typed(t, actor, review_change).map_err(String::from)
+}
+
+/// `check_edit` with the refusal's kind: `Forbidden`, or `Conflict` while the task is in review.
+pub fn check_edit_typed(t: &TaskFacts, actor: &Actor, review_change: bool) -> Result<(), StoreError> {
     let n = t.seq;
     let is_owner = !actor.id.is_empty() && t.owner_id == Some(actor.id.as_str());
     let creator = !actor.id.is_empty() && t.created_by_id == Some(actor.id.as_str());
     let privileged = actor.root || actor.human;
     if matches!(t.state, "done" | "failed" | "cancelled") {
         if !privileged {
-            return Err(format!("#{n} is {}: only the root tab or a person can change it", t.state));
+            return Err(StoreError::Forbidden(format!("#{n} is {}: only the root tab or a person can change it", t.state)));
         }
     } else if !(privileged || creator || (is_owner && is_held(t.state))) {
-        return Err(format!(
+        return Err(StoreError::Forbidden(format!(
             "#{n} can be changed only by who added it, the root tab, a person, or its owner while it is claimed or blocked"
-        ));
+        )));
     }
     if review_change {
         if t.state == "review" {
-            return Err(format!("#{n} is in review: the review step cannot be changed now"));
+            return Err(StoreError::Conflict(format!("#{n} is in review: the review step cannot be changed now")));
         }
         if is_owner && !actor.human {
-            return Err(format!("#{n} is yours: its owner cannot change whether it needs review"));
+            return Err(StoreError::Forbidden(format!("#{n} is yours: its owner cannot change whether it needs review")));
         }
         if !(creator || privileged) {
-            return Err(format!("#{n}: only who added it, the root tab or a person can change whether it needs review"));
+            return Err(StoreError::Forbidden(format!("#{n}: only who added it, the root tab or a person can change whether it needs review")));
         }
     }
     Ok(())

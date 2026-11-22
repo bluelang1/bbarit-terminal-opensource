@@ -208,6 +208,10 @@ Build/test gotchas:
   after a push `--watch` can exit before checks start; poll until the exit code
   is not 8 (pending).
   src/guide/useGuideHost.tauri.test.ts is flaky in CI; rerun before suspecting the PR.
+- board-store: PgStore methods wrap pg::PgOps (runs on a caller's connection, never
+  begins/commits). New PostgreSQL operations go into PgOps first; on any Err the caller
+  rolls back (atomically! helper). The crate is copied by hand into another repository;
+  keep its files free of app-only dependencies.
 - `bbarit-ctl js "…invoke('app_quit_kill_terminals')"` never returns once the app
   exits; run it in the background and confirm with `pgrep` instead.
 - The board store lives in src-tauri/crates/board-store (workspace default member, no Tauri
