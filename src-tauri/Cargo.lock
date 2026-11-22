@@ -907,6 +907,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "board-store"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rand 0.8.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "borsh"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5645,6 +5660,7 @@ dependencies = [
  "base64 0.22.1",
  "bbarit",
  "block2 0.6.2",
+ "board-store",
  "cbc",
  "chrono",
  "dirs 5.0.1",

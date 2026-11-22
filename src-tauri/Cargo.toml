@@ -1,3 +1,12 @@
+# One workspace, one Cargo.lock; the app stays the root package. `default-members` keeps
+# `cargo test --manifest-path src-tauri/Cargo.toml` running the board-store tests too.
+# The vendored mcp-bridge plugin (vendor/) is also a member, because path dependencies inside
+# the workspace directory always are; it is left out of `default-members`, so it is built as
+# the app's dependency and tested only with `-p tauri-plugin-mcp-bridge`, as before.
+[workspace]
+members = [".", "crates/board-store"]
+default-members = [".", "crates/board-store"]
+
 [package]
 name = "octo-ui"
 default-run = "octo-ui"
@@ -62,6 +71,10 @@ tauri-plugin-single-instance = "2"
 # Internalized BBARIT coding agent: compiled INTO this app binary (no separate
 # exe). The app re-execs itself with BBARIT_AGENT_MODE=1 to run the agent TUI.
 bbarit = { path = "../bbarit-agent" }
+
+# Agent team board store (model, SQLite and PostgreSQL engines, sync core), shared with the
+# board server later; see crates/board-store/src/lib.rs.
+board-store = { path = "crates/board-store" }
 
 # --- Embedded Semble dependencies ---
 # (tokenizers/safetensors/hf-hub/half are pulled in by model2vec-rs; listing

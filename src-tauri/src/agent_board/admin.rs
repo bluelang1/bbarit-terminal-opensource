@@ -13,7 +13,6 @@
 
 use super::config::{self, PgSettings, PgTarget};
 use super::pg::PgStore;
-use super::sqlite::SqliteStore;
 use super::store::BoardStore;
 use super::*;
 use serde_json::{json, Value};
@@ -99,7 +98,7 @@ pub async fn agent_board_settings_status() -> Result<Value, String> {
 #[tauri::command]
 pub async fn agent_board_pg_test(postgres: Option<Value>) -> Result<Value, String> {
     let target = target_from(postgres)?;
-    let mut out = PgStore::diagnose(&target).await;
+    let mut out = PgStore::diagnose(&target, super::APP_VERSION).await;
     out["envOverride"] = json!(target.from_env);
     out["passwordSaved"] = json!(read_selection().password.is_some());
     // Plain text to a server on another machine: the password and every note cross the network.
@@ -113,7 +112,7 @@ pub async fn agent_board_pg_test(postgres: Option<Value>) -> Result<Value, Strin
 #[tauri::command]
 pub async fn agent_board_pg_migrate(postgres: Option<Value>, apply: Option<bool>) -> Result<Value, String> {
     let target = target_from(postgres)?;
-    super::pg::timed(std::time::Duration::from_secs(120), PgStore::new(target).migrate(apply.unwrap_or(false))).await
+    super::pg::timed(std::time::Duration::from_secs(120), super::pg_store(target).migrate(apply.unwrap_or(false))).await
 }
 
 /// Copy teams, posts, tasks, dependencies, events and read cursors from one engine into the
@@ -121,16 +120,16 @@ pub async fn agent_board_pg_migrate(postgres: Option<Value>, apply: Option<bool>
 /// teams it does not have are copied). The source is never changed; nothing is deleted.
 #[tauri::command]
 pub async fn agent_board_copy(from: String, merge: Option<bool>, postgres: Option<Value>) -> Result<Value, String> {
-    let pg = BoardStore::Pg(PgStore::new(target_from(postgres)?));
+    let pg = BoardStore::Pg(super::pg_store(target_from(postgres)?));
     let path = db_path()?;
     let (source, target, to) = match from.trim() {
         "sqlite" => {
             if !path.exists() {
                 return Err("there is no local board file to copy yet".to_string());
             }
-            (BoardStore::Sqlite(SqliteStore::new(path)), pg, "postgres")
+            (BoardStore::Sqlite(super::local_store(path)), pg, "postgres")
         }
-        "postgres" => (pg, BoardStore::Sqlite(SqliteStore::new(path)), "sqlite"),
+        "postgres" => (pg, BoardStore::Sqlite(super::local_store(path)), "sqlite"),
         other => return Err(format!("unknown source: {other} (sqlite|postgres)")),
     };
     copy_between(&source, &target, merge.unwrap_or(false)).await.map(|mut v| {
@@ -140,18 +139,15 @@ pub async fn agent_board_copy(from: String, merge: Option<bool>, postgres: Optio
     })
 }
 
-/// Export from `source`, import into `target` (Copy data; tests call it directly).
-pub async fn copy_between(source: &BoardStore, target: &BoardStore, merge: bool) -> Result<Value, String> {
-    let dump = source.export_dump().await?;
-    target.import_dump(dump, merge).await
-}
+/// Export from `source`, import into `target` (Copy data; lives in the board-store crate).
+pub use super::store::copy_between;
 
 /// "Clean up old teams" on the PostgreSQL board (never automatic on a shared server): teams
 /// with no activity for 30 days are retired (hidden; removed for good 30 days later together
 /// with older tombstones). `apply` false: only count the teams it would retire.
 #[tauri::command]
 pub async fn agent_board_pg_cleanup(postgres: Option<Value>, apply: Option<bool>) -> Result<Value, String> {
-    let store = PgStore::new(target_from(postgres)?);
+    let store = super::pg_store(target_from(postgres)?);
     if !apply.unwrap_or(false) {
         let n = super::pg::timed(super::pg::CALL_TIMEOUT, store.stale_count(now_ms(), STALE_AFTER_MS)).await?;
         return Ok(json!({ "wouldRetire": n, "applied": false }));

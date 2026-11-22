@@ -113,3 +113,39 @@ jobs:
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked pty_backend
       - name: Test PTY holder (in-thread holder, unix socket, SO_PEERCRED)
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked pty_holder
+
+  board-store:
+    name: Board store (SQLite and PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      # A throwaway server: every test fixture makes its own schema and removes it.
+      BBARIT_TEST_PG_URL: postgres://postgres:test@127.0.0.1:5432/postgres
+      # A missing URL fails the PostgreSQL tests here instead of skipping them.
+      BBARIT_TEST_PG_REQUIRED: '1'
+    steps:
+      - uses: actions/checkout@v5
+      # Same pin as the Rust job (see the note there).
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: board-store
+      - name: Test the board store on SQLite and PostgreSQL
+        run: cargo test -p board-store --manifest-path src-tauri/Cargo.toml --locked
+      - name: Check the board store without bundled SQLite (server build)
+        run: cargo check -p board-store --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features pg
+      - name: Check the board store without PostgreSQL (SQLite only)
+        run: cargo check -p board-store --manifest-path src-tauri/Cargo.toml --locked --no-default-features --features sqlite
