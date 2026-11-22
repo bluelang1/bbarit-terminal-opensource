@@ -19,14 +19,23 @@
 //! session never runs a statement longer than 5 s (`statement_timeout`), the pool holds at
 //! most 5 connections and gives up connecting after 5 s. Errors are scrubbed of the password
 //! and URL (`PgTarget::redact`). Deadlocks and serialization failures are retried up to 3 times.
+//!
+//! Every board operation lives on `PgOps` and runs on a connection it is given, inside the
+//! caller's transaction (typed `StoreError`s); `PgStore`'s methods wrap each one in the store's
+//! own pool and transaction (and keep the `String` errors the app shows). A server that embeds
+//! the store uses `PgOps` directly, or `PgStore::from_pool` on its own pool; `steps_in_schema`
+//! and `migrate_on` create the tables in a schema its role owns (see the crate docs).
 
 use super::common::*;
-use super::config::{quote_ident, PgTarget, CONNECT_TIMEOUT_SECS};
+use super::config::{check_schema_name, quote_ident, redact, PgTarget, CONNECT_TIMEOUT_SECS};
 use super::copy::{self, Cell, Cols, Dump, Kind};
+use super::error::StoreError;
 use super::model::*;
 use serde_json::{json, Value};
-use sqlx::postgres::{PgConnection, PgPool, PgPoolOptions, PgRow};
-use sqlx::{Connection, Row};
+use sqlx::pool::PoolConnection;
+pub use sqlx::postgres::PgConnection;
+use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::{Connection, Postgres, Row, Transaction};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -77,8 +86,11 @@ pub struct PgStore {
     target: PgTarget,
     /// `"schema".`
     prefix: String,
-    limits: Limits,
+    /// The operations, with this store's schema, limits and redaction.
+    ops: PgOps,
     pool: OnceCell<PgPool>,
+    /// false: the caller's pool (`from_pool`); `close` leaves it open.
+    owns_pool: bool,
     /// The schema version was checked (and matched) once.
     ready: AtomicBool,
     /// The version of the program using this store (`created_by_app_version`, `hosts.app_version`).
@@ -107,7 +119,7 @@ pub fn plan_versions(stored: Option<i64>, code: i64) -> Result<Vec<i64>, String>
 }
 
 /// Everything the migration creates in the schema besides `board_meta`.
-const BOARD_RELATIONS: [&str; 10] =
+pub const BOARD_RELATIONS: [&str; 10] =
     ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "hosts", "outbox", "board_server_seq", "board_arrival_seq"];
 
 pub fn foreign_message(schema: &str, found: &[String]) -> String {
@@ -137,10 +149,13 @@ const SYNCED: [&str; 5] = ["teams", "posts", "tasks", "task_deps", "task_events"
 /// Version 2: the same tables as the SQLite store (minus the local change log), plus
 /// `server_seq` on every synced table (filled by a trigger from `board_server_seq`), the
 /// `posts.arrival` sequence and the server-only `hosts` table for stage 3b.
-fn v2_sql(schema: &str) -> Vec<String> {
+fn v2_sql(schema: &str, create_schema: bool) -> Vec<String> {
     let q = quote_ident(schema);
-    let mut out = vec![
-        format!("CREATE SCHEMA IF NOT EXISTS {q}"),
+    let mut out: Vec<String> = Vec::new();
+    if create_schema {
+        out.push(format!("CREATE SCHEMA IF NOT EXISTS {q}"));
+    }
+    out.extend([
         "CREATE SEQUENCE IF NOT EXISTS @@.board_server_seq".into(),
         "CREATE SEQUENCE IF NOT EXISTS @@.board_arrival_seq".into(),
         "CREATE TABLE IF NOT EXISTS @@.board_meta (key TEXT PRIMARY KEY, value TEXT)".into(),
@@ -206,7 +221,7 @@ BEGIN
 END
 $fn$"
             .into(),
-    ];
+    ]);
     for t in SYNCED {
         out.push(format!("CREATE INDEX IF NOT EXISTS {t}_server_seq ON @@.{t} (server_seq)"));
         out.push(format!("DROP TRIGGER IF EXISTS board_server_seq ON @@.{t}"));
@@ -259,8 +274,13 @@ pub fn seq_lock_key(schema: &str) -> String {
     format!("bbarit-board-seq:{schema}")
 }
 
-/// The migration steps from `stored` to SCHEMA_VERSION, SQL as it will run.
+/// The migration steps from `stored` to SCHEMA_VERSION, SQL as it will run (`migrate`: the
+/// first step starts with `CREATE SCHEMA IF NOT EXISTS`; see `steps_in_schema` for none).
 pub fn migration_steps(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, String> {
+    steps_for(schema, stored, true)
+}
+
+fn steps_for(schema: &str, stored: Option<i64>, create_schema: bool) -> Result<Vec<Step>, String> {
     let prefix = format!("{}.", quote_ident(schema));
     plan_versions(stored, SCHEMA_VERSION)?
         .into_iter()
@@ -268,7 +288,7 @@ pub fn migration_steps(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, S
             2 => Ok(Step {
                 version: 2,
                 description: "create the board tables, indexes and sequences (teams, posts, cursors, tasks, task_deps, task_events, hosts, board_meta) and the server_seq trigger",
-                sql: v2_sql(schema).into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
+                sql: v2_sql(schema, create_schema).into_iter().map(|s| s.replace("@@.", &prefix)).collect(),
             }),
             3 => Ok(Step {
                 version: 3,
@@ -405,38 +425,158 @@ impl Lock {
     }
 }
 
+/// Run a `StoreError` transaction again on a deadlock or serialization failure (`Busy`), up to 3
+/// more times; the last error comes back as it is ("team board unavailable: …").
 macro_rules! retrying {
-    ($self:ident, $call:expr) => {{
+    ($call:expr) => {{
         let mut tries = 0u32;
         loop {
             match $call.await {
-                Err(e) if e.starts_with(RETRY) && tries < 3 => {
+                Err(e) if e.is_retryable() && tries < 3 => {
                     tries += 1;
                     tokio::time::sleep(Duration::from_millis(15 * u64::from(tries))).await;
                 }
-                Err(e) => break Err(match e.strip_prefix(RETRY) {
-                    Some(m) => unavailable(m),
-                    None => e,
-                }),
-                ok => break ok,
+                other => break other,
             }
         }
     }};
 }
 
-
 /// `claim --next --label`: the task carries one of the labels in text[] `$2` (empty = any task).
 const PG_LABEL_MATCH: &str = "(cardinality($2::text[]) = 0 OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(t.labels::jsonb) l(v) WHERE l.v = ANY($2::text[])))";
-impl PgStore {
-    /// A store on `target`; `app_version` is the version of the program using it (recorded on
-    /// the server).
-    pub fn new(target: PgTarget, app_version: &str) -> Self {
-        Self::with_limits(target, Limits::default(), app_version)
+// ── Operations on a caller's connection ──────────────────────────────────
+
+/// The board operations of the PostgreSQL engine on a connection the caller provides, for a
+/// server that embeds the store and needs several store operations, plus its own rows, in
+/// ONE transaction (see the crate docs, "Embedding the store in a server").
+///
+/// Every public method takes `&mut PgConnection` (a `Transaction` or a pooled connection
+/// derefs to one) and never begins, commits or rolls back: the caller opens the transaction,
+/// calls any number of operations, writes its own rows and commits once. They take the same
+/// inputs, return the same JSON and refuse with the same message texts as `PgStore` (whose
+/// methods are thin wrappers: a connection from the pool, begin, the operation, commit), but
+/// as a typed `StoreError`.
+///
+/// Rules for the caller:
+/// - Run them inside a transaction (`BEGIN`, or `conn.begin()`): in autocommit mode each
+///   statement commits alone and a failure leaves half of an operation behind.
+/// - On ANY `Err` from a `PgOps` method, roll back: the whole transaction, or to a SAVEPOINT
+///   taken just before the call. A refusal can come after writes (`task add` creates the team
+///   and prunes before "task limit reached"; a task write expires leases before its rule
+///   check), so committing after an error would keep half of the operation. The
+///   `board_store::atomically!` macro (or `savepoint` + `settle`) does exactly this around one
+///   call; then the caller may go on and commit its own rows.
+/// - On `StoreError::Busy` (deadlock, serialization failure) roll back and retry the WHOLE
+///   transaction; `PgStore` retries its own transaction up to 3 times. Nothing else is
+///   retried for you.
+/// - Keep transactions that write board rows short: every board write takes a shared
+///   advisory lock (the `server_seq` trigger) and holds it until commit, and a sync pull only
+///   tries the exclusive side of that lock for 3 s before it gives up for that round.
+/// - Writes lock the team row first, then the task (`FOR UPDATE`), so one operation never
+///   deadlocks against another; several writes to different teams in one transaction can, and
+///   come back as `Busy`.
+/// - Do not set the transaction READ ONLY: besides the writes, `task_list` and `task_show`
+///   expire ran-out leases (a write), as every read path of the store does. For counts and rows
+///   from one snapshot (what `PgStore` does for plain reads, lists and exports with REPEATABLE
+///   READ READ ONLY), start the transaction REPEATABLE READ.
+/// - Clock: no operation reads the database clock. The time comes from `Ctx.now` or the `now`
+///   argument (ms since the epoch). A caller that wants the database's clock reads `db_now_ms`
+///   on the same connection first and builds its `Ctx` from that value.
+/// - The schema version is not checked here (`PgStore` checks it once per store): check it
+///   with `schema_version_on` / `version_check`, or run `migrate_on`, before serving.
+/// - Every operation can run in a caller's transaction; none needs its own. Only the sync
+///   methods of `PgStore` (stage 3b/3c) stay on the store's pool.
+#[derive(Clone)]
+pub struct PgOps {
+    schema: String,
+    /// `"schema".`
+    prefix: String,
+    limits: Limits,
+    /// Scrubbed from database error text besides the shape-based redaction (password, URL).
+    secrets: Vec<String>,
+    /// `user@host:port/database`, for "cannot reach" messages.
+    label: String,
+    /// How long a connection is awaited from the pool, for the same messages.
+    acquire_secs: u64,
+}
+
+impl std::fmt::Debug for PgOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgOps").field("schema", &self.schema).field("limits", &self.limits).finish()
+    }
+}
+
+/// The kind of a database error (see `StoreError`).
+fn db_error_kind(e: &sqlx::Error) -> fn(String) -> StoreError {
+    match e {
+        sqlx::Error::Database(d) => match d.code().as_deref().unwrap_or("") {
+            // Serialization failure, deadlock: the transaction may simply be run again.
+            "40001" | "40P01" => StoreError::Busy,
+            // A duplicate key, an exclusion constraint (other integrity errors are bugs).
+            "23505" | "23P01" => StoreError::Conflict,
+            // Connection, authentication, missing database / schema / board tables / columns /
+            // functions, missing privileges, locks not available, resources, operator
+            // intervention (statement_timeout included), system errors.
+            "42501" | "42P01" | "42703" | "42883" => StoreError::Unavailable,
+            c if ["08", "28", "3D", "3F", "53", "55", "57", "58"].iter().any(|p| c.starts_with(p)) => StoreError::Unavailable,
+            _ => StoreError::Internal,
+        },
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed
+        | sqlx::Error::Configuration(_) => StoreError::Unavailable,
+        _ => StoreError::Internal,
+    }
+}
+
+impl PgOps {
+    /// Operations on the board tables in `schema` (default limits). The schema name is checked
+    /// (`config::check_schema_name`) and quoted into every statement.
+    pub fn new(schema: &str) -> Result<PgOps, StoreError> {
+        check_schema_name(schema).map_err(StoreError::Invalid)?;
+        Ok(PgOps {
+            schema: schema.to_string(),
+            prefix: format!("{}.", quote_ident(schema)),
+            limits: Limits::default(),
+            secrets: Vec::new(),
+            label: "PostgreSQL".to_string(),
+            acquire_secs: CONNECT_TIMEOUT_SECS,
+        })
     }
 
-    pub fn with_limits(target: PgTarget, limits: Limits, app_version: &str) -> Self {
-        let prefix = format!("{}.", quote_ident(&target.schema));
-        PgStore { target, prefix, limits, pool: OnceCell::new(), ready: AtomicBool::new(false), app_version: app_version.to_string() }
+    /// The same with other per-team caps (tests use small ones).
+    pub fn with_limits(mut self, limits: Limits) -> PgOps {
+        self.limits = limits;
+        self
+    }
+
+    /// Values (password, connection URL) to scrub from database error text, besides the
+    /// shape-based redaction of URL user info and `password=` pairs that always applies.
+    pub fn with_secrets(mut self, secrets: Vec<String>) -> PgOps {
+        self.secrets = secrets;
+        self
+    }
+
+    fn for_target(target: &PgTarget, limits: Limits) -> PgOps {
+        PgOps {
+            schema: target.schema.clone(),
+            prefix: format!("{}.", quote_ident(&target.schema)),
+            limits,
+            secrets: target.secrets.clone(),
+            label: target.label.clone(),
+            acquire_secs: CONNECT_TIMEOUT_SECS,
+        }
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    pub fn limits(&self) -> Limits {
+        self.limits
     }
 
     /// SQL text with every `@@.` replaced by the quoted schema.
@@ -444,47 +584,21 @@ impl PgStore {
         sql.replace("@@.", &self.prefix)
     }
 
-    fn err(&self, e: sqlx::Error) -> String {
+    /// A database error as a `StoreError`: the text people see ("team board unavailable: …",
+    /// password and URL scrubbed) with its kind.
+    fn err(&self, e: sqlx::Error) -> StoreError {
         if matches!(e, sqlx::Error::PoolTimedOut) {
-            return unavailable(format!("cannot reach the PostgreSQL server ({}) within {CONNECT_TIMEOUT_SECS} s", self.target.label));
+            return StoreError::Unavailable(unavailable(format!(
+                "cannot reach the PostgreSQL server ({}) within {} s",
+                self.label, self.acquire_secs
+            )));
         }
-        let retry = matches!(&e, sqlx::Error::Database(d) if matches!(d.code().as_deref(), Some("40P01" | "40001")));
-        let msg = self.target.redact(&e.to_string());
-        if retry {
-            format!("{RETRY}{msg}")
-        } else {
-            unavailable(msg)
-        }
-    }
-
-    async fn pool(&self) -> Result<&PgPool, String> {
-        self.pool
-            .get_or_try_init(|| async {
-                Ok::<_, String>(
-                    PgPoolOptions::new()
-                        .max_connections(5)
-                        .acquire_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
-                        .idle_timeout(Duration::from_secs(300))
-                        .connect_lazy_with(self.target.opts.clone()),
-                )
-            })
-            .await
-    }
-
-    /// The pool, after the schema version was checked once (never creates anything).
-    async fn ready(&self) -> Result<&PgPool, String> {
-        let pool = self.pool().await?;
-        if !self.ready.load(Ordering::SeqCst) {
-            let mut c = pool.acquire().await.map_err(|e| self.err(e))?;
-            let stored = self.stored_version(&mut c).await?;
-            version_check(stored, &self.target.schema, SCHEMA_VERSION).map_err(unavailable)?;
-            self.ready.store(true, Ordering::SeqCst);
-        }
-        Ok(pool)
+        let secrets: Vec<&str> = self.secrets.iter().map(String::as_str).collect();
+        db_error_kind(&e)(unavailable(redact(&e.to_string(), &secrets)))
     }
 
     /// `board_meta.schema_version`, or None when the schema has no board tables.
-    async fn stored_version(&self, c: &mut PgConnection) -> Result<Option<i64>, String> {
+    pub async fn schema_version(&self, c: &mut PgConnection) -> Result<Option<i64>, StoreError> {
         let reg: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
             .bind(format!("{}board_meta", self.prefix))
             .fetch_one(&mut *c)
@@ -503,19 +617,20 @@ impl PgStore {
 
     /// Board table names that already exist in a schema without `board_meta` (someone else's
     /// tables): the migration must not attach indexes and triggers to them.
-    async fn foreign_tables(&self, c: &mut PgConnection) -> Result<Vec<String>, String> {
+    pub async fn foreign_tables(&self, c: &mut PgConnection) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar(
             "SELECT c.relname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
              WHERE n.nspname = $1 AND c.relname = ANY($2) ORDER BY 1",
         )
-        .bind(&self.target.schema)
+        .bind(&self.schema)
         .bind(BOARD_RELATIONS.iter().map(|s| s.to_string()).collect::<Vec<_>>())
         .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))
     }
 
-    async fn refuse_foreign(&self, c: &mut PgConnection, stored: Option<i64>) -> Result<(), String> {
+    /// Refuse a schema without board tables that holds tables with the board's names.
+    async fn refuse_foreign(&self, c: &mut PgConnection, stored: Option<i64>) -> Result<(), StoreError> {
         if stored.is_some() {
             return Ok(());
         }
@@ -523,58 +638,26 @@ impl PgStore {
         if found.is_empty() {
             Ok(())
         } else {
-            Err(foreign_message(&self.target.schema, &found))
+            Err(StoreError::Conflict(foreign_message(&self.schema, &found)))
         }
     }
 
-    /// Schema version stored in the database (None: no tables), for Settings.
-    pub async fn stored_schema_version(&self) -> Result<Option<i64>, String> {
-        let mut c = self.pool().await?.acquire().await.map_err(|e| self.err(e))?;
-        self.stored_version(&mut c).await
-    }
-
-    /// Create / upgrade the tables (Settings button only). `apply` false: only report what
-    /// would run. Refused when the database is newer than this app.
-    pub async fn migrate(&self, apply: bool) -> Result<Value, String> {
-        let pool = self.pool().await?;
-        let mut c = pool.acquire().await.map_err(|e| self.err(e))?;
-        let stored = self.stored_version(&mut c).await?;
-        self.refuse_foreign(&mut c, stored).await?;
-        let steps = migration_steps(&self.target.schema, stored)?;
-        let describe = |steps: &[Step]| -> Vec<Value> {
-            steps.iter().map(|s| json!({ "version": s.version, "description": s.description, "sql": s.sql })).collect()
-        };
-        let mut out = json!({
-            "schema": self.target.schema,
-            "from": stored,
-            "to": SCHEMA_VERSION,
-            "steps": describe(&steps),
-            "upToDate": steps.is_empty(),
-            "applied": false,
-        });
-        if apply && steps.is_empty() {
-            sqlx::query(&self.s("INSERT INTO @@.board_meta (key, value) VALUES ('server_uid', $1) ON CONFLICT (key) DO NOTHING"))
-                .bind(uuid::Uuid::new_v4().to_string())
-                .execute(&mut *c)
-                .await
-                .map_err(|e| self.err(e))?;
-        }
-        if !apply || steps.is_empty() {
-            return Ok(out);
-        }
-        let mut tx = c.begin().await.map_err(|e| self.err(e))?;
+    /// The migration under the per-schema advisory lock, in the caller's transaction: re-read
+    /// the version, refuse foreign tables, run the steps from it (with `CREATE SCHEMA IF NOT
+    /// EXISTS` only when `create_schema`) and record the version. Returns (from, steps run).
+    async fn migrate_locked(&self, c: &mut PgConnection, app_version: &str, create_schema: bool) -> Result<(Option<i64>, Vec<Step>), StoreError> {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("bbarit-board:{}", self.target.schema))
-            .execute(&mut *tx)
+            .bind(format!("bbarit-board:{}", self.schema))
+            .execute(&mut *c)
             .await
             .map_err(|e| self.err(e))?;
         // Re-read under the lock: another app may have migrated meanwhile.
-        let stored = self.stored_version(&mut tx).await?;
-        self.refuse_foreign(&mut tx, stored).await?;
-        let steps = migration_steps(&self.target.schema, stored)?;
+        let stored = self.schema_version(c).await?;
+        self.refuse_foreign(c, stored).await?;
+        let steps = steps_for(&self.schema, stored, create_schema).map_err(StoreError::Unavailable)?;
         for step in &steps {
             for sql in &step.sql {
-                sqlx::query(sql).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                sqlx::query(sql).execute(&mut *c).await.map_err(|e| self.err(e))?;
             }
         }
         if !steps.is_empty() {
@@ -584,130 +667,152 @@ impl PgStore {
                 // This server's identity: a rebuilt server at the same address gets a new one.
                 ("server_uid", uuid::Uuid::new_v4().to_string(), false),
                 ("created_at", now.to_string(), false),
-                ("created_by_app_version", self.app_version.clone(), false),
+                ("created_by_app_version", app_version.to_string(), false),
             ] {
                 let sql = if overwrite {
                     "INSERT INTO @@.board_meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = excluded.value"
                 } else {
                     "INSERT INTO @@.board_meta (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING"
                 };
-                sqlx::query(&self.s(sql)).bind(key).bind(value).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                sqlx::query(&self.s(sql)).bind(key).bind(value).execute(&mut *c).await.map_err(|e| self.err(e))?;
             }
         }
-        tx.commit().await.map_err(|e| self.err(e))?;
-        self.ready.store(false, Ordering::SeqCst);
-        out["applied"] = json!(true);
-        out["steps"] = Value::Array(describe(&steps));
-        Ok(out)
+        Ok((stored, steps))
     }
+}
 
-    /// Test connection for Settings: reachable, server version, TLS, schema and its version,
-    /// privileges and what to do next. Never fails; problems are in `error` / `next`.
-    pub async fn diagnose(target: &PgTarget, app_version: &str) -> Value {
-        let schema = target.schema.clone();
-        let mut out = json!({ "reachable": false, "target": target.label, "schema": schema, "codeVersion": SCHEMA_VERSION });
-        let conn = tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), PgConnection::connect_with(&target.opts)).await;
-        let mut c = match conn {
-            Err(_) => {
-                out["error"] = json!(format!("no answer from the server within {CONNECT_TIMEOUT_SECS} s"));
-                out["next"] = json!("check host, port and that the server accepts connections from this machine");
-                return out;
-            }
-            Ok(Err(e)) => {
-                out["error"] = json!(target.redact(&e.to_string()));
-                out["next"] = json!("check the connection fields, the password and the SSL mode");
-                return out;
-            }
-            Ok(Ok(c)) => c,
-        };
-        out["reachable"] = json!(true);
-        let store = PgStore::new(target.clone(), app_version);
-        let res: Result<(), String> = async {
-            let e = |e: sqlx::Error| target.redact(&e.to_string());
-            let version: String = sqlx::query_scalar("SHOW server_version").fetch_one(&mut c).await.map_err(e)?;
-            out["serverVersion"] = json!(version);
-            let tls: Option<bool> = sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
-                .fetch_optional(&mut c)
-                .await
-                .map_err(e)?;
-            out["tls"] = json!(tls.unwrap_or(false));
-            let (user, db): (String, String) =
-                sqlx::query_as("SELECT current_user::text, current_database()::text").fetch_one(&mut c).await.map_err(e)?;
-            out["user"] = json!(user);
-            out["database"] = json!(db);
-            let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)")
-                .bind(&schema)
-                .fetch_one(&mut c)
-                .await
-                .map_err(e)?;
-            out["schemaExists"] = json!(exists);
-            let can_create: bool = if exists {
-                sqlx::query_scalar("SELECT has_schema_privilege($1, 'CREATE')").bind(&schema).fetch_one(&mut c).await.map_err(e)?
-            } else {
-                sqlx::query_scalar("SELECT has_database_privilege(current_database(), 'CREATE')").fetch_one(&mut c).await.map_err(e)?
-            };
-            out["canCreate"] = json!(can_create);
-            let stored = store.stored_version(&mut c).await.map_err(clean_err)?;
-            out["schemaVersion"] = json!(stored);
-            let can_rw: Option<bool> = if stored.is_some() {
-                let mut all = true;
-                let outbox: &[&str] = if stored.is_some_and(|v| v >= 4) { &["outbox"] } else { &[] };
-                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta", "hosts"].iter().chain(outbox) {
-                    let ok: bool = sqlx::query_scalar("SELECT has_table_privilege($1, 'SELECT, INSERT, UPDATE, DELETE')")
-                        .bind(format!("{}{t}", store.prefix))
-                        .fetch_one(&mut c)
-                        .await
-                        .map_err(e)?;
-                    all &= ok;
-                }
-                // Writes also draw from the two sequences and fire the server_seq trigger.
-                for seq in ["board_server_seq", "board_arrival_seq"] {
-                    let ok: bool = sqlx::query_scalar("SELECT has_sequence_privilege($1, 'USAGE')")
-                        .bind(format!("{}{seq}", store.prefix))
-                        .fetch_one(&mut c)
-                        .await
-                        .map_err(e)?;
-                    all &= ok;
-                }
-                let ok: bool = sqlx::query_scalar("SELECT has_function_privilege($1, 'EXECUTE')")
-                    .bind(format!("{}board_set_server_seq()", store.prefix))
-                    .fetch_one(&mut c)
-                    .await
-                    .map_err(e)?;
-                all &= ok;
-                Some(all)
-            } else {
-                None
-            };
-            out["canReadWrite"] = json!(can_rw);
-            let foreign = if stored.is_none() { store.foreign_tables(&mut c).await.map_err(clean_err)? } else { Vec::new() };
-            out["foreignTables"] = json!(foreign);
-            let next = match stored {
-                Some(v) if v > SCHEMA_VERSION => "this database was set up by a newer app version: update the app".to_string(),
-                None if !foreign.is_empty() => foreign_message(&schema, &foreign),
-                None if can_create => "press Create / upgrade tables".to_string(),
-                None => format!("this user cannot create tables here: ask the database owner to create schema {schema} or grant CREATE"),
-                Some(v) if v < SCHEMA_VERSION => format!("press Create / upgrade tables (version {v} → {SCHEMA_VERSION})"),
-                Some(_) if can_rw == Some(false) => {
-                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them (hosts and outbox included), USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
-                }
-                Some(_) => "ready: choose \"PostgreSQL only\" as the usage type; to bring the boards of this computer, use Copy data from this computer (SQLite) to PostgreSQL first".to_string(),
-            };
-            out["next"] = json!(next);
-            Ok(())
-        }
-        .await;
-        if let Err(e) = res {
-            out["error"] = json!(e);
-        }
-        let _ = c.close().await;
-        out
+/// What `migrate_on` did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Migrated {
+    /// The version before (None: no board tables).
+    pub from: Option<i64>,
+    /// SCHEMA_VERSION.
+    pub to: i64,
+    /// The versions whose steps ran, oldest first (empty: already up to date).
+    pub applied: Vec<i64>,
+}
+
+/// Every table the board creates in its schema; a caller checking a schema for foreign tables
+/// compares against these (plus `OWNED_SEQUENCES` and `OWNED_FUNCTIONS`).
+pub const OWNED_TABLES: [&str; 9] = ["board_meta", "teams", "posts", "cursors", "tasks", "task_deps", "task_events", "hosts", "outbox"];
+/// The sequences the board creates in its schema.
+pub const OWNED_SEQUENCES: [&str; 2] = ["board_server_seq", "board_arrival_seq"];
+/// The functions the board creates in its schema (the `server_seq` trigger function).
+pub const OWNED_FUNCTIONS: [&str; 1] = ["board_set_server_seq"];
+
+/// The store's migration for `schema` as ordered steps from `stored` (None: no board tables;
+/// all steps) to SCHEMA_VERSION, WITHOUT `CREATE SCHEMA`: the schema must exist, so a role
+/// that owns only that schema (no CREATE on the database) can run them. Refused when the
+/// database is newer than this code. The SQL is exactly what `migrate_on` runs.
+pub fn steps_in_schema(schema: &str, stored: Option<i64>) -> Result<Vec<Step>, StoreError> {
+    check_schema_name(schema).map_err(StoreError::Invalid)?;
+    steps_for(schema, stored, false).map_err(StoreError::Unavailable)
+}
+
+/// The board's schema version on the caller's connection (None: no board tables in `schema`).
+pub async fn schema_version_on(c: &mut PgConnection, schema: &str) -> Result<Option<i64>, StoreError> {
+    PgOps::new(schema)?.schema_version(c).await
+}
+
+/// Create or upgrade the board tables in an existing `schema` on the caller's connection, in
+/// the caller's transaction (run it inside one: the steps and the version record must commit
+/// together; the per-schema advisory lock is held until that transaction ends). Never runs
+/// `CREATE SCHEMA`. Refuses a schema that holds foreign tables with the board's names
+/// (`Conflict`) and a database newer than this code (`Unavailable`). Running it again is a
+/// no-op (`applied` empty). `app_version` is recorded as `created_by_app_version`.
+pub async fn migrate_on(c: &mut PgConnection, schema: &str, app_version: &str) -> Result<Migrated, StoreError> {
+    let ops = PgOps::new(schema)?;
+    let (from, steps) = ops.migrate_locked(c, app_version, false).await?;
+    if steps.is_empty() {
+        sqlx::query(&ops.s("INSERT INTO @@.board_meta (key, value) VALUES ('server_uid', $1) ON CONFLICT (key) DO NOTHING"))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .execute(&mut *c)
+            .await
+            .map_err(|e| ops.err(e))?;
     }
+    Ok(Migrated { from, to: SCHEMA_VERSION, applied: steps.iter().map(|s| s.version).collect() })
+}
 
+/// The savepoint `savepoint` / `settle` / `atomically!` use.
+const OP_SAVEPOINT: &str = "bbarit_board_op";
+
+/// Take a savepoint before one `PgOps` call (pair it with `settle`; `atomically!` does both).
+/// Needs an open transaction on `c`.
+pub async fn savepoint(c: &mut PgConnection) -> Result<(), StoreError> {
+    sqlx::query(&format!("SAVEPOINT {OP_SAVEPOINT}"))
+        .execute(&mut *c)
+        .await
+        .map(|_| ())
+        .map_err(|e| db_error_kind(&e)(unavailable(redact(&e.to_string(), &[]))))
+}
+
+/// End the savepoint `savepoint` took, by the call's result: Ok releases it (the writes stay
+/// in the transaction), Err rolls back to it (nothing of the call remains; the transaction is
+/// usable again) and releases it. Returns the result unchanged. Should the rollback itself
+/// fail, the transaction is aborted or the connection gone, so a later COMMIT cannot keep the
+/// partial writes either.
+pub async fn settle<T>(c: &mut PgConnection, result: Result<T, StoreError>) -> Result<T, StoreError> {
+    match result {
+        Ok(v) => {
+            sqlx::query(&format!("RELEASE SAVEPOINT {OP_SAVEPOINT}"))
+                .execute(&mut *c)
+                .await
+                .map_err(|e| db_error_kind(&e)(unavailable(redact(&e.to_string(), &[]))))?;
+            Ok(v)
+        }
+        Err(e) => {
+            if sqlx::query(&format!("ROLLBACK TO SAVEPOINT {OP_SAVEPOINT}")).execute(&mut *c).await.is_ok() {
+                let _ = sqlx::query(&format!("RELEASE SAVEPOINT {OP_SAVEPOINT}")).execute(&mut *c).await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Run one `PgOps` call all-or-nothing inside the caller's transaction: a savepoint before
+/// it, released on `Ok`, rolled back to on `Err` (see `pg::settle`). Evaluates to a future of
+/// the call's result.
+///
+/// ```ignore
+/// let mut tx = conn.begin().await?;
+/// let ops = board_store::pg::PgOps::new("bbarit_board")?;
+/// match board_store::atomically!(&mut *tx, |c| ops.task_write(c, "lead", &op, &actor, &ctx)).await {
+///     Ok(v) => { /* the task changed */ }
+///     Err(e) => { /* nothing of it remains; record the refusal */ }
+/// }
+/// sqlx::query("INSERT INTO audit ...").execute(&mut *tx).await?;
+/// tx.commit().await?;
+/// ```
+#[macro_export]
+macro_rules! atomically {
+    ($conn:expr, |$c:ident| $call:expr) => {
+        async {
+            let $c: &mut $crate::pg::PgConnection = $conn;
+            match $crate::pg::savepoint(&mut *$c).await {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    let result = $call.await;
+                    $crate::pg::settle(&mut *$c, result).await
+                }
+            }
+        }
+    };
+}
+
+/// The database server's clock in ms since the epoch (`clock_timestamp()`), for a caller that
+/// builds `Ctx.now` from the database rather than from its own clock.
+pub async fn db_now_ms(c: &mut PgConnection) -> Result<i64, StoreError> {
+    sqlx::query_scalar(&format!("SELECT {SERVER_NOW_MS}"))
+        .fetch_one(&mut *c)
+        .await
+        .map_err(|e| db_error_kind(&e)(unavailable(redact(&e.to_string(), &[]))))
+}
+
+impl PgOps {
     // ── Teams ────────────────────────────────────────────────────────────
 
     /// The live team row this machine uses for root tab `team` (see sqlite::find_team).
-    async fn find_team(&self, c: &mut PgConnection, team: &str, host: Option<&str>, lock: Lock) -> Result<Option<TeamRef>, String> {
+    async fn find_team(&self, c: &mut PgConnection, team: &str, host: Option<&str>, lock: Lock) -> Result<Option<TeamRef>, StoreError> {
         let sql = self.s(&format!(
             "SELECT uid, name, last_post_seq, home_host, EXISTS (SELECT 1 FROM @@.hosts h WHERE h.host = teams.home_host)
              FROM @@.teams WHERE team = $1 AND deleted_at IS NULL
@@ -729,7 +834,7 @@ impl PgStore {
 
     /// The team homed on this machine for root tab `team`, created (or revived) when missing;
     /// its row stays locked until the transaction ends.
-    async fn ensure_team(&self, c: &mut PgConnection, team: &str, name: Option<&str>, ctx: &Ctx) -> Result<String, String> {
+    async fn ensure_team(&self, c: &mut PgConnection, team: &str, name: Option<&str>, ctx: &Ctx) -> Result<String, StoreError> {
         let now = ctx.now;
         for _ in 0..2 {
             let found = sqlx::query(&self.s(
@@ -778,11 +883,11 @@ impl PgStore {
             }
             // Another writer created it first: lock theirs.
         }
-        Err(unavailable("could not create the team row"))
+        Err(StoreError::Unavailable(unavailable("could not create the team row")))
     }
 
     /// Next post / task number of a team (never repeats, never goes back); also marks activity.
-    async fn next_seq(&self, c: &mut PgConnection, uid: &str, task: bool, now: i64) -> Result<i64, String> {
+    async fn next_seq(&self, c: &mut PgConnection, uid: &str, task: bool, now: i64) -> Result<i64, StoreError> {
         let sql = if task {
             "UPDATE @@.teams SET last_task_seq = last_task_seq + 1, last_activity_at = $2, updated_at = $2, row_version = row_version + 1
              WHERE uid = $1 RETURNING last_task_seq"
@@ -793,7 +898,7 @@ impl PgStore {
         sqlx::query_scalar(&self.s(sql)).bind(uid).bind(now).fetch_one(&mut *c).await.map_err(|e| self.err(e))
     }
 
-    async fn touch_team(&self, c: &mut PgConnection, uid: &str, now: i64) -> Result<(), String> {
+    async fn touch_team(&self, c: &mut PgConnection, uid: &str, now: i64) -> Result<(), StoreError> {
         sqlx::query(&self.s("UPDATE @@.teams SET last_activity_at = $2, updated_at = $2, row_version = row_version + 1 WHERE uid = $1"))
             .bind(uid)
             .bind(now)
@@ -803,7 +908,7 @@ impl PgStore {
         Ok(())
     }
 
-    async fn lock_team(&self, c: &mut PgConnection, uid: &str) -> Result<bool, String> {
+    async fn lock_team(&self, c: &mut PgConnection, uid: &str) -> Result<bool, StoreError> {
         let row = sqlx::query(&self.s("SELECT uid FROM @@.teams WHERE uid = $1 FOR UPDATE"))
             .bind(uid)
             .fetch_optional(&mut *c)
@@ -812,17 +917,17 @@ impl PgStore {
         Ok(row.is_some())
     }
 
-    async fn ids(&self, c: &mut PgConnection, sql: &str, arg: &str) -> Result<Vec<String>, String> {
+    async fn ids(&self, c: &mut PgConnection, sql: &str, arg: &str) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar(&self.s(sql)).bind(arg).fetch_all(&mut *c).await.map_err(|e| self.err(e))
     }
 
-    async fn count(&self, c: &mut PgConnection, sql: &str, arg: &str) -> Result<i64, String> {
+    async fn count(&self, c: &mut PgConnection, sql: &str, arg: &str) -> Result<i64, StoreError> {
         sqlx::query_scalar(&self.s(sql)).bind(arg).fetch_one(&mut *c).await.map_err(|e| self.err(e))
     }
 
     // ── Posts ────────────────────────────────────────────────────────────
 
-    async fn tombstone_posts(&self, c: &mut PgConnection, ids: &[String], now: i64) -> Result<(), String> {
+    async fn tombstone_posts(&self, c: &mut PgConnection, ids: &[String], now: i64) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -851,7 +956,7 @@ impl PgStore {
         text: &str,
         task_id: Option<&str>,
         ctx: &Ctx,
-    ) -> Result<(String, i64), String> {
+    ) -> Result<(String, i64), StoreError> {
         let now = ctx.now;
         let seq = self.next_seq(c, team_uid, false, now).await?;
         let id = new_id();
@@ -885,335 +990,19 @@ impl PgStore {
         Ok((id, seq))
     }
 
-    async fn task_id_of(&self, c: &mut PgConnection, team_uid: &str, team: &str, seq: i64) -> Result<String, String> {
+    async fn task_id_of(&self, c: &mut PgConnection, team_uid: &str, team: &str, seq: i64) -> Result<String, StoreError> {
         sqlx::query_scalar(&self.s("SELECT id FROM @@.tasks WHERE team_uid = $1 AND seq = $2 AND deleted_at IS NULL"))
             .bind(team_uid)
             .bind(seq)
             .fetch_optional(&mut *c)
             .await
             .map_err(|e| self.err(e))?
-            .ok_or_else(|| format!("no task #{seq} in team {team}"))
-    }
-
-    pub async fn post(&self, team: String, input: PostInput, ctx: Ctx) -> Result<Value, String> {
-        retrying!(self, self.post_once(&team, &input, &ctx))
-    }
-
-    async fn post_once(&self, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, String> {
-        let spec = PostSpec::check(team, input)?;
-        let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
-        let uid = self.ensure_team(&mut tx, team, spec.team_name.as_deref(), ctx).await?;
-        let task_id = match input.task {
-            Some(seq) => Some(self.task_id_of(&mut tx, &uid, team, seq).await?),
-            None => None,
-        };
-        let (id, _) = self
-            .insert_post(
-                &mut tx,
-                &uid,
-                &spec.author_id,
-                spec.author_name.as_deref(),
-                spec.author_cli.as_deref(),
-                &spec.kind,
-                &spec.text,
-                task_id.as_deref(),
-                ctx,
-            )
-            .await?;
-        let row = sqlx::query(&self.s(&format!("SELECT {POST_COLS} FROM @@.posts p WHERE p.id = $1")))
-            .bind(&id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-        let out = post_json(team, &row).map_err(|e| self.err(e))?;
-        tx.commit().await.map_err(|e| self.err(e))?;
-        Ok(out)
-    }
-
-    /// See sqlite::read. A `--new` read holds the team row FOR SHARE, so no post lands between
-    /// the rows it returns and the cursor it stores.
-    pub async fn read(&self, team: String, q: ReadQuery, host: Option<String>) -> Result<Value, String> {
-        retrying!(self, self.read_once(&team, &q, host.as_deref()))
-    }
-
-    async fn read_once(&self, team: &str, q: &ReadQuery, host: Option<&str>) -> Result<Value, String> {
-        let spec = ReadSpec::check(team, q)?;
-        let exclude_kind: Option<&str> = if spec.pinned { Some("announce") } else { None };
-        let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
-        let cursor_read = spec.cursor_tab.is_some();
-        if !cursor_read {
-            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
-        }
-        let Some(t) = self.find_team(&mut tx, team, host, if cursor_read { Lock::Share } else { Lock::None }).await? else {
-            return Ok(spec.empty(team));
-        };
-        let uid = t.uid.as_str();
-        let cursor: i64 = match &spec.cursor_tab {
-            Some(tab) => sqlx::query_scalar(&self.s("SELECT arrival FROM @@.cursors WHERE team_uid = $1 AND tab_id = $2"))
-                .bind(uid)
-                .bind(tab)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| self.err(e))?
-                .unwrap_or(0),
-            None => 0,
-        };
-        let total = self.count(&mut tx, "SELECT count(*) FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
-        const FILTER: &str = "p.team_uid = $1 AND p.deleted_at IS NULL AND p.seq > $2 AND p.arrival > $3
-            AND ($4::text IS NULL OR p.kind = $4)
-            AND ($5::text IS NULL OR p.author_id = $5 OR lower(p.author_name) = lower($5))
-            AND ($6::text IS NULL OR p.text ILIKE $6 ESCAPE E'\\\\')
-            AND ($7::text IS NULL OR p.author_id IS DISTINCT FROM $7)
-            AND ($8::text IS NULL OR p.kind <> $8)";
-        let matched: i64 = sqlx::query_scalar(&self.s(&format!("SELECT count(*) FROM @@.posts p WHERE {FILTER}")))
-            .bind(uid)
-            .bind(spec.seq_after)
-            .bind(cursor)
-            .bind(&spec.kind)
-            .bind(&spec.author)
-            .bind(&spec.pattern)
-            .bind(&spec.exclude)
-            .bind(exclude_kind)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-        let rows = sqlx::query(&self.s(&format!(
-            "SELECT {POST_COLS}, p.arrival FROM @@.posts p WHERE {FILTER} ORDER BY {} LIMIT $9",
-            if cursor_read { "p.arrival ASC" } else { "p.seq DESC" }
-        )))
-        .bind(uid)
-        .bind(spec.seq_after)
-        .bind(cursor)
-        .bind(&spec.kind)
-        .bind(&spec.author)
-        .bind(&spec.pattern)
-        .bind(&spec.exclude)
-        .bind(exclude_kind)
-        .bind(spec.limit)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| self.err(e))?;
-        let mut pairs = Vec::with_capacity(rows.len());
-        for r in &rows {
-            pairs.push((post_json(team, r).map_err(|e| self.err(e))?, r.try_get::<i64, _>(10).map_err(|e| self.err(e))?));
-        }
-        if !cursor_read {
-            pairs.reverse();
-        }
-        let last_arrival = pairs.last().map(|(_, a)| *a);
-        let posts: Vec<Value> = pairs.into_iter().map(|(p, _)| p).collect();
-        let announcements: Vec<Value> = if spec.pinned {
-            let rows = sqlx::query(&self.s(&format!(
-                "SELECT {POST_COLS} FROM @@.posts p WHERE p.team_uid = $1 AND p.deleted_at IS NULL AND p.kind = 'announce'
-                 ORDER BY p.seq DESC LIMIT $2"
-            )))
-            .bind(uid)
-            .bind(PINNED_ANNOUNCEMENTS)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-            let mut v = rows.iter().map(|r| post_json(team, r)).collect::<Result<Vec<_>, _>>().map_err(|e| self.err(e))?;
-            v.reverse();
-            v
-        } else {
-            Vec::new()
-        };
-        let more = (matched - posts.len() as i64).max(0);
-        let mut new_cursor = None;
-        if let Some(tab) = &spec.cursor_tab {
-            let newest = self.count(&mut tx, "SELECT coalesce(max(arrival), 0) FROM @@.posts WHERE team_uid = $1", uid).await?;
-            let target = if more > 0 { last_arrival.unwrap_or(cursor) } else { newest.max(cursor) };
-            sqlx::query(&self.s(
-                "INSERT INTO @@.cursors AS c (team_uid, tab_id, arrival) VALUES ($1, $2, $3)
-                 ON CONFLICT (team_uid, tab_id) DO UPDATE SET arrival = GREATEST(c.arrival, excluded.arrival)",
-            ))
-            .bind(uid)
-            .bind(tab)
-            .bind(target)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-            new_cursor = Some(target);
-        }
-        tx.commit().await.map_err(|e| self.err(e))?;
-        let mut out = json!({
-            "team": team,
-            "posts": posts,
-            "lastSeq": t.last_post_seq,
-            "total": total,
-            "matched": matched,
-            "more": more,
-            "since": spec.since,
-        });
-        if spec.pinned {
-            out["announcements"] = Value::Array(announcements);
-        }
-        if let Some(name) = t.name {
-            out["teamName"] = Value::String(name);
-        }
-        if let Some(next) = new_cursor {
-            out["cursor"] = json!(cursor);
-            out["nextCursor"] = json!(next);
-        }
-        Ok(out)
-    }
-
-    pub async fn teams(&self) -> Result<Vec<Value>, String> {
-        let pool = self.ready().await?;
-        let rows = sqlx::query(&self.s(
-            "SELECT t.team, t.name, t.last_post_seq, t.last_activity_at,
-                    count(p.id), count(DISTINCT p.author_id), min(p.ts), max(p.ts),
-                    (SELECT count(*) FROM @@.tasks k WHERE k.team_uid = t.uid AND k.deleted_at IS NULL
-                       AND k.state IN ('open','claimed','blocked','review')),
-                    t.last_task_seq, t.home_host, t.uid
-             FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
-             WHERE t.deleted_at IS NULL
-             GROUP BY t.uid
-             ORDER BY t.last_activity_at DESC, coalesce(max(p.ts), 0) DESC
-             LIMIT $1",
-        ))
-        .bind(MAX_TEAMS_LISTED)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| self.err(e))?;
-        rows.iter()
-            .map(|r| -> Result<Value, sqlx::Error> {
-                let mut v = json!({
-                    "team": r.try_get::<String, _>(0)?,
-                    "lastSeq": r.try_get::<i64, _>(2)?,
-                    "updatedTs": r.try_get::<i64, _>(3)?,
-                    "posts": r.try_get::<i64, _>(4)?,
-                    "members": r.try_get::<i64, _>(5)?,
-                    "firstTs": r.try_get::<Option<i64>, _>(6)?,
-                    "lastTs": r.try_get::<Option<i64>, _>(7)?,
-                    "liveTasks": r.try_get::<i64, _>(8)?,
-                    "lastTaskSeq": r.try_get::<i64, _>(9)?,
-                    "uid": r.try_get::<String, _>(11)?,
-                });
-                if let Some(name) = r.try_get::<Option<String>, _>(1)? {
-                    v["teamName"] = Value::String(name);
-                }
-                if let Some(host) = r.try_get::<Option<String>, _>(10)? {
-                    v["homeHost"] = Value::String(host);
-                }
-                Ok(v)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| self.err(e))
-    }
-
-    pub async fn clear(&self, team: String, ctx: Ctx) -> Result<Value, String> {
-        retrying!(self, self.clear_once(&team, &ctx))
-    }
-
-    async fn clear_once(&self, team: &str, ctx: &Ctx) -> Result<Value, String> {
-        check_team(team)?;
-        let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
-        let Some(t) = self.find_team(&mut tx, team, ctx.host.as_deref(), Lock::Update).await? else {
-            return Ok(json!({ "team": team, "removed": 0, "lastSeq": 0 }));
-        };
-        if let Some(home) = &t.sync_home {
-            return Err(read_only_message(home));
-        }
-        let ids = self.ids(&mut tx, "SELECT id FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", &t.uid).await?;
-        self.tombstone_posts(&mut tx, &ids, ctx.now).await?;
-        self.touch_team(&mut tx, &t.uid, ctx.now).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
-        Ok(json!({ "team": team, "removed": ids.len(), "lastSeq": t.last_post_seq }))
-    }
-
-    /// "Clean up old teams" (Settings; never automatic on a shared server): tombstone every
-    /// team idle for `max_age_ms` with its posts, tasks, dependencies and events (cursors go),
-    /// then remove tombstones older than TOMBSTONE_RETENTION_MS. One transaction per team.
-    /// How many teams "Clean up old teams" would retire now (nothing is changed).
-    pub async fn stale_count(&self, now: i64, max_age_ms: i64) -> Result<i64, String> {
-        sqlx::query_scalar(&self.s(
-            "SELECT count(*) FROM (SELECT t.uid FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
-             WHERE t.deleted_at IS NULL
-             GROUP BY t.uid HAVING greatest(t.last_activity_at, coalesce(max(p.ts), 0)) < $1) x",
-        ))
-        .bind(now - max_age_ms)
-        .fetch_one(self.ready().await?)
-        .await
-        .map_err(|e| self.err(e))
-    }
-
-    pub async fn prune_stale(&self, now: i64, max_age_ms: i64) -> Result<usize, String> {
-        let cutoff = now - max_age_ms;
-        let pool = self.ready().await?;
-        let candidates: Vec<String> = sqlx::query_scalar(&self.s(
-            "SELECT t.uid FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
-             WHERE t.deleted_at IS NULL
-             GROUP BY t.uid HAVING greatest(t.last_activity_at, coalesce(max(p.ts), 0)) < $1",
-        ))
-        .bind(cutoff)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| self.err(e))?;
-        let mut retired = 0usize;
-        for uid in &candidates {
-            let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-            // Re-check under the team lock: it may have become active meanwhile.
-            let last: Option<i64> = sqlx::query_scalar(&self.s(
-                "SELECT greatest(t.last_activity_at,
-                        coalesce((SELECT max(p.ts) FROM @@.posts p WHERE p.team_uid = t.uid AND p.deleted_at IS NULL), 0))
-                 FROM @@.teams t WHERE t.uid = $1 AND t.deleted_at IS NULL FOR UPDATE",
-            ))
-            .bind(uid)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?
-            .flatten();
-            if !last.is_some_and(|l| l < cutoff) {
-                continue;
-            }
-            let posts = self.ids(&mut tx, "SELECT id FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
-            self.tombstone_posts(&mut tx, &posts, now).await?;
-            let tasks = self.ids(&mut tx, "SELECT id FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
-            self.tombstone_tasks(&mut tx, &tasks, now).await?;
-            sqlx::query(&self.s("DELETE FROM @@.cursors WHERE team_uid = $1")).bind(uid).execute(&mut *tx).await.map_err(|e| self.err(e))?;
-            sqlx::query(&self.s("UPDATE @@.teams SET deleted_at = $2, updated_at = $2, row_version = row_version + 1 WHERE uid = $1"))
-                .bind(uid)
-                .bind(now)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| self.err(e))?;
-            tx.commit().await.map_err(|e| self.err(e))?;
-            retired += 1;
-        }
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        let purge_before = now - TOMBSTONE_RETENTION_MS;
-        for table in ["posts", "task_events", "task_deps", "tasks", "teams"] {
-            sqlx::query(&self.s(&format!("DELETE FROM @@.{table} WHERE deleted_at IS NOT NULL AND deleted_at < $1")))
-                .bind(purge_before)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| self.err(e))?;
-        }
-        // Finished remote notes (stage 3c) after OUTBOX_RETENTION_MS; only where the table exists.
-        let has_outbox: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-            .bind(format!("{}outbox", self.prefix))
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-        if has_outbox {
-            sqlx::query(&self.s("DELETE FROM @@.outbox WHERE state <> 'pending' AND coalesce(handled_at, created_at) < $1"))
-                .bind(now - OUTBOX_RETENTION_MS)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| self.err(e))?;
-        }
-        sqlx::query(&self.s("DELETE FROM @@.cursors WHERE team_uid NOT IN (SELECT uid FROM @@.teams)"))
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| self.err(e))?;
-        tx.commit().await.map_err(|e| self.err(e))?;
-        Ok(retired)
+            .ok_or_else(|| StoreError::NotFound(format!("no task #{seq} in team {team}")))
     }
 
     // ── Tasks ────────────────────────────────────────────────────────────
 
-    async fn load_task(&self, c: &mut PgConnection, team_uid: &str, team: &str, seq: i64, lock: bool) -> Result<TaskRow, String> {
+    async fn load_task(&self, c: &mut PgConnection, team_uid: &str, team: &str, seq: i64, lock: bool) -> Result<TaskRow, StoreError> {
         let sql = self.s(&format!(
             "SELECT {TASK_COLS} FROM @@.tasks t WHERE t.team_uid = $1 AND t.seq = $2 AND t.deleted_at IS NULL{}",
             if lock { " FOR UPDATE OF t" } else { "" }
@@ -1221,11 +1010,11 @@ impl PgStore {
         let row = sqlx::query(&sql).bind(team_uid).bind(seq).fetch_optional(&mut *c).await.map_err(|e| self.err(e))?;
         match row {
             Some(r) => task_from_row(&r).map_err(|e| self.err(e)),
-            None => Err(format!("no task #{seq} in team {team}")),
+            None => Err(StoreError::NotFound(format!("no task #{seq} in team {team}"))),
         }
     }
 
-    async fn load_task_by_id(&self, c: &mut PgConnection, id: &str, lock: bool) -> Result<Option<TaskRow>, String> {
+    async fn load_task_by_id(&self, c: &mut PgConnection, id: &str, lock: bool) -> Result<Option<TaskRow>, StoreError> {
         let sql = self.s(&format!(
             "SELECT {TASK_COLS} FROM @@.tasks t WHERE t.id = $1 AND t.deleted_at IS NULL{}",
             if lock { " FOR UPDATE OF t" } else { "" }
@@ -1234,7 +1023,7 @@ impl PgStore {
         row.map(|r| task_from_row(&r)).transpose().map_err(|e| self.err(e))
     }
 
-    async fn deps_of(&self, c: &mut PgConnection, task_id: &str) -> Result<Vec<(i64, String)>, String> {
+    async fn deps_of(&self, c: &mut PgConnection, task_id: &str) -> Result<Vec<(i64, String)>, StoreError> {
         sqlx::query_as(&self.s(
             "SELECT x.seq, x.state FROM @@.task_deps d JOIN @@.tasks x ON x.id = d.depends_on_id
              WHERE d.task_id = $1 AND d.deleted_at IS NULL AND x.deleted_at IS NULL ORDER BY x.seq",
@@ -1245,7 +1034,7 @@ impl PgStore {
         .map_err(|e| self.err(e))
     }
 
-    async fn task_out(&self, c: &mut PgConnection, row: &TaskRow, now: i64, stale_ms: i64) -> Result<Value, String> {
+    async fn task_out(&self, c: &mut PgConnection, row: &TaskRow, now: i64, stale_ms: i64) -> Result<Value, StoreError> {
         Ok(task_json(row, &self.deps_of(c, &row.id).await?, now, stale_ms))
     }
 
@@ -1263,7 +1052,7 @@ impl PgStore {
         note: Option<&str>,
         data: Option<Value>,
         origin_host: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), StoreError> {
         let seq = self.count(c, "SELECT coalesce(max(seq), 0) + 1 FROM @@.task_events WHERE task_id = $1", &task.id).await?;
         sqlx::query(&self.s(
             "INSERT INTO @@.task_events (id, task_id, team_uid, seq, ts, actor_id, actor_name, actor_host, action, from_state, to_state,
@@ -1293,7 +1082,7 @@ impl PgStore {
 
     /// Release claimed/blocked tasks whose lease ran out (see sqlite::expire_leases); rows
     /// another writer holds right now are skipped (the next reader gets them).
-    async fn expire_leases(&self, c: &mut PgConnection, team_uid: Option<&str>, now: i64, except: Option<&str>, host: Option<&str>) -> Result<Vec<Value>, String> {
+    async fn expire_leases(&self, c: &mut PgConnection, team_uid: Option<&str>, now: i64, except: Option<&str>, host: Option<&str>) -> Result<Vec<Value>, StoreError> {
         let rows = sqlx::query(&self.s(&format!(
             "SELECT {TASK_COLS} FROM @@.tasks t
              WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.lease_until IS NOT NULL AND t.lease_until < $1
@@ -1347,7 +1136,7 @@ impl PgStore {
     }
 
     /// Tombstone tasks with their events and dependency rows.
-    async fn tombstone_tasks(&self, c: &mut PgConnection, ids: &[String], now: i64) -> Result<(), String> {
+    async fn tombstone_tasks(&self, c: &mut PgConnection, ids: &[String], now: i64) -> Result<(), StoreError> {
         if ids.is_empty() {
             return Ok(());
         }
@@ -1362,7 +1151,7 @@ impl PgStore {
         Ok(())
     }
 
-    async fn tombstone_dep(&self, c: &mut PgConnection, task_id: &str, depends_on_id: &str, now: i64) -> Result<u64, String> {
+    async fn tombstone_dep(&self, c: &mut PgConnection, task_id: &str, depends_on_id: &str, now: i64) -> Result<u64, StoreError> {
         Ok(sqlx::query(&self.s(
             "UPDATE @@.task_deps SET deleted_at = $3, updated_at = $3, row_version = row_version + 1
              WHERE task_id = $1 AND depends_on_id = $2 AND deleted_at IS NULL",
@@ -1376,7 +1165,7 @@ impl PgStore {
         .rows_affected())
     }
 
-    async fn insert_dep(&self, c: &mut PgConnection, task_id: &str, depends_on_id: &str, team_uid: &str, ctx: &Ctx) -> Result<(), String> {
+    async fn insert_dep(&self, c: &mut PgConnection, task_id: &str, depends_on_id: &str, team_uid: &str, ctx: &Ctx) -> Result<(), StoreError> {
         sqlx::query(&self.s(
             "INSERT INTO @@.task_deps AS d (task_id, depends_on_id, team_uid, origin_host, updated_at) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (task_id, depends_on_id) DO UPDATE SET deleted_at = NULL, updated_at = excluded.updated_at,
@@ -1394,7 +1183,7 @@ impl PgStore {
     }
 
     /// Keep a team within its caps on live rows (see sqlite::prune_team).
-    async fn prune_team(&self, c: &mut PgConnection, team_uid: &str, room: i64, now: i64) -> Result<usize, String> {
+    async fn prune_team(&self, c: &mut PgConnection, team_uid: &str, room: i64, now: i64) -> Result<usize, StoreError> {
         let limits = self.limits;
         let mut removed = 0usize;
         let count = self.count(c, "SELECT count(*) FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL", team_uid).await?;
@@ -1440,7 +1229,7 @@ impl PgStore {
     }
 
     /// Does `from` (transitively) depend on `target`? Bounded by MAX_DEP_DEPTH levels.
-    async fn depends_transitively(&self, c: &mut PgConnection, from: &str, target: &str) -> Result<bool, String> {
+    async fn depends_transitively(&self, c: &mut PgConnection, from: &str, target: &str) -> Result<bool, StoreError> {
         let mut frontier = vec![from.to_string()];
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::from([from.to_string()]);
         let sql = self.s("SELECT depends_on_id FROM @@.task_deps WHERE task_id = ANY($1) AND deleted_at IS NULL");
@@ -1463,38 +1252,380 @@ impl PgStore {
         if frontier.is_empty() {
             Ok(false)
         } else {
-            Err(format!("dependency chain deeper than {MAX_DEP_DEPTH} levels: refused"))
+            Err(StoreError::Conflict(format!("dependency chain deeper than {MAX_DEP_DEPTH} levels: refused")))
         }
     }
 
-    async fn add_task(&self, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, String> {
+    async fn brief_list(&self, c: &mut PgConnection, sql: &str, id: &str) -> Result<Vec<Value>, StoreError> {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(&self.s(sql)).bind(id).fetch_all(&mut *c).await.map_err(|e| self.err(e))?;
+        Ok(rows.into_iter().map(|(seq, title, state)| json!({ "seq": seq, "title": title, "state": state })).collect())
+    }
+
+    async fn holders(&self, c: &mut PgConnection, instance: &str) -> Result<Vec<String>, StoreError> {
+        self.ids(
+            c,
+            "SELECT DISTINCT owner_id FROM @@.tasks
+             WHERE deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = $1 AND owner_id IS NOT NULL",
+            instance,
+        )
+        .await
+    }
+
+    fn select_sql(&self, table: &str, cols: Cols) -> String {
+        let list = copy::col_list(cols);
+        let filter = match table {
+            "teams" => "deleted_at IS NULL",
+            "cursors" => "team_uid IN (SELECT uid FROM @@.teams WHERE deleted_at IS NULL)",
+            _ => "deleted_at IS NULL AND team_uid IN (SELECT uid FROM @@.teams WHERE deleted_at IS NULL)",
+        };
+        // Posts in read order (see sqlite::select_sql).
+        let order = if table == "posts" { " ORDER BY team_uid, arrival, seq" } else { "" };
+        self.s(&format!("SELECT {list} FROM @@.{table} WHERE {filter}{order}"))
+    }
+
+    // ── Operations (public: the caller's transaction) ─────────────────────
+
+    /// One post (see sqlite::post): the team row (created when missing) locked first, the post
+    /// and the per-team cap, all in the caller's transaction.
+    pub async fn post(&self, c: &mut PgConnection, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, StoreError> {
+        let spec = PostSpec::check(team, input)?;
+        let uid = self.ensure_team(c, team, spec.team_name.as_deref(), ctx).await?;
+        let task_id = match input.task {
+            Some(seq) => Some(self.task_id_of(c, &uid, team, seq).await?),
+            None => None,
+        };
+        let (id, _) = self
+            .insert_post(
+                c,
+                &uid,
+                &spec.author_id,
+                spec.author_name.as_deref(),
+                spec.author_cli.as_deref(),
+                &spec.kind,
+                &spec.text,
+                task_id.as_deref(),
+                ctx,
+            )
+            .await?;
+        let row = sqlx::query(&self.s(&format!("SELECT {POST_COLS} FROM @@.posts p WHERE p.id = $1")))
+            .bind(&id)
+            .fetch_one(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+        let out = post_json(team, &row).map_err(|e| self.err(e))?;
+        Ok(out)
+    }
+
+    /// See sqlite::read. A `--new` read holds the team row FOR SHARE, so no post lands between
+    /// the rows it returns and the cursor it stores (and writes that cursor). `PgStore` runs a
+    /// plain read as one REPEATABLE READ READ ONLY snapshot; in a caller's READ COMMITTED
+    /// transaction the totals and rows come from separate statements.
+    pub async fn read(&self, c: &mut PgConnection, team: &str, q: &ReadQuery, host: Option<&str>) -> Result<Value, StoreError> {
+        let spec = ReadSpec::check(team, q)?;
+        let exclude_kind: Option<&str> = if spec.pinned { Some("announce") } else { None };
+        let cursor_read = spec.cursor_tab.is_some();
+        let Some(t) = self.find_team(c, team, host, if cursor_read { Lock::Share } else { Lock::None }).await? else {
+            return Ok(spec.empty(team));
+        };
+        let uid = t.uid.as_str();
+        let cursor: i64 = match &spec.cursor_tab {
+            Some(tab) => sqlx::query_scalar(&self.s("SELECT arrival FROM @@.cursors WHERE team_uid = $1 AND tab_id = $2"))
+                .bind(uid)
+                .bind(tab)
+                .fetch_optional(&mut *c)
+                .await
+                .map_err(|e| self.err(e))?
+                .unwrap_or(0),
+            None => 0,
+        };
+        let total = self.count(c, "SELECT count(*) FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
+        const FILTER: &str = "p.team_uid = $1 AND p.deleted_at IS NULL AND p.seq > $2 AND p.arrival > $3
+            AND ($4::text IS NULL OR p.kind = $4)
+            AND ($5::text IS NULL OR p.author_id = $5 OR lower(p.author_name) = lower($5))
+            AND ($6::text IS NULL OR p.text ILIKE $6 ESCAPE E'\\\\')
+            AND ($7::text IS NULL OR p.author_id IS DISTINCT FROM $7)
+            AND ($8::text IS NULL OR p.kind <> $8)";
+        let matched: i64 = sqlx::query_scalar(&self.s(&format!("SELECT count(*) FROM @@.posts p WHERE {FILTER}")))
+            .bind(uid)
+            .bind(spec.seq_after)
+            .bind(cursor)
+            .bind(&spec.kind)
+            .bind(&spec.author)
+            .bind(&spec.pattern)
+            .bind(&spec.exclude)
+            .bind(exclude_kind)
+            .fetch_one(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+        let rows = sqlx::query(&self.s(&format!(
+            "SELECT {POST_COLS}, p.arrival FROM @@.posts p WHERE {FILTER} ORDER BY {} LIMIT $9",
+            if cursor_read { "p.arrival ASC" } else { "p.seq DESC" }
+        )))
+        .bind(uid)
+        .bind(spec.seq_after)
+        .bind(cursor)
+        .bind(&spec.kind)
+        .bind(&spec.author)
+        .bind(&spec.pattern)
+        .bind(&spec.exclude)
+        .bind(exclude_kind)
+        .bind(spec.limit)
+        .fetch_all(&mut *c)
+        .await
+        .map_err(|e| self.err(e))?;
+        let mut pairs = Vec::with_capacity(rows.len());
+        for r in &rows {
+            pairs.push((post_json(team, r).map_err(|e| self.err(e))?, r.try_get::<i64, _>(10).map_err(|e| self.err(e))?));
+        }
+        if !cursor_read {
+            pairs.reverse();
+        }
+        let last_arrival = pairs.last().map(|(_, a)| *a);
+        let posts: Vec<Value> = pairs.into_iter().map(|(p, _)| p).collect();
+        let announcements: Vec<Value> = if spec.pinned {
+            let rows = sqlx::query(&self.s(&format!(
+                "SELECT {POST_COLS} FROM @@.posts p WHERE p.team_uid = $1 AND p.deleted_at IS NULL AND p.kind = 'announce'
+                 ORDER BY p.seq DESC LIMIT $2"
+            )))
+            .bind(uid)
+            .bind(PINNED_ANNOUNCEMENTS)
+            .fetch_all(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+            let mut v = rows.iter().map(|r| post_json(team, r)).collect::<Result<Vec<_>, _>>().map_err(|e| self.err(e))?;
+            v.reverse();
+            v
+        } else {
+            Vec::new()
+        };
+        let more = (matched - posts.len() as i64).max(0);
+        let mut new_cursor = None;
+        if let Some(tab) = &spec.cursor_tab {
+            let newest = self.count(c, "SELECT coalesce(max(arrival), 0) FROM @@.posts WHERE team_uid = $1", uid).await?;
+            let target = if more > 0 { last_arrival.unwrap_or(cursor) } else { newest.max(cursor) };
+            sqlx::query(&self.s(
+                "INSERT INTO @@.cursors AS c (team_uid, tab_id, arrival) VALUES ($1, $2, $3)
+                 ON CONFLICT (team_uid, tab_id) DO UPDATE SET arrival = GREATEST(c.arrival, excluded.arrival)",
+            ))
+            .bind(uid)
+            .bind(tab)
+            .bind(target)
+            .execute(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+            new_cursor = Some(target);
+        }
+        let mut out = json!({
+            "team": team,
+            "posts": posts,
+            "lastSeq": t.last_post_seq,
+            "total": total,
+            "matched": matched,
+            "more": more,
+            "since": spec.since,
+        });
+        if spec.pinned {
+            out["announcements"] = Value::Array(announcements);
+        }
+        if let Some(name) = t.name {
+            out["teamName"] = Value::String(name);
+        }
+        if let Some(next) = new_cursor {
+            out["cursor"] = json!(cursor);
+            out["nextCursor"] = json!(next);
+        }
+        Ok(out)
+    }
+
+    pub async fn teams(&self, c: &mut PgConnection) -> Result<Vec<Value>, StoreError> {
+        let rows = sqlx::query(&self.s(
+            "SELECT t.team, t.name, t.last_post_seq, t.last_activity_at,
+                    count(p.id), count(DISTINCT p.author_id), min(p.ts), max(p.ts),
+                    (SELECT count(*) FROM @@.tasks k WHERE k.team_uid = t.uid AND k.deleted_at IS NULL
+                       AND k.state IN ('open','claimed','blocked','review')),
+                    t.last_task_seq, t.home_host, t.uid
+             FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
+             WHERE t.deleted_at IS NULL
+             GROUP BY t.uid
+             ORDER BY t.last_activity_at DESC, coalesce(max(p.ts), 0) DESC
+             LIMIT $1",
+        ))
+        .bind(MAX_TEAMS_LISTED)
+        .fetch_all(&mut *c)
+        .await
+        .map_err(|e| self.err(e))?;
+        rows.iter()
+            .map(|r| -> Result<Value, sqlx::Error> {
+                let mut v = json!({
+                    "team": r.try_get::<String, _>(0)?,
+                    "lastSeq": r.try_get::<i64, _>(2)?,
+                    "updatedTs": r.try_get::<i64, _>(3)?,
+                    "posts": r.try_get::<i64, _>(4)?,
+                    "members": r.try_get::<i64, _>(5)?,
+                    "firstTs": r.try_get::<Option<i64>, _>(6)?,
+                    "lastTs": r.try_get::<Option<i64>, _>(7)?,
+                    "liveTasks": r.try_get::<i64, _>(8)?,
+                    "lastTaskSeq": r.try_get::<i64, _>(9)?,
+                    "uid": r.try_get::<String, _>(11)?,
+                });
+                if let Some(name) = r.try_get::<Option<String>, _>(1)? {
+                    v["teamName"] = Value::String(name);
+                }
+                if let Some(host) = r.try_get::<Option<String>, _>(10)? {
+                    v["homeHost"] = Value::String(host);
+                }
+                Ok(v)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| self.err(e))
+    }
+
+    /// Tombstone the team's posts (team row locked first).
+    pub async fn clear(&self, c: &mut PgConnection, team: &str, ctx: &Ctx) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        let Some(t) = self.find_team(c, team, ctx.host.as_deref(), Lock::Update).await? else {
+            return Ok(json!({ "team": team, "removed": 0, "lastSeq": 0 }));
+        };
+        if let Some(home) = &t.sync_home {
+            return Err(StoreError::Forbidden(read_only_message(home)));
+        }
+        let ids = self.ids(c, "SELECT id FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", &t.uid).await?;
+        self.tombstone_posts(c, &ids, ctx.now).await?;
+        self.touch_team(c, &t.uid, ctx.now).await?;
+        Ok(json!({ "team": team, "removed": ids.len(), "lastSeq": t.last_post_seq }))
+    }
+
+    /// How many teams "Clean up old teams" would retire now (nothing is changed).
+    pub async fn stale_count(&self, c: &mut PgConnection, now: i64, max_age_ms: i64) -> Result<i64, StoreError> {
+        sqlx::query_scalar(&self.s(
+            "SELECT count(*) FROM (SELECT t.uid FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
+             WHERE t.deleted_at IS NULL
+             GROUP BY t.uid HAVING greatest(t.last_activity_at, coalesce(max(p.ts), 0)) < $1) x",
+        ))
+        .bind(now - max_age_ms)
+        .fetch_one(&mut *c)
+        .await
+        .map_err(|e| self.err(e))
+    }
+
+    /// Teams idle since before `cutoff` (no lock; `retire_team` re-checks under the team lock).
+    async fn stale_candidates(&self, c: &mut PgConnection, cutoff: i64) -> Result<Vec<String>, StoreError> {
+        sqlx::query_scalar(&self.s(
+            "SELECT t.uid FROM @@.teams t LEFT JOIN @@.posts p ON p.team_uid = t.uid AND p.deleted_at IS NULL
+             WHERE t.deleted_at IS NULL
+             GROUP BY t.uid HAVING greatest(t.last_activity_at, coalesce(max(p.ts), 0)) < $1",
+        ))
+        .bind(cutoff)
+        .fetch_all(&mut *c)
+        .await
+        .map_err(|e| self.err(e))
+    }
+
+    /// Tombstone one idle team with its posts, tasks, dependencies and events (cursors go);
+    /// false when it became active meanwhile (checked under its row lock).
+    async fn retire_team(&self, c: &mut PgConnection, uid: &str, cutoff: i64, now: i64) -> Result<bool, StoreError> {
+        // Re-check under the team lock: it may have become active meanwhile.
+        let last: Option<i64> = sqlx::query_scalar(&self.s(
+            "SELECT greatest(t.last_activity_at,
+                    coalesce((SELECT max(p.ts) FROM @@.posts p WHERE p.team_uid = t.uid AND p.deleted_at IS NULL), 0))
+             FROM @@.teams t WHERE t.uid = $1 AND t.deleted_at IS NULL FOR UPDATE",
+        ))
+        .bind(uid)
+        .fetch_optional(&mut *c)
+        .await
+        .map_err(|e| self.err(e))?
+        .flatten();
+        if !last.is_some_and(|l| l < cutoff) {
+            return Ok(false);
+        }
+        let posts = self.ids(c, "SELECT id FROM @@.posts WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
+        self.tombstone_posts(c, &posts, now).await?;
+        let tasks = self.ids(c, "SELECT id FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL", uid).await?;
+        self.tombstone_tasks(c, &tasks, now).await?;
+        sqlx::query(&self.s("DELETE FROM @@.cursors WHERE team_uid = $1")).bind(uid).execute(&mut *c).await.map_err(|e| self.err(e))?;
+        sqlx::query(&self.s("UPDATE @@.teams SET deleted_at = $2, updated_at = $2, row_version = row_version + 1 WHERE uid = $1"))
+            .bind(uid)
+            .bind(now)
+            .execute(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(true)
+    }
+
+    /// Remove tombstones older than TOMBSTONE_RETENTION_MS, finished outbox notes older than
+    /// OUTBOX_RETENTION_MS (where the table exists) and cursors of removed teams.
+    async fn purge_tombstones(&self, c: &mut PgConnection, now: i64) -> Result<(), StoreError> {
+        let purge_before = now - TOMBSTONE_RETENTION_MS;
+        for table in ["posts", "task_events", "task_deps", "tasks", "teams"] {
+            sqlx::query(&self.s(&format!("DELETE FROM @@.{table} WHERE deleted_at IS NOT NULL AND deleted_at < $1")))
+                .bind(purge_before)
+                .execute(&mut *c)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
+        // Finished remote notes (stage 3c) after OUTBOX_RETENTION_MS; only where the table exists.
+        let has_outbox: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+            .bind(format!("{}outbox", self.prefix))
+            .fetch_one(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+        if has_outbox {
+            sqlx::query(&self.s("DELETE FROM @@.outbox WHERE state <> 'pending' AND coalesce(handled_at, created_at) < $1"))
+                .bind(now - OUTBOX_RETENTION_MS)
+                .execute(&mut *c)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
+        sqlx::query(&self.s("DELETE FROM @@.cursors WHERE team_uid NOT IN (SELECT uid FROM @@.teams)"))
+            .execute(&mut *c)
+            .await
+            .map_err(|e| self.err(e))?;
+        Ok(())
+    }
+
+    /// "Clean up old teams" in the caller's transaction: every idle team and the purge at once
+    /// (`PgStore::prune_stale` gives each team its own transaction instead). Locks each retired
+    /// team's row, in candidate order.
+    pub async fn prune_stale(&self, c: &mut PgConnection, now: i64, max_age_ms: i64) -> Result<usize, StoreError> {
+        let cutoff = now - max_age_ms;
+        let mut retired = 0usize;
+        for uid in &self.stale_candidates(c, cutoff).await? {
+            if self.retire_team(c, uid, cutoff, now).await? {
+                retired += 1;
+            }
+        }
+        self.purge_tombstones(c, now).await?;
+        Ok(retired)
+    }
+
+    /// `task add` (see `task_write`): team row first, dependencies checked, the per-team caps.
+    async fn add_task(&self, c: &mut PgConnection, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, StoreError> {
         let spec = AddSpec::check(op)?;
         let now = ctx.now;
-        let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
-        let uid = self.ensure_team(&mut tx, team, spec.team_name.as_deref(), ctx).await?;
+        let uid = self.ensure_team(c, team, spec.team_name.as_deref(), ctx).await?;
         let parent_id = match op.parent {
-            Some(seq) => Some(self.task_id_of(&mut tx, &uid, team, seq).await?),
+            Some(seq) => Some(self.task_id_of(c, &uid, team, seq).await?),
             None => None,
         };
         let id = new_id();
         let mut dep_ids = Vec::new();
         for seq in &spec.after {
-            let dep = self.load_task(&mut tx, &uid, team, *seq, false).await?;
+            let dep = self.load_task(c, &uid, team, *seq, false).await?;
             if dep.state == "cancelled" {
-                return Err(format!("#{seq} is cancelled: it cannot be a dependency"));
+                return Err(StoreError::Conflict(format!("#{seq} is cancelled: it cannot be a dependency")));
             }
-            self.depends_transitively(&mut tx, &dep.id, &id).await?;
+            self.depends_transitively(c, &dep.id, &id).await?;
             dep_ids.push(dep.id);
         }
-        self.prune_team(&mut tx, &uid, 1, now).await?;
-        let count = self.count(&mut tx, "SELECT count(*) FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL", &uid).await?;
+        self.prune_team(c, &uid, 1, now).await?;
+        let count = self.count(c, "SELECT count(*) FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL", &uid).await?;
         if count >= self.limits.tasks {
-            return Err(format!(
+            return Err(StoreError::Conflict(format!(
                 "task limit reached: team {team} has {count} tasks that cannot be pruned (max {}); finish or cancel some first",
                 self.limits.tasks
-            ));
+            )));
         }
-        let seq = self.next_seq(&mut tx, &uid, true, now).await?;
+        let seq = self.next_seq(c, &uid, true, now).await?;
         sqlx::query(&self.s(
             "INSERT INTO @@.tasks (id, team_uid, seq, parent_id, title, body, state, priority, needs_review,
                created_by_id, created_by_name, created_by_host, max_attempts, labels, created_at, updated_at, origin_host)
@@ -1515,15 +1646,15 @@ impl PgStore {
         .bind(spec.labels_json())
         .bind(now)
         .bind(&ctx.host)
-        .execute(&mut *tx)
+        .execute(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         for dep in &dep_ids {
-            self.insert_dep(&mut tx, &id, dep, &uid, ctx).await?;
+            self.insert_dep(c, &id, dep, &uid, ctx).await?;
         }
-        let row = self.load_task(&mut tx, &uid, team, seq, false).await?;
+        let row = self.load_task(c, &uid, team, seq, false).await?;
         self.add_event(
-            &mut tx,
+            c,
             &row,
             now,
             actor,
@@ -1536,46 +1667,42 @@ impl PgStore {
             ctx.host.as_deref(),
         )
         .await?;
-        self.prune_team(&mut tx, &uid, 0, now).await?;
-        let task = self.task_out(&mut tx, &row, now, DEFAULT_STALE_MS).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
+        self.prune_team(c, &uid, 0, now).await?;
+        let task = self.task_out(c, &row, now, DEFAULT_STALE_MS).await?;
         Ok(json!({ "action": "add", "from": Value::Null, "to": "open", "task": task, "expired": [] }))
     }
 
-    pub async fn task_write(&self, team: String, op: TaskOpInput, actor: Actor, ctx: Ctx) -> Result<Value, String> {
-        retrying!(self, self.task_write_once(&team, &op, &actor, &ctx))
-    }
-
-    /// One task write (see sqlite::task_write): the team row locked first, lazy lease expiry,
-    /// the rule check, a guarded UPDATE and the event, all in one transaction.
-    async fn task_write_once(&self, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, String> {
-        check_team(team)?;
+    /// One task write (see sqlite::task_write, every op including `add`): the team row locked
+    /// first, lazy lease expiry, the rule check, a guarded UPDATE and the event. A refused
+    /// owner-only transition is `LeaseLost` when the actor's lease ran out and the task was
+    /// taken from them.
+    pub async fn task_write(&self, c: &mut PgConnection, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
         let name = op.op.trim();
         if name == "add" {
-            return self.add_task(team, op, actor, ctx).await;
+            return self.add_task(c, team, op, actor, ctx).await;
         }
         let WriteSpec { action, reason, result, claim_next, next_labels, lease } = WriteSpec::check(name, op)?;
         let now = ctx.now;
         let host = ctx.host.as_deref();
-        let mut tx = self.ready().await?.begin().await.map_err(|e| self.err(e))?;
-        let Some(team_ref) = self.find_team(&mut tx, team, host, Lock::Update).await? else {
+        let Some(team_ref) = self.find_team(c, team, host, Lock::Update).await? else {
             if claim_next {
                 return Ok(none_ready(0, 0, Vec::new()));
             }
-            return Err(format!("no task #{} in team {team}", op.task.unwrap_or(0)));
+            return Err(StoreError::NotFound(format!("no task #{} in team {team}", op.task.unwrap_or(0))));
         };
         if let Some(home) = &team_ref.sync_home {
-            return Err(read_only_message(home));
+            return Err(StoreError::Forbidden(read_only_message(home)));
         }
         let uid = team_ref.uid.as_str();
         let target: Option<TaskRow> = match op.task {
-            Some(seq) => Some(self.load_task(&mut tx, uid, team, seq, true).await?),
+            Some(seq) => Some(self.load_task(c, uid, team, seq, true).await?),
             None => None,
         };
         let except = target.as_ref().filter(|t| t.owner_id.as_deref() == Some(actor.id.as_str())).map(|t| t.id.clone());
-        let expired = self.expire_leases(&mut tx, Some(uid), now, except.as_deref(), host).await?;
+        let expired = self.expire_leases(c, Some(uid), now, except.as_deref(), host).await?;
         let row = match target {
-            Some(t) => self.load_task(&mut tx, uid, team, t.seq, false).await?,
+            Some(t) => self.load_task(c, uid, team, t.seq, false).await?,
             None => {
                 let next: Option<i64> = sqlx::query_scalar(&self.s(&format!(
                     "SELECT t.seq FROM @@.tasks t WHERE t.team_uid = $1 AND t.deleted_at IS NULL AND t.state = 'open' AND NOT {UNMET}
@@ -1584,11 +1711,11 @@ impl PgStore {
                 )))
                 .bind(uid)
                 .bind(&next_labels)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *c)
                 .await
                 .map_err(|e| self.err(e))?;
                 match next {
-                    Some(seq) => self.load_task(&mut tx, uid, team, seq, false).await?,
+                    Some(seq) => self.load_task(c, uid, team, seq, false).await?,
                     None => {
                         let (open, waiting): (i64, i64) = sqlx::query_as(&self.s(&format!(
                             "SELECT count(*), count(*) FILTER (WHERE {UNMET}) FROM @@.tasks t
@@ -1596,30 +1723,31 @@ impl PgStore {
                         )))
                         .bind(uid)
                         .bind(&next_labels)
-                        .fetch_one(&mut *tx)
+                        .fetch_one(&mut *c)
                         .await
                         .map_err(|e| self.err(e))?;
-                        tx.commit().await.map_err(|e| self.err(e))?;
                         return Ok(none_ready(open, waiting, expired));
                     }
                 }
             }
         };
         let from = row.state.clone();
-        let to = check_transition(action, &row.facts(), actor)?;
+        let to = match check_transition_typed(action, &row.facts(), actor) {
+            Ok(to) => to,
+            Err(e) => return Err(self.lease_lost_or(&mut *c, &row, action, actor, e).await),
+        };
         let owner = actor.id.as_str();
         let seq = row.seq;
         let id = row.id.as_str();
         let mut note: Option<String> = reason.clone();
         let mut data: Option<Value> = None;
         let mut attempt_after = row.attempt;
-        let c: &mut PgConnection = &mut tx;
         let n: u64 = match action {
             Action::Claim => {
                 let deps = self.deps_of(c, id).await?;
                 let unmet: Vec<String> = deps.iter().filter(|(_, s)| !dep_met(s)).map(|(n, s)| format!("#{n} ({s})")).collect();
                 if !unmet.is_empty() {
-                    return Err(format!("#{seq} is waiting for {}: claim a ready task (agent task list --ready)", unmet.join(", ")));
+                    return Err(StoreError::Conflict(format!("#{seq} is waiting for {}: claim a ready task (agent task list --ready)", unmet.join(", "))));
                 }
                 let sql = self.s(
                     "UPDATE @@.tasks SET state = 'claimed', owner_id = $2, owner_name = $3, owner_host = $4, owner_instance = $5,
@@ -1778,11 +1906,11 @@ impl PgStore {
             }
             Action::Edit => {
                 if op.review.is_some() {
-                    check_edit(&row.facts(), actor, true)?;
+                    check_edit_typed(&row.facts(), actor, true)?;
                 }
                 if let Some(v) = op.expected_version {
                     if v != row.version {
-                        return Err(format!("#{seq} changed since you loaded it (version {v}, now {}): load it again", row.version));
+                        return Err(StoreError::Conflict(format!("#{seq} changed since you loaded it (version {v}, now {}): load it again", row.version)));
                     }
                 }
                 let EditSpec { title, body, labels, fields } = EditSpec::check(op)?;
@@ -1811,14 +1939,14 @@ impl PgStore {
                     .rows_affected()
             }
             Action::DepAdd | Action::DepRemove => {
-                let on_seq = op.on.ok_or_else(|| "dependency required: agent task dep add|rm <#task> <#depends-on>".to_string())?;
+                let on_seq = op.on.ok_or_else(|| StoreError::Invalid("dependency required: agent task dep add|rm <#task> <#depends-on>".to_string()))?;
                 let on = self.load_task(c, uid, team, on_seq, false).await?;
                 if on.id == row.id {
-                    return Err(format!("#{seq} cannot depend on itself"));
+                    return Err(StoreError::Invalid(format!("#{seq} cannot depend on itself")));
                 }
                 data = Some(json!({ "on": on_seq }));
                 if action == Action::DepAdd && on.state == "cancelled" {
-                    return Err(format!("#{on_seq} is cancelled: it cannot be a dependency"));
+                    return Err(StoreError::Conflict(format!("#{on_seq} is cancelled: it cannot be a dependency")));
                 }
                 if action == Action::DepAdd {
                     let exists: i64 = sqlx::query_scalar(&self.s(
@@ -1830,18 +1958,18 @@ impl PgStore {
                     .await
                     .map_err(|e| self.err(e))?;
                     if exists > 0 {
-                        return Err(format!("#{seq} already depends on #{on_seq}"));
+                        return Err(StoreError::Conflict(format!("#{seq} already depends on #{on_seq}")));
                     }
                     let count = self.count(c, "SELECT count(*) FROM @@.task_deps WHERE task_id = $1 AND deleted_at IS NULL", id).await?;
                     if count as usize >= MAX_DEPS_PER_TASK {
-                        return Err(format!("#{seq} already has {MAX_DEPS_PER_TASK} dependencies (max)"));
+                        return Err(StoreError::Conflict(format!("#{seq} already has {MAX_DEPS_PER_TASK} dependencies (max)")));
                     }
                     if self.depends_transitively(c, &on.id, id).await? {
-                        return Err(format!("#{on_seq} already depends on #{seq} (directly or through other tasks): that would be a cycle"));
+                        return Err(StoreError::Conflict(format!("#{on_seq} already depends on #{seq} (directly or through other tasks): that would be a cycle")));
                     }
                     self.insert_dep(c, id, &on.id, uid, ctx).await?;
                 } else if self.tombstone_dep(c, id, &on.id, now).await? == 0 {
-                    return Err(format!("#{seq} does not depend on #{on_seq}"));
+                    return Err(StoreError::NotFound(format!("#{seq} does not depend on #{on_seq}")));
                 }
                 let sql = self.s("UPDATE @@.tasks SET updated_at = $2, version = version + 1, row_version = row_version + 1 WHERE id = $1");
                 sqlx::query(&sql).bind(id).bind(now).execute(&mut *c).await.map_err(|e| self.err(e))?.rows_affected()
@@ -1849,7 +1977,7 @@ impl PgStore {
         };
         if n == 0 {
             return Err(match self.load_task(c, uid, team, seq, false).await {
-                Ok(cur) => format!("#{seq} changed meanwhile: it is now {}", describe_state(&cur.facts())),
+                Ok(cur) => StoreError::Conflict(format!("#{seq} changed meanwhile: it is now {}", describe_state(&cur.facts()))),
                 Err(e) => e,
             });
         }
@@ -1867,7 +1995,6 @@ impl PgStore {
         self.prune_team(c, uid, 0, now).await?;
         self.touch_team(c, uid, now).await?;
         let task = self.task_out(c, &updated, now, DEFAULT_STALE_MS).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
         let mut out = json!({ "action": action.event(), "from": from, "to": to, "task": task, "expired": expired });
         if let Some(p) = post_seq {
             out["post"] = json!(p);
@@ -1876,43 +2003,91 @@ impl PgStore {
     }
 
     /// Expire leases of one team in its own short write transaction, only when some ran out.
-    async fn expire_if_needed(&self, pool: &PgPool, uid: &str, now: i64, host: Option<&str>) -> Result<Vec<Value>, String> {
-        let n: i64 = sqlx::query_scalar(&self.s(
+    /// A refused owner-only transition (block, unblock, release, done, submit, fail) becomes
+    /// `LeaseLost` when the actor held this task and lost it: its newest `lease_expired` or
+    /// `auto_release` event names the actor as owner and comes after the actor's own newest
+    /// event on the task. Any other refusal (or a failing lookup) is returned unchanged.
+    async fn lease_lost_or(&self, c: &mut PgConnection, row: &TaskRow, action: Action, actor: &Actor, refused: StoreError) -> StoreError {
+        let owner_action = matches!(action, Action::Block | Action::Unblock | Action::Release | Action::Done | Action::Submit | Action::Fail);
+        if !owner_action || actor.human || actor.id.is_empty() || row.owner_id.as_deref() == Some(actor.id.as_str()) {
+            return refused;
+        }
+        // Under a savepoint: a failing lookup must not leave the caller's transaction aborted.
+        // (Refused outside a transaction block, where a failure aborts nothing.)
+        let saved = sqlx::query("SAVEPOINT bbarit_board_lookup").execute(&mut *c).await.is_ok();
+        let lost: Result<bool, sqlx::Error> = sqlx::query_scalar(&self.s(
+            "SELECT EXISTS (SELECT 1 FROM @@.task_events e
+               WHERE e.task_id = $1 AND e.deleted_at IS NULL AND e.action IN ('lease_expired', 'auto_release')
+                 AND e.data IS NOT NULL AND (e.data::jsonb ->> 'ownerId') = $2
+                 AND e.seq > coalesce((SELECT max(m.seq) FROM @@.task_events m
+                                        WHERE m.task_id = $1 AND m.deleted_at IS NULL AND m.actor_id = $2), 0))",
+        ))
+        .bind(&row.id)
+        .bind(&actor.id)
+        .fetch_one(&mut *c)
+        .await;
+        if saved {
+            if lost.is_err() {
+                let _ = sqlx::query("ROLLBACK TO SAVEPOINT bbarit_board_lookup").execute(&mut *c).await;
+            }
+            let _ = sqlx::query("RELEASE SAVEPOINT bbarit_board_lookup").execute(&mut *c).await;
+        }
+        match lost {
+            Ok(true) => StoreError::LeaseLost(refused.into_message()),
+            _ => refused,
+        }
+    }
+    /// How many leases of one team ran out (claimed or blocked past `lease_until`).
+    async fn expired_count(&self, c: &mut PgConnection, uid: &str, now: i64) -> Result<i64, StoreError> {
+        sqlx::query_scalar(&self.s(
             "SELECT count(*) FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND lease_until < $2",
         ))
         .bind(uid)
         .bind(now)
-        .fetch_one(pool)
+        .fetch_one(&mut *c)
         .await
-        .map_err(|e| self.err(e))?;
-        if n == 0 {
-            return Ok(Vec::new());
-        }
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        if !self.lock_team(&mut tx, uid).await? {
-            return Ok(Vec::new());
-        }
-        let out = self.expire_leases(&mut tx, Some(uid), now, None, host).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
-        Ok(out)
+        .map_err(|e| self.err(e))
     }
 
-    pub async fn task_list(&self, team: String, q: TaskListQuery, ctx: Ctx) -> Result<Value, String> {
-        retrying!(self, self.task_list_once(&team, &q, &ctx))
+    /// Expire leases of one team, its row locked first (nothing when the team row is gone).
+    async fn expire_locked(&self, c: &mut PgConnection, uid: &str, now: i64, host: Option<&str>) -> Result<Vec<Value>, StoreError> {
+        if !self.lock_team(c, uid).await? {
+            return Ok(Vec::new());
+        }
+        self.expire_leases(c, Some(uid), now, None, host).await
     }
 
-    async fn task_list_once(&self, team: &str, q: &TaskListQuery, ctx: &Ctx) -> Result<Value, String> {
-        let now = ctx.now;
-        let ListSpec { stale, stored, want_waiting, want_ready, want_stale, state_filter, pattern, mine, limit } = ListSpec::check(team, q)?;
-        let mut counts = ListSpec::zero_counts();
-        let pool = self.ready().await?;
-        let mut c = pool.acquire().await.map_err(|e| self.err(e))?;
-        let Some(team_ref) = self.find_team(&mut c, team, ctx.host.as_deref(), Lock::None).await? else {
-            return Ok(json!({ "team": team, "tasks": [], "matched": 0, "more": 0, "counts": counts, "expired": [] }));
+    /// Expire leases of one team only when some ran out (the store's own path does this in a
+    /// separate short write transaction before a list or show).
+    async fn expire_if_needed(&self, c: &mut PgConnection, uid: &str, now: i64, host: Option<&str>) -> Result<Vec<Value>, StoreError> {
+        if self.expired_count(c, uid, now).await? == 0 {
+            return Ok(Vec::new());
+        }
+        self.expire_locked(c, uid, now, host).await
+    }
+    /// See sqlite::task_list. In the caller's transaction: find the team, expire its ran-out
+    /// leases (a write: the transaction must not be READ ONLY), then list. The store's own path
+    /// runs those as three steps (lookup, a short write transaction, one REPEATABLE READ READ
+    /// ONLY snapshot); a caller wanting the counts and rows from one snapshot starts its
+    /// transaction REPEATABLE READ.
+    pub async fn task_list(&self, c: &mut PgConnection, team: &str, q: &TaskListQuery, ctx: &Ctx) -> Result<Value, StoreError> {
+        let spec = ListSpec::check(team, q)?;
+        let Some(team_ref) = self.find_team(c, team, ctx.host.as_deref(), Lock::None).await? else {
+            return Ok(Self::no_tasks(team));
         };
-        drop(c);
+        let expired = self.expire_if_needed(c, &team_ref.uid, ctx.now, ctx.host.as_deref()).await?;
+        self.task_list_rows(c, team, spec, team_ref, expired, ctx.now).await
+    }
+
+    fn no_tasks(team: &str) -> Value {
+        json!({ "team": team, "tasks": [], "matched": 0, "more": 0, "counts": ListSpec::zero_counts(), "expired": [] })
+    }
+
+    /// The list itself (after the lookup and the lease expiry).
+    async fn task_list_rows(&self, c: &mut PgConnection, team: &str, spec: ListSpec, team_ref: TeamRef, expired: Vec<Value>, now: i64) -> Result<Value, StoreError> {
+        let ListSpec { stale, stored, want_waiting, want_ready, want_stale, state_filter, pattern, mine, limit } = spec;
+        let mut counts = ListSpec::zero_counts();
         let uid = team_ref.uid.clone();
-        let expired = self.expire_if_needed(pool, &uid, now, ctx.host.as_deref()).await?;
         let filter = format!(
             "t.team_uid = $1 AND t.deleted_at IS NULL
              AND (NOT $2 OR t.state = ANY($3)
@@ -1922,8 +2097,6 @@ impl PgStore {
              AND ($8::text IS NULL OR t.owner_id = $8)
              AND ($9::text IS NULL OR t.title ILIKE $9 ESCAPE E'\\\\' OR t.body ILIKE $9 ESCAPE E'\\\\')"
         );
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
         let stale_before = now - stale;
         let matched: i64 = sqlx::query_scalar(&self.s(&format!("SELECT count(*) FROM @@.tasks t WHERE {filter}")))
             .bind(&uid)
@@ -1935,7 +2108,7 @@ impl PgStore {
             .bind(stale_before)
             .bind(&mine)
             .bind(&pattern)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *c)
             .await
             .map_err(|e| self.err(e))?;
         let rows = sqlx::query(&self.s(&format!(
@@ -1954,7 +2127,7 @@ impl PgStore {
         .bind(&mine)
         .bind(&pattern)
         .bind(limit)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         let rows = rows.iter().map(task_from_row).collect::<Result<Vec<_>, _>>().map_err(|e| self.err(e))?;
@@ -1964,7 +2137,7 @@ impl PgStore {
              WHERE d.team_uid = $1 AND d.deleted_at IS NULL AND x.deleted_at IS NULL ORDER BY x.seq",
         ))
         .bind(&uid)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         for (task, seq, state) in dep_rows {
@@ -1974,7 +2147,7 @@ impl PgStore {
             "SELECT state, count(*) FROM @@.tasks WHERE team_uid = $1 AND deleted_at IS NULL GROUP BY state",
         ))
         .bind(&uid)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         for (s, n) in by_state {
@@ -1987,12 +2160,11 @@ impl PgStore {
         )))
         .bind(&uid)
         .bind(stale_before)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         counts.insert("waiting".into(), json!(waiting));
         counts.insert("stale".into(), json!(stale_n));
-        tx.commit().await.map_err(|e| self.err(e))?;
         let tasks: Vec<Value> = rows.iter().map(|r| task_json(r, deps.get(&r.id).map(Vec::as_slice).unwrap_or(&[]), now, stale)).collect();
         let more = (matched - tasks.len() as i64).max(0);
         let mut out = json!({ "team": team, "tasks": tasks, "matched": matched, "more": more, "counts": counts, "expired": expired });
@@ -2002,32 +2174,39 @@ impl PgStore {
         Ok(out)
     }
 
-    async fn brief_list(&self, c: &mut PgConnection, sql: &str, id: &str) -> Result<Vec<Value>, String> {
-        let rows: Vec<(i64, String, String)> = sqlx::query_as(&self.s(sql)).bind(id).fetch_all(&mut *c).await.map_err(|e| self.err(e))?;
-        Ok(rows.into_iter().map(|(seq, title, state)| json!({ "seq": seq, "title": title, "state": state })).collect())
+    /// See sqlite::task_show. In the caller's transaction: find the team, expire its ran-out
+    /// leases (a write), then read the task (the store's own path: lookup, a short write
+    /// transaction, then one REPEATABLE READ READ ONLY snapshot).
+    pub async fn task_show(&self, c: &mut PgConnection, team: &str, seq: i64, history: bool, stale: Option<i64>, ctx: &Ctx) -> Result<Value, StoreError> {
+        let team_ref = self.show_team(c, team, seq, ctx).await?;
+        let expired = self.expire_if_needed(c, &team_ref.uid, ctx.now, ctx.host.as_deref()).await?;
+        self.task_show_rows(c, team, &team_ref.uid, seq, history, stale, expired, ctx.now).await
     }
 
-    pub async fn task_show(&self, team: String, seq: i64, history: bool, stale: Option<i64>, ctx: Ctx) -> Result<Value, String> {
-        retrying!(self, self.task_show_once(&team, seq, history, stale, &ctx))
+    async fn show_team(&self, c: &mut PgConnection, team: &str, seq: i64, ctx: &Ctx) -> Result<TeamRef, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        self.find_team(c, team, ctx.host.as_deref(), Lock::None)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("no task #{seq} in team {team}")))
     }
 
-    async fn task_show_once(&self, team: &str, seq: i64, history: bool, stale: Option<i64>, ctx: &Ctx) -> Result<Value, String> {
-        check_team(team)?;
-        let now = ctx.now;
-        let pool = self.ready().await?;
-        let team_ref = {
-            let mut c = pool.acquire().await.map_err(|e| self.err(e))?;
-            self.find_team(&mut c, team, ctx.host.as_deref(), Lock::None).await?.ok_or_else(|| format!("no task #{seq} in team {team}"))?
-        };
-        let uid = team_ref.uid.as_str();
-        let expired = self.expire_if_needed(pool, uid, now, ctx.host.as_deref()).await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
-        let row = self.load_task(&mut tx, uid, team, seq, false).await?;
-        let task = self.task_out(&mut tx, &row, now, stale_ms(stale)).await?;
+    #[allow(clippy::too_many_arguments)]
+    async fn task_show_rows(
+        &self,
+        c: &mut PgConnection,
+        team: &str,
+        uid: &str,
+        seq: i64,
+        history: bool,
+        stale: Option<i64>,
+        expired: Vec<Value>,
+        now: i64,
+    ) -> Result<Value, StoreError> {
+        let row = self.load_task(c, uid, team, seq, false).await?;
+        let task = self.task_out(c, &row, now, stale_ms(stale)).await?;
         let deps = self
             .brief_list(
-                &mut tx,
+                c,
                 "SELECT x.seq, x.title, x.state FROM @@.task_deps d JOIN @@.tasks x ON x.id = d.depends_on_id
                  WHERE d.task_id = $1 AND d.deleted_at IS NULL AND x.deleted_at IS NULL ORDER BY x.seq",
                 &row.id,
@@ -2035,7 +2214,7 @@ impl PgStore {
             .await?;
         let dependents = self
             .brief_list(
-                &mut tx,
+                c,
                 "SELECT x.seq, x.title, x.state FROM @@.task_deps d JOIN @@.tasks x ON x.id = d.task_id
                  WHERE d.depends_on_id = $1 AND d.deleted_at IS NULL AND x.deleted_at IS NULL ORDER BY x.seq",
                 &row.id,
@@ -2043,14 +2222,14 @@ impl PgStore {
             .await?;
         let children = self
             .brief_list(
-                &mut tx,
+                c,
                 "SELECT x.seq, x.title, x.state FROM @@.tasks x WHERE x.parent_id = $1 AND x.deleted_at IS NULL ORDER BY x.seq",
                 &row.id,
             )
             .await?;
         let parent = match row.parent_seq {
             Some(p) => {
-                let pr = self.load_task(&mut tx, uid, team, p, false).await?;
+                let pr = self.load_task(c, uid, team, p, false).await?;
                 json!({ "seq": pr.seq, "title": pr.title, "state": pr.state })
             }
             None => Value::Null,
@@ -2063,7 +2242,7 @@ impl PgStore {
             ))
             .bind(&row.id)
             .bind(MAX_HISTORY)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *c)
             .await
             .map_err(|e| self.err(e))?;
             let mut events = rows
@@ -2088,23 +2267,14 @@ impl PgStore {
             events.reverse();
             out["events"] = Value::Array(events);
         }
-        tx.commit().await.map_err(|e| self.err(e))?;
         Ok(out)
     }
 
     /// See sqlite::team_events (one REPEATABLE READ READ ONLY snapshot).
-    pub async fn team_events(&self, team: String, q: EventsQuery, host: Option<String>) -> Result<Value, String> {
-        retrying!(self, self.team_events_once(&team, &q, host.as_deref()))
-    }
-
-    async fn team_events_once(&self, team: &str, q: &EventsQuery, host: Option<&str>) -> Result<Value, String> {
-        check_team(team)?;
+    pub async fn team_events(&self, c: &mut PgConnection, team: &str, q: &EventsQuery, host: Option<&str>) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
         let (limit, since) = q.check();
-        let pool = self.ready().await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
-        let Some(team_ref) = self.find_team(&mut tx, team, host, Lock::None).await? else {
-            tx.commit().await.map_err(|e| self.err(e))?;
+        let Some(team_ref) = self.find_team(c, team, host, Lock::None).await? else {
             return Ok(json!({ "team": team, "events": [], "more": 0 }));
         };
         let from = "FROM @@.task_events e JOIN @@.tasks x ON x.id = e.task_id
@@ -2112,7 +2282,7 @@ impl PgStore {
         let matched: i64 = sqlx::query_scalar(&self.s(&format!("SELECT count(*) {from}")))
             .bind(&team_ref.uid)
             .bind(since)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *c)
             .await
             .map_err(|e| self.err(e))?;
         let rows = sqlx::query(&self.s(&format!(
@@ -2122,10 +2292,9 @@ impl PgStore {
         .bind(&team_ref.uid)
         .bind(since)
         .bind(limit)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
-        tx.commit().await.map_err(|e| self.err(e))?;
         let mut events = rows
             .iter()
             .map(|r| -> Result<Value, sqlx::Error> {
@@ -2152,9 +2321,7 @@ impl PgStore {
     // ── Leases ───────────────────────────────────────────────────────────
 
     /// See sqlite::lease_tick (only the lease columns change; no team lock needed).
-    pub async fn lease_tick(&self, instance: String, alive: Vec<String>, now: i64, lease: i64) -> Result<Value, String> {
-        let pool = self.ready().await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+    pub async fn lease_tick(&self, c: &mut PgConnection, instance: &str, alive: &[String], now: i64, lease: i64) -> Result<Value, StoreError> {
         let renewed: Vec<String> = sqlx::query_scalar(&self.s(
             "UPDATE @@.tasks SET lease_until = $1, heartbeat_at = $2, row_version = row_version + 1
              WHERE deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = $3 AND owner_id = ANY($4)
@@ -2162,34 +2329,21 @@ impl PgStore {
         ))
         .bind(now + lease_ms(Some(lease)))
         .bind(now)
-        .bind(&instance)
-        .bind(&alive)
-        .fetch_all(&mut *tx)
+        .bind(instance)
+        .bind(alive)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
-        let holders = self.holders(&mut tx, &instance).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
+        let holders = self.holders(c, instance).await?;
         Ok(json!({ "renewed": renewed.len(), "holders": holders }))
     }
 
-    async fn holders(&self, c: &mut PgConnection, instance: &str) -> Result<Vec<String>, String> {
-        self.ids(
-            c,
-            "SELECT DISTINCT owner_id FROM @@.tasks
-             WHERE deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = $1 AND owner_id IS NOT NULL",
-            instance,
-        )
-        .await
-    }
-
-    /// Release one held task (auto_release) in its own transaction, team row first, only while
-    /// it is still held through `instance` (and by `owner` when given).
-    async fn release_one(&self, id: &str, owner: Option<&str>, instance: &str, now: i64, host: Option<&str>, reason: &str) -> Result<Option<Value>, String> {
-        let pool = self.ready().await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        let Some(seen) = self.load_task_by_id(&mut tx, id, false).await? else { return Ok(None) };
-        self.lock_team(&mut tx, &seen.team_uid).await?;
-        let Some(row) = self.load_task_by_id(&mut tx, id, true).await? else { return Ok(None) };
+    /// Release one held task (auto_release), team row first, only while it is still held
+    /// through `instance` (and by `owner` when given). None: nothing to release (no write).
+    async fn release_one(&self, c: &mut PgConnection, id: &str, owner: Option<&str>, instance: &str, now: i64, host: Option<&str>, reason: &str) -> Result<Option<Value>, StoreError> {
+        let Some(seen) = self.load_task_by_id(c, id, false).await? else { return Ok(None) };
+        self.lock_team(c, &seen.team_uid).await?;
+        let Some(row) = self.load_task_by_id(c, id, true).await? else { return Ok(None) };
         if !is_held(&row.state) || row.owner_instance.as_deref() != Some(instance) || owner.is_some_and(|o| row.owner_id.as_deref() != Some(o)) {
             return Ok(None);
         }
@@ -2202,7 +2356,7 @@ impl PgStore {
         .bind(&row.id)
         .bind(&row.state)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&mut *c)
         .await
         .map_err(|e| self.err(e))?
         .rows_affected();
@@ -2211,7 +2365,7 @@ impl PgStore {
         }
         let app = Actor::app(host);
         self.add_event(
-            &mut tx,
+            c,
             &row,
             now,
             &app,
@@ -2224,43 +2378,49 @@ impl PgStore {
             host,
         )
         .await?;
-        self.touch_team(&mut tx, &row.team_uid, now).await?;
-        tx.commit().await.map_err(|e| self.err(e))?;
+        self.touch_team(c, &row.team_uid, now).await?;
         Ok(Some(json!({ "team": row.team, "seq": row.seq, "title": row.title, "ownerId": row.owner_id, "from": row.state })))
     }
 
-    pub async fn release_owner(&self, instance: String, owner_id: String, now: i64, host: Option<String>, reason: String) -> Result<Value, String> {
-        let pool = self.ready().await?;
-        let ids: Vec<String> = sqlx::query_scalar(&self.s(
+    /// Ids of the tasks `owner_id` holds through `instance`.
+    async fn held_ids(&self, c: &mut PgConnection, instance: &str, owner_id: &str) -> Result<Vec<String>, StoreError> {
+        sqlx::query_scalar(&self.s(
             "SELECT id FROM @@.tasks WHERE deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_id = $1 AND owner_instance = $2",
         ))
-        .bind(&owner_id)
-        .bind(&instance)
-        .fetch_all(pool)
+        .bind(owner_id)
+        .bind(instance)
+        .fetch_all(&mut *c)
         .await
-        .map_err(|e| self.err(e))?;
+        .map_err(|e| self.err(e))
+    }
+
+    /// auto_release every task `owner_id` holds through `instance`, all in the caller's
+    /// transaction (the store's own path gives each task its own transaction and retries it).
+    /// Each release locks its task's team row, then the task, in the order the tasks are found;
+    /// a deadlock with another writer is `Busy`: retry the whole transaction.
+    pub async fn release_owner(&self, c: &mut PgConnection, instance: &str, owner_id: &str, now: i64, host: Option<&str>, reason: &str) -> Result<Value, StoreError> {
         let mut released = Vec::new();
-        for id in ids {
-            if let Some(v) = retrying!(self, self.release_one(&id, Some(&owner_id), &instance, now, host.as_deref(), &reason))? {
+        for id in self.held_ids(c, instance, owner_id).await? {
+            if let Some(v) = self.release_one(c, &id, Some(owner_id), instance, now, host, reason).await? {
                 released.push(v);
             }
         }
         Ok(json!({ "released": released }))
     }
-
-    pub async fn lease_holders(&self, instance: String) -> Result<Vec<String>, String> {
-        let mut c = self.ready().await?.acquire().await.map_err(|e| self.err(e))?;
-        self.holders(&mut c, &instance).await
+    /// Owner tabs of `instance` that still hold tasks.
+    pub async fn lease_holders(&self, c: &mut PgConnection, instance: &str) -> Result<Vec<String>, StoreError> {
+        self.holders(c, instance).await
     }
 
-    pub async fn held_on_host(&self, host: String) -> Result<Vec<Value>, String> {
+    /// Tasks held (claimed or blocked) by tabs on `host`, by team and number.
+    pub async fn held_on_host(&self, c: &mut PgConnection, host: &str) -> Result<Vec<Value>, StoreError> {
         let rows = sqlx::query(&self.s(
             "SELECT t.id, tm.team, t.seq, t.state, t.owner_id, t.owner_name, t.owner_instance, t.lease_until, t.heartbeat_at
              FROM @@.tasks t JOIN @@.teams tm ON tm.uid = t.team_uid
              WHERE t.deleted_at IS NULL AND t.state IN ('claimed','blocked') AND t.owner_host = $1 ORDER BY tm.team, t.seq",
         ))
-        .bind(&host)
-        .fetch_all(self.ready().await?)
+        .bind(host)
+        .fetch_all(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         rows.iter()
@@ -2281,38 +2441,47 @@ impl PgStore {
             .map_err(|e| self.err(e))
     }
 
-    /// See sqlite::lease_apply. Adoptions are single guarded UPDATEs; each release is its own
-    /// transaction (team row first).
+    /// Adopt one held task for `instance` (a single guarded UPDATE); 1 when it was adopted.
+    async fn adopt_one(&self, c: &mut PgConnection, instance: &str, a: &LeaseItem, now: i64, lease: i64) -> Result<u64, StoreError> {
+        Ok(sqlx::query(&self.s(
+            "UPDATE @@.tasks SET owner_instance = $2, lease_until = $3, heartbeat_at = $4, row_version = row_version + 1
+             WHERE id = $1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = $5",
+        ))
+        .bind(&a.id)
+        .bind(instance)
+        .bind(now + lease_ms(Some(lease)))
+        .bind(now)
+        .bind(&a.instance)
+        .execute(&mut *c)
+        .await
+        .map_err(|e| self.err(e))?
+        .rows_affected())
+    }
+
+    /// The reason recorded on a task released because its owner tab did not come back.
+    const NOT_BACK: &'static str = "owner tab did not come back after the app restarted";
+
+    /// See sqlite::lease_apply, all in the caller's transaction (the store's own path runs each
+    /// adoption as its own statement and each release in its own transaction). Releases lock
+    /// team row, then task, in list order; a deadlock is `Busy`: retry the whole transaction.
+    #[allow(clippy::too_many_arguments)]
     pub async fn lease_apply(
         &self,
-        instance: String,
-        adopt: Vec<LeaseItem>,
-        release: Vec<LeaseItem>,
+        c: &mut PgConnection,
+        instance: &str,
+        adopt: &[LeaseItem],
+        release: &[LeaseItem],
         now: i64,
         lease: i64,
-        host: Option<String>,
-    ) -> Result<Value, String> {
-        let pool = self.ready().await?;
+        host: Option<&str>,
+    ) -> Result<Value, StoreError> {
         let mut adopted = 0u64;
-        for a in &adopt {
-            adopted += sqlx::query(&self.s(
-                "UPDATE @@.tasks SET owner_instance = $2, lease_until = $3, heartbeat_at = $4, row_version = row_version + 1
-                 WHERE id = $1 AND deleted_at IS NULL AND state IN ('claimed','blocked') AND owner_instance = $5",
-            ))
-            .bind(&a.id)
-            .bind(&instance)
-            .bind(now + lease_ms(Some(lease)))
-            .bind(now)
-            .bind(&a.instance)
-            .execute(pool)
-            .await
-            .map_err(|e| self.err(e))?
-            .rows_affected();
+        for a in adopt {
+            adopted += self.adopt_one(c, instance, a, now, lease).await?;
         }
         let mut released = Vec::new();
-        for r in &release {
-            let reason = "owner tab did not come back after the app restarted";
-            if let Some(v) = retrying!(self, self.release_one(&r.id, None, &r.instance, now, host.as_deref(), reason))? {
+        for r in release {
+            if let Some(v) = self.release_one(c, &r.id, None, &r.instance, now, host, Self::NOT_BACK).await? {
                 released.push(v);
             }
         }
@@ -2322,38 +2491,24 @@ impl PgStore {
     // ── Settings: counts, copy ───────────────────────────────────────────
 
     /// Live teams, posts and tasks (status line).
-    pub async fn counts(&self) -> Result<Value, String> {
+    pub async fn counts(&self, c: &mut PgConnection) -> Result<Value, StoreError> {
         let (teams, posts, tasks): (i64, i64, i64) = sqlx::query_as(&self.s(
             "SELECT (SELECT count(*) FROM @@.teams WHERE deleted_at IS NULL),
                     (SELECT count(*) FROM @@.posts WHERE deleted_at IS NULL),
                     (SELECT count(*) FROM @@.tasks WHERE deleted_at IS NULL)",
         ))
-        .fetch_one(self.ready().await?)
+        .fetch_one(&mut *c)
         .await
         .map_err(|e| self.err(e))?;
         Ok(json!({ "teams": teams, "posts": posts, "tasks": tasks }))
     }
 
-    fn select_sql(&self, table: &str, cols: Cols) -> String {
-        let list = copy::col_list(cols);
-        let filter = match table {
-            "teams" => "deleted_at IS NULL",
-            "cursors" => "team_uid IN (SELECT uid FROM @@.teams WHERE deleted_at IS NULL)",
-            _ => "deleted_at IS NULL AND team_uid IN (SELECT uid FROM @@.teams WHERE deleted_at IS NULL)",
-        };
-        // Posts in read order (see sqlite::select_sql).
-        let order = if table == "posts" { " ORDER BY team_uid, arrival, seq" } else { "" };
-        self.s(&format!("SELECT {list} FROM @@.{table} WHERE {filter}{order}"))
-    }
-
-    /// Every live row of every live team (Copy data).
-    pub async fn export_dump(&self) -> Result<Dump, String> {
-        let pool = self.ready().await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.err(e))?;
+    /// Every live row of every live team (Copy data). `PgStore` reads it in one REPEATABLE READ
+    /// READ ONLY snapshot; a caller wanting one snapshot starts its transaction so.
+    pub async fn export_dump(&self, c: &mut PgConnection) -> Result<Dump, StoreError> {
         let mut dump = Dump::default();
         for (table, cols) in copy::TABLES {
-            let rows = sqlx::query(&self.select_sql(table, cols)).fetch_all(&mut *tx).await.map_err(|e| self.err(e))?;
+            let rows = sqlx::query(&self.select_sql(table, cols)).fetch_all(&mut *c).await.map_err(|e| self.err(e))?;
             let out = dump.rows_mut(table);
             for r in &rows {
                 let mut cells = Vec::with_capacity(cols.len());
@@ -2366,40 +2521,37 @@ impl PgStore {
                 out.push(cells);
             }
         }
-        tx.commit().await.map_err(|e| self.err(e))?;
         Ok(dump)
     }
 
     /// Insert a dump (Copy data): refused unless the board has no live team or `merge` is set;
     /// teams it already has are skipped, tombstoned teams in the way are removed for good.
     /// One transaction; rows go in multi-row INSERTs of up to IMPORT_CHUNK rows.
-    pub async fn import_dump(&self, dump: Dump, merge: bool) -> Result<Value, String> {
-        let pool = self.ready().await?;
-        let mut tx = pool.begin().await.map_err(|e| self.err(e))?;
+    pub async fn import_dump(&self, c: &mut PgConnection, dump: Dump, merge: bool) -> Result<Value, StoreError> {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("bbarit-board-copy:{}", self.target.schema))
-            .execute(&mut *tx)
+            .bind(format!("bbarit-board-copy:{}", self.schema))
+            .execute(&mut *c)
             .await
             .map_err(|e| self.err(e))?;
         let mut existing = copy::Existing::default();
         let rows: Vec<(String, String, Option<String>, bool)> =
             sqlx::query_as(&self.s("SELECT uid, team, home_host, deleted_at IS NOT NULL FROM @@.teams"))
-                .fetch_all(&mut *tx)
+                .fetch_all(&mut *c)
                 .await
                 .map_err(|e| self.err(e))?;
         for (uid, team, host, dead) in rows {
             existing.add(uid, team, host, dead);
         }
-        let copy::Plan { dump: plan, skipped, purge } = copy::plan(dump, &existing, merge)?;
+        let copy::Plan { dump: plan, skipped, purge } = copy::plan(dump, &existing, merge).map_err(StoreError::Conflict)?;
         if !purge.is_empty() {
             for table in copy::PURGE_TABLES {
                 sqlx::query(&self.s(&format!("DELETE FROM @@.{table} WHERE team_uid = ANY($1)")))
                     .bind(&purge)
-                    .execute(&mut *tx)
+                    .execute(&mut *c)
                     .await
                     .map_err(|e| self.err(e))?;
             }
-            sqlx::query(&self.s("DELETE FROM @@.teams WHERE uid = ANY($1)")).bind(&purge).execute(&mut *tx).await.map_err(|e| self.err(e))?;
+            sqlx::query(&self.s("DELETE FROM @@.teams WHERE uid = ANY($1)")).bind(&purge).execute(&mut *c).await.map_err(|e| self.err(e))?;
         }
         let mut arrivals = copy::ArrivalMap::default();
         for (table, cols) in copy::TABLES {
@@ -2413,7 +2565,7 @@ impl PgStore {
                     // export's read order (the values of one call sort in allocation order).
                     let mut fresh: Vec<i64> = sqlx::query_scalar(&self.s("SELECT nextval('@@.board_arrival_seq') FROM generate_series(1, $1)"))
                         .bind(rows.len() as i64)
-                        .fetch_all(&mut *tx)
+                        .fetch_all(&mut *c)
                         .await
                         .map_err(|e| self.err(e))?;
                     fresh.sort_unstable();
@@ -2456,13 +2608,606 @@ impl PgStore {
                         };
                     }
                 }
-                q.execute(&mut *tx).await.map_err(|e| self.err(e))?;
+                q.execute(&mut *c).await.map_err(|e| self.err(e))?;
             }
         }
-        tx.commit().await.map_err(|e| self.err(e))?;
         Ok(copy::summary(&plan, &skipped))
     }
 }
+
+impl PgStore {
+    /// A store on `target` with its own pool (at most 5 connections, 5 s to connect);
+    /// `app_version` is the version of the program using it (recorded on the server).
+    pub fn new(target: PgTarget, app_version: &str) -> Self {
+        Self::with_limits(target, Limits::default(), app_version)
+    }
+
+    pub fn with_limits(target: PgTarget, limits: Limits, app_version: &str) -> Self {
+        let prefix = format!("{}.", quote_ident(&target.schema));
+        let ops = PgOps::for_target(&target, limits);
+        PgStore {
+            target,
+            prefix,
+            ops,
+            pool: OnceCell::new(),
+            owns_pool: true,
+            ready: AtomicBool::new(false),
+            app_version: app_version.to_string(),
+        }
+    }
+
+    /// A store on the caller's pool (a server sharing one pool between the store and its own
+    /// work): no second pool is created, the pool's own limits and timeouts apply, and `close`
+    /// leaves it open. The schema version is checked on the first command, as with `new`.
+    /// The store's own pool sets `statement_timeout` (5 s) and `application_name`
+    /// (`bbarit-board`) on every session; give the caller's pool the same (its
+    /// `PgConnectOptions::options` / `application_name`), or a stuck statement holds the team
+    /// lock and the shared `server_seq` lock without limit. Pass the password and URL to
+    /// `with_secrets` so error text is scrubbed as with the store's own pool.
+    pub fn from_pool(pool: PgPool, schema: &str, limits: Limits, app_version: &str) -> Result<Self, StoreError> {
+        check_schema_name(schema).map_err(StoreError::Invalid)?;
+        let opts = pool.connect_options();
+        let label = format!(
+            "{}@{}:{}/{}",
+            opts.get_username(),
+            opts.get_host(),
+            opts.get_port(),
+            opts.get_database().unwrap_or(opts.get_username())
+        );
+        let target = PgTarget {
+            opts: (*opts).clone(),
+            schema: schema.to_string(),
+            label,
+            from_env: false,
+            secrets: Vec::new(),
+            host: opts.get_host().to_string(),
+        };
+        let mut store = Self::with_limits(target, limits, app_version);
+        store.ops.acquire_secs = pool.options().get_acquire_timeout().as_secs();
+        store.pool = OnceCell::new_with(Some(pool));
+        store.owns_pool = false;
+        Ok(store)
+    }
+
+    /// Values (password, connection URL) to scrub from error text (see `PgOps::with_secrets`);
+    /// for a store made with `from_pool`.
+    pub fn with_secrets(mut self, secrets: Vec<String>) -> Self {
+        self.target.secrets = secrets.clone();
+        self.ops.secrets = secrets;
+        self
+    }
+
+    /// The operations on a caller's connection, with this store's schema and limits.
+    pub fn ops(&self) -> &PgOps {
+        &self.ops
+    }
+
+    /// The pool this store uses, once it exists (always for `from_pool`).
+    pub fn pool_handle(&self) -> Option<&PgPool> {
+        self.pool.get()
+    }
+
+    /// SQL text with every `@@.` replaced by the quoted schema.
+    fn s(&self, sql: &str) -> String {
+        sql.replace("@@.", &self.prefix)
+    }
+
+    fn err(&self, e: sqlx::Error) -> String {
+        if matches!(e, sqlx::Error::PoolTimedOut) {
+            return unavailable(format!("cannot reach the PostgreSQL server ({}) within {} s", self.target.label, self.ops.acquire_secs));
+        }
+        let retry = matches!(&e, sqlx::Error::Database(d) if matches!(d.code().as_deref(), Some("40P01" | "40001")));
+        let msg = self.target.redact(&e.to_string());
+        if retry {
+            format!("{RETRY}{msg}")
+        } else {
+            unavailable(msg)
+        }
+    }
+
+    async fn pool(&self) -> Result<&PgPool, StoreError> {
+        self.pool
+            .get_or_try_init(|| async {
+                Ok::<_, StoreError>(
+                    PgPoolOptions::new()
+                        .max_connections(5)
+                        .acquire_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+                        .idle_timeout(Duration::from_secs(300))
+                        .connect_lazy_with(self.target.opts.clone()),
+                )
+            })
+            .await
+    }
+
+    /// The pool, after the schema version was checked once (never creates anything).
+    async fn ready(&self) -> Result<&PgPool, StoreError> {
+        let pool = self.pool().await?;
+        if !self.ready.load(Ordering::SeqCst) {
+            let mut c = pool.acquire().await.map_err(|e| self.ops.err(e))?;
+            let stored = self.ops.schema_version(&mut c).await?;
+            version_check(stored, &self.target.schema, SCHEMA_VERSION).map_err(|m| StoreError::Unavailable(unavailable(m)))?;
+            self.ready.store(true, Ordering::SeqCst);
+        }
+        Ok(pool)
+    }
+
+    /// A pooled connection (autocommit), after the version check.
+    async fn conn(&self) -> Result<PoolConnection<Postgres>, StoreError> {
+        self.ready().await?.acquire().await.map_err(|e| self.ops.err(e))
+    }
+
+    /// A transaction on the pool, after the version check.
+    async fn begin(&self) -> Result<Transaction<'static, Postgres>, StoreError> {
+        self.ready().await?.begin().await.map_err(|e| self.ops.err(e))
+    }
+
+    /// A REPEATABLE READ READ ONLY transaction (one snapshot for counts and rows).
+    async fn snapshot(&self) -> Result<Transaction<'static, Postgres>, StoreError> {
+        let mut tx = self.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").execute(&mut *tx).await.map_err(|e| self.ops.err(e))?;
+        Ok(tx)
+    }
+
+    async fn commit(&self, tx: Transaction<'static, Postgres>) -> Result<(), StoreError> {
+        tx.commit().await.map_err(|e| self.ops.err(e))
+    }
+
+    /// `board_meta.schema_version`, or None when the schema has no board tables.
+    async fn stored_version(&self, c: &mut PgConnection) -> Result<Option<i64>, String> {
+        self.ops.schema_version(c).await.map_err(String::from)
+    }
+
+    /// Board table names that already exist in a schema without `board_meta` (someone else's
+    /// tables): the migration must not attach indexes and triggers to them.
+    async fn foreign_tables(&self, c: &mut PgConnection) -> Result<Vec<String>, String> {
+        self.ops.foreign_tables(c).await.map_err(String::from)
+    }
+
+    async fn refuse_foreign(&self, c: &mut PgConnection, stored: Option<i64>) -> Result<(), String> {
+        self.ops.refuse_foreign(c, stored).await.map_err(String::from)
+    }
+
+    /// Schema version stored in the database (None: no tables), for Settings.
+    pub async fn stored_schema_version(&self) -> Result<Option<i64>, String> {
+        let mut c = self.pool().await?.acquire().await.map_err(|e| self.err(e))?;
+        self.stored_version(&mut c).await
+    }
+
+    /// Create / upgrade the tables (Settings button only). `apply` false: only report what
+    /// would run. Refused when the database is newer than this app. Runs `CREATE SCHEMA IF NOT
+    /// EXISTS` first; a role that may not create schemas uses `migrate_on` on a schema it owns.
+    pub async fn migrate(&self, apply: bool) -> Result<Value, String> {
+        let pool = self.pool().await?;
+        let mut c = pool.acquire().await.map_err(|e| self.err(e))?;
+        let stored = self.stored_version(&mut c).await?;
+        self.refuse_foreign(&mut c, stored).await?;
+        let steps = migration_steps(&self.target.schema, stored)?;
+        let describe = |steps: &[Step]| -> Vec<Value> {
+            steps.iter().map(|s| json!({ "version": s.version, "description": s.description, "sql": s.sql })).collect()
+        };
+        let mut out = json!({
+            "schema": self.target.schema,
+            "from": stored,
+            "to": SCHEMA_VERSION,
+            "steps": describe(&steps),
+            "upToDate": steps.is_empty(),
+            "applied": false,
+        });
+        if apply && steps.is_empty() {
+            sqlx::query(&self.s("INSERT INTO @@.board_meta (key, value) VALUES ('server_uid', $1) ON CONFLICT (key) DO NOTHING"))
+                .bind(uuid::Uuid::new_v4().to_string())
+                .execute(&mut *c)
+                .await
+                .map_err(|e| self.err(e))?;
+        }
+        if !apply || steps.is_empty() {
+            return Ok(out);
+        }
+        let mut tx = c.begin().await.map_err(|e| self.err(e))?;
+        let (_, steps) = self.ops.migrate_locked(&mut tx, &self.app_version, true).await?;
+        tx.commit().await.map_err(|e| self.err(e))?;
+        self.ready.store(false, Ordering::SeqCst);
+        out["applied"] = json!(true);
+        out["steps"] = Value::Array(describe(&steps));
+        Ok(out)
+    }
+
+    /// Test connection for Settings: reachable, server version, TLS, schema and its version,
+    /// privileges and what to do next. Never fails; problems are in `error` / `next`.
+    pub async fn diagnose(target: &PgTarget, app_version: &str) -> Value {
+        let schema = target.schema.clone();
+        let mut out = json!({ "reachable": false, "target": target.label, "schema": schema, "codeVersion": SCHEMA_VERSION });
+        let conn = tokio::time::timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), PgConnection::connect_with(&target.opts)).await;
+        let mut c = match conn {
+            Err(_) => {
+                out["error"] = json!(format!("no answer from the server within {CONNECT_TIMEOUT_SECS} s"));
+                out["next"] = json!("check host, port and that the server accepts connections from this machine");
+                return out;
+            }
+            Ok(Err(e)) => {
+                out["error"] = json!(target.redact(&e.to_string()));
+                out["next"] = json!("check the connection fields, the password and the SSL mode");
+                return out;
+            }
+            Ok(Ok(c)) => c,
+        };
+        out["reachable"] = json!(true);
+        let store = PgStore::new(target.clone(), app_version);
+        let res: Result<(), String> = async {
+            let e = |e: sqlx::Error| target.redact(&e.to_string());
+            let version: String = sqlx::query_scalar("SHOW server_version").fetch_one(&mut c).await.map_err(e)?;
+            out["serverVersion"] = json!(version);
+            let tls: Option<bool> = sqlx::query_scalar("SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+                .fetch_optional(&mut c)
+                .await
+                .map_err(e)?;
+            out["tls"] = json!(tls.unwrap_or(false));
+            let (user, db): (String, String) =
+                sqlx::query_as("SELECT current_user::text, current_database()::text").fetch_one(&mut c).await.map_err(e)?;
+            out["user"] = json!(user);
+            out["database"] = json!(db);
+            let exists: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = $1)")
+                .bind(&schema)
+                .fetch_one(&mut c)
+                .await
+                .map_err(e)?;
+            out["schemaExists"] = json!(exists);
+            let can_create: bool = if exists {
+                sqlx::query_scalar("SELECT has_schema_privilege($1, 'CREATE')").bind(&schema).fetch_one(&mut c).await.map_err(e)?
+            } else {
+                sqlx::query_scalar("SELECT has_database_privilege(current_database(), 'CREATE')").fetch_one(&mut c).await.map_err(e)?
+            };
+            out["canCreate"] = json!(can_create);
+            let stored = store.stored_version(&mut c).await.map_err(clean_err)?;
+            out["schemaVersion"] = json!(stored);
+            let can_rw: Option<bool> = if stored.is_some() {
+                let mut all = true;
+                let outbox: &[&str] = if stored.is_some_and(|v| v >= 4) { &["outbox"] } else { &[] };
+                for t in ["teams", "posts", "cursors", "tasks", "task_deps", "task_events", "board_meta", "hosts"].iter().chain(outbox) {
+                    let ok: bool = sqlx::query_scalar("SELECT has_table_privilege($1, 'SELECT, INSERT, UPDATE, DELETE')")
+                        .bind(format!("{}{t}", store.prefix))
+                        .fetch_one(&mut c)
+                        .await
+                        .map_err(e)?;
+                    all &= ok;
+                }
+                // Writes also draw from the two sequences and fire the server_seq trigger.
+                for seq in ["board_server_seq", "board_arrival_seq"] {
+                    let ok: bool = sqlx::query_scalar("SELECT has_sequence_privilege($1, 'USAGE')")
+                        .bind(format!("{}{seq}", store.prefix))
+                        .fetch_one(&mut c)
+                        .await
+                        .map_err(e)?;
+                    all &= ok;
+                }
+                let ok: bool = sqlx::query_scalar("SELECT has_function_privilege($1, 'EXECUTE')")
+                    .bind(format!("{}board_set_server_seq()", store.prefix))
+                    .fetch_one(&mut c)
+                    .await
+                    .map_err(e)?;
+                all &= ok;
+                Some(all)
+            } else {
+                None
+            };
+            out["canReadWrite"] = json!(can_rw);
+            let foreign = if stored.is_none() { store.foreign_tables(&mut c).await.map_err(clean_err)? } else { Vec::new() };
+            out["foreignTables"] = json!(foreign);
+            let next = match stored {
+                Some(v) if v > SCHEMA_VERSION => "this database was set up by a newer app version: update the app".to_string(),
+                None if !foreign.is_empty() => foreign_message(&schema, &foreign),
+                None if can_create => "press Create / upgrade tables".to_string(),
+                None => format!("this user cannot create tables here: ask the database owner to create schema {schema} or grant CREATE"),
+                Some(v) if v < SCHEMA_VERSION => format!("press Create / upgrade tables (version {v} → {SCHEMA_VERSION})"),
+                Some(_) if can_rw == Some(false) => {
+                    "this user cannot write the board tables: ask for SELECT, INSERT, UPDATE and DELETE on them (hosts and outbox included), USAGE on board_server_seq and board_arrival_seq, and EXECUTE on board_set_server_seq()".to_string()
+                }
+                Some(_) => "ready: choose \"PostgreSQL only\" as the usage type; to bring the boards of this computer, use Copy data from this computer (SQLite) to PostgreSQL first".to_string(),
+            };
+            out["next"] = json!(next);
+            Ok(())
+        }
+        .await;
+        if let Err(e) = res {
+            out["error"] = json!(e);
+        }
+        let _ = c.close().await;
+        out
+    }
+}
+
+// ── The store's own transactions (thin wrappers over `PgOps`) ────────────
+//
+// Each command: the pure input checks first (as before), then a connection or transaction from
+// the store's pool, the `PgOps` operation, commit. Deadlocks and serialization failures retry
+// the whole transaction up to 3 times. Errors keep their texts (`StoreError` → `String`).
+
+impl PgStore {
+    pub async fn post(&self, team: String, input: PostInput, ctx: Ctx) -> Result<Value, String> {
+        retrying!(self.post_tx(&team, &input, &ctx)).map_err(String::from)
+    }
+
+    async fn post_tx(&self, team: &str, input: &PostInput, ctx: &Ctx) -> Result<Value, StoreError> {
+        PostSpec::check(team, input)?;
+        let mut tx = self.begin().await?;
+        let out = self.ops.post(&mut tx, team, input, ctx).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// See sqlite::read. A `--new` read holds the team row FOR SHARE, so no post lands between
+    /// the rows it returns and the cursor it stores; a plain read is one REPEATABLE READ READ
+    /// ONLY snapshot.
+    pub async fn read(&self, team: String, q: ReadQuery, host: Option<String>) -> Result<Value, String> {
+        retrying!(self.read_tx(&team, &q, host.as_deref())).map_err(String::from)
+    }
+
+    async fn read_tx(&self, team: &str, q: &ReadQuery, host: Option<&str>) -> Result<Value, StoreError> {
+        let spec = ReadSpec::check(team, q)?;
+        let mut tx = if spec.cursor_tab.is_some() { self.begin().await? } else { self.snapshot().await? };
+        let out = self.ops.read(&mut tx, team, q, host).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    pub async fn teams(&self) -> Result<Vec<Value>, String> {
+        let mut c = self.conn().await?;
+        Ok(self.ops.teams(&mut c).await?)
+    }
+
+    pub async fn clear(&self, team: String, ctx: Ctx) -> Result<Value, String> {
+        retrying!(self.clear_tx(&team, &ctx)).map_err(String::from)
+    }
+
+    async fn clear_tx(&self, team: &str, ctx: &Ctx) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        let mut tx = self.begin().await?;
+        let out = self.ops.clear(&mut tx, team, ctx).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// How many teams "Clean up old teams" would retire now (nothing is changed).
+    pub async fn stale_count(&self, now: i64, max_age_ms: i64) -> Result<i64, String> {
+        let mut c = self.conn().await?;
+        Ok(self.ops.stale_count(&mut c, now, max_age_ms).await?)
+    }
+
+    /// "Clean up old teams" (Settings; never automatic on a shared server): tombstone every
+    /// team idle for `max_age_ms` with its posts, tasks, dependencies and events (cursors go),
+    /// then remove tombstones older than TOMBSTONE_RETENTION_MS. One transaction per team.
+    pub async fn prune_stale(&self, now: i64, max_age_ms: i64) -> Result<usize, String> {
+        Ok(self.prune_stale_tx(now, max_age_ms).await?)
+    }
+
+    async fn prune_stale_tx(&self, now: i64, max_age_ms: i64) -> Result<usize, StoreError> {
+        let cutoff = now - max_age_ms;
+        let candidates = {
+            let mut c = self.conn().await?;
+            self.ops.stale_candidates(&mut c, cutoff).await?
+        };
+        let mut retired = 0usize;
+        for uid in &candidates {
+            let mut tx = self.begin().await?;
+            if !self.ops.retire_team(&mut tx, uid, cutoff, now).await? {
+                continue;
+            }
+            self.commit(tx).await?;
+            retired += 1;
+        }
+        let mut tx = self.begin().await?;
+        self.ops.purge_tombstones(&mut tx, now).await?;
+        self.commit(tx).await?;
+        Ok(retired)
+    }
+
+    pub async fn task_write(&self, team: String, op: TaskOpInput, actor: Actor, ctx: Ctx) -> Result<Value, String> {
+        retrying!(self.task_write_tx(&team, &op, &actor, &ctx)).map_err(String::from)
+    }
+
+    /// One task write (see sqlite::task_write): the team row locked first, lazy lease expiry,
+    /// the rule check, a guarded UPDATE and the event, all in one transaction.
+    async fn task_write_tx(&self, team: &str, op: &TaskOpInput, actor: &Actor, ctx: &Ctx) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        let name = op.op.trim();
+        if name == "add" {
+            AddSpec::check(op)?;
+        } else {
+            WriteSpec::check(name, op)?;
+        }
+        let mut tx = self.begin().await?;
+        let out = self.ops.task_write(&mut tx, team, op, actor, ctx).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// Expire leases of one team in its own short write transaction, only when some ran out.
+    async fn expire_if_needed_tx(&self, uid: &str, now: i64, host: Option<&str>) -> Result<Vec<Value>, StoreError> {
+        let n = {
+            let mut c = self.conn().await?;
+            self.ops.expired_count(&mut c, uid, now).await?
+        };
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.begin().await?;
+        let out = self.ops.expire_locked(&mut tx, uid, now, host).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    pub async fn task_list(&self, team: String, q: TaskListQuery, ctx: Ctx) -> Result<Value, String> {
+        retrying!(self.task_list_tx(&team, &q, &ctx)).map_err(String::from)
+    }
+
+    async fn task_list_tx(&self, team: &str, q: &TaskListQuery, ctx: &Ctx) -> Result<Value, StoreError> {
+        let spec = ListSpec::check(team, q)?;
+        let team_ref = {
+            let mut c = self.conn().await?;
+            match self.ops.find_team(&mut c, team, ctx.host.as_deref(), Lock::None).await? {
+                Some(t) => t,
+                None => return Ok(PgOps::no_tasks(team)),
+            }
+        };
+        let expired = self.expire_if_needed_tx(&team_ref.uid, ctx.now, ctx.host.as_deref()).await?;
+        let mut tx = self.snapshot().await?;
+        let out = self.ops.task_list_rows(&mut tx, team, spec, team_ref, expired, ctx.now).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    pub async fn task_show(&self, team: String, seq: i64, history: bool, stale: Option<i64>, ctx: Ctx) -> Result<Value, String> {
+        retrying!(self.task_show_tx(&team, seq, history, stale, &ctx)).map_err(String::from)
+    }
+
+    async fn task_show_tx(&self, team: &str, seq: i64, history: bool, stale: Option<i64>, ctx: &Ctx) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        let team_ref = {
+            let mut c = self.conn().await?;
+            self.ops.show_team(&mut c, team, seq, ctx).await?
+        };
+        let expired = self.expire_if_needed_tx(&team_ref.uid, ctx.now, ctx.host.as_deref()).await?;
+        let mut tx = self.snapshot().await?;
+        let out = self.ops.task_show_rows(&mut tx, team, &team_ref.uid, seq, history, stale, expired, ctx.now).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// See sqlite::team_events (one REPEATABLE READ READ ONLY snapshot).
+    pub async fn team_events(&self, team: String, q: EventsQuery, host: Option<String>) -> Result<Value, String> {
+        retrying!(self.team_events_tx(&team, &q, host.as_deref())).map_err(String::from)
+    }
+
+    async fn team_events_tx(&self, team: &str, q: &EventsQuery, host: Option<&str>) -> Result<Value, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
+        let mut tx = self.snapshot().await?;
+        let out = self.ops.team_events(&mut tx, team, q, host).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// See sqlite::lease_tick (only the lease columns change; no team lock needed).
+    pub async fn lease_tick(&self, instance: String, alive: Vec<String>, now: i64, lease: i64) -> Result<Value, String> {
+        Ok(self.lease_tick_tx(&instance, &alive, now, lease).await?)
+    }
+
+    async fn lease_tick_tx(&self, instance: &str, alive: &[String], now: i64, lease: i64) -> Result<Value, StoreError> {
+        let mut tx = self.begin().await?;
+        let out = self.ops.lease_tick(&mut tx, instance, alive, now, lease).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+
+    /// Release one held task (auto_release) in its own transaction, team row first, only while
+    /// it is still held through `instance` (and by `owner` when given).
+    async fn release_one_tx(&self, id: &str, owner: Option<&str>, instance: &str, now: i64, host: Option<&str>, reason: &str) -> Result<Option<Value>, StoreError> {
+        let mut tx = self.begin().await?;
+        let out = self.ops.release_one(&mut tx, id, owner, instance, now, host, reason).await?;
+        if out.is_some() {
+            self.commit(tx).await?;
+        }
+        Ok(out)
+    }
+
+    pub async fn release_owner(&self, instance: String, owner_id: String, now: i64, host: Option<String>, reason: String) -> Result<Value, String> {
+        Ok(self.release_owner_tx(&instance, &owner_id, now, host.as_deref(), &reason).await?)
+    }
+
+    async fn release_owner_tx(&self, instance: &str, owner_id: &str, now: i64, host: Option<&str>, reason: &str) -> Result<Value, StoreError> {
+        let ids = {
+            let mut c = self.conn().await?;
+            self.ops.held_ids(&mut c, instance, owner_id).await?
+        };
+        let mut released = Vec::new();
+        for id in ids {
+            if let Some(v) = retrying!(self.release_one_tx(&id, Some(owner_id), instance, now, host, reason))? {
+                released.push(v);
+            }
+        }
+        Ok(json!({ "released": released }))
+    }
+
+    pub async fn lease_holders(&self, instance: String) -> Result<Vec<String>, String> {
+        let mut c = self.conn().await?;
+        Ok(self.ops.lease_holders(&mut c, &instance).await?)
+    }
+
+    pub async fn held_on_host(&self, host: String) -> Result<Vec<Value>, String> {
+        let mut c = self.conn().await?;
+        Ok(self.ops.held_on_host(&mut c, &host).await?)
+    }
+
+    /// See sqlite::lease_apply. Adoptions are single guarded UPDATEs; each release is its own
+    /// transaction (team row first).
+    pub async fn lease_apply(
+        &self,
+        instance: String,
+        adopt: Vec<LeaseItem>,
+        release: Vec<LeaseItem>,
+        now: i64,
+        lease: i64,
+        host: Option<String>,
+    ) -> Result<Value, String> {
+        Ok(self.lease_apply_tx(&instance, &adopt, &release, now, lease, host.as_deref()).await?)
+    }
+
+    async fn lease_apply_tx(
+        &self,
+        instance: &str,
+        adopt: &[LeaseItem],
+        release: &[LeaseItem],
+        now: i64,
+        lease: i64,
+        host: Option<&str>,
+    ) -> Result<Value, StoreError> {
+        let pool = self.ready().await?;
+        let mut adopted = 0u64;
+        for a in adopt {
+            let mut c = pool.acquire().await.map_err(|e| self.ops.err(e))?;
+            adopted += self.ops.adopt_one(&mut c, instance, a, now, lease).await?;
+        }
+        let mut released = Vec::new();
+        for r in release {
+            if let Some(v) = retrying!(self.release_one_tx(&r.id, None, &r.instance, now, host, PgOps::NOT_BACK))? {
+                released.push(v);
+            }
+        }
+        Ok(json!({ "adopted": adopted, "released": released }))
+    }
+
+    /// Live teams, posts and tasks (status line).
+    pub async fn counts(&self) -> Result<Value, String> {
+        let mut c = self.conn().await?;
+        Ok(self.ops.counts(&mut c).await?)
+    }
+
+    /// Every live row of every live team (Copy data), from one snapshot.
+    pub async fn export_dump(&self) -> Result<Dump, String> {
+        Ok(self.export_dump_tx().await?)
+    }
+
+    async fn export_dump_tx(&self) -> Result<Dump, StoreError> {
+        let mut tx = self.snapshot().await?;
+        let dump = self.ops.export_dump(&mut tx).await?;
+        self.commit(tx).await?;
+        Ok(dump)
+    }
+
+    /// Insert a dump (Copy data): refused unless the board has no live team or `merge` is set;
+    /// teams it already has are skipped, tombstoned teams in the way are removed for good.
+    /// One transaction; rows go in multi-row INSERTs of up to IMPORT_CHUNK rows.
+    pub async fn import_dump(&self, dump: Dump, merge: bool) -> Result<Value, String> {
+        Ok(self.import_dump_tx(dump, merge).await?)
+    }
+
+    async fn import_dump_tx(&self, dump: Dump, merge: bool) -> Result<Value, StoreError> {
+        let mut tx = self.begin().await?;
+        let out = self.ops.import_dump(&mut tx, dump, merge).await?;
+        self.commit(tx).await?;
+        Ok(out)
+    }
+}
+
 
 // ── Sync (stage 3b; the orchestration lives in sync.rs) ─────────────────
 
@@ -2505,8 +3250,11 @@ fn bind_cells<'q>(
 }
 
 impl PgStore {
-    /// Close the pool (sync stopped or its server changed).
+    /// Close the pool (sync stopped or its server changed); a caller's pool (`from_pool`) stays open.
     pub async fn close(&self) {
+        if !self.owns_pool {
+            return;
+        }
         if let Some(p) = self.pool.get() {
             p.close().await;
         }

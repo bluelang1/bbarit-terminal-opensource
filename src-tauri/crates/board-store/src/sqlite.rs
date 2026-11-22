@@ -443,6 +443,43 @@ fn migrate(conn: &mut Connection, now: i64, host: &str, app_version: &str) -> ru
     tx.commit()
 }
 
+/// Put the file in WAL mode (a no-op once it is). Switching a new file is a read that upgrades
+/// to a write inside one statement, and SQLite never runs the busy handler for such an
+/// upgrade: while another connection opens the same new file, the switch fails at once with
+/// "database is locked" instead of waiting. So a busy switch is retried here, re-reading the
+/// mode each time (the other connection usually switched it), within the same 5 s that
+/// busy_timeout gives every other statement (one deadline for all attempts). A switch that
+/// answers with another mode (SQLite refused it without an error) is retried the same way;
+/// after the deadline the file stays in its mode, as before this retry existed.
+fn switch_to_wal(conn: &Connection) -> rusqlite::Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut pause = 2u64;
+    loop {
+        let attempt = conn.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).and_then(|mode| {
+            if mode.eq_ignore_ascii_case("wal") {
+                Ok(true)
+            } else {
+                conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0)).map(|m| m.eq_ignore_ascii_case("wal"))
+            }
+        });
+        let now = std::time::Instant::now();
+        match attempt {
+            Ok(true) => return Ok(()),
+            Ok(false) if now >= deadline => {
+                #[cfg(debug_assertions)]
+                eprintln!("agent board: the board file did not switch to WAL mode; it keeps its journal mode");
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) && now < deadline => {}
+            Err(e) => return Err(e),
+        }
+        std::thread::sleep(Duration::from_millis(pause).min(deadline.saturating_duration_since(now)));
+        pause = (pause * 2).min(50);
+    }
+}
+
 /// Open (creating when missing) and migrate the board database at `path`; `host` names this
 /// machine in a migration (the home of teams the file already had), `app_version` is recorded
 /// as `created_by_app_version` in a new file.
@@ -459,10 +496,7 @@ pub fn open_db(path: &Path, host: &str, app_version: &str) -> Result<Connection,
             "database is from a newer app version (schema {version}, this app knows {SCHEMA_VERSION})"
         )));
     }
-    let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0)).map_err(unavailable)?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0)).map_err(unavailable)?;
-    }
+    switch_to_wal(&conn).map_err(unavailable)?;
     if version < SCHEMA_VERSION {
         migrate(&mut conn, now_ms(), host, app_version).map_err(unavailable)?;
     }

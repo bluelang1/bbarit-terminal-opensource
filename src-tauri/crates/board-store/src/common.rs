@@ -2,6 +2,7 @@
 //! the done-note text and the input checks every write runs before it touches a database.
 //! Keeping them here makes the SQLite and PostgreSQL stores differ only in SQL.
 
+use super::error::StoreError;
 use super::model::*;
 use serde_json::{json, Value};
 
@@ -197,17 +198,17 @@ pub struct PostSpec {
 }
 
 impl PostSpec {
-    pub fn check(team: &str, input: &PostInput) -> Result<PostSpec, String> {
-        check_team(team)?;
+    pub fn check(team: &str, input: &PostInput) -> Result<PostSpec, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
         let kind = input.kind.trim().to_ascii_lowercase();
         if !POST_KINDS.contains(&kind.as_str()) {
-            return Err(format!("invalid kind: {} ({})", input.kind, POST_KINDS.join("|")));
+            return Err(StoreError::Invalid(format!("invalid kind: {} ({})", input.kind, POST_KINDS.join("|"))));
         }
         if kind == "announce" && !input.root {
-            return Err("only the team's root tab can post an announcement (--kind announce)".to_string());
+            return Err(StoreError::Forbidden("only the team's root tab can post an announcement (--kind announce)".to_string()));
         }
-        let text = clean_text(&input.text)?;
-        let author_id = clean_label(Some(&input.author_id), 256).ok_or_else(|| "author required".to_string())?;
+        let text = clean_text(&input.text).map_err(StoreError::Invalid)?;
+        let author_id = clean_label(Some(&input.author_id), 256).ok_or_else(|| StoreError::Invalid("author required".to_string()))?;
         Ok(PostSpec {
             kind,
             text,
@@ -235,29 +236,29 @@ pub struct ReadSpec {
 }
 
 impl ReadSpec {
-    pub fn check(team: &str, q: &ReadQuery) -> Result<ReadSpec, String> {
-        check_team(team)?;
+    pub fn check(team: &str, q: &ReadQuery) -> Result<ReadSpec, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
         let limit = q.limit.unwrap_or(DEFAULT_READ_LIMIT).clamp(1, MAX_READ_LIMIT);
         let kind = non_empty(&q.kind).map(|k| k.to_ascii_lowercase());
         if let Some(k) = &kind {
             if !POST_KINDS.contains(&k.as_str()) {
-                return Err(format!("invalid kind: {k} ({})", POST_KINDS.join("|")));
+                return Err(StoreError::Invalid(format!("invalid kind: {k} ({})", POST_KINDS.join("|"))));
             }
         }
         let author = non_empty(&q.author);
         let search = non_empty(&q.search);
         if let Some(s) = &search {
             if s.chars().count() > MAX_SEARCH_CHARS {
-                return Err(format!("search text too long (max {MAX_SEARCH_CHARS} characters)"));
+                return Err(StoreError::Invalid(format!("search text too long (max {MAX_SEARCH_CHARS} characters)")));
             }
         }
         let exclude = non_empty(&q.exclude_author);
         let cursor_tab = non_empty(&q.cursor_tab);
         if cursor_tab.as_deref().is_some_and(|t| !valid_team_id(t)) {
-            return Err("invalid read cursor tab id (expected 1-128 characters of A-Z a-z 0-9 _ -)".to_string());
+            return Err(StoreError::Invalid("invalid read cursor tab id (expected 1-128 characters of A-Z a-z 0-9 _ -)".to_string()));
         }
         if cursor_tab.is_some() && (kind.is_some() || author.is_some() || search.is_some() || q.since.is_some()) {
-            return Err(NEW_WITH_FILTER_ERROR.to_string());
+            return Err(StoreError::Invalid(NEW_WITH_FILTER_ERROR.to_string()));
         }
         let pinned = cursor_tab.is_none() && kind.is_none() && author.is_none() && search.is_none();
         let pattern = search.as_deref().map(like_pattern);
@@ -301,21 +302,21 @@ pub struct AddSpec {
 }
 
 impl AddSpec {
-    pub fn check(op: &TaskOpInput) -> Result<AddSpec, String> {
-        let title = clean_line(op.title.as_deref().unwrap_or(""), "title", MAX_TITLE_CHARS)?;
+    pub fn check(op: &TaskOpInput) -> Result<AddSpec, StoreError> {
+        let title = clean_line(op.title.as_deref().unwrap_or(""), "title", MAX_TITLE_CHARS).map_err(StoreError::Invalid)?;
         let body = match op.body.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(b) => Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES)?),
+            Some(b) => Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES).map_err(StoreError::Invalid)?),
             None => None,
         };
         let priority = op.priority.unwrap_or(DEFAULT_PRIORITY);
         if !(0..=MAX_PRIORITY).contains(&priority) {
-            return Err(format!("priority must be 0-{MAX_PRIORITY} (higher is claimed first)"));
+            return Err(StoreError::Invalid(format!("priority must be 0-{MAX_PRIORITY} (higher is claimed first)")));
         }
         let max_attempts = op.max_attempts.unwrap_or(DEFAULT_MAX_ATTEMPTS);
         if !(1..=MAX_MAX_ATTEMPTS).contains(&max_attempts) {
-            return Err(format!("max attempts must be 1-{MAX_MAX_ATTEMPTS}"));
+            return Err(StoreError::Invalid(format!("max attempts must be 1-{MAX_MAX_ATTEMPTS}")));
         }
-        let labels = clean_labels(op.labels.as_deref().unwrap_or(&[]))?;
+        let labels = clean_labels(op.labels.as_deref().unwrap_or(&[])).map_err(StoreError::Invalid)?;
         let mut after: Vec<i64> = Vec::new();
         for n in &op.after {
             if !after.contains(n) {
@@ -323,7 +324,7 @@ impl AddSpec {
             }
         }
         if after.len() > MAX_DEPS_PER_TASK {
-            return Err(format!("too many dependencies (max {MAX_DEPS_PER_TASK})"));
+            return Err(StoreError::Invalid(format!("too many dependencies (max {MAX_DEPS_PER_TASK})")));
         }
         Ok(AddSpec {
             title,
@@ -354,29 +355,29 @@ pub struct WriteSpec {
 }
 
 impl WriteSpec {
-    pub fn check(name: &str, op: &TaskOpInput) -> Result<WriteSpec, String> {
-        let action = Action::parse(name).ok_or_else(|| format!("unknown task operation: {name}"))?;
+    pub fn check(name: &str, op: &TaskOpInput) -> Result<WriteSpec, StoreError> {
+        let action = Action::parse(name).ok_or_else(|| StoreError::Invalid(format!("unknown task operation: {name}")))?;
         let reason = match action {
-            Action::Block => Some(require_text(&op.reason, "reason", "--reason")?),
-            Action::Reject => Some(require_text(&op.reason, "reason", "--reason")?),
-            Action::Fail => Some(require_text(&op.error, "error", "--error")?),
+            Action::Block => Some(require_text(&op.reason, "reason", "--reason").map_err(StoreError::Invalid)?),
+            Action::Reject => Some(require_text(&op.reason, "reason", "--reason").map_err(StoreError::Invalid)?),
+            Action::Fail => Some(require_text(&op.error, "error", "--error").map_err(StoreError::Invalid)?),
             Action::Reopen | Action::Cancel | Action::Approve => match op.reason.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                Some(r) => Some(clean_multiline(r, "reason", MAX_REASON_CHARS, MAX_TEXT_LINES)?),
+                Some(r) => Some(clean_multiline(r, "reason", MAX_REASON_CHARS, MAX_TEXT_LINES).map_err(StoreError::Invalid)?),
                 None => None,
             },
             _ => None,
         };
         let result = match action {
-            Action::Done | Action::Submit => Some(TaskResult::check(op.result.as_ref().unwrap_or(&ResultInput::default()))?),
+            Action::Done | Action::Submit => Some(TaskResult::check(op.result.as_ref().unwrap_or(&ResultInput::default())).map_err(StoreError::Invalid)?),
             _ => None,
         };
         let claim_next = action == Action::Claim && op.next && op.task.is_none();
         if op.task.is_none() && !claim_next {
-            return Err(format!("task number required (agent task {name} <#>)"));
+            return Err(StoreError::Invalid(format!("task number required (agent task {name} <#>)")));
         }
         let next_labels = match (&op.labels, action) {
-            (Some(l), Action::Claim) if claim_next => clean_labels(l)?,
-            (Some(l), Action::Claim) if !l.is_empty() => return Err("agent task claim: --label goes with --next".into()),
+            (Some(l), Action::Claim) if claim_next => clean_labels(l).map_err(StoreError::Invalid)?,
+            (Some(l), Action::Claim) if !l.is_empty() => return Err(StoreError::Invalid("agent task claim: --label goes with --next".into())),
             _ => Vec::new(),
         };
         Ok(WriteSpec { action, reason, result, claim_next, next_labels, lease: lease_ms(op.lease_ms) })
@@ -393,23 +394,23 @@ pub struct EditSpec {
 }
 
 impl EditSpec {
-    pub fn check(op: &TaskOpInput) -> Result<EditSpec, String> {
+    pub fn check(op: &TaskOpInput) -> Result<EditSpec, StoreError> {
         let title = match &op.title {
-            Some(t) => Some(clean_line(t, "title", MAX_TITLE_CHARS)?),
+            Some(t) => Some(clean_line(t, "title", MAX_TITLE_CHARS).map_err(StoreError::Invalid)?),
             None => None,
         };
         let body = match &op.body {
             Some(b) if b.trim().is_empty() => Some(None),
-            Some(b) => Some(Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES)?)),
+            Some(b) => Some(Some(clean_multiline(b, "body", MAX_BODY_CHARS, MAX_BODY_LINES).map_err(StoreError::Invalid)?)),
             None => None,
         };
         if let Some(p) = op.priority {
             if !(0..=MAX_PRIORITY).contains(&p) {
-                return Err(format!("priority must be 0-{MAX_PRIORITY}"));
+                return Err(StoreError::Invalid(format!("priority must be 0-{MAX_PRIORITY}")));
             }
         }
         let labels = match &op.labels {
-            Some(l) => Some(serde_json::to_string(&clean_labels(l)?).unwrap_or_else(|_| "[]".into())),
+            Some(l) => Some(serde_json::to_string(&clean_labels(l).map_err(StoreError::Invalid)?).unwrap_or_else(|_| "[]".into())),
             None => None,
         };
         let mut fields = Vec::new();
@@ -429,7 +430,7 @@ impl EditSpec {
             fields.push("review");
         }
         if fields.is_empty() {
-            return Err("nothing to edit (--title, --body, --priority, --label)".to_string());
+            return Err(StoreError::Invalid("nothing to edit (--title, --body, --priority, --label)".to_string()));
         }
         Ok(EditSpec { title, body, labels, fields })
     }
@@ -449,8 +450,8 @@ pub struct ListSpec {
 }
 
 impl ListSpec {
-    pub fn check(team: &str, q: &TaskListQuery) -> Result<ListSpec, String> {
-        check_team(team)?;
+    pub fn check(team: &str, q: &TaskListQuery) -> Result<ListSpec, StoreError> {
+        check_team(team).map_err(StoreError::Invalid)?;
         let stale = stale_ms(q.stale_ms);
         let mut stored: Vec<String> = Vec::new();
         let (mut want_waiting, mut want_ready, mut want_stale) = (false, q.ready, false);
@@ -462,13 +463,13 @@ impl ListSpec {
                 "ready" => want_ready = true,
                 "stale" => want_stale = true,
                 s if TASK_STATES.contains(&s) => stored.push(s.to_string()),
-                other => return Err(format!("invalid state: {other} ({}|waiting|ready|stale)", TASK_STATES.join("|"))),
+                other => return Err(StoreError::Invalid(format!("invalid state: {other} ({}|waiting|ready|stale)", TASK_STATES.join("|")))),
             }
         }
         let search = non_empty(&q.search);
         if let Some(s) = &search {
             if s.chars().count() > MAX_SEARCH_CHARS {
-                return Err(format!("search text too long (max {MAX_SEARCH_CHARS} characters)"));
+                return Err(StoreError::Invalid(format!("search text too long (max {MAX_SEARCH_CHARS} characters)")));
             }
         }
         let any_filter = !stored.is_empty() || want_waiting || want_ready || want_stale;

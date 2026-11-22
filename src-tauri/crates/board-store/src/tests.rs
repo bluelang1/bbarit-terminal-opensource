@@ -1518,6 +1518,29 @@ mod sqlite_only {
         .unwrap();
     }
 
+    /// Several connections opening one brand-new file at the same moment: switching it to WAL
+    /// is a read upgraded to a write, which SQLite refuses at once (no busy wait) while
+    /// another connection has the file open; every opener must still get a working board.
+    #[test]
+    fn many_connections_open_one_new_file_at_once() {
+        for round in 0..10 {
+            let fx = Fixture::new(Engine::Sqlite, &format!("newfile{round}"));
+            let gate = std::sync::Arc::new(std::sync::Barrier::new(12));
+            let handles: Vec<_> = (0..12)
+                .map(|_| {
+                    let (path, gate) = (fx.db(), gate.clone());
+                    std::thread::spawn(move || {
+                        gate.wait();
+                        test_open_db(&path).map(|c| c.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0)).unwrap())
+                    })
+                })
+                .collect();
+            for h in handles {
+                assert_eq!(h.join().unwrap().as_deref(), Ok("wal"), "round {round}");
+            }
+        }
+    }
+
     #[test]
     fn a_new_file_records_the_program_version_it_was_given() {
         let fx = Fixture::new(Engine::Sqlite, "appver");
@@ -1991,6 +2014,415 @@ mod pg_only {
         let t = super::super::config::pg_target(&settings, None, Some(&sec)).unwrap();
         let e = run(test_pg(t).post("t".into(), input("t1", "note", "x"), cx(1))).unwrap_err();
         assert!(e.starts_with("team board unavailable:"), "{e}");
+    }
+}
+
+// ── PostgreSQL operations in a caller's transaction (a server that embeds the store) ─────
+
+mod pg_on_connection {
+    use super::super::error::StoreError;
+    use super::super::pg::{self, PgOps};
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn connect(t: &PgTarget) -> sqlx::PgConnection {
+        sqlx::PgConnection::connect_with(&t.opts).await.unwrap()
+    }
+
+    fn add_op(title: &str, review: bool) -> TaskOpInput {
+        TaskOpInput { title: Some(title.into()), review: Some(review), ..op("add") }
+    }
+
+    fn submit_op(task: i64) -> TaskOpInput {
+        TaskOpInput { result: Some(ResultInput { summary: Some("did it".into()), ..Default::default() }), ..on("submit", task) }
+    }
+
+    /// post, task add / claim / submit / approve, lease_apply and clear, then a row in a table
+    /// of the caller's own, all in one transaction that ends with `commit` (or a rollback).
+    async fn one_request(t: &PgTarget, commit: bool) {
+        let ops = PgOps::new(&t.schema).unwrap();
+        let mut c = connect(t).await;
+        let mut tx = c.begin().await.unwrap();
+        let p = ops.post(&mut tx, "req", &input("t1", "note", "hello"), &cx(1_000)).await.unwrap();
+        assert_eq!(p["seq"], 1);
+        // Two operations in one transaction see each other's writes.
+        let r = ops.read(&mut tx, "req", &ReadQuery::default(), Some(&here())).await.unwrap();
+        assert_eq!(seqs(&r), vec![1]);
+        let one = ops.task_write(&mut tx, "req", &add_op("first", true), &member("lead"), &cx(1_001)).await.unwrap();
+        assert_eq!(one["task"]["seq"], 1);
+        assert_eq!(ops.task_show(&mut tx, "req", 1, false, None, &cx(1_002)).await.unwrap()["task"]["state"], "open");
+        ops.task_write(&mut tx, "req", &on("claim", 1), &member("b1"), &cx(1_003)).await.unwrap();
+        ops.task_write(&mut tx, "req", &submit_op(1), &member("b1"), &cx(1_004)).await.unwrap();
+        let done = ops.task_write(&mut tx, "req", &on("approve", 1), &member("b2"), &cx(1_005)).await.unwrap();
+        assert_eq!(done["to"], "done");
+        ops.task_write(&mut tx, "req", &add_op("second", false), &member("lead"), &cx(1_006)).await.unwrap();
+        ops.task_write(&mut tx, "req", &on("claim", 2), &member("b3"), &cx(1_007)).await.unwrap();
+        let listed = ops.task_list(&mut tx, "req", &TaskListQuery { all: true, ..Default::default() }, &cx(1_008)).await.unwrap();
+        assert_eq!(task_seqs(&listed), vec![2, 1]);
+        let held = ops.held_on_host(&mut tx, &here()).await.unwrap();
+        let item = LeaseItem { id: held[0]["id"].as_str().unwrap().to_string(), instance: "inst-a".into() };
+        let applied = ops.lease_apply(&mut tx, "inst-new", &[item], &[], 1_009, 60_000, Some(&here())).await.unwrap();
+        assert_eq!(applied["adopted"], 1);
+        let cleared = ops.clear(&mut tx, "req", &cx(1_010)).await.unwrap();
+        assert_eq!(cleared["removed"], 2, "the note and the done note");
+        let own = format!("INSERT INTO {}.app_log (msg) VALUES ('request 1')", super::super::config::quote_ident(&t.schema));
+        sqlx::query(&own).execute(&mut *tx).await.unwrap();
+        if commit {
+            tx.commit().await.unwrap();
+        } else {
+            tx.rollback().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn a_rolled_back_request_leaves_nothing_and_a_committed_one_everything() {
+        if !pg_enabled() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "onconn");
+        fx.raw_exec("CREATE TABLE app_log (msg TEXT NOT NULL)");
+        let t = fx.pg.clone().unwrap();
+        run(one_request(&t, false));
+        for table in ["teams", "posts", "tasks", "task_events", "app_log"] {
+            assert_eq!(fx.raw_count(&format!("SELECT count(*) FROM {table}")), 0, "{table} after ROLLBACK");
+        }
+        run(one_request(&t, true));
+        assert_eq!(fx.raw_count("SELECT count(*) FROM teams"), 1);
+        assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 2, "both posts, tombstoned by clear");
+        assert_eq!(fx.raw_count("SELECT count(*) FROM posts WHERE deleted_at IS NULL"), 0);
+        assert_eq!(fx.raw_count("SELECT count(*) FROM tasks WHERE state = 'done'"), 1);
+        assert_eq!(fx.raw_strings("SELECT owner_instance FROM tasks WHERE seq = 2"), vec!["inst-new".to_string()]);
+        assert_eq!(fx.raw_count("SELECT count(*) FROM app_log"), 1);
+        // The store's own wrappers read what the caller's transaction committed.
+        assert_eq!(fx.store().state("req", 1, 2_000), "done");
+    }
+
+    #[test]
+    fn from_pool_uses_the_callers_pool_and_leaves_it_open() {
+        if !pg_enabled() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "frompool");
+        let t = fx.pg.clone().unwrap();
+        run(async {
+            let app = format!("bbt-frompool-{}", std::process::id());
+            let pool = PgPoolOptions::new().max_connections(2).connect_with(t.opts.clone().application_name(&app)).await.unwrap();
+            assert!(PgStore::from_pool(pool.clone(), "Bad Name", Limits::default(), TEST_APP_VERSION).is_err());
+            let store = PgStore::from_pool(pool.clone(), &t.schema, Limits::default(), TEST_APP_VERSION).unwrap();
+            assert_eq!(store.post("p".into(), input("t1", "note", "shared"), cx(1)).await.unwrap()["seq"], 1);
+            // Eight commands at once: a pool of the store's own would open up to 5 connections;
+            // on the server there are never more than the caller's pool allows (2).
+            let store = std::sync::Arc::new(store);
+            let busy: Vec<_> = (0..8)
+                .map(|_| {
+                    let s = store.clone();
+                    tokio::spawn(async move { s.read("p".into(), ReadQuery::default(), Some(here())).await.unwrap() })
+                })
+                .collect();
+            for b in busy {
+                b.await.unwrap();
+            }
+            let mut admin = connect(&t).await;
+            let on_server: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name = $1")
+                .bind(&app)
+                .fetch_one(&mut admin)
+                .await
+                .unwrap();
+            assert!((1..=2).contains(&on_server), "{on_server} connections");
+            assert_eq!(pool.size() as i64, on_server);
+            // A connection the caller takes from the same pool sees the store's write.
+            let mut c = pool.acquire().await.unwrap();
+            let sql = format!("SELECT count(*) FROM {}.posts", super::super::config::quote_ident(&t.schema));
+            let n: i64 = sqlx::query_scalar(&sql).fetch_one(&mut *c).await.unwrap();
+            assert_eq!(n, 1);
+            drop(c);
+            // `close` leaves a caller's pool open; closing the caller's pool stops the store.
+            store.close().await;
+            assert!(!pool.is_closed());
+            assert_eq!(store.post("p".into(), input("t1", "note", "again"), cx(2)).await.unwrap()["seq"], 2);
+            pool.close().await;
+            let e = store.post("p".into(), input("t1", "note", "closed"), cx(3)).await.unwrap_err();
+            assert!(e.starts_with("team board unavailable:"), "{e}");
+        });
+    }
+
+    #[test]
+    fn errors_carry_their_kind_and_the_same_text() {
+        if !pg_enabled() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "kinds");
+        let t = fx.pg.clone().unwrap();
+        run(async {
+            let ops = PgOps::new(&t.schema).unwrap();
+            let mut conn = connect(&t).await;
+            let c = &mut conn;
+            // Invalid input.
+            let e = ops.post(c, "bad team!", &input("t1", "note", "x"), &cx(1)).await.unwrap_err();
+            assert!(matches!(e, StoreError::Invalid(_)) && e.kind() == "invalid", "{e:?}");
+            assert_eq!(e.to_string(), "invalid team id (expected 1-128 characters of A-Z a-z 0-9 _ -)");
+            assert_eq!(ops.post(c, "k", &input("t1", "gossip", "x"), &cx(1)).await.unwrap_err().kind(), "invalid");
+            // Not found.
+            let e = ops.task_show(c, "k", 9, false, None, &cx(1)).await.unwrap_err();
+            assert_eq!((e.kind(), e.to_string().as_str()), ("not_found", "no task #9 in team k"));
+            ops.task_write(c, "k", &add_op("one", false), &member("lead"), &cx(1_000)).await.unwrap();
+            assert_eq!(ops.task_write(c, "k", &on("claim", 9), &member("b1"), &cx(1_000)).await.unwrap_err().kind(), "not_found");
+            // Conflict: already claimed; an edit against an old version.
+            let lease = TaskOpInput { lease_ms: Some(30_000), ..on("claim", 1) };
+            ops.task_write(c, "k", &lease, &member("b1"), &cx(1_000)).await.unwrap();
+            let e = ops.task_write(c, "k", &on("claim", 1), &member("b2"), &cx(1_001)).await.unwrap_err();
+            assert_eq!((e.kind(), e.to_string().as_str()), ("conflict", "#1 is already claimed by b1 (b1 name)"));
+            let edit = TaskOpInput { title: Some("new".into()), expected_version: Some(1), ..on("edit", 1) };
+            assert_eq!(ops.task_write(c, "k", &edit, &member("lead"), &cx(1_002)).await.unwrap_err().kind(), "conflict");
+            // Forbidden: someone else's task; a person working on a task.
+            let e = ops.task_write(c, "k", &on("release", 1), &member("b3"), &cx(1_003)).await.unwrap_err();
+            assert_eq!((e.kind(), e.to_string().as_str()), ("forbidden", "#1 is claimed by b1 (b1 name): only its owner can release it"));
+            assert_eq!(ops.task_write(c, "k", &on("release", 1), &human(), &cx(1_003)).await.unwrap_err().kind(), "forbidden");
+            // Lease lost: b1's lease runs out, a list expires it, b1 tries to finish.
+            ops.task_list(c, "k", &TaskListQuery::default(), &cx(40_000)).await.unwrap();
+            let e = ops.task_write(c, "k", &done_op(1, "late"), &member("b1"), &cx(40_001)).await.unwrap_err();
+            assert_eq!((e.kind(), e.to_string().as_str()), ("lease_lost", "#1 is open: claim it first"));
+            // Still lease lost once someone else holds it; never-owner b3 stays forbidden.
+            ops.task_write(c, "k", &on("claim", 1), &member("b2"), &cx(40_002)).await.unwrap();
+            assert_eq!(ops.task_write(c, "k", &done_op(1, "late"), &member("b1"), &cx(40_003)).await.unwrap_err().kind(), "lease_lost");
+            assert_eq!(ops.task_write(c, "k", &done_op(1, "x"), &member("b3"), &cx(40_003)).await.unwrap_err().kind(), "forbidden");
+            // b1 claims again later: a refusal is no longer about the old lease.
+            ops.task_write(c, "k", &on("release", 1), &member("b2"), &cx(40_004)).await.unwrap();
+            ops.task_write(c, "k", &on("claim", 1), &member("b1"), &cx(40_005)).await.unwrap();
+            assert_eq!(ops.task_write(c, "k", &on("unblock", 1), &member("b1"), &cx(40_006)).await.unwrap_err().kind(), "conflict");
+            // Unavailable: a schema without board tables.
+            let bare = PgOps::new("bbt_no_such_board_schema").unwrap();
+            assert_eq!(bare.teams(c).await.unwrap_err().kind(), "unavailable");
+        });
+        // The store's wrappers keep the same text.
+        assert_eq!(fx.store().w("k", on("claim", 9), &member("b1"), cx(50_000)).unwrap_err(), "no task #9 in team k");
+    }
+
+    /// A schema of its own (removed afterwards), for tests that create the tables themselves.
+    struct OwnSchema(PgTarget);
+
+    impl OwnSchema {
+        fn new(tag: &str) -> OwnSchema {
+            let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            OwnSchema(pg_test_target(&test_schema(tag, n)))
+        }
+    }
+
+    impl Drop for OwnSchema {
+        fn drop(&mut self) {
+            remove_test_schema(&self.0);
+        }
+    }
+
+    /// Everything in a schema: relations by kind, functions, triggers by table, as sorted text.
+    async fn objects(c: &mut sqlx::PgConnection, schema: &str) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT x FROM (
+               SELECT c.relkind::text || ':' || c.relname AS x FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1
+               UNION ALL SELECT 'function:' || p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1
+               UNION ALL SELECT 'trigger:' || c.relname || ':' || t.tgname FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND NOT t.tgisinternal
+             ) o ORDER BY x",
+        )
+        .bind(schema)
+        .fetch_all(&mut *c)
+        .await
+        .unwrap()
+    }
+
+    #[test]
+    fn a_refused_operation_leaves_no_partial_write_inside_atomically() {
+        if !pg_enabled() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "atomic");
+        fx.raw_exec("CREATE TABLE app_log (msg TEXT NOT NULL)");
+        let t = fx.pg.clone().unwrap();
+        let own = format!("INSERT INTO {}.app_log (msg) VALUES ('refused')", super::super::config::quote_ident(&t.schema));
+        // No room for any task: `task add` creates the team row, then refuses.
+        let full = Limits { tasks: 0, ..Limits::default() };
+        let ops = PgOps::new(&t.schema).unwrap().with_limits(full);
+        run(async {
+            // Without the savepoint, committing after the refusal keeps the new team row.
+            let mut c = connect(&t).await;
+            let mut tx = c.begin().await.unwrap();
+            let e = ops.task_write(&mut tx, "bare", &add_op("x", false), &member("lead"), &cx(1)).await.unwrap_err();
+            assert_eq!(e.kind(), "conflict", "{e}");
+            tx.commit().await.unwrap();
+            // With it: the refusal comes back, nothing of it remains, the caller's row commits.
+            let mut tx = c.begin().await.unwrap();
+            let e = board_store_atomically(&ops, &mut tx).await.unwrap_err();
+            assert!(e.to_string().starts_with("task limit reached: team guarded has 0 tasks"), "{e}");
+            sqlx::query(&own).execute(&mut *tx).await.unwrap();
+            // The transaction is still usable for the store too.
+            let ok = crate::atomically!(&mut *tx, |c| ops.post(c, "guarded", &input("t1", "note", "after"), &cx(3))).await.unwrap();
+            assert_eq!(ok["seq"], 1);
+            tx.commit().await.unwrap();
+        });
+        assert_eq!(fx.raw_strings("SELECT team FROM teams ORDER BY team"), vec!["bare".to_string(), "guarded".to_string()]);
+        assert_eq!(fx.raw_count("SELECT count(*) FROM tasks"), 0);
+        assert_eq!(fx.raw_count("SELECT count(*) FROM posts"), 1, "only the post after the refusal");
+        assert_eq!(fx.raw_count("SELECT count(*) FROM app_log"), 1);
+    }
+
+    /// `atomically!` around a `task add` that is refused (the team row it created goes too).
+    async fn board_store_atomically(ops: &PgOps, conn: &mut sqlx::PgConnection) -> Result<Value, StoreError> {
+        let r = crate::atomically!(&mut *conn, |c| ops.task_write(c, "guarded", &add_op("x", false), &member("lead"), &cx(2))).await;
+        let teams: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {}.teams WHERE team = 'guarded'", super::super::config::quote_ident(ops.schema())))
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(teams, 0, "rolled back to the savepoint");
+        r
+    }
+
+    #[test]
+    fn a_serialization_failure_is_busy() {
+        if !pg_enabled() {
+            return;
+        }
+        let fx = Fixture::new(Engine::Pg, "busy");
+        let t = fx.pg.clone().unwrap();
+        run(async {
+            let ops = PgOps::new(&t.schema).unwrap();
+            let (mut a, mut b) = (connect(&t).await, connect(&t).await);
+            ops.post(&mut a, "hot", &input("t1", "note", "first"), &cx(1)).await.unwrap();
+            let mut tx = a.begin().await.unwrap();
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ").execute(&mut *tx).await.unwrap();
+            ops.teams(&mut tx).await.unwrap(); // the snapshot starts here
+            ops.post(&mut b, "hot", &input("t2", "note", "meanwhile"), &cx(2)).await.unwrap();
+            let e = ops.post(&mut tx, "hot", &input("t1", "note", "late"), &cx(3)).await.unwrap_err();
+            assert!(matches!(e, StoreError::Busy(_)) && e.is_retryable(), "{e:?}");
+            assert!(e.to_string().starts_with("team board unavailable:"), "{e}");
+        });
+    }
+
+    #[test]
+    fn two_servers_migrating_at_once_end_with_one_board() {
+        if !pg_enabled() {
+            return;
+        }
+        let own = OwnSchema::new("migrace");
+        let t = own.0.clone();
+        let q = super::super::config::quote_ident(&t.schema);
+        let applied = run(async {
+            sqlx::query(&format!("CREATE SCHEMA {q}")).execute(&mut connect(&t).await).await.unwrap();
+            let gate = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+            let runs: Vec<_> = (0..2)
+                .map(|_| {
+                    let (t, gate) = (t.clone(), gate.clone());
+                    tokio::spawn(async move {
+                        let mut c = connect(&t).await;
+                        let mut tx = c.begin().await.unwrap();
+                        gate.wait().await;
+                        let m = pg::migrate_on(&mut tx, &t.schema, TEST_APP_VERSION).await.unwrap();
+                        tx.commit().await.unwrap();
+                        m.applied
+                    })
+                })
+                .collect();
+            let mut out = Vec::new();
+            for r in runs {
+                out.push(r.await.unwrap());
+            }
+            out.sort();
+            assert_eq!(pg::schema_version_on(&mut connect(&t).await, &t.schema).await.unwrap(), Some(pg::SCHEMA_VERSION));
+            out
+        });
+        assert_eq!(applied, vec![vec![], (2..=pg::SCHEMA_VERSION).collect::<Vec<_>>()], "one ran the steps, the other found them done");
+    }
+
+    /// A role that owns only its schema (no CREATE on the database), removed afterwards.
+    struct OwnerRole {
+        admin: PgTarget,
+        role: String,
+    }
+
+    impl Drop for OwnerRole {
+        fn drop(&mut self) {
+            remove_test_schema(&self.admin);
+            let statement = format!("DROP ROLE IF EXISTS \"{}\"", self.role);
+            run(async {
+                if let Ok(mut c) = sqlx::PgConnection::connect_with(&self.admin.opts).await {
+                    let _ = sqlx::query(&statement).execute(&mut c).await;
+                    let _ = c.close().await;
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_schema_owner_without_create_on_the_database_runs_the_migration_steps() {
+        if !pg_enabled() {
+            return;
+        }
+        let n = FIXTURE_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let schema = test_schema("ownedonly", n);
+        let admin = pg_test_target(&schema);
+        let guard = OwnerRole { admin: admin.clone(), role: format!("{schema}_role") };
+        let q = super::super::config::quote_ident(&schema);
+        let role = format!("\"{}\"", guard.role);
+        run(async {
+            let mut c = connect(&admin).await;
+            sqlx::raw_sql(&format!("CREATE ROLE {role} LOGIN PASSWORD 'test'; CREATE SCHEMA {q} AUTHORIZATION {role}"))
+                .execute(&mut c)
+                .await
+                .unwrap();
+            let can_create: bool = sqlx::query_scalar("SELECT has_database_privilege($1, current_database(), 'CREATE')")
+                .bind(&guard.role)
+                .fetch_one(&mut c)
+                .await
+                .unwrap();
+            assert!(!can_create, "the role must not be able to create schemas");
+        });
+        // The steps: no CREATE SCHEMA, versions 2..=current, none from the current version.
+        let steps = pg::steps_in_schema(&schema, None).unwrap();
+        assert_eq!(steps.iter().map(|s| s.version).collect::<Vec<_>>(), (2..=pg::SCHEMA_VERSION).collect::<Vec<_>>());
+        assert!(steps.iter().flat_map(|s| &s.sql).all(|sql| !sql.contains("CREATE SCHEMA")));
+        assert!(pg::steps_in_schema(&schema, Some(pg::SCHEMA_VERSION)).unwrap().is_empty());
+        let owner = PgTarget { opts: admin.opts.clone().username(&guard.role).password("test"), ..admin.clone() };
+        let desktop = Fixture::new(Engine::Pg, "ownedcmp");
+        let d = desktop.pg.clone().unwrap();
+        run(async {
+            let mut c = connect(&owner).await;
+            assert_eq!(pg::schema_version_on(&mut c, &schema).await.unwrap(), None);
+            let mut tx = c.begin().await.unwrap();
+            let done = pg::migrate_on(&mut tx, &schema, TEST_APP_VERSION).await.unwrap();
+            tx.commit().await.unwrap();
+            assert_eq!(done, pg::Migrated { from: None, to: pg::SCHEMA_VERSION, applied: (2..=pg::SCHEMA_VERSION).collect() });
+            assert_eq!(pg::schema_version_on(&mut c, &schema).await.unwrap(), Some(pg::SCHEMA_VERSION));
+            // Running it again is a no-op.
+            let mut tx = c.begin().await.unwrap();
+            let again = pg::migrate_on(&mut tx, &schema, TEST_APP_VERSION).await.unwrap();
+            tx.commit().await.unwrap();
+            assert_eq!(again, pg::Migrated { from: Some(pg::SCHEMA_VERSION), to: pg::SCHEMA_VERSION, applied: vec![] });
+            // Exactly the tables the store says it owns.
+            let tables: Vec<String> = sqlx::query_scalar("SELECT tablename::text FROM pg_tables WHERE schemaname = $1 ORDER BY 1")
+                .bind(&schema)
+                .fetch_all(&mut c)
+                .await
+                .unwrap();
+            let mut owned: Vec<String> = pg::OWNED_TABLES.iter().map(|s| s.to_string()).collect();
+            owned.sort();
+            assert_eq!(tables, owned);
+            let all = objects(&mut c, &schema).await;
+            for s in pg::OWNED_SEQUENCES {
+                assert!(all.contains(&format!("S:{s}")), "{s}: {all:?}");
+            }
+            for f in pg::OWNED_FUNCTIONS {
+                assert!(all.contains(&format!("function:{f}")), "{f}: {all:?}");
+            }
+            // The same objects and version as the desktop's PgStore::migrate creates.
+            let mut dc = connect(&d).await;
+            assert_eq!(objects(&mut dc, &d.schema).await, all);
+            assert_eq!(pg::schema_version_on(&mut dc, &d.schema).await.unwrap(), Some(pg::SCHEMA_VERSION));
+            // The role uses the board it created.
+            let ops = PgOps::new(&schema).unwrap();
+            assert_eq!(ops.post(&mut c, "own", &input("t1", "note", "mine"), &cx(1)).await.unwrap()["seq"], 1);
+            assert!(pg::db_now_ms(&mut c).await.unwrap() > 1_600_000_000_000);
+            let _ = c.close().await;
+        });
+        drop(guard);
     }
 }
 
