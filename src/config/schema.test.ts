@@ -118,3 +118,28 @@ describe('window pin', () => {
       .toEqual({ alwaysOnTop: false, followDesktops: true });
   });
 });
+
+describe('agent relay limits', () => {
+  it('defaults for old config files and clamps saved values', () => {
+    const board = { leaseSeconds: 300, renewSeconds: 60, staleMinutes: 30 };
+    expect(validateConfig({}).agents).toEqual({ enabled: true, leadPhrase: '리드 에이전트로 진행해줘', maxChildren: 6, maxDepth: 2, maxTotal: 12, board });
+    expect(validateConfig({ agents: { maxChildren: 99, maxDepth: 'x', maxTotal: 3 } } as any).agents)
+      .toEqual({ enabled: true, leadPhrase: '리드 에이전트로 진행해줘', maxChildren: 32, maxDepth: 2, maxTotal: 3, board });
+  });
+
+  it('keeps the agent team switch (agents.enabled): on unless saved as false', () => {
+    expect(validateConfig({ agents: { enabled: false } } as any).agents.enabled).toBe(false);
+    expect(validateConfig({ agents: { enabled: true } } as any).agents.enabled).toBe(true);
+    expect(validateConfig({ agents: { enabled: 'no' } } as any).agents.enabled).toBe(true);
+  });
+
+  it('keeps a valid lead phrase and falls back to the default otherwise', () => {
+    expect(validateConfig({ agents: { leadPhrase: '  팀장으로   해줘 ' } } as any).agents.leadPhrase).toBe('팀장으로 해줘');
+    expect(validateConfig({ agents: { leadPhrase: 'x' } } as any).agents.leadPhrase).toBe('리드 에이전트로 진행해줘');
+  });
+
+  it('keeps team-board timing (agents.board) clamped, renewal at most half the lease', () => {
+    const agents = validateConfig({ agents: { board: { leaseSeconds: 100, renewSeconds: 90, staleMinutes: 2, backend: 'sqlite' } } } as any).agents;
+    expect(agents.board).toEqual({ leaseSeconds: 100, renewSeconds: 50, staleMinutes: 5, backend: 'sqlite' });
+  });
+});

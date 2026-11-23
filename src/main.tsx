@@ -85,6 +85,8 @@ const ThreadPage = lazy(() => import('./pages/ThreadPage'))
 const PetPage = lazy(() => import('./pages/PetPage'))
 // Getting-started guide + What's new (tool-guide window, opened by the main window).
 const GuidePage = lazy(() => import('./pages/GuidePage'))
+// Team status in its own window (tool-team-status, opened from the toolbar gauge overlay).
+const TeamStatusPage = lazy(() => import('./pages/TeamStatusPage'))
 // Planning AI disabled from app routing for now.
 // const PlanningPage = lazy(() => import('./pages/PlanningPage'))
 
@@ -160,6 +162,7 @@ function getPage(): string {
   if (path.startsWith('/chat')) return 'chat';
   if (path.startsWith('/thread')) return 'thread';
   if (path.startsWith('/guide')) return 'guide';
+  if (path.startsWith('/team-status')) return 'team-status';
   if (path.startsWith('/harness')) return 'harness';
   // if (path.startsWith('/planning')) return 'planning';
   return 'main';
@@ -187,6 +190,7 @@ function RootRouter() {
       {page === 'chat' && <ChatPage />}
       {page === 'thread' && <ThreadPage />}
       {page === 'guide' && <GuidePage />}
+      {page === 'team-status' && <TeamStatusPage />}
       {/* {page === 'planning' && <PlanningPage />} */}
     </Suspense>
   );

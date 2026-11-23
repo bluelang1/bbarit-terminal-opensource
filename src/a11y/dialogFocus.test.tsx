@@ -6,7 +6,7 @@ import { focusableIn, nextTrapTarget, shouldRestoreFocus, useDialogFocus } from 
 
 const onConfirm = vi.fn();
 const onCancel = vi.fn();
-const api: { setOpen: (v: boolean) => void } = { setOpen: () => {} };
+const api: { setOpen: (v: boolean) => void; restore: boolean } = { setOpen: () => {}, restore: true };
 
 function Dialog({ danger }: { danger: boolean }) {
   const [open, setOpen] = useState(false);
@@ -18,6 +18,7 @@ function Dialog({ danger }: { danger: boolean }) {
   useDialogFocus(boxRef, open, {
     initialFocus: () => (danger ? cancelRef.current : okRef.current),
     onEscape: close,
+    restoreFocus: () => api.restore,
   });
   if (!open) return null;
   return (
@@ -121,6 +122,15 @@ describe('useDialogFocus', () => {
     expect(document.activeElement).toBe(terminal);
   });
 
+  it('does not return focus when restoreFocus says no (a jump to another tab)', () => {
+    render(<Dialog danger />);
+    act(() => api.setOpen(true));
+    api.restore = false;
+    key('Escape');
+    api.restore = true;
+    expect(document.activeElement).not.toBe(terminal);
+  });
+
   it('does not return focus to an element that left the document', () => {
     render(<Dialog danger />);
     act(() => api.setOpen(true));
@@ -156,6 +166,22 @@ describe('dialogFocus helpers', () => {
     const box = document.createElement('div');
     box.innerHTML = '<button id="x"></button><button id="d" disabled></button><div inert><button id="i"></button></div><span tabindex="0" id="s"></span><span tabindex="-1"></span>';
     expect(focusableIn(box).map((el) => el.id)).toEqual(['x', 's']);
+  });
+
+  it('focusableIn skips controls without a layout box (display: none, [hidden])', () => {
+    const box = document.createElement('div');
+    box.innerHTML = '<button id="a"></button><div style="display:none"><button id="n"></button></div><div hidden><a href="#" id="h">x</a></div><button id="b"></button>';
+    document.body.appendChild(box);
+    expect(focusableIn(box).map((el) => el.id)).toEqual(['a', 'b']);
+    // With a layout engine: no client rects means no box.
+    const rects = (n: number) => ({ length: n }) as unknown as DOMRectList;
+    const spyRoot = vi.spyOn(document.documentElement, 'getClientRects').mockReturnValue(rects(1));
+    const a = box.querySelector<HTMLElement>('#a')!;
+    const spyA = vi.spyOn(a, 'getClientRects').mockReturnValue(rects(1));
+    expect(focusableIn(box).map((el) => el.id)).toEqual(['a']);
+    spyA.mockRestore();
+    spyRoot.mockRestore();
+    box.remove();
   });
 
   it('shouldRestoreFocus only when focus was left nowhere or inside the dialog', () => {

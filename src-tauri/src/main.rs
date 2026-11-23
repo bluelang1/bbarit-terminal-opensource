@@ -16,8 +16,12 @@ macro_rules! safe_eprintln {
     }};
 }
 
+mod agent_board;
+mod agent_caller;
 mod agent_gateway;
+mod agent_relay_log;
 mod browser_bridge;
+mod bundled_skills;
 mod chrome_import;
 mod claude_design;
 mod code_search;
@@ -3240,6 +3244,8 @@ fn create_shell(
     let shell_work_dir = resolve_shell_work_dir(&work_dir);
     let claude_hook = claude_hook_file(&app, "session-start.sh");
     let ctl_path = bbarit_ctl_path().map(str::to_string);
+    // Agent relay caller token (agent_caller.rs): deterministic per terminal id.
+    let term_token = agent_caller::term_token(&terminal_id);
 
     #[cfg(not(target_os = "windows"))]
     let deps = {
@@ -3279,6 +3285,7 @@ fn create_shell(
             shell_work_dir,
             claude_hook,
             ctl_path,
+            term_token,
             username,
             home,
             nvm_node_bin,
@@ -3287,7 +3294,7 @@ fn create_shell(
         }
     };
     #[cfg(target_os = "windows")]
-    let deps = pty_backend::ShellEnvDeps { shell_work_dir, claude_hook, ctl_path };
+    let deps = pty_backend::ShellEnvDeps { shell_work_dir, claude_hook, ctl_path, term_token };
 
     // Per-terminal scope token; close_pty sweeps every process that still carries it.
     let scope_token = new_scope_token();
@@ -3435,24 +3442,40 @@ fn claude_hook_file(app: &AppHandle, name: &str) -> Option<String> {
         .map(|dir| strip_extended_length_prefix(dir.join(name).to_string_lossy().to_string()))
 }
 
-/// Env every tab PTY gets so the hook can say which tab it ran in and where the bridge is.
-fn bbarit_terminal_env(terminal_id: &str, hook_script: Option<&str>) -> Vec<(&'static str, String)> {
+/// Env every tab PTY gets so the hook can say which tab it ran in and where the bridge is,
+/// plus the tab's agent relay caller token (`BBARIT_TERM_TOKEN`, agent_caller.rs) when the
+/// key could be read.
+fn bbarit_terminal_env(
+    terminal_id: &str,
+    hook_script: Option<&str>,
+    term_token: Option<&str>,
+) -> Vec<(&'static str, String)> {
     let mut env = vec![
         ("BBARIT_TERMINAL_ID", terminal_id.to_string()),
         ("BBARIT_BRIDGE_PORT", browser_bridge::BRIDGE_PORT.to_string()),
     ];
+    if let Some(token) = term_token {
+        env.push((agent_caller::TOKEN_ENV, token.to_string()));
+    }
     if let Some(hook) = hook_script {
         env.push(("BBARIT_CLAUDE_HOOK", hook.to_string()));
     }
     env
 }
 
-/// Used by build_shell_command: drop inherited Claude markers, add the hook env.
-fn apply_bbarit_terminal_env(cmd: &mut CommandBuilder, terminal_id: &str, hook_script: Option<&str>) {
+/// Used by build_shell_command: drop inherited Claude markers (and an inherited caller token:
+/// the app was started from another tab), add the hook env and this tab's token.
+fn apply_bbarit_terminal_env(
+    cmd: &mut CommandBuilder,
+    terminal_id: &str,
+    hook_script: Option<&str>,
+    term_token: Option<&str>,
+) {
     for key in INHERITED_CLAUDE_MARKERS {
         cmd.env_remove(key);
     }
-    for (key, value) in bbarit_terminal_env(terminal_id, hook_script) {
+    cmd.env_remove(agent_caller::TOKEN_ENV);
+    for (key, value) in bbarit_terminal_env(terminal_id, hook_script, term_token) {
         cmd.env(key, value);
     }
 }
@@ -3467,6 +3490,75 @@ fn claude_hook_settings_path(app: AppHandle) -> Option<String> {
     claude_hook_file(&app, "bbarit-session.json")
 }
 
+/// Largest usage file the model limit fallback reads (docs/MODEL_LIMIT_FALLBACK.md).
+const USAGE_FILE_MAX_BYTES: u64 = 64 * 1024;
+
+/// Read a local regular file of at most 64 KB. `~/` is the home dir; ssh paths, FIFOs,
+/// devices and directories are refused, so a misconfigured path can never block.
+fn read_small_local_file(path: &str, home: Option<std::path::PathBuf>) -> Result<String, String> {
+    let path = path.trim();
+    if path.is_empty() || path.contains("://") || path.starts_with("ssh:") {
+        return Err("not a local path".into());
+    }
+    let full = match path.strip_prefix("~/") {
+        Some(rest) => home.ok_or("no home dir")?.join(rest),
+        None => std::path::PathBuf::from(path),
+    };
+    if !full.is_absolute() {
+        return Err("path must be absolute".into());
+    }
+    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > USAGE_FILE_MAX_BYTES {
+        return Err("file too large".into());
+    }
+    use std::io::Read;
+    let mut buf = String::new();
+    std::fs::File::open(&full)
+        .map_err(|e| e.to_string())?
+        .take(USAGE_FILE_MAX_BYTES)
+        .read_to_string(&mut buf)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+/// The model limit fallback's usage file (written by the user's status line; read only).
+/// Async so the file read never runs on the main thread.
+#[tauri::command(async)]
+fn read_usage_file(path: String) -> Result<String, String> {
+    read_small_local_file(&path, dirs::home_dir())
+}
+
+#[cfg(test)]
+mod usage_file_tests {
+    use super::read_small_local_file;
+
+    #[test]
+    fn reads_small_regular_files_and_expands_home() {
+        let dir = std::env::temp_dir().join(format!("bbarit-usage-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("u.json");
+        std::fs::write(&file, "[{\"name\":\"Fable\",\"pct\":100}]").unwrap();
+        assert!(read_small_local_file(file.to_str().unwrap(), None).unwrap().contains("Fable"));
+        assert!(read_small_local_file("~/u.json", Some(dir.clone())).unwrap().contains("Fable"));
+        std::fs::write(&file, vec![b'x'; 64 * 1024 + 1]).unwrap();
+        assert_eq!(read_small_local_file(file.to_str().unwrap(), None), Err("file too large".into()));
+        assert_eq!(read_small_local_file(dir.to_str().unwrap(), None), Err("not a regular file".into()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn refuses_remote_relative_and_special_paths() {
+        assert_eq!(read_small_local_file("ssh://host/x.json", None), Err("not a local path".into()));
+        assert_eq!(read_small_local_file("rel/x.json", None), Err("path must be absolute".into()));
+        assert_eq!(read_small_local_file("", None), Err("not a local path".into()));
+        #[cfg(unix)]
+        assert_eq!(read_small_local_file("/dev/null", None), Err("not a regular file".into()));
+    }
+}
+
 /// Env vars the frontend may read. Kept to an allowlist so the webview cannot read secrets.
 const READABLE_ENV_VARS: [&str; 1] = ["CLAUDE_CONFIG_DIR"];
 
@@ -3478,6 +3570,123 @@ fn read_env_var(name: String) -> Option<String> {
     get_env_value(&name).map(|v| v.trim().to_string())
 }
 
+/// Claude Code's keybindings file: `$CLAUDE_CONFIG_DIR/keybindings.json` when that variable
+/// is visible to the app (env or ~/.config/octo/.env, as `read_env_var`), else
+/// `~/.claude/keybindings.json`.
+fn claude_keybindings_path() -> Option<std::path::PathBuf> {
+    if let Some(dir) = get_env_value("CLAUDE_CONFIG_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir).join("keybindings.json"));
+        }
+    }
+    dirs::home_dir().map(|home| home.join(".claude").join("keybindings.json"))
+}
+
+/// One context's bindings (key → action string, or null = unbound); later blocks override
+/// earlier ones. Anything else in the file is dropped. Invalid JSON → empty.
+fn claude_context_bindings_from(text: &str, context: &str) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(text) else {
+        return out;
+    };
+    let Some(blocks) = root.get("bindings").and_then(|b| b.as_array()) else {
+        return out;
+    };
+    for block in blocks {
+        if block.get("context").and_then(|c| c.as_str()) != Some(context) {
+            continue;
+        }
+        let Some(map) = block.get("bindings").and_then(|b| b.as_object()) else {
+            continue;
+        };
+        for (key, action) in map {
+            if key.len() > 64 {
+                continue;
+            }
+            match action {
+                serde_json::Value::String(a) if a.len() <= 64 => {
+                    out.insert(key.clone(), serde_json::Value::String(a.clone()));
+                }
+                serde_json::Value::Null => {
+                    out.insert(key.clone(), serde_json::Value::Null);
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// `{ chat, autocomplete }`: only those two contexts of Claude Code's keybindings.
+fn claude_keybindings_from(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chat": claude_context_bindings_from(text, "Chat"),
+        "autocomplete": claude_context_bindings_from(text, "Autocomplete"),
+    })
+}
+
+/// Larger keybindings files are ignored (defaults).
+const CLAUDE_KEYBINDINGS_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Claude Code's Chat and Autocomplete keybindings, so automatic input can press the
+/// configured submit key (src/terminal/claudeSubmitKey.ts). Missing, oversized or invalid
+/// file → empty maps (defaults).
+#[tauri::command(async)]
+fn claude_chat_keybindings() -> serde_json::Value {
+    let text = claude_keybindings_path()
+        .filter(|path| {
+            std::fs::metadata(path)
+                .map(|m| m.is_file() && m.len() <= CLAUDE_KEYBINDINGS_MAX_BYTES)
+                .unwrap_or(false)
+        })
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    claude_keybindings_from(&text)
+}
+
+#[cfg(test)]
+mod claude_keybindings_tests {
+    use super::{claude_context_bindings_from, claude_keybindings_from};
+
+    #[test]
+    fn keeps_only_chat_and_autocomplete_strings_and_nulls() {
+        let text = r#"{
+          "$schema": "x",
+          "bindings": [
+            { "context": "Global", "bindings": { "ctrl+t": "app:toggleTodos" } },
+            { "context": "Chat", "bindings": { "enter": "chat:newline", "shift+enter": "chat:submit", "ctrl+x": null, "bad": 3 } },
+            { "context": "Autocomplete", "bindings": { "shift+enter": "autocomplete:dismiss" } },
+            { "context": "Chat", "bindings": { "cmd+enter": "chat:submit", "enter": "chat:newline" } }
+          ],
+          "secret": "never"
+        }"#;
+        let map = claude_context_bindings_from(text, "Chat");
+        assert_eq!(map.len(), 4);
+        assert_eq!(map["enter"], "chat:newline");
+        assert_eq!(map["shift+enter"], "chat:submit");
+        assert_eq!(map["cmd+enter"], "chat:submit");
+        assert!(map["ctrl+x"].is_null());
+        assert!(!map.contains_key("ctrl+t"));
+        assert!(!map.contains_key("bad"));
+        let both = claude_keybindings_from(text);
+        assert_eq!(both["autocomplete"]["shift+enter"], "autocomplete:dismiss");
+        assert_eq!(both.as_object().unwrap().len(), 2);
+        assert!(!both.to_string().contains("never"));
+        assert!(!both.to_string().contains("toggleTodos"));
+    }
+
+    #[test]
+    fn invalid_or_unexpected_files_give_defaults() {
+        assert!(claude_context_bindings_from("not json", "Chat").is_empty());
+        assert!(claude_context_bindings_from("[]", "Chat").is_empty());
+        assert!(claude_context_bindings_from(r#"{"bindings": {"Chat": 1}}"#, "Chat").is_empty());
+        let empty = claude_keybindings_from("");
+        assert!(empty["chat"].as_object().unwrap().is_empty());
+        assert!(empty["autocomplete"].as_object().unwrap().is_empty());
+    }
+}
+
 #[cfg(test)]
 mod claude_hook_env_tests {
     use super::{apply_bbarit_terminal_env, bbarit_terminal_env, read_env_var, INHERITED_CLAUDE_MARKERS};
@@ -3485,17 +3694,20 @@ mod claude_hook_env_tests {
 
     #[test]
     fn tab_env_names_terminal_bridge_and_hook() {
-        let env = bbarit_terminal_env("term-1", Some("/res/claude-hooks/session-start.sh"));
+        let env = bbarit_terminal_env("term-1", Some("/res/claude-hooks/session-start.sh"), Some("ab12"));
         assert_eq!(
             env,
             vec![
                 ("BBARIT_TERMINAL_ID", "term-1".to_string()),
                 ("BBARIT_BRIDGE_PORT", crate::browser_bridge::BRIDGE_PORT.to_string()),
+                ("BBARIT_TERM_TOKEN", "ab12".to_string()),
                 ("BBARIT_CLAUDE_HOOK", "/res/claude-hooks/session-start.sh".to_string()),
             ]
         );
         // A missing resource leaves the hook var out; the bundled settings then no-op.
-        assert!(bbarit_terminal_env("t", None).iter().all(|(k, _)| *k != "BBARIT_CLAUDE_HOOK"));
+        assert!(bbarit_terminal_env("t", None, None).iter().all(|(k, _)| *k != "BBARIT_CLAUDE_HOOK"));
+        // No key → no token var (agent.* calls with a caller from that tab are refused).
+        assert!(bbarit_terminal_env("t", None, None).iter().all(|(k, _)| *k != "BBARIT_TERM_TOKEN"));
     }
 
     #[test]
@@ -3504,8 +3716,9 @@ mod claude_hook_env_tests {
         for key in INHERITED_CLAUDE_MARKERS {
             cmd.env(key, "1");
         }
-        apply_bbarit_terminal_env(&mut cmd, "t", Some("/h.sh"));
-        for key in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT"] {
+        cmd.env("BBARIT_TERM_TOKEN", "inherited-from-another-tab");
+        apply_bbarit_terminal_env(&mut cmd, "t", Some("/h.sh"), None);
+        for key in ["CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "BBARIT_TERM_TOKEN"] {
             assert!(cmd.get_env(key).is_none(), "{key} should be removed");
         }
         assert_eq!(cmd.get_env("BBARIT_TERMINAL_ID").and_then(|v| v.to_str()), Some("t"));
@@ -4006,6 +4219,8 @@ const RELAUNCH_WATCHDOG: Duration = Duration::from_secs(8);
 /// `RELAUNCH_WATCHDOG`, respawn and exit directly.
 #[tauri::command(async)]
 fn app_relaunch_for_update(app: AppHandle, state: State<'_, AppState>) {
+    // Held tabs survive the handover: no task lease may be released from here on.
+    agent_board::mark_exiting();
     HANDOVER_ON_EXIT.store(true, Ordering::SeqCst);
     RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
     state.pty_selection.on_app_exit(exit_reason_now());
@@ -5972,7 +6187,7 @@ fn list_system_fonts() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
@@ -5988,8 +6203,9 @@ fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result
 
 // Ship the bundled SEO/GEO skills to EVERY user: on startup, copy them from the app's bundled
 // resources into the user's ~/.claude/skills so the in-app coding agents (Claude/Codex/…) can use
-// them on any installed copy — not just the dev machine. Idempotent: a skill that already exists
-// is left untouched so the user's own edits/customizations are never clobbered.
+// them on any installed copy — not just the dev machine. A folder the app wrote (marker file) is
+// refreshed when the bundle changed; a folder the user created or edited is never overwritten
+// (bundled_skills.rs).
 fn install_bundled_skills(app: &AppHandle) {
     let src = match app
         .path()
@@ -6013,21 +6229,25 @@ fn install_bundled_skills(app: &AppHandle) {
         Ok(e) => e,
         Err(_) => return,
     };
-    let mut installed = 0u32;
+    let (mut installed, mut updated) = (0u32, 0u32);
+    let mut kept: Vec<String> = Vec::new();
     for entry in entries.flatten() {
         if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let target = dest_root.join(entry.file_name());
-        if target.exists() {
-            continue;
-        }
-        if copy_dir_all(&entry.path(), &target).is_ok() {
-            installed += 1;
+        match bundled_skills::sync_skill(&entry.path(), &target) {
+            bundled_skills::Outcome::Installed => installed += 1,
+            bundled_skills::Outcome::Updated => updated += 1,
+            bundled_skills::Outcome::KeptUserCopy => kept.push(entry.file_name().to_string_lossy().into_owned()),
+            _ => {}
         }
     }
-    if installed > 0 {
-        safe_eprintln!("[skills] installed {} bundled SEO/GEO skills into ~/.claude/skills", installed);
+    if installed > 0 || updated > 0 {
+        safe_eprintln!("[skills] bundled skills in ~/.claude/skills: {} installed, {} updated", installed, updated);
+    }
+    if !kept.is_empty() {
+        safe_eprintln!("[skills] kept your own or edited copies (not updated): {}", kept.join(", "));
     }
 }
 
@@ -10284,6 +10504,24 @@ fn main() {
                 // BBARIT_CTL for every PTY (agent relay, docs/AGENT_RELAY.md).
                 init_bbarit_ctl_path(app.handle());
 
+                // Agent team boards idle for 30 days are deleted (agent_board.rs); off the main thread.
+                std::thread::spawn(agent_board::prune_on_start);
+                // Team-task leases are renewed / released by the host from PTY liveness, so a
+                // webview reload or a hidden window never lets a live claim expire.
+                {
+                    let selection = app.state::<AppState>().pty_selection.clone();
+                    let ready_sel = selection.clone();
+                    agent_board::start_lease_worker(
+                        selection,
+                        Box::new(move || ready_sel.is_resolved()),
+                        || agent_board::board_timing(read_octo_config_json().as_ref()),
+                    );
+                }
+                // Board sync (usage type "Both (sync)"): a host task; idle in the other modes.
+                agent_board::sync::start_sync_worker(app.handle().clone());
+                // Board server mode: the server's change stream refreshes open team views (idle otherwise).
+                agent_board::stream::start_stream_worker(app.handle().clone());
+
                 if std::env::var_os("BBARIT_DISABLE_BUNDLED_SKILLS_INSTALL").is_none() {
                     // Ship bundled SEO/GEO skills to this user's ~/.claude/skills (every installed copy).
                     let skills_handle = app.handle().clone();
@@ -10385,7 +10623,49 @@ fn main() {
             resolve_bundled_agent,
             resolve_browser_cli,
             claude_hook_settings_path,
+            read_usage_file,
             read_env_var,
+            claude_chat_keybindings,
+            agent_relay_log::agent_relay_log_append,
+            agent_relay_log::agent_relay_log_tail,
+            agent_relay_log::agent_relay_log_refusals,
+            agent_caller::agent_caller_verify,
+            agent_caller::agent_caller_key_info,
+            agent_board::agent_board_post,
+            agent_board::agent_board_read,
+            agent_board::agent_board_teams,
+            agent_board::agent_board_clear,
+            agent_board::agent_board_info,
+            agent_board::agent_task_write,
+            agent_board::agent_task_list,
+            agent_board::agent_task_show,
+            agent_board::agent_board_team_events,
+            agent_board::agent_task_release_owner,
+            agent_board::agent_task_held_on_host,
+            agent_board::agent_task_lease_apply,
+            agent_board::admin::agent_board_settings_status,
+            agent_board::server_login::board_server_status,
+            agent_board::server_login::board_server_sign_in_start,
+            agent_board::server_login::board_server_sign_in_poll,
+            agent_board::server_login::board_server_sign_in_cancel,
+            agent_board::server_login::board_server_open_sign_in_link,
+            agent_board::server_login::board_server_sign_out,
+            agent_board::admin::agent_board_pg_test,
+            agent_board::admin::agent_board_pg_migrate,
+            agent_board::admin::agent_board_copy,
+            agent_board::admin::agent_board_pg_cleanup,
+            agent_board::admin::agent_board_secret_save,
+            agent_board::admin::agent_board_secret_clear,
+            agent_board::sync::agent_board_sync_status,
+            agent_board::sync::agent_board_sync_now,
+            agent_board::sync::agent_board_remove_mirrors,
+            agent_board::sync::agent_board_check_host_name,
+            agent_board::sync::agent_board_restore_preview,
+            agent_board::sync::agent_board_restore,
+            agent_board::sync::agent_board_adopt_preview,
+            agent_board::sync::agent_board_adopt,
+            agent_board::sync::agent_board_outbox,
+            agent_board::sync::agent_board_outbox_dismiss,
             editor_bridge_respond,
             gateway_ui_respond,
             gateway_info,
@@ -10655,6 +10935,8 @@ fn main() {
             // which never goes through CloseRequested (prevent_close) above. Reap
             // the RPC agent children here so no `--mode rpc` process outlives the app.
             if let tauri::RunEvent::Exit = event {
+                // Before PTYs disconnect: the team-task lease worker must not see them as dead.
+                agent_board::mark_exiting();
                 // Decide the update relaunch first, so a watchdog firing meanwhile backs off.
                 let restart = exit_restart_action(
                     RELAUNCH_REQUESTED.load(Ordering::SeqCst),

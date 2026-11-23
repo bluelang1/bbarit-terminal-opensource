@@ -38,6 +38,8 @@ export interface GuideHostInput {
   gitPanelOpen: boolean;
   /** Hint mode (src/hints) is showing its labels. */
   hintModeOpen?: boolean;
+  /** The Team status view is showing (overlay tab or its own window). */
+  teamStatusOpen?: boolean;
 }
 
 export interface GuideHost {
@@ -183,6 +185,7 @@ export function useGuideHost(input: GuideHostInput): GuideHost {
   useIncrease(enabled ? input.statusTabCount : 0, () => mark('status'));
   useIncrease(enabled && input.gitPanelOpen ? 1 : 0, () => mark('git-keys'));
   useIncrease(enabled && input.hintModeOpen ? 1 : 0, () => mark('hints'));
+  useIncrease(enabled && input.teamStatusOpen ? 1 : 0, () => mark('team-status'));
 
   const runStartup = useCallback((projectCount: number) => {
     if (!latest.current.enabled || !isTauri() || startupRanRef.current) return;

@@ -4,6 +4,7 @@
 //!   - GET  /health          — liveness probe
 //!   - POST /api/invoke      — generic command dispatch for MCP clients
 //!   - POST /api/claude-session — Claude Code SessionStart hook report (docs/CLAUDE_SESSION_HOOK.md)
+//!   - POST /api/claude-limit — Claude Code StopFailure rate-limit report (docs/MODEL_LIMIT_FALLBACK.md)
 //!   - GET  /api/commands    — list available commands
 //!   - GET  /web             — embedded xterm.js web terminal UI
 //!   - WS   /ws/terminal/{id} — PTY I/O
@@ -92,6 +93,8 @@ pub async fn start_browser_bridge(
         .route("/api/commands", get(handle_list_commands))
         .route("/editor", post(handle_editor))
         .route("/api/claude-session", post(handle_claude_session))
+        .route("/api/claude-limit", post(handle_claude_limit))
+        .route("/api/agent-lead", get(handle_agent_lead))
         .with_state(bridge_ctx.clone())
         // POST /gateway/ui — the agent's app_control tool drives the app UI. It
         // authenticates with the internal UI token, and lives on the LOCAL port
@@ -490,6 +493,15 @@ async fn handle_claude_session(
     (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
+// GET /api/agent-lead — the bundled UserPromptSubmit hook (claude-hooks/user-prompt-submit.sh)
+// reads the lead phrases here (text/plain, one per line; empty while the agent team is off).
+// The hook never sends the prompt; matching happens in the hook. docs/AGENT_RELAY.md "Lead mode".
+async fn handle_agent_lead() -> (StatusCode, [(axum::http::header::HeaderName, &'static str); 1], String) {
+    let cfg = crate::read_octo_config_json();
+    let body = crate::agent_board::lead_hook_phrases(cfg.as_ref()).join("\n");
+    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")], body)
+}
+
 #[cfg(test)]
 mod claude_session_tests {
     use super::*;
@@ -539,6 +551,124 @@ mod claude_session_tests {
         assert_eq!(
             parse_claude_session_report(&json!({ "terminalId": "t", "sessionId": SID, "source": "x y" })),
             Err("source is invalid")
+        );
+    }
+}
+
+// ── Claude limit hook ──
+//
+// The bundled StopFailure hook (resources/claude-hooks/stop-failure.sh) POSTs a turn that
+// ended on `"error":"rate_limit"` here with Claude Code's message ("You've hit your Fable
+// limit · resets …"). The frontend decides whether to switch the tab's model; this only
+// validates and re-emits. docs/MODEL_LIMIT_FALLBACK.md
+
+pub const CLAUDE_LIMIT_EVENT: &str = "claude-limit-reported";
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeLimitReport {
+    pub terminal_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+pub fn parse_claude_limit_report(body: &serde_json::Value) -> Result<ClaudeLimitReport, &'static str> {
+    let field = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::trim);
+    let terminal_id = field("terminalId").unwrap_or("");
+    if terminal_id.is_empty() {
+        return Err("terminalId is required");
+    }
+    if terminal_id.len() > 128 || terminal_id.chars().any(char::is_control) {
+        return Err("terminalId is invalid");
+    }
+    let session_id = field("sessionId").filter(|s| !s.is_empty());
+    if session_id.is_some_and(|s| !is_uuid(s)) {
+        return Err("sessionId must be a uuid");
+    }
+    let error = field("error").unwrap_or("");
+    if error.is_empty() || error.len() > 32 || !error.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        return Err("error is invalid");
+    }
+    let message = field("message").filter(|m| !m.is_empty());
+    if message.is_some_and(|m| m.len() > 512 || m.chars().any(char::is_control)) {
+        return Err("message is invalid");
+    }
+    Ok(ClaudeLimitReport {
+        terminal_id: terminal_id.to_string(),
+        session_id: session_id.map(str::to_ascii_lowercase),
+        error: error.to_string(),
+        message: message.map(str::to_string),
+    })
+}
+
+async fn handle_claude_limit(
+    AxumState(ctx): AxumState<BridgeCtx>,
+    body: Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let report = match body.as_ref().map(|Json(v)| parse_claude_limit_report(v)) {
+        Ok(Ok(report)) => report,
+        Ok(Err(reason)) => {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "ok": false, "error": reason })))
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "ok": false, "error": "body must be JSON" })),
+            )
+        }
+    };
+    if let Err(e) = ctx.app_handle.emit(CLAUDE_LIMIT_EVENT, &report) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        );
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod claude_limit_tests {
+    use super::*;
+    use serde_json::json;
+
+    const SID: &str = "264af8d3-db3b-4f8e-818f-7414907e0c7b";
+    const MSG: &str = "You've hit your Fable limit · resets Nov 21 at 12pm (Asia/Seoul)";
+
+    #[test]
+    fn accepts_the_stop_failure_report_and_emits_camel_case() {
+        let r = parse_claude_limit_report(&json!({
+            "terminalId": "t1", "sessionId": SID, "error": "rate_limit", "message": MSG,
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({ "terminalId": "t1", "sessionId": SID, "error": "rate_limit", "message": MSG })
+        );
+        // The hook sends "" for a missing session id or message.
+        let r = parse_claude_limit_report(&json!({ "terminalId": "t1", "sessionId": "", "error": "rate_limit", "message": "" })).unwrap();
+        assert_eq!((r.session_id, r.message), (None, None));
+    }
+
+    #[test]
+    fn rejects_bad_fields() {
+        assert_eq!(parse_claude_limit_report(&json!({ "error": "rate_limit" })), Err("terminalId is required"));
+        assert_eq!(
+            parse_claude_limit_report(&json!({ "terminalId": "t", "sessionId": "abc", "error": "rate_limit" })),
+            Err("sessionId must be a uuid")
+        );
+        for bad in ["", "rate limit", "x\u{7}"] {
+            assert_eq!(parse_claude_limit_report(&json!({ "terminalId": "t", "error": bad })), Err("error is invalid"), "{bad:?}");
+        }
+        assert_eq!(
+            parse_claude_limit_report(&json!({ "terminalId": "t", "error": "rate_limit", "message": "a\u{1b}]7501;x" })),
+            Err("message is invalid")
+        );
+        assert_eq!(
+            parse_claude_limit_report(&json!({ "terminalId": "t", "error": "rate_limit", "message": "x".repeat(513) })),
+            Err("message is invalid")
         );
     }
 }

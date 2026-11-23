@@ -22,7 +22,7 @@ import { ClampedMenu } from './components/ClampedMenu';
 import StatusBarStats from './components/StatusBarStats';
 import { type OnMount } from '@monaco-editor/react';
 import { XTerminal, disposeTerminal, releaseTerminalRuntime, getTerminalRecentOutput, isTerminalBusy } from './XTerminal';
-import { getTerminalAgentState, isTerminalAgentUiReady, isTerminalPtyStarted, PTY_EXITED_EVENT, PTY_REPLAYED_EVENT } from './XTerminal';
+import { getTerminalAgentState, isTerminalAgentRunning, isTerminalAgentUiReady, isTerminalPtyStarted, PTY_EXITED_EVENT, PTY_REPLAYED_EVENT } from './XTerminal';
 import { useRestoreFocusOnWindowFocus } from './hooks/useRestoreFocusOnWindowFocus';
 import { BROKER_AGENT_ROLES, startDevReviewPair, ROLE_LABEL as BROKER_ROLE_LABEL, normalizeBrokerAgentRole, shouldAcceptBrokerStatusUpdate, type BrokerReviewMode, type DevReviewRole, type BrokerStatusSnapshot, type PairEvent } from './devreview/devReviewPair';
 import { performAgentRestart } from './devreview/restartAgents';
@@ -44,13 +44,14 @@ import { CustomFontPicker } from './components/CustomFontPicker';
 import { looksLikePlainShellPrompt, looksLikeCompiling } from './terminal/agentReadiness';
 import { lastCommandOf, subscribeLastCommands, lastCommandsVersion } from './terminal/lastCommand';
 import { equalizeLayoutRatios } from './terminal/terminalLayoutEqualize';
-import { autoInputRefusalMessage, queueAutoInput, setInputGateFallbackWriter, type AutoInputResult } from './terminal/inputGate';
+import { autoInputRefusalMessage, dropQueuedAutoInput, queueAutoInput, setInputGateFallbackWriter, setInputGateSubmitKeyResolver, type AutoInputResult } from './terminal/inputGate';
+import { claudeSubmitKey, claudeSubmitSpec, refreshClaudeSubmitKey, submitKeyForTerminal, type ClaudeKeybindings } from './terminal/claudeSubmitKey';
 import { gateSubmitDelayFor, queueButtonInput } from './terminal/buttonInput';
 import { resolveTerminalClickPath } from './terminal/openTerminalPath';
 import { withBbaritAgentLanguageFlags } from './terminal/bbaritAgentLanguage';
 import { buildBbaritPersonaProfile, findBbaritPersonaProfile, type BbaritPersonaEntry, type BbaritPersonaProfile } from './terminal/bbaritAgentPersonaProfile';
 import { GATEWAY_UI_COMMAND_DOCS } from './gatewayUiCommands';
-import { useTranslation } from './i18n';
+import { useTranslation, type Locale } from './i18n';
 import './App.css';
 
 // Agents selectable for either broker role (developer/reviewer) — swappable any time.
@@ -145,7 +146,7 @@ const TodoGanttPanel = React.lazy(() => import('./components/TodoGanttPanel'));
 // Scrum modal is now a separate window — launch is handled by ScrumPage.tsx
 import { aiChat, getAiTagProvider } from './notes/ollamaTagging';
 import { kvGet, kvSet, kvGetMany, kvSetMany, kvGetJSON, kvSetJSON } from './hooks/useKV';
-import { describePtyBackend, getPtyRecovery, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
+import { describePtyBackend, getPtyRecovery, holderIntroWanted, hostDebugBuild, isRestoredTerminal, loadPtyRecovery, onRecoveryWait, placeUnknownRecovered, recoveredPtyFor, withoutRecovered, type RecoveredPty } from './terminal/ptyRecovery';
 import { GITHUB_ACCOUNT_NONE, projectEditUpdates, projectGithubAccountFor } from './projectEdit';
 import {
   KV_CALENDAR_KEY, KANBAN_TASK_SYNC_EVENT, buildEventFromTask, diffKanbanForGantt,
@@ -169,12 +170,14 @@ import { captureDropTargets, dropSideFor, findDropTarget, type DropTargetRect } 
 import { isClaudeSessionId, newClaudeSessionId, type ClaudeSessionSource } from './terminal/claudeSessionDir';
 import { dedicatedCodexSessionFields, restoredCodexFreshSession } from './terminal/codexSession';
 import { applyReportedClaudeSessionToProjects, CLAUDE_SESSION_REPORTED_EVENT, isDedicatedClaudeTab, type ClaudeSessionReport } from './terminal/claudeSessionReport';
+import { sanitizeModelFallbackMark, type ModelFallbackMark } from './terminal/modelLimitFallback';
+import { CLAUDE_LIMIT_REPORTED_EVENT, MODEL_FALLBACK_EVENT, MODEL_FALLBACK_MARK_EVENT, modelLimitTabsVersion, modelSwitchIndicator, releaseHumanModelChoice, subscribeModelLimitTabs, noteModelLimitHook, syncModelFallbackMarks, type ClaudeLimitReport, type ModelFallbackEventDetail } from './terminal/modelLimitRuntime';
 import { contentFingerprint, diskChangedSinceLoad } from './utils/fileSyncGuard';
 
 const KanbanPanel = React.lazy(() => import('./kanban/KanbanPanel').then(m => ({ default: m.KanbanPanel })));
 const Pm2Panel = React.lazy(() => import('./pm2/Pm2Panel').then(m => ({ default: m.Pm2Panel })));
 const HubPanel = React.lazy(() => import('./pm2/HubPanel').then(m => ({ default: m.HubPanel })));
-const DashboardPanel = React.lazy(() => import('./dashboard/DashboardPanel').then(m => ({ default: m.DashboardPanel })));
+const TeamStatusOverlay = React.lazy(() => import('./teamStatus/TeamStatusOverlay').then(m => ({ default: m.TeamStatusOverlay })));
 import type { KanbanTask } from './kanban/types';
 import { loadKanbanBoard, saveKanbanBoard, createTask, moveTask, updateTask } from './kanban/storage';
 
@@ -185,15 +188,30 @@ import { getLoungeHandle } from './collab/loungeClient';
 import { LOUNGE_UNREAD_EVENT, loadLoungeUnreadCounts, startLoungeUnreadMonitor, totalLoungeUnread, type LoungeUnreadCounts } from './collab/loungeNotifications';
 import { listenRemoteNoteChanges } from './collab/notesSync';
 import { aggregateProjectAgentState, type AgentTabState } from './terminal/programStatus';
-import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { AGENT_STATE_LABEL, AGENT_STATUS_EVENT, BLOCKED_KIND_LABEL, blockedAlertText, clearedStatusDisplay, displayAgentState, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { collectBusyAgentTabs, formatBusyAgentWarning, updateInterruptsTerminals } from './terminal/busyAgentTabs';
 import { isAgentCli, newPetFeedMemory, petFeedTick, summaryEquals, type PetFeedRow, type PetSummary } from './pet/summary';
 import { useGuideHost } from './guide/useGuideHost';
+import { agentTeamEnabled, agentTeamRefusal, gaugeButtonLabel, refusalAfterWorktree, showStopTeamButton, showTeamStatusButton, teamBadgeCount, teamGatedNoteSend } from './terminal/agentTeamSwitch';
 import { Spotlight } from './guide/Spotlight';
-import { UNREPORTED_SETTLE_MS, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { anyRelayChildWorking, effectiveAgentState, markLinkStopped, restoreStopMark, selectStopTargets, stopAgentTerminal, type AgentStopResult } from './terminal/agentRelay';
+import { UNREPORTED_SETTLE_MS, orphanAgentLink, agentRunTerminalSpec, agentSettledBy, dedicatedClaudeSessionFields, canDeliverToParent, decideAgentNote, decideExitNote, dropParent, enqueueNote, flushNotes, formatAgentBrief, formatAgentNote, parentAcceptsNotes, restoreAgentLinks, resyncLinkAfterReplay, runAgentBrief, serializeAgentLinks, wrapAgentMessage, type AgentLink, type PersistedAgentLink, type AgentNoteState, type AgentStatusSnapshot, type PendingNotes } from './terminal/agentRelay';
+import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from './terminal/agentWorktree';
+import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
+import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
+import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
+import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, forwardHostBoardEvent, onAgentBoardChange, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
+import { isProtectedConfigPath, keepProtectedConfig, protectedConfigRefusal, readBoardModeSetting, redactProtectedConfig } from './terminal/agentBoardStorage';
+import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
+import './teamStatus/teamStatus.css';
+import { badgeCount, badgeLabel, badgeSeverity, badgeText, limitUsage, needsYou, projectTeams, teamMemberIds, teamStatusSurface, type NeedsYouItem } from './teamStatus/model';
+import { SERVER_WATCH_POLL_MS, useTeamWatch } from './teamStatus/watch';
+import { POPOUT_EVENT, POPOUT_LABEL, POPOUT_SIZE, contextKey, newPopoutToken, popoutUrl, serveRequest, type PopoutContext } from './teamStatus/popout';
+import type { ActionResult, HumanTaskSub, TeamBoardSource } from './teamStatus/source';
+import type { TeamMember } from './teamStatus/TeamStatusView';
 import { fetchStatusesByRepo, shareInFlight } from './git/terminalGitStatus';
 import { useDialogFocus } from './a11y/dialogFocus';
 import { isHiddenStackedPane, isStackedTerminalMode } from './terminal/stackedPanes';
@@ -260,7 +278,7 @@ const sendAgentOsNotification = (title: string, body: string, settings: OsNotify
 
 // Per-terminal OSC 7501 status (docs/AGENT_STATUS_OSC7501.md). `done` drops to
 // `idle` once the user has looked at the terminal (seenTurn >= turn).
-type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number };
+type AgentStatusEntry = { state: AgentTabState; kind?: string; msg?: string; turn: number; seenTurn: number; resetAt?: number };
 const BROWSER_TOOLBAR_ENABLED = false;
 // GitHub repositories for the toolbar link and the "open release page" fallback
 // (VITE_BBARIT_RELEASE_REPO_MAC / _WIN, see src/config/endpoints.ts). The signed
@@ -632,6 +650,8 @@ interface TerminalInstance {
   codexFreshSession?: boolean;
   /** Set on the two terminals opened by the Broker Agent, for strong visual distinction. */
   brokerRole?: 'developer' | 'reviewer';
+  /** Switched to the fallback model by the app after the primary's limit (docs/MODEL_LIMIT_FALLBACK.md). */
+  modelFallback?: ModelFallbackMark;
 }
 
 type TerminalGitStatus = {
@@ -1920,6 +1940,7 @@ function saveProjects(projects: Project[], activeId: string | null, agentLinks?:
         claudeSessionId: t.claudeSessionId || undefined,
         claudeSessionSource: t.claudeSessionId ? (t.claudeSessionSource || undefined) : undefined,
         codexFreshSession: restoredCodexFreshSession(t),
+        modelFallback: t.cliType === 'claude' ? sanitizeModelFallbackMark(t.modelFallback) : undefined,
       })),
       activeTerminalId: p.activeTerminalId,
     })),
@@ -1968,6 +1989,7 @@ async function loadProjects(): Promise<{ projects: Project[]; activeProjectId: s
               claudeSessionId: isClaudeSessionId(t?.claudeSessionId) ? t.claudeSessionId : undefined,
               claudeSessionSource: isClaudeSessionId(t?.claudeSessionId) ? (t?.claudeSessionSource === 'hook' ? 'hook' : 'app') : undefined,
               codexFreshSession: restoredCodexFreshSession({ cliType, codexFreshSession: t?.codexFreshSession }),
+              modelFallback: cliType === 'claude' ? sanitizeModelFallbackMark(t?.modelFallback) : undefined,
             } as TerminalInstance;
           })
         : [createTerminal()];
@@ -2611,7 +2633,7 @@ function App() {
 
   const [showGlobalSettings, setShowGlobalSettings] = useState(false);
   // Set by the guide's keep-running step; cleared when settings closes.
-  const [settingsInitialTab, setSettingsInitialTab] = useState<{ tab: 'terminal'; nonce: number } | undefined>(undefined);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<{ tab: 'terminal' | 'agent'; nonce: number } | undefined>(undefined);
   const [themePickerTerminalId, setThemePickerTerminalId] = useState<string | null>(null);
   const [projectThemePickerPosition, setProjectThemePickerPosition] = useState<{ top: number; left: number } | null>(null);
   // Poll for BBARIT instances on the same LAN while the SSH project form is open.
@@ -3264,6 +3286,22 @@ function App() {
   // 앱 내부 비서(웹챗 iframe) 오버레이. URL은 gateway_info로 lazy 로드.
   const [showSecretary, setShowSecretary] = useState(false);
   const [showDashboard, setShowDashboard] = useState(false);
+  /** Gauge overlay request: the tab and team an entry point asked for (badge, team button). */
+  const [gaugeRequest, setGaugeRequest] = useState<{ tab?: 'team' | 'dashboard'; team?: string; projectId?: string; nonce: number }>({ nonce: 0 });
+  /** The overlay tab shown: the board is read only for Team status (never just for the Dashboard). */
+  const [gaugeTab, setGaugeTab] = useState<'team' | 'dashboard' | null>(null);
+  /** Set by a jump to an agent tab: the overlay closes without giving focus back. */
+  const gaugeNoRestoreRef = useRef(false);
+  // Team status in its own window (tool-team-status): open, the team it shows, the project it
+  // came from, and a nonce bumped when the main window asks it to show a team.
+  const [teamPopout, setTeamPopout] = useState<{ open: boolean; team: string; projectId: string; nonce: number }>({ open: false, team: '', projectId: '', nonce: 0 });
+  /** Per-open random token: the pop-out gets it in its URL and must send it with every message. */
+  const popoutTokenRef = useRef<string | null>(null);
+  /** Cleanup of the one close listener on the pop-out window. */
+  const popoutCloseOffRef = useRef<(() => void) | null>(null);
+  /** The team the overlay's Team status tab shows (handed to the pop-out). */
+  const gaugeTeamRef = useRef('');
+  useEffect(() => { if (!showDashboard) setGaugeTab(null); }, [showDashboard]);
   const [secretaryUrl, setSecretaryUrl] = useState<string | null>(null);
   const [secretaryError, setSecretaryError] = useState<string | null>(null);
   const openSecretary = useCallback(async () => {
@@ -3690,9 +3728,7 @@ function App() {
   const [agentStatus, setAgentStatus] = useState<Map<string, AgentStatusEntry>>(() => new Map());
   // Display state: OSC 7501 when the terminal reports it, else I/O activity (busyTerminals).
   const agentStateOf = (terminalId: string): AgentTabState => {
-    const s = agentStatus.get(terminalId);
-    if (s) return s.state === 'done' && s.seenTurn >= s.turn ? 'idle' : s.state;
-    return busyTerminals.has(terminalId) ? 'working' : 'idle';
+    return displayAgentState(agentStatus.get(terminalId), busyTerminals.has(terminalId));
   };
   // Legacy `running`/`stopped` stays alongside so existing CSS keeps working.
   const terminalStatusClass = (terminalId: string): string => {
@@ -5871,7 +5907,15 @@ Office project scaffold created by BBARIT Terminal.
       const looking = d.looking || isUserLooking(activeTerminalIdForStatusRef.current === tid);
       setAgentStatus((prev) => {
         const old = prev.get(tid);
-        if (d.cleared) {
+        const clearedAs = clearedStatusDisplay(d);
+        if (clearedAs === 'idle') {
+          // A 7501 program just (re)started in this tab: stay idle until it reports, instead
+          // of guessing "working" from screen output.
+          const next = new Map(prev);
+          next.set(tid, { state: 'idle', turn: d.turn, seenTurn: d.turn, resetAt: Date.now() });
+          return next;
+        }
+        if (clearedAs === 'drop') {
           if (!old) return prev;
           const next = new Map(prev);
           next.delete(tid);
@@ -5917,6 +5961,34 @@ Office project scaffold created by BBARIT Terminal.
   // 처음 등록한 리스너가 그대로 써도 된다.
   const agentLinksRef = useRef<Map<string, AgentLink>>(new Map());
   const agentNoteQueueRef = useRef<PendingNotes>(new Map());
+  /** agent run --worktree jobs (git runs past one bridge request); read by agent.run.result. */
+  const agentRunJobsRef = useRef<Map<string, { done: boolean; at: number; result?: Record<string, unknown> }>>(new Map());
+  /** agent.run slots taken between the limit check and the moment the child's link exists. */
+  const agentRunReservationsRef = useRef(createAgentRunReservations());
+  /** Relay child state: OSC 7501 when reported, else output activity (shells, Codex, …). */
+  const relayChildState = (terminalId: string): AgentTabState => effectiveAgentState(getTerminalAgentState(terminalId), isTerminalBusy(terminalId));
+  /** Stop-team button: shown while a relay child is working (agent stop design). */
+  const [relayTeamWorking, setRelayTeamWorking] = useState(false);
+  /** Settings → "Agent team in tabs" (agents.enabled). Off hides the team UI and stops notes. */
+  const agentTeamOn = agentTeamEnabled(appConfig.agents);
+  /** Live relay child ids, joined — keys the activity poll below. */
+  const [relayChildKey, setRelayChildKey] = useState('');
+  const refreshRelayTeamWorking = () => {
+    const live = [...agentLinksRef.current.values()].filter((l) => l.parentId && !l.exited && !!findTerminalAnywhere(l.childId));
+    setRelayChildKey(live.map((l) => l.childId).sort().join(','));
+    setRelayTeamWorking(anyRelayChildWorking(live, relayChildState));
+  };
+  // Children without OSC 7501 send no status event: re-check activity every 2 s while relay
+  // children exist (keyed on the id string, not on objects, so renders do not restart it).
+  useEffect(() => {
+    if (!relayChildKey) return;
+    const timer = window.setInterval(refreshRelayTeamWorking, 2000);
+    return () => window.clearInterval(timer);
+  }, [relayChildKey]);
+  /** Drop worktree-run job results nobody read in 10 min (called on agent.* commands). */
+  const pruneAgentRunJobs = (now = Date.now()) => {
+    for (const [id, job] of agentRunJobsRef.current) if (now - job.at > 10 * 60 * 1000) agentRunJobsRef.current.delete(id);
+  };
   /** Persist lastNotifiedTurn changes (projects are saved with the links). */
   const scheduleAgentLinksSave = () => {
     if (!projectsLoadedRef.current || projectsRef.current.length === 0) return;
@@ -5936,18 +6008,512 @@ Office project scaffold created by BBARIT Terminal.
     }
     return undefined;
   };
+  /** Relay audit log (~/.config/octo/agent-relay.log): fire and forget, never fails the action. */
+  const logAgentRelay = (input: AgentRelayLogInput) => {
+    try {
+      void invoke('agent_relay_log_append', { entry: buildAgentRelayLogEntry(input) }).catch(() => {});
+    } catch { /* logging never fails a relay action */ }
+  };
+  /** { id, name, cliType } of a relay tab for the log (name/cliType from the tab or its link). */
+  const relayLogParty = (terminalId: string) => {
+    const term = findTerminalAnywhere(terminalId);
+    const link = agentLinksRef.current.get(terminalId);
+    return { id: terminalId, name: term?.name || link?.name, cliType: term?.cliType || link?.cliType };
+  };
+  /** Agent board: the team root tab's name (open tab, else its relay link) or ''. */
+  const boardTeamName = (team: string): string => findTerminalAnywhere(team)?.name || agentLinksRef.current.get(team)?.name || '';
+  /** Rust agent_board_* errors (team board unavailable: …) as a plain message. */
+  const boardError = (e: unknown): string => String(e instanceof Error ? e.message : e) || 'team board unavailable';
+  /**
+   * Clear a team board, log it and notify viewers. Permission is the caller's job: the
+   * agent.board.clear command checks canClearBoard first; the stage-2 in-app viewer (a person
+   * pressing a button, no ctl caller) calls this directly. Not reachable through ctl.
+   */
+  const clearAgentBoard = async (team: string, by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' }): Promise<{ ok: true; removed: number } | { ok: false; error: string }> => {
+    if (!isValidTeamId(team)) return { ok: false, error: `invalid team id: ${team}` };
+    let res: { removed?: number };
+    try {
+      res = await invoke('agent_board_clear', { team });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    const removed = res?.removed ?? 0;
+    logAgentRelay({
+      event: 'board_clear',
+      caller: by.caller ? relayLogParty(by.caller) : undefined,
+      callerVerified: by.callerVerified,
+      extra: { team, removed, by: by.source },
+    });
+    emitAgentBoardEvent({ team, action: 'clear', removed });
+    return { ok: true, removed };
+  };
+  // ── Team tasks (src/terminal/agentTasks.ts, Rust agent_board/) ── leases: a claim holds a task
+  // for agents.board.leaseSeconds. The host renews / releases them from PTY liveness
+  // (agent_board::start_lease_worker), so a webview reload or a hidden window changes nothing.
+  // The webview only hands a closed tab's tasks back at once (the host checks the PTY is really
+  // gone) and, once per load, sorts out the previous instance's claims (planStartupLeases).
+  const boardConfig = () => normalizeAgentBoardConfig(getConfigSnapshot().agents?.board);
+  const boardLeaseStartupRef = useRef(false);
+  /** Tab ids seen in the last projects pass (a vanished id is a closed tab). */
+  const boardKnownTabsRef = useRef<Set<string>>(new Set());
+  /** Log and announce a task change (audit log `task_<action>`, viewer event). */
+  const reportTaskChange = (team: string, op: Pick<TaskOp, 'op' | 'title' | 'reason' | 'error' | 'result'>, res: TaskWriteResult, by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' | 'app' }) => {
+    if (res.task) {
+      const audit = taskAuditFields(team, op, res);
+      logAgentRelay({ event: audit.event, caller: by.caller ? relayLogParty(by.caller) : undefined, callerVerified: by.callerVerified, text: audit.text, extra: { ...audit.extra, by: by.source } });
+    }
+    if (res.task) emitAgentBoardEvent({ team, action: 'task', task: res.task.seq, taskAction: String(res.action || op.op), state: res.task.state, authorId: by.caller });
+    if (typeof res.post === 'number') emitAgentBoardEvent({ team, action: 'post', seq: res.post, kind: 'done', authorId: by.caller });
+    for (const e of res.expired || []) {
+      // The app released it: the owner is recorded as `owner`, there is no caller.
+      logAgentRelay({ event: 'task_lease_expired', extra: { team, task: e.seq, from: (e as { from?: string }).from, to: 'open', owner: e.ownerId, by: 'app' } });
+      emitAgentBoardEvent({ team, action: 'task', task: e.seq, taskAction: 'lease_expired', state: 'open' });
+    }
+  };
+  /** Tasks the host handed back (it writes their audit lines): tell viewers. */
+  const announceReleased = (released: Array<{ team: string; seq: number }> | undefined) => {
+    for (const r of released || []) emitAgentBoardEvent({ team: r.team, action: 'task', task: r.seq, taskAction: 'auto_release', state: 'open' });
+  };
+  /** A tab closed: hand back its tasks now (the host refuses while its PTY still runs). */
+  const releaseBoardTasksOf = async (tabId: string, reason: string) => {
+    try {
+      const res = await invoke<{ released?: Array<{ team: string; seq: number }> }>('agent_task_release_owner', { ownerId: tabId, reason });
+      announceReleased(res?.released);
+    } catch { /* the host's lease worker retries */ }
+  };
+  /** App start (and every webview load): re-adopt claims whose tab the PTY holder kept running, release stale ones. */
+  const reconcileBoardLeasesOnStart = async (alive: ReadonlySet<string>) => {
+    try {
+      const held = await invoke<HeldTask[]>('agent_task_held_on_host');
+      if (!Array.isArray(held) || held.length === 0) return;
+      const info = await invoke<{ instance: string }>('agent_board_info');
+      const recovered = new Set(getPtyRecovery().recovered.filter((r) => !r.exited).map((r) => r.id));
+      const plan = planStartupLeases(held, { instance: info.instance, alive, recovered, now: Date.now(), renewMs: boardConfig().renewSeconds * 1000 });
+      if (plan.adopt.length || plan.release.length) {
+        const res = await invoke<{ released?: Array<{ team: string; seq: number }> }>('agent_task_lease_apply', {
+          adopt: plan.adopt, release: plan.release, leaseMs: boardConfig().leaseSeconds * 1000,
+        });
+        announceReleased(res?.released);
+      }
+    } catch { /* leases expire on their own */ }
+  };
+  /**
+   * One task write through the store, then log, viewer event and lease tracking. Permission is
+   * the caller's job (agent.task.* checks planTaskWrite; the stage-4 viewer uses
+   * humanTaskAction). Returns the store result or an error.
+   */
+  const runAgentTaskWrite = async (
+    team: string,
+    op: TaskOp,
+    actor: { id: string; name?: string; cli?: string; root: boolean; human: boolean },
+    by: { caller?: string; callerVerified?: true | 'legacy'; source: 'ctl' | 'viewer' },
+  ): Promise<{ ok: true; res: TaskWriteResult } | { ok: false; error: string }> => {
+    let res: TaskWriteResult;
+    try {
+      res = await invoke<TaskWriteResult>('agent_task_write', { team, actor, op });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    reportTaskChange(team, op, res, by);
+    return { ok: true, res };
+  };
+  /**
+   * Human task actions for the stage-4 viewer (a person pressing a button; author "user"): add,
+   * edit, cancel, reopen, retry, approve, reject, dependencies. Not reachable through ctl or a
+   * UI command.
+   */
+  const humanTaskAction = async (team: string, sub: string, request: Record<string, unknown>) => {
+    if (!isValidTeamId(team)) return { ok: false as const, error: `invalid team id: ${team}` };
+    const built = buildTaskOp(sub, request, { teamName: boardTeamName(team) || undefined });
+    if (!built.ok) return built;
+    return runAgentTaskWrite(team, built.value, { id: 'user', name: 'user', root: false, human: true }, { source: 'viewer' });
+  };
+  /** A person posts a note to a team board from the Team status view (author "user"). Not reachable through ctl. */
+  const humanBoardPost = async (team: string, raw: string): Promise<ActionResult> => {
+    if (!isValidTeamId(team)) return { ok: false, error: `invalid team id: ${team}` };
+    const text = sanitizeBoardText(raw);
+    if (!text.ok) return { ok: false, error: text.error };
+    let stored: BoardPost & { pending?: boolean; home?: string };
+    try {
+      stored = await invoke<BoardPost & { pending?: boolean; home?: string }>('agent_board_post', {
+        team,
+        post: { teamName: boardTeamName(team) || undefined, authorId: 'user', authorName: 'user', kind: 'note', text: text.value, root: false },
+      });
+    } catch (e) {
+      return { ok: false, error: boardError(e) };
+    }
+    logAgentRelay({ event: 'board_post', text: text.value, extra: { team, kind: 'note', seq: stored.seq, by: 'viewer', ...(stored.pending ? { pendingFor: stored.home } : {}) } });
+    // A note queued for another computer's team is not a post yet: views refresh, nobody is told.
+    emitAgentBoardEvent(stored.pending ? { team, action: 'sync' } : { team, action: 'post', seq: stored.seq, kind: 'note', authorId: 'user' });
+    return { ok: true };
+  };
+  // ── Team status view (src/teamStatus/, toolbar gauge overlay) ── reads go through the board
+  // commands; a person's actions go through humanTaskAction / humanBoardPost (author "user").
+  // A person's actions are not reachable through agent.* UI commands. Not a security boundary:
+  // `bbarit-ctl js` / the mcp-bridge already has full control of the main window, and Tauri
+  // events carry no sender (the pop-out's requests are only checked against a per-open token).
+  const teamBoardSource: TeamBoardSource = {
+    info: () => invoke('agent_board_info'),
+    syncStatus: () => invoke('agent_board_sync_status'),
+    teams: async () => {
+      const rows = await invoke<Array<{ team: string; teamName?: string; updatedTs?: number; liveTasks?: number; homeHost?: string; mirror?: boolean; syncedAt?: number }>>('agent_board_teams');
+      return (Array.isArray(rows) ? rows : []).map((r) => ({ ...r, teamName: boardTeamName(r.team) || r.teamName }));
+    },
+    tasks: async (team) => {
+      const res = await invoke<{ tasks?: any[]; teamName?: string; expired?: TaskWriteResult['expired'] }>('agent_task_list', {
+        team, query: { all: true, limit: 500, staleMs: boardConfig().staleMinutes * 60_000 },
+      });
+      if (res?.expired?.length) reportTaskChange(team, { op: 'list' }, { expired: res.expired }, { source: 'app' });
+      return { tasks: Array.isArray(res?.tasks) ? res.tasks : [], teamName: boardTeamName(team) || res?.teamName };
+    },
+    events: async (team) => {
+      const res = await invoke<{ events?: any[] }>('agent_board_team_events', { team, query: { limit: 500 } });
+      return Array.isArray(res?.events) ? res.events : [];
+    },
+    posts: async (team) => {
+      const res = await invoke<{ posts?: any[]; announcements?: any[] }>('agent_board_read', { team, query: { limit: 200 } });
+      return [...(Array.isArray(res?.announcements) ? res.announcements : []), ...(Array.isArray(res?.posts) ? res.posts : [])];
+    },
+    history: async (team, seq) => {
+      const res = await invoke<{ events?: any[] }>('agent_task_show', { team, task: seq, history: true, staleMs: boardConfig().staleMinutes * 60_000 });
+      return Array.isArray(res?.events) ? res.events : [];
+    },
+    refusals: () => invoke('agent_relay_log_refusals', { limit: 20 }),
+    act: async (team, sub: HumanTaskSub, request) => {
+      const r = await humanTaskAction(team, sub, request);
+      return r.ok ? { ok: true } : { ok: false, error: r.error };
+    },
+    postNote: humanBoardPost,
+    outbox: (team) => invoke('agent_board_outbox', { team }),
+    dismissOutbox: async (id) => {
+      try {
+        await invoke('agent_board_outbox_dismiss', { id });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: boardError(e) };
+      }
+    },
+    adoptPreview: (team) => invoke('agent_board_adopt_preview', { team }),
+    adopt: async (team, uid, home, version) => {
+      try {
+        await invoke('agent_board_adopt', { team, uid, home, version });
+        emitAgentBoardEvent({ team, action: 'sync' });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e instanceof Error ? e.message : e) };
+      }
+    },
+  };
+  // Badges: read while relay children exist or the Team status tab is open (never for the
+  // Dashboard tab alone). The hook re-renders only when a badge-relevant key changes.
+  // Board server mode: the change stream refreshes the badges; the poll is only a slower fallback.
+  const boardServerMode = readBoardModeSetting(appConfig.agents?.board) === 'server';
+  const teamWatch = useTeamWatch(teamBoardSource, agentTeamOn && (!!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open), boardConfig().staleMinutes * 60_000, boardServerMode ? SERVER_WATCH_POLL_MS : undefined);
+  const teamMembersOf = (team: string): TeamMember[] => teamMemberIds(agentLinksRef.current, team).map((id) => {
+    const term = findTerminalAnywhere(id);
+    const link = agentLinksRef.current.get(id);
+    const status = !term || link?.exited ? 'exited' : agentStateOf(id);
+    return {
+      id,
+      name: term?.name || link?.name || id,
+      cli: term?.cliType || link?.cliType,
+      status,
+      open: !!term,
+      message: status === 'blocked' ? agentStatus.get(id)?.msg : undefined,
+    };
+  });
+  const teamNeeds = (team: string): NeedsYouItem[] => {
+    const agents = needsYou([], teamMembersOf(team).map((m) => ({ id: m.id, name: m.name, status: m.status, message: m.message })), [], Date.now());
+    return [...(teamWatch.needs.get(team) || []), ...agents];
+  };
+  const projectTeamMap = projectTeams(projects.map((p) => ({ id: p.id, terminalIds: p.terminals.map((tm) => tm.id) })), agentLinksRef.current, teamWatch.teams);
+  const projectNeeds = (projectId: string): NeedsYouItem[] => (projectTeamMap.get(projectId) || []).flatMap(teamNeeds);
+  /** Open Team status for `team`; `projectId` is the project the request came from (the team is remembered there). */
+  const openTeamStatus = (team?: string, projectId?: string) => {
+    if (!agentTeamOn) return;
+    setGaugeRequest({ tab: 'team', team, projectId, nonce: Date.now() });
+    setShowDashboard(true);
+  };
+  /** Jump to an agent's tab: focus only (nothing is typed into it); the overlay closes. */
+  const jumpToTeamTab = (tabId: string) => {
+    const project = projectsRef.current.find((p) => p.terminals.some((tm) => tm.id === tabId));
+    if (!project) return;
+    updateProject(project.id, { activeTerminalId: tabId });
+    openProjectTerminal(project.id);
+    // Close without giving focus back to the previously focused terminal, then focus the
+    // target tab's terminal once it is shown (keys must go to the tab the person picked).
+    gaugeNoRestoreRef.current = true;
+    setShowDashboard(false);
+    window.setTimeout(() => {
+      gaugeNoRestoreRef.current = false;
+      const host = Array.from(document.querySelectorAll<HTMLElement>('[data-terminal-id]')).find((el) => el.getAttribute('data-terminal-id') === tabId);
+      host?.querySelector<HTMLElement>('.xterm-helper-textarea')?.focus({ preventScroll: true });
+    }, 60);
+  };
+  const openBoardSettings = () => {
+    setShowDashboard(false);
+    setSettingsInitialTab({ tab: 'agent', nonce: Date.now() });
+    setShowGlobalSettings(true);
+  };
+  const teamLimits = () => limitUsage(agentLinksRef.current, normalizeAgentLimits(getConfigSnapshot().agents), (l) => !l.exited && (!!l.pending || !!findTerminalAnywhere(l.childId)));
+  // ── Team status pop-out (src/teamStatus/popout.ts) ── the main window answers its reads and
+  // a person's actions with teamBoardSource, pushes the context it cannot compute (agent tabs,
+  // limits, the owning project's theme) and forwards board change hints (DOM events stay in
+  // their window). Only the main window serves it (the harness window loads App too).
+  const popoutProjectId = teamPopout.open
+    ? ([...projectTeamMap.entries()].find(([, teams]) => teams.includes(teamPopout.team))?.[0] || teamPopout.projectId || activeProjectId || '')
+    : '';
+  const popoutProject = teamPopout.open ? projects.find((p) => p.id === popoutProjectId) : undefined;
+  const popoutStyle = popoutProject ? (STYLES[popoutProject.styleIndex] || STYLES[0]) : activeStyle;
+  const popoutCtx: PopoutContext | null = teamPopout.open ? {
+    team: teamPopout.team,
+    nonce: teamPopout.nonce,
+    projectId: popoutProjectId,
+    projectTeamIds: projectTeamMap.get(popoutProjectId) || [],
+    locale,
+    surface: teamStatusSurface(popoutStyle),
+    theme: {
+      bg: popoutStyle.bg,
+      text: popoutStyle.text,
+      accent: popoutStyle.accent,
+      font: popoutProject ? getEffectiveFont(popoutProject.fontIndex, popoutProject.customFontFamily) : activeFont.value,
+      light: isLightBg(popoutStyle.bg),
+    },
+    staleMs: boardConfig().staleMinutes * 60_000,
+    members: teamPopout.team ? teamMembersOf(teamPopout.team) : [],
+    limits: teamLimits(),
+    mainPinned: windowPin.alwaysOnTop,
+  } : null;
+  const popoutCtxKey = contextKey(popoutCtx);
+  const popoutCtxRef = useRef<PopoutContext | null>(null);
+  popoutCtxRef.current = popoutCtx;
+  const sendPopoutCtx = () => {
+    if (popoutCtxRef.current && isTauri()) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.ctx, popoutCtxRef.current).catch(() => {});
+  };
+  useEffect(() => { sendPopoutCtx(); }, [popoutCtxKey]);
+  // Board sync (Rust sync worker) and the board server's change stream (agent_board/stream.rs)
+  // announce changed teams as the Tauri event `octo-agent-board`; views listen for the window
+  // event of the same name and re-read through their own loaders.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const off = tauriListen<unknown>('octo-agent-board', (e) => { forwardHostBoardEvent(e.payload); });
+    return () => { void off.then((f) => f()).catch(() => {}); };
+  }, []);
+  useEffect(() => {
+    if (!teamPopout.open || !isTauri()) return;
+    return onAgentBoardChange((d) => { void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.board, d).catch(() => {}); });
+  }, [teamPopout.open]);
+  const teamPopoutOpenRef = useRef(false);
+  teamPopoutOpenRef.current = teamPopout.open;
+  const popoutHandlersRef = useRef({ source: teamBoardSource, jump: jumpToTeamTab, settings: openBoardSettings });
+  popoutHandlersRef.current = { source: teamBoardSource, jump: jumpToTeamTab, settings: openBoardSettings };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let me: ReturnType<typeof getCurrentWindow>;
+    try { me = getCurrentWindow(); } catch { return; }
+    if (me.label !== 'main') return;
+    const focusMain = () => { void me.unminimize().catch(() => {}); void me.show().catch(() => {}); void me.setFocus().catch(() => {}); };
+    const offs = [
+      me.listen<unknown>(POPOUT_EVENT.req, async (e) => {
+        if (!agentTeamEnabled(getConfigSnapshot().agents)) return;
+        const res = await serveRequest(popoutHandlersRef.current.source, e.payload, popoutTokenRef.current);
+        if (res) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.res, res).catch(() => {});
+      }),
+      me.listen<{ team?: unknown; projectId?: unknown; token?: unknown }>(POPOUT_EVENT.hello, (e) => {
+        const token = typeof e.payload?.token === 'string' ? e.payload.token : '';
+        // After this window reloaded no token is known: the open pop-out's one is taken (it can
+        // only come from a window this app opened; see the trust note in AGENT_RELAY.md).
+        if (!popoutTokenRef.current && token) popoutTokenRef.current = token;
+        if (!token || token !== popoutTokenRef.current) return;
+        const team = typeof e.payload?.team === 'string' ? e.payload.team : '';
+        const projectId = typeof e.payload?.projectId === 'string' ? e.payload.projectId : '';
+        // A heartbeat, or the first hello after this window reloaded: the pop-out says which team
+        // it shows (the nonce is not bumped, so its own choice stands).
+        if (!teamPopoutOpenRef.current) {
+          teamPopoutOpenRef.current = true;
+          setTeamPopout((p) => (p.open ? p : { ...p, open: true, team, projectId }));
+          void watchTeamPopoutClose();
+        }
+        sendPopoutCtx();
+      }),
+      me.listen<{ team?: unknown; token?: unknown }>(POPOUT_EVENT.team, (e) => {
+        if (!popoutTokenOk(e.payload)) return;
+        const team = typeof e.payload?.team === 'string' ? e.payload.team : '';
+        if (team) setTeamPopout((p) => (p.team === team ? p : { ...p, team }));
+      }),
+      me.listen<{ tabId?: unknown; token?: unknown }>(POPOUT_EVENT.jump, (e) => {
+        if (!popoutTokenOk(e.payload) || typeof e.payload?.tabId !== 'string') return;
+        focusMain();
+        popoutHandlersRef.current.jump(e.payload.tabId);
+      }),
+      me.listen<{ token?: unknown }>(POPOUT_EVENT.settings, (e) => { if (popoutTokenOk(e.payload)) { focusMain(); popoutHandlersRef.current.settings(); } }),
+    ];
+    return () => { offs.forEach((p) => { void p.then((un) => un()).catch(() => {}); }); };
+  }, []);
+  /**
+   * Marks the pop-out closed only when no live window has its label (a stale handle's close
+   * event must not close the state of a newer window).
+   */
+  const confirmTeamPopoutClosed = async () => {
+    try {
+      const w = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (w) {
+        try { await w.isVisible(); return; } catch { /* dead handle: it is gone */ }
+      }
+    } catch { /* treat as gone */ }
+    popoutTokenRef.current = null;
+    popoutCloseOffRef.current?.();
+    popoutCloseOffRef.current = null;
+    setTeamPopout((p) => (p.open ? { ...p, open: false } : p));
+  };
+  /** One close listener on the current pop-out window (replaces any earlier one). */
+  const watchTeamPopoutClose = async (win?: WebviewWindow | null) => {
+    popoutCloseOffRef.current?.();
+    popoutCloseOffRef.current = null;
+    try {
+      const w = win ?? await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (!w) { void confirmTeamPopoutClosed(); return; }
+      const off = await w.once('tauri://destroyed', () => { void confirmTeamPopoutClosed(); });
+      popoutCloseOffRef.current = off;
+    } catch { /* the next hello or open tries again */ }
+  };
+  const popoutTokenOk = (payload: unknown) => {
+    const token = (payload as { token?: unknown } | null)?.token;
+    return typeof token === 'string' && !!popoutTokenRef.current && token === popoutTokenRef.current;
+  };
+  /** Open (or focus) Team status in its own window for `team`. */
+  const openTeamStatusPopout = async (team: string, projectId: string) => {
+    if (!agentTeamOn) return;
+    setTeamPopout((p) => ({ open: true, team: team || p.team, projectId, nonce: p.nonce + 1 }));
+    setShowDashboard(false);
+    const markClosed = () => { void confirmTeamPopoutClosed(); };
+    try {
+      const existing = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (existing) {
+        try {
+          await existing.isVisible();
+          await existing.show();
+          await existing.setFocus();
+          return;
+        } catch {
+          try { await existing.close(); } catch { /* already gone */ }
+        }
+      }
+    } catch { /* not found, create new */ }
+    try {
+      popoutTokenRef.current = newPopoutToken();
+      const w = new WebviewWindow(POPOUT_LABEL, {
+        url: popoutUrl(window.location.origin, team, projectId, popoutTokenRef.current),
+        title: locale === 'ko' ? '팀 현황' : 'Team status',
+        width: POPOUT_SIZE.width,
+        height: POPOUT_SIZE.height,
+        minWidth: POPOUT_SIZE.minWidth,
+        minHeight: POPOUT_SIZE.minHeight,
+        center: true,
+        resizable: true,
+        decorations: true,
+      });
+      w.once('tauri://error', (e) => { console.error('[team-status popout] error:', e); markClosed(); });
+      void watchTeamPopoutClose(w);
+    } catch (e) {
+      console.error('[team-status popout] create failed:', e);
+      markClosed();
+    }
+  };
+  const bringTeamPopoutToFront = async () => {
+    try {
+      const w = await WebviewWindow.getByLabel(POPOUT_LABEL);
+      if (!w) { void confirmTeamPopoutClosed(); return; }
+      await w.unminimize().catch(() => {});
+      await w.show();
+      await w.setFocus();
+    } catch {
+      void confirmTeamPopoutClosed();
+    }
+  };
+  // Agent team turned off: the pop-out team status window closes (board data stays).
+  useEffect(() => {
+    if (agentTeamOn || !teamPopout.open || !isTauri()) return;
+    void (async () => {
+      try { await (await WebviewWindow.getByLabel(POPOUT_LABEL))?.close(); } catch { /* already gone */ }
+      void confirmTeamPopoutClosed();
+    })();
+  }, [agentTeamOn, teamPopout.open]);
+  const renderTeamBadge = (items: NeedsYouItem[], className = 'ts-badge', onClick?: () => void) => {
+    // Agent team off: no badges on project tabs or the gauge button.
+    const n = teamBadgeCount(agentTeamOn, badgeCount(items));
+    if (!n) return null;
+    const label = badgeLabel(items, locale);
+    return (
+      <span
+        className={className}
+        data-severity={badgeSeverity(items) || undefined}
+        aria-label={label}
+        title={label}
+        {...(onClick ? { role: 'button', tabIndex: 0, onClick: (e: React.MouseEvent) => { e.stopPropagation(); onClick(); }, onKeyDown: (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onClick(); } } } : {})}
+      >
+        {badgeText(n)}
+      </span>
+    );
+  };
+  /**
+   * Caller check shared by every agent.* command that reads `caller` (src/terminal/agentCaller.ts):
+   * the ctl's BBARIT_TERM_TOKEN must match the caller id (Rust agent_caller_verify); without a
+   * token only a PTY-holder shell started by an older app (holder started_at before the key's
+   * creation time) passes, as `legacy`; an unreadable key refuses every caller. Refusals go to
+   * the relay log (never the token). Callerless requests pass as before.
+   */
+  const checkAgentCaller = async (request: any, cmd: string): Promise<CallerDecision> => {
+    const decision = await verifyAgentCaller(request, {
+      keyInfo: () => invoke<CallerKeyInfo>('agent_caller_key_info'),
+      verify: (terminalId, token) => invoke<boolean>('agent_caller_verify', { terminalId, token }),
+      recoveredEntry: (terminalId) => recoveredPtyFor(terminalId),
+    });
+    if (!decision.ok) {
+      logAgentRelay({ event: 'caller_refused', caller: relayLogParty(decision.caller), extra: { reason: decision.reason, cmd } });
+    }
+    return decision;
+  };
+  // Claude Code may have Enter rebound to newline (keybindings.json "Chat"): the input gate
+  // presses the configured submit key in Claude tabs. Loaded at startup and on window focus,
+  // and again before agent run/send (cached, no polling).
+  const loadClaudeChatBindings = () => invoke<ClaudeKeybindings>('claude_chat_keybindings');
+  const claudeSubmitWarning = (cliType?: string): Record<string, unknown> => {
+    const reason = cliType === 'claude' ? claudeSubmitKey().reason : undefined;
+    return reason ? { warning: reason } : {};
+  };
+  useEffect(() => {
+    setInputGateSubmitKeyResolver((id, text) => submitKeyForTerminal({
+      cliType: findTerminalAnywhere(id)?.cliType,
+      state: getTerminalAgentState(id),
+      agentRunning: isTerminalAgentRunning(id),
+      text,
+    }));
+    void refreshClaudeSubmitKey(loadClaudeChatBindings, { force: true });
+    const onFocus = () => { void refreshClaudeSubmitKey(loadClaudeChatBindings); };
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      setInputGateSubmitKeyResolver(null);
+    };
+  }, []);
   const agentPtyFallbackWrite = (terminalId: string) => (data: string) => {
     void invoke('write_to_pty', { terminalId, data }).catch(() => {});
   };
   const flushAgentNotes = async (parentId: string): Promise<void> => {
+    // Agent team off: queued notes are dropped quietly (child tabs stay as they are).
+    if (!agentTeamEnabled(getConfigSnapshot().agents)) { dropParent(agentNoteQueueRef.current, parentId); return; }
     if (agentNoteFlushingRef.current.has(parentId)) return;
     if (!canDeliverToParent(getTerminalAgentState(parentId))) return;
     agentNoteFlushingRef.current.add(parentId);
     let again = false;
     try {
-      const res = await flushNotes(agentNoteQueueRef.current, parentId, async (note) => {
+      // Turned off mid-flush: the rest of this batch (already out of the queue) is dropped.
+      const res = await flushNotes(agentNoteQueueRef.current, parentId, teamGatedNoteSend(() => agentTeamEnabled(getConfigSnapshot().agents), async (note) => {
         const parent = findTerminalAnywhere(parentId);
         if (!parent) return { ok: false, reason: 'disposed' };
+        // A stopped child gets no queued notes from its own children (they would restart it).
+        if (agentLinksRef.current.get(parentId)?.stopped) return { ok: false, reason: 'disposed' };
         const r = await queueAutoInput(parentId, note, {
           source: 'agent',
           submit: true,
@@ -5955,7 +6521,7 @@ Office project scaffold created by BBARIT Terminal.
           fallbackWrite: agentPtyFallbackWrite(parentId),
         });
         return r.ok ? { ok: true } : { ok: false, reason: r.reason };
-      });
+      }));
       // 사람이 치는 중이었거나 터미널이 아직 준비되지 않았다 → 잠시 뒤 다시. blocked 는 부모가
       // blocked 를 벗어나는 상태 보고에서 다시 보낸다.
       if (res.stoppedBy === 'typing' || res.stoppedBy === 'no-writer' || res.stoppedBy === 'cancelled') {
@@ -5969,7 +6535,7 @@ Office project scaffold created by BBARIT Terminal.
     if (again) void flushAgentNotes(parentId);
   };
   const deliverAgentNote = async (link: AgentLink, state: AgentNoteState, snap?: AgentStatusSnapshot): Promise<void> => {
-    if (!link.parentId) return;
+    if (!link.parentId || !agentTeamEnabled(getConfigSnapshot().agents)) return;
     // 부모가 셸 탭이거나 최근 7501 보고(working/blocked/done)가 없으면 넣지 않는다 — 에이전트가
     // 떠난 셸 프롬프트에 명령으로 들어갈 수 있다.
     const parent = findTerminalAnywhere(link.parentId);
@@ -5980,7 +6546,7 @@ Office project scaffold created by BBARIT Terminal.
       now: Date.now(),
     })) return;
     const child = findTerminalAnywhere(link.childId);
-    const tail = state === 'blocked' && snap?.msg ? '' : await readTerminalTail(link.childId, 40).catch(() => '');
+    const tail = state === 'stopped' || (state === 'blocked' && snap?.msg) ? '' : await readTerminalTail(link.childId, 40).catch(() => '');
     const note = formatAgentNote({
       childId: link.childId,
       childName: child?.name || link.name,
@@ -5989,6 +6555,7 @@ Office project scaffold created by BBARIT Terminal.
       kind: snap?.kind,
       msg: snap?.msg,
       tail,
+      branch: link.branch,
     });
     enqueueNote(agentNoteQueueRef.current, link.parentId, note);
     await flushAgentNotes(link.parentId);
@@ -6006,6 +6573,7 @@ Office project scaffold created by BBARIT Terminal.
         const { note, link: next } = decideAgentNote(link, snap);
         agentLinksRef.current.set(tid, next);
         if (note) { void deliverAgentNote(next, note, snap); scheduleAgentLinksSave(); }
+        refreshRelayTeamWorking();
       }
       // 이 터미널이 부모라면 blocked 를 벗어날 때 쌓인 노트를 보낸다.
       if (!d.cleared && d.state !== 'blocked' && agentNoteQueueRef.current.has(tid)) void flushAgentNotes(tid);
@@ -6014,11 +6582,24 @@ Office project scaffold created by BBARIT Terminal.
     // PTY 종료는 XTerminal 이 read_from_pty 의 'PTY disconnected' 로 알아채 보낸다.
     const onPtyExited = (ev: Event) => {
       const tid = String((ev as CustomEvent).detail?.terminalId || '');
+      // Task leases: the host releases an exited owner's tasks itself (agent_board lease worker);
+      // a "PTY disconnected" seen here may be the app quitting with the PTY holder keeping the tab.
       const link = tid ? agentLinksRef.current.get(tid) : undefined;
       if (!link) return;
+      if (!link.exited) {
+        logAgentRelay({
+          event: 'exit',
+          caller: link.parentId ? relayLogParty(link.parentId) : undefined,
+          target: relayLogParty(tid),
+          depth: agentDepth(agentLinksRef.current, tid),
+          worktree: link.worktree,
+          branch: link.branch,
+        });
+      }
       const { note, link: next } = decideExitNote(link);
       agentLinksRef.current.set(tid, next);
       if (note) void deliverAgentNote(next, note);
+      refreshRelayTeamWorking();
     };
     window.addEventListener(PTY_EXITED_EVENT, onPtyExited as EventListener);
     // Replayed output re-counted old turns (ignored above): line the link up with the result.
@@ -6037,6 +6618,8 @@ Office project scaffold created by BBARIT Terminal.
       window.removeEventListener(PTY_REPLAYED_EVENT, onPtyReplayed as EventListener);
     };
   }, []);
+  // Agent team turned off: notes waiting for parents are dropped quietly; links and tabs stay.
+  useEffect(() => { if (!agentTeamOn) agentNoteQueueRef.current.clear(); }, [agentTeamOn]);
   // 탭이 닫히면: 부모가 사라진 링크와 대기열은 버린다(자식 탭은 그대로 둔다). 닫힌 자식의 링크도 버린다.
   useEffect(() => {
     const alive = new Set(projects.flatMap((p) => p.terminals.map((tt) => tt.id)));
@@ -6049,8 +6632,19 @@ Office project scaffold created by BBARIT Terminal.
       }
       restoredAgentLinksRef.current = undefined;
     }
+    // A child whose parent tab closed keeps running: its link stays with parentId '' (no
+    // notes, nobody's child) so it still counts toward agents.maxTotal and keeps its depth.
+    const orphans: Array<[string, number]> = [];
     for (const [childId, link] of agentLinksRef.current) {
-      if (!alive.has(childId) || (link.parentId && !alive.has(link.parentId))) agentLinksRef.current.delete(childId);
+      // A link whose tab is not in `projects` yet (several runs in one tick: this effect can
+      // fire for the first tab before the others have rendered) is kept while it is pending;
+      // injectAgentBrief drops it if the tab really went away.
+      if (!alive.has(childId)) { if (!link.pending) agentLinksRef.current.delete(childId); }
+      else if (link.parentId && !alive.has(link.parentId)) orphans.push([childId, agentDepth(agentLinksRef.current, childId)]);
+    }
+    for (const [childId, depth] of orphans) {
+      const link = agentLinksRef.current.get(childId);
+      if (link) agentLinksRef.current.set(childId, orphanAgentLink(link, depth));
     }
     for (const parentId of [...agentNoteQueueRef.current.keys()]) {
       if (!alive.has(parentId)) dropParent(agentNoteQueueRef.current, parentId);
@@ -6061,9 +6655,22 @@ Office project scaffold created by BBARIT Terminal.
     for (const tid of [...agentReplayedTurnRef.current.keys()]) {
       if (!alive.has(tid)) agentReplayedTurnRef.current.delete(tid);
     }
+    if (projectsLoadedRef.current) {
+      // Team tasks: a closed owner tab hands its tasks back; once per start, the previous
+      // instance's claims are re-adopted (tab recovered by the PTY holder) or released.
+      for (const id of boardKnownTabsRef.current) {
+        if (!alive.has(id)) void releaseBoardTasksOf(id, 'owner tab closed');
+      }
+      boardKnownTabsRef.current = new Set(alive);
+      if (!boardLeaseStartupRef.current) {
+        boardLeaseStartupRef.current = true;
+        void reconcileBoardLeasesOnStart(alive);
+      }
+    }
+    refreshRelayTeamWorking();
   }, [projects]);
   /** agent.run: 자식 에이전트가 준비되면(7501 idle 또는 화면 휴리스틱) 첫 메시지를 게이트로 넣는다. */
-  const injectAgentBrief = async (terminalId: string, cliType: string, prompt: string, parentId?: string, parentName?: string): Promise<void> => {
+  const injectAgentBrief = async (terminalId: string, cliType: string, prompt: string, parentId?: string, parentName?: string, worktree?: { path: string; branch: string }): Promise<void> => {
     const outcome = await runAgentBrief({
       exists: () => !!findTerminalAnywhere(terminalId),
       ptyStarted: () => isTerminalPtyStarted(terminalId),
@@ -6071,10 +6678,15 @@ Office project scaffold created by BBARIT Terminal.
       getTurn: () => agentRelayStatusRef.current.get(terminalId)?.turn ?? 0,
       uiReady: () => isTerminalAgentUiReady(terminalId, cliType as Parameters<typeof isTerminalAgentUiReady>[1]),
       inject: async (text) => {
+        // Stopped before the prompt was typed: do not start it.
+        if (agentLinksRef.current.get(terminalId)?.stopped) return { ok: false, reason: 'stopped' };
         const r = await queueAutoInput(terminalId, text, {
           source: 'agent',
           submit: true,
           force: false,
+          // Readiness may come from the welcome screen before any 7501 report, so the brief
+          // asks for Claude's configured submit key explicitly.
+          ...(cliType === 'claude' ? { submitKey: claudeSubmitSpec(text) } : {}),
           submitDelayMs: gateSubmitDelayFor(cliType),
           fallbackWrite: agentPtyFallbackWrite(terminalId),
         });
@@ -6082,7 +6694,7 @@ Office project scaffold created by BBARIT Terminal.
       },
       sleep: (ms) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); }),
       now: () => Date.now(),
-    }, { cliType, text: formatAgentBrief({ parentId, parentName, prompt, cliType }) });
+    }, { cliType, text: formatAgentBrief({ parentId, parentName, prompt, cliType, worktree }) });
     if (outcome.kind === 'gone') { agentLinksRef.current.delete(terminalId); return; }
     const link = agentLinksRef.current.get(terminalId);
     if (!link) return;
@@ -6097,8 +6709,91 @@ Office project scaffold created by BBARIT Terminal.
       sentAt: Date.now(),
       sentTurn: outcome.sentTurn,
       sentWhileBlocked: outcome.sentWhileBlocked,
-      briefError: outcome.ok ? undefined : autoInputRefusalMessage(outcome.reason as Parameters<typeof autoInputRefusalMessage>[0]),
+      briefError: outcome.ok ? undefined : outcome.reason === 'stopped' ? 'stopped before the prompt was typed' : autoInputRefusalMessage(outcome.reason as Parameters<typeof autoInputRefusalMessage>[0]),
     });
+  };
+  /** Close a tab in any project (closeTerminal only handles the active project). */
+  const closeTerminalAnywhere = (terminalId: string) => {
+    const owner = projectsRef.current.find((p) => p.terminals.some((tt) => tt.id === terminalId));
+    if (!owner) return;
+    if (owner.id === activeProjectIdLatestRef.current) { closeTerminal(terminalId, true); return; }
+    disposeTerminal(terminalId);
+    setProjects((prev) => prev.map((p) => {
+      if (p.id !== owner.id) return p;
+      const filtered = p.terminals.filter((tt) => tt.id !== terminalId);
+      const nextTerminals = filtered.length > 0 ? filtered : [createTerminal()];
+      const nextActive = p.activeTerminalId === terminalId ? (nextTerminals[0]?.id || '') : p.activeTerminalId;
+      const ids = nextTerminals.map((tt) => tt.id);
+      const nextLayout = p.terminalLayout
+        ? (normalizeTerminalLayout(layoutRemoveTerminal(p.terminalLayout, terminalId), ids, nextActive) || buildDefaultLayout(ids, nextActive) || undefined)
+        : p.terminalLayout;
+      return { ...p, terminals: nextTerminals, activeTerminalId: nextActive, terminalLayout: nextLayout };
+    }));
+  };
+  /**
+   * agent stop / stop-team button: per child, drop queued automatic input (gate + notes for
+   * it), mark the link stopped, send the CLI's interrupt key through the gate (force, no
+   * quiet wait, no Enter), then one `stopped` note to its parent unless the parent asked.
+   */
+  const stopRelayAgents = async (ids: string[], opts: { close?: boolean; by?: string; caller?: string; callerVerified?: true | 'legacy'; silent?: boolean; source: 'ctl' | 'button' }): Promise<Array<AgentStopResult & { name: string }>> => {
+    const results: Array<AgentStopResult & { name: string }> = [];
+    for (const terminalId of ids) {
+      const term = findTerminalAnywhere(terminalId);
+      const link = agentLinksRef.current.get(terminalId);
+      const cliType = term?.cliType || link?.cliType;
+      const depth = agentDepth(agentLinksRef.current, terminalId);
+      const res = await stopAgentTerminal({
+        dropQueuedInput: (id) => {
+          dropQueuedAutoInput(id);
+          dropParent(agentNoteQueueRef.current, id);
+        },
+        markStopped: (id) => {
+          const l = agentLinksRef.current.get(id);
+          if (!l) return;
+          agentLinksRef.current.set(id, markLinkStopped(l, {
+            turn: agentRelayStatusRef.current.get(id)?.turn ?? 0,
+            working: getTerminalAgentState(id) === 'working',
+          }));
+          // Key refused: the child keeps running — restore the link's previous stop state.
+          return () => {
+            const cur = agentLinksRef.current.get(id);
+            if (cur) agentLinksRef.current.set(id, restoreStopMark(cur, l));
+          };
+        },
+        sendKey: async (id, key) => {
+          const r = await queueAutoInput(id, key, {
+            source: 'agent',
+            submit: false,
+            force: true,
+            quietMs: 0,
+            fallbackWrite: terminalWritersRef.current[id] || agentPtyFallbackWrite(id),
+          });
+          return r.ok ? { ok: true } : { ok: false, reason: r.reason };
+        },
+        sleep: (ms) => new Promise<void>((resolve) => { window.setTimeout(resolve, ms); }),
+        notifyParent: (id) => {
+          // Button stops are silent (the user pressed it); a ctl stop by the parent itself too.
+          if (opts.silent) return;
+          const l = agentLinksRef.current.get(id);
+          if (!l?.parentId || l.parentId === opts.caller) return;
+          void deliverAgentNote(l, 'stopped', { state: 'idle', turn: l.stopTurn ?? 0, msg: opts.by });
+        },
+        close: closeTerminalAnywhere,
+      }, { terminalId, cliType, close: opts.close });
+      results.push({ ...res, name: term?.name || link?.name || '' });
+      logAgentRelay({
+        event: 'stop',
+        caller: opts.caller ? relayLogParty(opts.caller) : undefined,
+        callerVerified: opts.callerVerified,
+        target: { id: terminalId, name: term?.name || link?.name, cliType },
+        depth,
+        worktree: link?.worktree,
+        branch: link?.branch,
+        extra: { by: opts.source, ok: res.ok, keys: res.keys, closed: !!res.closed, reason: res.reason },
+      });
+    }
+    refreshRelayTeamWorking();
+    return results;
   };
   /** agent.status / agent.list 의 항목 하나. */
   const describeAgentTerminal = async (terminalId: string, withLines: boolean) => {
@@ -6131,7 +6826,12 @@ Office project scaffold created by BBARIT Terminal.
       ...(settledBy === 'quiet' ? { settledBy } : {}),
       turn,
       reported: reported !== undefined,
+      agentRunning: isTerminalAgentRunning(terminalId),
       ...(link?.parentId ? { parentId: link.parentId } : {}),
+      depth: agentDepth(agentLinksRef.current, terminalId),
+      ...(link?.worktree ? { worktree: link.worktree } : {}),
+      ...(link?.branch ? { branch: link.branch } : {}),
+      ...(link?.stopped ? { stopped: true } : {}),
       ...(link?.pending ? { pending: true } : {}),
       ...(link?.briefError ? { error: link.briefError } : {}),
     };
@@ -6576,6 +7276,7 @@ Office project scaffold created by BBARIT Terminal.
     statusTabCount: agentStatus.size,
     gitPanelOpen: showGitPanel,
     hintModeOpen: hintMode.active,
+    teamStatusOpen: agentTeamOn && ((showDashboard && gaugeTab === 'team') || teamPopout.open),
   });
   guideStartupRef.current = guide.runStartup;
 
@@ -7284,6 +7985,11 @@ Office project scaffold created by BBARIT Terminal.
 
     const cmd = String(request?.cmd || '').trim();
     if (!cmd) return { ok: false, error: 'missing cmd' };
+    // Settings → "Agent team in tabs" off: every agent.* command that starts, messages or
+    // controls child tabs, and every board/task command, is refused here — the one dispatcher
+    // ctl and the gateway reach (src/terminal/agentTeamSwitch.ts). Read per command.
+    const teamOff = agentTeamRefusal(cmd, getConfigSnapshot().agents);
+    if (teamOff) return teamOff;
 
     switch (cmd) {
       case 'status':
@@ -7422,12 +8128,14 @@ Office project scaffold created by BBARIT Terminal.
       case 'config.get': {
         const path = request?.path ? String(request.path) : '';
         const snap = getConfigSnapshot();
-        return { ok: true, value: path ? getByPath(snap, path) : snap };
+        // Team board storage (usage type, connection) is Settings-only (agentBoardStorage.ts).
+        return { ok: true, value: redactProtectedConfig(path ? getByPath(snap, path) : snap, path) };
       }
       case 'config.patch': {
         const path = String(request?.path || '').trim();
         if (!path) return { ok: false, error: 'path required' };
-        updateConfig((prev) => setByPath(prev, path, request?.value));
+        if (isProtectedConfigPath(path)) return { ok: false, error: protectedConfigRefusal(path) };
+        updateConfig((prev) => keepProtectedConfig(prev, setByPath(prev, path, request?.value)));
         return { ok: true };
       }
       case 'image.generate': {
@@ -7567,12 +8275,18 @@ Office project scaffold created by BBARIT Terminal.
       }
       // ── 에이전트 간 위임(docs/AGENT_RELAY.md) ── agent.wait 는 ctl 이 agent.status 를 폴링한다.
       case 'agent.run': {
+        pruneAgentRunJobs();
         const cliType = String(request?.cliType || 'claude').trim();
         const allowed = ['shell', 'claude', 'codex', 'cursor', 'opencode', 'kimi', 'gemini', 'qwen', 'pi', 'reasonix', 'bbarit', 'bbarit-oss', 'gajae'];
         if (!allowed.includes(cliType)) return { ok: false, error: `invalid cliType: ${cliType} (${allowed.join('/')})` };
         const prompt = String(request?.prompt ?? '').trim();
         if (!prompt) return { ok: false, error: 'prompt required' };
-        const caller = String(request?.caller || '').trim();
+        // Caller token check (agentCaller.ts) — before the limit check below, never between
+        // that check and the slot reservation.
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const callerVerified = callerCheck.verified;
         const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
         if (caller && !callerTerm) return { ok: false, error: `caller not found: ${caller}` };
         // 자식은 caller 의 프로젝트에, cwd = workDir || caller 의 마지막 cwd || 그 프로젝트 폴더.
@@ -7580,40 +8294,133 @@ Office project scaffold created by BBARIT Terminal.
         const callerProject = caller ? projects.find((p) => p.terminals.some((tt) => tt.id === caller)) : undefined;
         const projectId = callerProject?.id || activeProjectId;
         if (!projectId) return { ok: false, error: 'no active project' };
-        const workDir = (request?.workDir ? String(request.workDir).trim() : '')
-          || callerTerm?.lastWorkDir || callerProject?.workDir || undefined;
+        if (cliType === 'claude') await refreshClaudeSubmitKey(loadClaudeChatBindings, { force: true });
+        // Relay limits (config.agents): checked and a slot reserved in one synchronous step
+        // (no await from here until the child's link exists or the run fails), before any
+        // tab, worktree or branch exists. The slot is released once the link counts instead,
+        // or on any failure. A just-created child counts while its tab is not in
+        // projectsRef yet (pending until its prompt is typed).
+        const limitCheck = agentRunReservationsRef.current.reserve(
+          agentLinksRef.current,
+          caller,
+          (l) => !l.exited && (!!l.pending || !!findTerminalAnywhere(l.childId)),
+          normalizeAgentLimits(getConfigSnapshot().agents),
+        );
+        const callerParty = caller ? { id: caller, name: callerTerm?.name, cliType: callerTerm?.cliType } : undefined;
+        if (!limitCheck.ok) {
+          logAgentRelay({
+            event: 'run_refused',
+            caller: callerParty,
+            callerVerified,
+            target: { id: '', name: request?.name ? String(request.name) : undefined, cliType },
+            depth: limitCheck.depth,
+            text: prompt,
+            extra: { reason: limitCheck.limit, count: limitCheck.count, max: limitCheck.max, error: limitCheck.error },
+          });
+          return { ok: false, error: limitCheck.error, limit: limitCheck.limit };
+        }
+        const releaseSlot = limitCheck.release;
+        const requestedWorkDir = request?.workDir ? String(request.workDir).trim() : '';
         // Claude·Codex 자식은 전용 세션 — `--continue`·`resume --last` 로 부모 대화를 이어받지 않게 한다.
         const spec = agentRunTerminalSpec(cliType, request?.name ? String(request.name) : undefined);
         const name = spec.name;
-        const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name, workDir, {
-          projectId,
-          activate: !caller,
-          freshClaudeSession: spec.freshClaudeSession,
-          freshCodexSession: spec.freshCodexSession,
-        });
-        if (!terminalId) return { ok: false, error: 'failed to create terminal' };
-        // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
-        agentLinksRef.current.set(terminalId, {
-          childId: terminalId,
-          parentId: caller,
-          name,
-          cliType,
-          createdAt: Date.now(),
-          lastNotifiedTurn: -1,
-          pending: true,
-        });
-        void injectAgentBrief(terminalId, cliType, prompt, caller || undefined, callerTerm?.name);
-        return { ok: true, terminalId };
+        const launch = (worktree?: { path: string; branch: string }) => {
+          const workDir = worktree?.path || requestedWorkDir || callerTerm?.lastWorkDir || callerProject?.workDir || undefined;
+          const terminalId = addTerminal(cliType as Parameters<typeof addTerminal>[0], undefined, name, workDir, {
+            projectId,
+            activate: !caller,
+            freshClaudeSession: spec.freshClaudeSession,
+            freshCodexSession: spec.freshCodexSession,
+          });
+          if (!terminalId) { releaseSlot(); return { ok: false, error: 'failed to create terminal' }; }
+          // caller 가 없으면 parentId 가 빈 항목 — 노트·list 대상이 아니고 wait 판정용 주입 기록만 둔다.
+          agentLinksRef.current.set(terminalId, {
+            childId: terminalId,
+            parentId: caller,
+            name,
+            cliType,
+            createdAt: Date.now(),
+            lastNotifiedTurn: -1,
+            pending: true,
+            depth: limitCheck.depth,
+            // Agent board team: the caller's team root, kept if the parent tab closes.
+            ...(caller ? { teamId: teamRootOf(agentLinksRef.current, caller) } : {}),
+            ...(worktree ? { worktree: worktree.path, branch: worktree.branch } : {}),
+          });
+          // The link counts from here on: hand back the reserved slot.
+          releaseSlot();
+          void injectAgentBrief(terminalId, cliType, prompt, caller || undefined, callerTerm?.name, worktree);
+          logAgentRelay({
+            event: 'run',
+            caller: callerParty,
+            callerVerified,
+            target: { id: terminalId, name, cliType },
+            depth: limitCheck.depth,
+            worktree: worktree?.path,
+            branch: worktree?.branch,
+            text: prompt,
+          });
+          return { ok: true, terminalId, ...(worktree ? { worktree: worktree.path, branch: worktree.branch } : {}), ...claudeSubmitWarning(cliType) };
+        };
+        // --worktree: own worktree + branch under the git top level of --workdir, else the
+        // caller's cwd (as a plain run), else the project folder. Not a git repo → error, no tab.
+        // git can outlast one bridge request (mcp-bridge execute_js waits 5 s), so this runs as
+        // a job: the reply is { pending, jobId } and ctl polls agent.run.result for the outcome.
+        const worktreeReq = parseWorktreeRequest(request?.worktree);
+        if (!worktreeReq) {
+          try { return launch(); } finally { releaseSlot(); }
+        }
+        const jobId = `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        const activeProj = projects.find((p) => p.id === projectId);
+        agentRunJobsRef.current.set(jobId, { done: false, at: Date.now() });
+        void prepareAgentWorktree({
+          run: (script, cwd) => invoke<string>('run_cli_oneshot', { command: script, workDir: cwd, timeoutSecs: 120, login: false }),
+          addWorktree: (repoDir, worktreeDir, branchName) => invoke('git_worktree_add', { repoDir, worktreeDir, branchName }),
+        }, {
+          baseDir: agentWorktreeBaseDir({
+            requested: requestedWorkDir,
+            callerCwd: callerTerm?.lastWorkDir,
+            callerProjectDir: callerProject?.workDir,
+            activeProjectDir: activeProj?.workDir,
+          }),
+          name: worktreeReq.name || (request?.name ? String(request.name) : ''),
+          fallback: cliType,
+        }).then((prepared): Record<string, unknown> => {
+          if (!prepared.ok) return { ok: false, error: prepared.error };
+          // Turned off while git ran: no tab, no brief (the slot is released below).
+          const off = refusalAfterWorktree(getConfigSnapshot().agents, prepared);
+          return off || launch({ path: prepared.path, branch: prepared.branch });
+        })
+          .catch((e): Record<string, unknown> => ({ ok: false, error: `worktree: ${String(e instanceof Error ? e.message : e)}` }))
+          .then((result) => {
+            // Worktree failed (or launch threw): the slot is free again. Idempotent after launch.
+            releaseSlot();
+            agentRunJobsRef.current.set(jobId, { done: true, at: Date.now(), result });
+          });
+        return { ok: true, pending: true, jobId };
+      }
+      case 'agent.run.result': {
+        pruneAgentRunJobs();
+        const jobId = String(request?.jobId || '').trim();
+        const job = agentRunJobsRef.current.get(jobId);
+        if (!job) return { ok: false, error: `unknown agent run job: ${jobId || '(none)'}` };
+        if (!job.done) return { ok: true, pending: true, jobId };
+        agentRunJobsRef.current.delete(jobId);
+        return job.result || { ok: false, error: 'agent run job ended without a result' };
       }
       case 'agent.send': {
+        pruneAgentRunJobs();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
         const terminalId = String(request?.terminalId || '').trim();
         const target = terminalId ? findTerminalAnywhere(terminalId) : undefined;
         if (!target) return { ok: false, error: `terminal not found: ${terminalId || '(none)'}` };
         const text = String(request?.text ?? '');
         if (!text.trim()) return { ok: false, error: 'text required' };
-        const caller = String(request?.caller || '').trim();
+        const caller = callerCheck.caller;
         const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
         const wrapped = wrapAgentMessage(text, caller || undefined, callerTerm?.name);
+        if (target.cliType === 'claude') await refreshClaudeSubmitKey(loadClaudeChatBindings);
         const sentTurn = agentRelayStatusRef.current.get(terminalId)?.turn ?? 0;
         const sentWhileBlocked = getTerminalAgentState(terminalId) === 'blocked';
         const result = await queueAutoInput(terminalId, wrapped, {
@@ -7622,6 +8429,15 @@ Office project scaffold created by BBARIT Terminal.
           force: request?.force === true,
           submitDelayMs: gateSubmitDelayFor(target.cliType),
           fallbackWrite: terminalWritersRef.current[terminalId] || agentPtyFallbackWrite(terminalId),
+        });
+        logAgentRelay({
+          event: 'send',
+          caller: caller ? { id: caller, name: callerTerm?.name, cliType: callerTerm?.cliType } : undefined,
+          callerVerified: callerCheck.verified,
+          target: { id: terminalId, name: target.name, cliType: target.cliType },
+          depth: agentDepth(agentLinksRef.current, terminalId),
+          text,
+          extra: { ok: result.ok, reason: result.ok ? undefined : result.reason, force: request?.force === true ? true : undefined },
         });
         if (!result.ok) {
           const error = result.reason === 'blocked'
@@ -7632,7 +8448,7 @@ Office project scaffold created by BBARIT Terminal.
           return { ok: false, error, reason: result.reason, terminalId };
         }
         const link = agentLinksRef.current.get(terminalId);
-        if (link) agentLinksRef.current.set(terminalId, { ...link, sentAt: Date.now(), sentTurn, sentWhileBlocked });
+        if (link) agentLinksRef.current.set(terminalId, { ...link, sentAt: Date.now(), sentTurn, sentWhileBlocked, stopped: false, stopTurn: undefined });
         // 자식이 부모에게 직접 보고했다 → 이 턴이 끝날 때의 done 노트는 중복이라 건너뛴다.
         // 보고 중(working)이면 턴 번호는 working 을 떠날 때 하나 오른다.
         const reporter = caller ? agentLinksRef.current.get(caller) : undefined;
@@ -7641,12 +8457,221 @@ Office project scaffold created by BBARIT Terminal.
           const lastSendTurn = getTerminalAgentState(caller) === 'working' ? callerTurn + 1 : callerTurn;
           agentLinksRef.current.set(caller, { ...reporter, lastSendTurn });
         }
-        return { ok: true, terminalId };
+        return { ok: true, terminalId, ...claudeSubmitWarning(target.cliType) };
+      }
+      case 'agent.stop': {
+        pruneAgentRunJobs();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const targets = selectStopTargets(agentLinksRef.current, {
+          terminalId: request?.terminalId ? String(request.terminalId) : undefined,
+          caller: caller || undefined,
+        });
+        if (!targets.ok) return { ok: false, error: targets.error };
+        const callerTerm = caller ? findTerminalAnywhere(caller) : undefined;
+        const stopped = await stopRelayAgents(targets.ids, {
+          close: request?.close === true,
+          caller: caller || undefined,
+          callerVerified: callerCheck.verified,
+          by: caller ? (callerTerm?.name ? `${caller} ${callerTerm.name}` : caller) : 'bbarit-ctl',
+          source: 'ctl',
+        });
+        return { ok: true, stopped };
+      }
+      case 'agent.log': {
+        const tail = Math.max(1, Math.min(500, Math.trunc(Number(request?.tail)) || 20));
+        const lines = await invoke<string[]>('agent_relay_log_tail', { lines: tail });
+        return { ok: true, lines };
+      }
+      // ── Agent team board (src/terminal/agentBoard.ts, Rust agent_board.rs) ── pull only: a post
+      // never types into any tab; viewers listen for AGENT_BOARD_EVENT.
+      case 'agent.board.post': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const postTeam = boardPostTeam(agentLinksRef.current, caller);
+        if (!postTeam.ok) return { ok: false, error: postTeam.error };
+        const team = postTeam.value;
+        const callerTerm = findTerminalAnywhere(caller);
+        if (!callerTerm) return { ok: false, error: `caller not found: ${caller}` };
+        const kind = parseBoardKind(request?.kind);
+        if (!kind.ok) return { ok: false, error: kind.error };
+        const isRoot = team === caller;
+        const allowedKind = canPostKind(kind.value, isRoot);
+        if (!allowedKind.ok) return { ok: false, error: allowedKind.error };
+        const text = sanitizeBoardText(request?.text);
+        if (!text.ok) return { ok: false, error: text.error };
+        let taskLink: number | undefined;
+        if (request?.task !== undefined && request?.task !== null && request?.task !== '') {
+          const n = parseTaskNumber(request.task);
+          if (!n.ok) return { ok: false, error: n.error };
+          taskLink = n.value;
+        }
+        let stored: BoardPost;
+        try {
+          stored = await invoke<BoardPost>('agent_board_post', {
+            team,
+            post: { teamName: boardTeamName(team) || undefined, authorId: caller, authorName: callerTerm.name, authorCli: callerTerm.cliType, kind: kind.value, text: text.value, task: taskLink, root: isRoot },
+          });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        const queued = (stored as BoardPost & { pending?: boolean; home?: string }).pending === true;
+        logAgentRelay({
+          event: 'board_post',
+          caller: relayLogParty(caller),
+          callerVerified: callerCheck.verified,
+          text: text.value,
+          extra: { team, kind: kind.value, seq: stored.seq, task: taskLink, ...(queued ? { pendingFor: (stored as { home?: string }).home } : {}) },
+        });
+        // A note for another computer's team (sync) waits for its home: not a post here yet,
+        // so nothing is announced; the home numbers it on its next sync round.
+        if (queued) {
+          emitAgentBoardEvent({ team, action: 'sync' });
+          return { ok: true, team, pending: true, home: (stored as { home?: string }).home, ts: stored.ts };
+        }
+        emitAgentBoardEvent({ team, action: 'post', seq: stored.seq, kind: kind.value, authorId: caller, ...(taskLink ? { task: taskLink } : {}) });
+        return { ok: true, team, seq: stored.seq, ts: stored.ts, ...(taskLink ? { task: taskLink } : {}) };
+      }
+      case 'agent.board.read': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const parsed = parseBoardReadRequest(request);
+        if (!parsed.ok) return { ok: false, error: parsed.error };
+        const plan = planBoardRead(agentLinksRef.current, caller, parsed.value);
+        if (!plan.ok) return { ok: false, error: plan.error };
+        const { team, query } = plan.value;
+        let res: { posts?: BoardPost[]; announcements?: BoardPost[]; lastSeq?: number; total?: number; matched?: number; more?: number; teamName?: string; cursor?: number; nextCursor?: number };
+        try {
+          res = await invoke('agent_board_read', { team, query });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        const posts = Array.isArray(res?.posts) ? res.posts : [];
+        const announcements = Array.isArray(res?.announcements) ? res.announcements : [];
+        const teamName = boardTeamName(team) || res?.teamName || '';
+        const more = res?.more ?? 0;
+        return {
+          ok: true,
+          team,
+          teamName,
+          posts,
+          ...(announcements.length ? { announcements } : {}),
+          lastSeq: res?.lastSeq ?? 0,
+          total: res?.total ?? posts.length,
+          matched: res?.matched ?? posts.length,
+          more,
+          ...(parsed.value.newOnly ? { cursor: res?.cursor ?? 0, nextCursor: res?.nextCursor ?? 0 } : {}),
+          text: formatBoardRead({ teamId: team, teamName, posts, announcements, more, newOnly: parsed.value.newOnly }),
+        };
+      }
+      case 'agent.board.teams': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const mine = callerCheck.caller ? teamRootOf(agentLinksRef.current, callerCheck.caller) : '';
+        let rows: Array<Record<string, unknown> & { team: string; teamName?: string }>;
+        try {
+          rows = await invoke('agent_board_teams');
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        const teams = (Array.isArray(rows) ? rows : []).map((t) => ({
+          ...t,
+          teamName: boardTeamName(t.team) || t.teamName || '',
+          open: !!findTerminalAnywhere(t.team),
+          mine: !!mine && t.team === mine,
+        }));
+        return { ok: true, teams };
+      }
+      case 'agent.board.clear': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        // Only a verified caller that is its team's root tab (canClearBoard); never callerless.
+        const allowed = canClearBoard(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!allowed.ok) return { ok: false, error: allowed.error };
+        const res = await clearAgentBoard(allowed.value, { caller, callerVerified: callerCheck.verified, source: 'ctl' });
+        return res.ok ? { ok: true, team: allowed.value, removed: res.removed } : res;
+      }
+      // ── Team tasks (src/terminal/agentTasks.ts) ── reads may name any team (--team); writes need a
+      // verified caller and go to its own team. All through checkAgentCaller like agent.board.*.
+      case 'agent.task.list':
+      case 'agent.task.show': {
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const planned = planTaskRead(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!planned.ok) return { ok: false, error: planned.error };
+        const team = planned.value;
+        const staleMs = boardConfig().staleMinutes * 60 * 1000;
+        if (cmd === 'agent.task.list') {
+          const parsed = parseTaskListRequest(request, caller, staleMs);
+          if (!parsed.ok) return { ok: false, error: parsed.error };
+          let res: { tasks?: any[]; counts?: Record<string, number>; matched?: number; more?: number; teamName?: string; expired?: TaskWriteResult['expired'] };
+          try {
+            res = await invoke('agent_task_list', { team, query: parsed.value.query });
+          } catch (e) {
+            return { ok: false, error: boardError(e) };
+          }
+          if (res?.expired?.length) reportTaskChange(team, { op: 'list' }, { expired: res.expired }, { source: 'app' });
+          const tasks = Array.isArray(res?.tasks) ? res.tasks : [];
+          const teamName = boardTeamName(team) || res?.teamName || '';
+          return {
+            ok: true, team, teamName, tasks, counts: res?.counts || {}, matched: res?.matched ?? tasks.length, more: res?.more ?? 0,
+            text: formatTaskList({ teamId: team, teamName, tasks, counts: res?.counts, more: res?.more, tree: parsed.value.tree }),
+          };
+        }
+        const n = parseTaskNumber(request?.task);
+        if (!n.ok) return { ok: false, error: `${n.error}: agent task show <#>` };
+        let res: any;
+        try {
+          res = await invoke('agent_task_show', { team, task: n.value, history: request?.history === true, staleMs });
+        } catch (e) {
+          return { ok: false, error: boardError(e) };
+        }
+        if (res?.expired?.length) reportTaskChange(team, { op: 'show' }, { expired: res.expired }, { source: 'app' });
+        const teamName = boardTeamName(team) || '';
+        return {
+          ok: true, ...res, teamName,
+          text: formatTaskShow({ teamId: team, teamName, task: res.task, deps: res.deps, dependents: res.dependents, children: res.children, parentTask: res.parentTask, events: res.events }),
+        };
+      }
+      case 'agent.task.add': case 'agent.task.claim': case 'agent.task.block': case 'agent.task.unblock':
+      case 'agent.task.release': case 'agent.task.done': case 'agent.task.submit': case 'agent.task.approve':
+      case 'agent.task.reject': case 'agent.task.fail': case 'agent.task.retry': case 'agent.task.reopen':
+      case 'agent.task.cancel': case 'agent.task.edit': case 'agent.task.dep': {
+        const sub = cmd.slice('agent.task.'.length);
+        if (!(TASK_WRITE_SUBS as readonly string[]).includes(sub)) return { ok: false, error: `unknown task command: ${sub}` };
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
+        const caller = callerCheck.caller;
+        const planned = planTaskWrite(agentLinksRef.current, caller, String(request?.team ?? '').trim() || undefined);
+        if (!planned.ok) return { ok: false, error: planned.error };
+        const { team, root } = planned.value;
+        const callerTerm = findTerminalAnywhere(caller);
+        if (!callerTerm) return { ok: false, error: `caller not found: ${caller}` };
+        const callerLink = agentLinksRef.current.get(caller);
+        const built = buildTaskOp(sub, request, {
+          worktree: callerLink?.worktree,
+          branch: callerLink?.branch,
+          leaseMs: boardConfig().leaseSeconds * 1000,
+          teamName: boardTeamName(team) || undefined,
+        });
+        if (!built.ok) return { ok: false, error: built.error };
+        const done = await runAgentTaskWrite(team, built.value, { id: caller, name: callerTerm.name, cli: callerTerm.cliType, root, human: false }, { caller, callerVerified: callerCheck.verified, source: 'ctl' });
+        if (!done.ok) return done;
+        const res = done.res;
+        return { ok: true, team, ...res, ...(res.task === null ? { nothing: true } : {}), text: formatTaskWrite(res) };
       }
       case 'agent.status':
       case 'agent.list': {
+        pruneAgentRunJobs();
+        const callerCheck = await checkAgentCaller(request, cmd);
+        if (!callerCheck.ok) return { ok: false, error: callerCheck.error, callerRefused: callerCheck.reason };
         const terminalId = String(request?.terminalId || '').trim();
-        const caller = String(request?.caller || '').trim();
+        const caller = callerCheck.caller;
         const ids = terminalId
           ? [terminalId]
           : [...agentLinksRef.current.values()]
@@ -14975,6 +16000,93 @@ Office project scaffold created by BBARIT Terminal.
       if (unlisten) unlisten();
     };
   }, [isHarnessWindow]);
+  // Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md). The StopFailure hook report goes to
+  // the runtime, which acts only on Claude tabs mounted in this window.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tauriListen<ClaudeLimitReport>(CLAUDE_LIMIT_REPORTED_EVENT, (event) => {
+      noteModelLimitHook(event.payload);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+  // Tab model-switch icons re-render when a tab registers or a person takes its model over.
+  const modelLimitTabsVer = useSyncExternalStore(subscribeModelLimitTabs, modelLimitTabsVersion, modelLimitTabsVersion);
+  // Marks live on the terminals (persisted with them); the runtime gets a copy keyed on a string.
+  const modelFallbackMarksKey = useMemo(() => JSON.stringify(
+    projects.flatMap((p) => p.terminals.filter((tt) => tt.modelFallback).map((tt) => [tt.id, tt.modelFallback])),
+  ), [projects]);
+  useEffect(() => {
+    try { syncModelFallbackMarks(JSON.parse(modelFallbackMarksKey)); } catch { /* ignore */ }
+  }, [modelFallbackMarksKey]);
+  // Mark changes are stored on the terminal by the main window, which persists tabs. Marks are
+  // broadcast as a Tauri event so a change made in a harness/pop-out window reaches it too.
+  const storeModelFallbackMark = useCallback((terminalId: string, markIn: ModelFallbackMark | null | undefined) => {
+        const mark = sanitizeModelFallbackMark(markIn ?? undefined);
+        const d = { terminalId };
+        setProjects((prev) => {
+          let changed = false;
+          const next = prev.map((p) => {
+            const idx = p.terminals.findIndex((tt) => tt.id === d.terminalId);
+            if (idx < 0) return p;
+            const cur = p.terminals[idx];
+            if (JSON.stringify(cur.modelFallback ?? null) === JSON.stringify(mark ?? null)) return p;
+            changed = true;
+            const terminals = p.terminals.slice();
+            terminals[idx] = { ...cur, modelFallback: mark };
+            return { ...p, terminals };
+          });
+          return changed ? next : prev;
+        });
+  }, []);
+  useEffect(() => {
+    if (isHarnessWindow) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void tauriListen<{ terminalId: string; mark: ModelFallbackMark | null }>(MODEL_FALLBACK_MARK_EVENT, (event) => {
+      if (event.payload?.terminalId) storeModelFallbackMark(event.payload.terminalId, event.payload.mark);
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    }).catch(() => {});
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, [isHarnessWindow, storeModelFallbackMark]);
+  // Notices become a toast (in the window where the tab runs).
+  useEffect(() => {
+    const onFallback = (ev: Event) => {
+      const d = (ev as CustomEvent).detail as ModelFallbackEventDetail | undefined;
+      if (!d) return;
+      // Fallback path when the Tauri event could not be sent (main window only).
+      if (d.terminalId && d.mark !== undefined && !isHarnessWindow) storeModelFallbackMark(d.terminalId, d.mark);
+      if (d.notice && d.text) {
+        const { projects: projs } = taskNotifyRef.current;
+        let projectId = '', title = '';
+        for (const p of projs) {
+          const term = p.terminals.find((tt) => tt.id === d.terminalId);
+          if (term) {
+            projectId = p.id;
+            title = [p.displayName || p.name || '', term.name || ''].filter(Boolean).join(' - ');
+            break;
+          }
+        }
+        const id = `model-fallback-${d.terminalId}-${Date.now()}`;
+        const toast: TaskToast = { id, projectId, terminalId: d.terminalId, title: title || 'Claude', prompt: d.text, duration: '' };
+        setTaskToasts((prev) => [...prev.filter((tt) => tt.id !== id), toast].slice(-4));
+        taskToastTimersRef.current[id] = window.setTimeout(() => dismissTaskToast(id), 12000);
+      }
+    };
+    window.addEventListener(MODEL_FALLBACK_EVENT, onFallback as EventListener);
+    return () => window.removeEventListener(MODEL_FALLBACK_EVENT, onFallback as EventListener);
+  }, [dismissTaskToast, isHarnessWindow, storeModelFallbackMark]);
   // Main window: tab-close warns about unsaved edits, but window-close used to
   // discard every dirty office/document tab silently. Intercept and ask once.
   useEffect(() => {
@@ -17284,6 +18396,78 @@ Office project scaffold created by BBARIT Terminal.
                   );
                 })()}
               </span>
+
+              {/* 팀 현황 — 이 프로젝트에 팀 보드가 있을 때 (게이지 오버레이의 팀 현황 탭) */}
+              {showTeamStatusButton(agentTeamOn, (projectTeamMap.get(activeProjectId || '') || []).length) && (
+                <button
+                  className="view-mode-apply-all ts-badge-host"
+                  data-guide="team-status"
+                  onClick={() => openTeamStatus((projectTeamMap.get(activeProjectId || '') || [])[0], activeProjectId || undefined)}
+                  title={locale === 'ko' ? '이 프로젝트의 팀 현황' : 'Team status for this project'}
+                  aria-label={locale === 'ko' ? '이 프로젝트의 팀 현황' : 'Team status for this project'}
+                  style={{
+                    marginLeft: 4,
+                    padding: 0,
+                    width: 26,
+                    height: 22,
+                    background: 'transparent',
+                    border: `1px solid ${activeStyle.text}33`,
+                    borderRadius: 'var(--brutal-radius)',
+                    color: activeStyle.text,
+                    cursor: 'pointer',
+                    opacity: 0.8,
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                >
+                  <LucideIcons.Users size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
+                </button>
+              )}
+
+              {/* 팀 멈춤 — 릴레이 자식이 하나라도 작업 중일 때만 (agent stop 과 같은 경로) */}
+              {showStopTeamButton(agentTeamOn, relayTeamWorking) && (
+                <button
+                  className="view-mode-apply-all"
+                  data-guide="stop-team"
+                  onClick={() => {
+                    const targets = selectStopTargets(agentLinksRef.current, {
+                      all: true,
+                      isActive: (id) => {
+                        const st = relayChildState(id);
+                        return st === 'working' || st === 'blocked';
+                      },
+                    });
+                    if (targets.ok) void stopRelayAgents(targets.ids, { silent: true, source: 'button' });
+                  }}
+                  title={locale === 'ko'
+                    ? '에이전트 팀 멈춤: 작업 중인 릴레이 자식 에이전트를 중단합니다 (Claude·bbarit 는 Esc, 셸·ollama 는 Ctrl+C. 중단 키를 모르는 CLI 는 건드리지 않음. 탭과 출력은 남음)'
+                    : 'Stop agent team: interrupt working relay child agents (Esc for Claude and bbarit, Ctrl+C for shells and ollama; CLIs without a known interrupt key are left alone; tabs and output stay)'}
+                  aria-label={locale === 'ko' ? '에이전트 팀 멈춤' : 'Stop agent team'}
+                  style={{
+                    marginLeft: 4,
+                    padding: 0,
+                    width: 26,
+                    height: 22,
+                    background: 'transparent',
+                    border: '1px solid #e5484d',
+                    borderRadius: 'var(--brutal-radius)',
+                    color: '#e5484d',
+                    cursor: 'pointer',
+                    opacity: 0.9,
+                    transition: 'all 0.05s ease',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0,
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.background = '#e5484d22'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.opacity = '0.9'; e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <LucideIcons.OctagonX size={13} strokeWidth={2.5} style={{ flexShrink: 0, display: 'block' }} />
+                </button>
+              )}
             </>
           );
         })()}
@@ -17371,6 +18555,7 @@ Office project scaffold created by BBARIT Terminal.
                 )}
               </span>
             )}
+            {renderTeamBadge(projectNeeds(project.id), 'ts-badge ts-tab-badge', () => openTeamStatus((projectTeamMap.get(project.id) || [])[0], project.id))}
             {renderProjectThemePicker(project)}
             <span className="tab-close" data-project-tab-ignore-drag="true" onClick={(e) => { e.stopPropagation(); closeProject(project.id); }}>
               <OctoX size={12} />
@@ -17924,7 +19109,7 @@ Office project scaffold created by BBARIT Terminal.
             {isToolbarVisible('hub') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-hub${showHubModal ? ' active' : ''}`} onClick={() => setShowHubModal(!showHubModal)} title={t('view.hub')}>
               <LucideIcons.Waypoints size={14} />
             </button>}
-            {isToolbarVisible('dashboard') && <button data-hint="tool" className={`btn-top-small toolbar-tool tool-dashboard${showDashboard ? ' active' : ''}`} onClick={() => setShowDashboard((v) => !v)} title={locale === 'ko' ? '에이전트 대시보드 (주소는 설정 > Hub)' : 'Agent Dashboard (URL in Settings > Hub)'}><LucideIcons.Gauge size={14} /></button>}
+            {isToolbarVisible('dashboard') && <button data-hint="tool" data-guide={gaugeButtonLabel(agentTeamOn, locale).guide} className={`btn-top-small toolbar-tool tool-dashboard ts-badge-host${showDashboard ? ' active' : ''}`} onClick={() => { setGaugeRequest({ nonce: Date.now() }); setShowDashboard((v) => !v); }} title={gaugeButtonLabel(agentTeamOn, locale).title}><LucideIcons.Gauge size={14} />{renderTeamBadge(activeProjectId ? projectNeeds(activeProjectId) : [])}</button>}
             {isToolbarVisible('skills') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-skills" onClick={() => { void openToolWindow('skills'); }} title="Skills"><LucideIcons.Blocks size={14} /></button>}
             {isToolbarVisible('mcp') && <button data-hint="tool" className="btn-top-small toolbar-tool tool-mcp" onClick={() => setShowMcpPanel(true)} title="MCP Server" style={{ position: 'relative' }}>
               <LucideIcons.ServerCog size={14} />
@@ -21412,7 +22597,7 @@ Office project scaffold created by BBARIT Terminal.
                       key={terminal.id}
                       data-terminal-tab-id={terminal.id}
                       data-hint="tab"
-                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminalStatusClass(terminal.id)}`}
+                      className={`terminal-tab ${terminal.id === activeProject.activeTerminalId ? 'active' : ''} ${terminal.cliType || 'shell'} ${terminal.cliType === 'claude' ? `has-model-switch${['switched', 'unconfirmed'].includes(modelSwitchIndicator(terminal.id, terminal.modelFallback, locale as Locale).state) ? ' model-switch-shown' : ''}` : ''} ${terminalStatusClass(terminal.id)}`}
                       title={terminal.name}
                       style={isTerminalFiltered(terminal.id) ? { opacity: 0.25, pointerEvents: 'none' } : undefined}
                       onMouseDown={(e) => {
@@ -21502,6 +22687,33 @@ Office project scaffold created by BBARIT Terminal.
                             <span className="terminal-telegram-dot" />
                           </button>
                         )}
+                        {terminal.cliType === 'claude' && (() => {
+                          // Model limit fallback state (docs/MODEL_LIMIT_FALLBACK.md); depends on modelLimitTabsVer.
+                          void modelLimitTabsVer;
+                          const ind = modelSwitchIndicator(terminal.id, terminal.modelFallback, locale as Locale);
+                          const Icon = ind.state === 'off' ? LucideIcons.RefreshCwOff
+                            : ind.state === 'human' || ind.state === 'preset' ? LucideIcons.UserLock
+                            : ind.state === 'on' ? LucideIcons.RefreshCw
+                            : LucideIcons.ArrowRightLeft;
+                          return (
+                            <button
+                              type="button"
+                              className={`terminal-telegram-badge terminal-model-switch is-${ind.state}`}
+                              title={ind.tooltip}
+                              aria-label={ind.tooltip}
+                              data-model-switch={ind.state}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                // A typed /model choice is released here (no input, model unchanged).
+                                if (ind.state === 'human' && releaseHumanModelChoice(terminal.id)) return;
+                                setSettingsInitialTab({ tab: 'agent', nonce: Date.now() });
+                                setShowGlobalSettings(true);
+                              }}
+                            >
+                              <Icon size={12} aria-hidden="true" />
+                            </button>
+                          );
+                        })()}
                         <button
                           type="button"
                           className="terminal-telegram-badge"
@@ -23538,12 +24750,31 @@ Office project scaffold created by BBARIT Terminal.
       {/* BBARIT Secretary — 앱 내부 비서 웹챗(gateway) iframe 오버레이 */}
       {showDashboard && (
         <React.Suspense fallback={null}>
-          <DashboardPanel
+          <TeamStatusOverlay
+            teamEnabled={agentTeamOn}
+            initialTab={gaugeRequest.tab}
             onClose={() => setShowDashboard(false)}
-            onOpenExternal={(url) => { void openExternalUrl(url); }}
-            accent={activeStyle.accent}
-            bg={activeStyle.bg}
-            text={activeStyle.text}
+            onOpenExternal={(url: string) => { void openExternalUrl(url); }}
+            onTabChange={setGaugeTab}
+            restoreFocus={() => !gaugeNoRestoreRef.current}
+            poppedOut={teamPopout.open}
+            onPopOut={() => { void openTeamStatusPopout(gaugeTeamRef.current, gaugeRequest.projectId || activeProjectId || ''); }}
+            onBringToFront={() => { void bringTeamPopoutToFront(); }}
+            view={{
+              source: teamBoardSource,
+              locale,
+              surface: teamStatusSurface(activeStyle),
+              requested: gaugeRequest.team ? { team: gaugeRequest.team, nonce: gaugeRequest.nonce } : undefined,
+              projectId: gaugeRequest.projectId || activeProjectId || '',
+              projectTeamIds: projectTeamMap.get(gaugeRequest.projectId || activeProjectId || '') || [],
+              membersOf: teamMembersOf,
+              limits: teamLimits(),
+              staleMs: boardConfig().staleMinutes * 60_000,
+              onTeamChange: (team: string) => { gaugeTeamRef.current = team; },
+              onJump: jumpToTeamTab,
+              onOpenSettings: openBoardSettings,
+              onCopy: (text: string) => { void navigator.clipboard?.writeText(text).catch(() => {}); },
+            }}
           />
         </React.Suspense>
       )}

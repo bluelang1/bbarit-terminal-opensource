@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from 'react';
+import { modelDisplayName } from '../terminal/modelLimitFallback';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
@@ -42,6 +43,8 @@ import BBARIT_CLI_DOC from '../../docs/BBARIT_CLI.md?raw';
 import BBARIT_CTL_SOURCE from '../../scripts/bbarit-ctl.mjs?raw';
 import { DEFAULT_DASHBOARD_URL, loadDashboardUrl, normalizeDashboardUrl, saveDashboardUrl } from '../dashboard/dashboardUrl';
 import { PetSettings } from './PetSettings';
+import { AgentBoardSettings } from './AgentBoardSettings';
+import { AgentTeamSwitch } from './AgentTeamSwitch';
 import './SettingsPanel.css';
 
 // Control CLI 탭에서 버스 명령 → 복사용 CLI 예시 매핑 (bbarit-ctl 서브커맨드).
@@ -64,6 +67,12 @@ const CLI_EXAMPLES: Record<string, string> = {
   'agent.send': 'agent send <terminalId> "take another look"',
   'agent.status': 'agent status <terminalId>',
   'agent.list': 'agent list',
+  'agent.stop': 'agent stop --children',
+  'agent.log': 'agent log --tail 50',
+  'agent.board.post': 'agent board post "login bug is in auth.ts" --kind finding',
+  'agent.board.read': 'agent board read --new',
+  'agent.board.teams': 'agent board teams',
+  'agent.board.clear': 'agent board clear',
   'editor.open': 'open ./README.md',
   'editor.list': 'files',
   'editor.close': 'close README.md',
@@ -2830,6 +2839,30 @@ export function SettingsPanel({
                   <label>{t('settings.agent.resumeLastSession')}</label>
                   <input type="checkbox" checked={agentSettings.resumeLastSession ?? false} onChange={(e) => setAgentSettings(prev => ({ ...prev, resumeLastSession: e.target.checked }))} />
                 </div>
+                {/* Model limit fallback — docs/MODEL_LIMIT_FALLBACK.md */}
+                <div className="setting-item toggle">
+                  <label>{t('settings.agent.limitFallback').replace('{primary}', modelDisplayName(agentSettings.claudeLimitPrimaryModel || 'claude-fable-5-2')).replace('{fallback}', modelDisplayName(agentSettings.claudeLimitFallbackModel || 'opus'))}</label>
+                  <input type="checkbox" checked={agentSettings.claudeLimitFallback ?? false} onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitFallback: e.target.checked }))} />
+                </div>
+                <span className="setting-description" style={{ display: 'block', marginBottom: 8 }}>
+                  {t('settings.agent.limitFallback.desc')}
+                </span>
+                {agentSettings.claudeLimitFallback && (
+                  <>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.primary')}</label>
+                      <input type="text" value={agentSettings.claudeLimitPrimaryModel ?? 'claude-fable-5-2'} placeholder="claude-fable-5-2" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitPrimaryModel: e.target.value }))} />
+                    </div>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.fallback')}</label>
+                      <input type="text" value={agentSettings.claudeLimitFallbackModel ?? 'opus'} placeholder="opus" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitFallbackModel: e.target.value }))} />
+                    </div>
+                    <div className="setting-item">
+                      <label>{t('settings.agent.limitFallback.usageFile')}</label>
+                      <input type="text" value={agentSettings.claudeLimitUsageFile ?? '~/.claude/logs/model-usage.json'} placeholder="~/.claude/logs/model-usage.json" onChange={(e) => setAgentSettings(prev => ({ ...prev, claudeLimitUsageFile: e.target.value }))} />
+                    </div>
+                  </>
+                )}
                 <div className="setting-item">
                   <label>{t('settings.agent.claudeModel')}</label>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -3597,6 +3630,8 @@ export function SettingsPanel({
                   />
                 </div>
               </div>
+              <AgentTeamSwitch />
+              <AgentBoardSettings />
 
             </div>
           )}

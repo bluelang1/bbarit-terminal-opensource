@@ -11,7 +11,15 @@ const CHROME_KEYS = [
 
 describe('GUIDE_STEPS', () => {
   it('steps in spec order', () => {
-    expect(GUIDE_STEPS.map(s => s.id)).toEqual(['project', 'ai-terminal', 'status', 'keep-running', 'git-keys', 'hints', 'window-pin', 'pet']);
+    expect(GUIDE_STEPS.map(s => s.id)).toEqual(['project', 'ai-terminal', 'status', 'keep-running', 'git-keys', 'hints', 'window-pin', 'team-status', 'pet']);
+  });
+
+  it('team-status hidden while the agent team is off (Settings → Agent team in tabs)', () => {
+    expect(visibleSteps(true).map(s => s.id)).toContain('team-status');
+    expect(visibleSteps(true, true).map(s => s.id)).toContain('team-status');
+    const off = visibleSteps(true, false).map(s => s.id);
+    expect(off).not.toContain('team-status');
+    expect(off).toHaveLength(GUIDE_STEPS.length - 1);
   });
 
   it('pet hidden off macOS', () => {
@@ -49,6 +57,8 @@ describe('GUIDE_STEPS', () => {
     expect(byId['git-keys'].target?.selector).toBe('[data-guide="git"]');
     expect(byId['window-pin'].target?.selector).toBe('[data-guide="window-pin"]');
     expect(byId['window-pin'].macOnly).toBeUndefined();
+    expect(byId['team-status'].target?.selector).toBe('[data-guide="team-status"]');
+    expect(byId['team-status'].macOnly).toBeUndefined();
     expect(byId.status.target).toBeUndefined();
     expect(byId.status.action).toBeUndefined();
     expect(byId.hints.target).toBeUndefined();

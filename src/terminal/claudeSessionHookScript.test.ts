@@ -100,3 +100,67 @@ describe.skipIf(process.platform === 'win32')('session-start.sh', () => {
     expect(res.status).toBe(0);
   });
 });
+
+// StopFailure hook for the model limit fallback (docs/MODEL_LIMIT_FALLBACK.md). Input is the
+// JSON measured from Claude Code 2.1.325 on a real Fable limit.
+const STOP_SCRIPT = path.resolve(__dirname, '../../src-tauri/resources/claude-hooks/stop-failure.sh');
+const LIMIT_MSG = "You've hit your Fable limit · resets Nov 21 at 12pm (Asia/Seoul)";
+const STOP_INPUT = {
+  session_id: SID,
+  transcript_path: '/Users/u/.claude/projects/-p/x.jsonl',
+  cwd: '/p',
+  prompt_id: 'a7ab9bf3-6fee-412d-a4b4-0115ec6fca5e',
+  effort: { level: 'medium' },
+  hook_event_name: 'StopFailure',
+  error: 'rate_limit',
+  last_assistant_message: LIMIT_MSG,
+};
+
+describe.skipIf(process.platform === 'win32')('stop-failure.sh', () => {
+  let dir = '';
+  let log = '';
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'bbarit-stop-hook-'));
+    log = path.join(dir, 'curl.log');
+    const fakeCurl = path.join(dir, 'curl');
+    writeFileSync(fakeCurl, `#!/bin/sh\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${log}"\necho should-not-reach-stdout\nexit 7\n`);
+    chmodSync(fakeCurl, 0o755);
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const run = (input: string, env: Record<string, string | undefined> = {}) => spawnSync('/bin/sh', [STOP_SCRIPT], {
+    input,
+    encoding: 'utf8',
+    env: { PATH: `${dir}:${process.env.PATH ?? '/usr/bin:/bin'}`, BBARIT_BRIDGE_PORT: '1', BBARIT_TERMINAL_ID: 't', ...env },
+  });
+
+  it('should_post_a_rate_limit_to_the_bridge_and_exit_0', () => {
+    const res = run(JSON.stringify(STOP_INPUT));
+    expect(res.status).toBe(0);
+    expect(res.stdout).toBe('');
+    const args = readFileSync(log, 'utf8').trimEnd().split('\n');
+    expect(args).toContain('http://127.0.0.1:1/api/claude-limit');
+    expect(JSON.parse(args[args.indexOf('-d') + 1])).toEqual({ terminalId: 't', sessionId: SID, error: 'rate_limit', message: LIMIT_MSG });
+  });
+
+  it('should_ignore_other_errors_subagents_and_missing_env', () => {
+    expect(run(JSON.stringify({ ...STOP_INPUT, error: 'server_error' })).status).toBe(0);
+    expect(run(JSON.stringify({ ...STOP_INPUT, agent_id: 'a1' })).status).toBe(0);
+    expect(run(JSON.stringify(STOP_INPUT), { BBARIT_TERMINAL_ID: undefined }).status).toBe(0);
+    expect(existsSync(log)).toBe(false);
+  });
+
+  it('should_ship_settings_that_run_it_next_to_the_session_hook', () => {
+    const settings = JSON.parse(readFileSync(SETTINGS, 'utf8'));
+    const cmd: string = settings.hooks.StopFailure[0].hooks[0].command;
+    // BBARIT_CLAUDE_HOOK points at session-start.sh; the stop hook sits in the same folder.
+    const res = spawnSync('/bin/sh', ['-c', cmd], {
+      input: JSON.stringify(STOP_INPUT),
+      encoding: 'utf8',
+      env: { PATH: `${dir}:${process.env.PATH}`, BBARIT_CLAUDE_HOOK: SCRIPT, BBARIT_BRIDGE_PORT: '1', BBARIT_TERMINAL_ID: 't' },
+    });
+    expect(res.status).toBe(0);
+    expect(readFileSync(log, 'utf8')).toContain('/api/claude-limit');
+    expect(spawnSync('/bin/sh', ['-c', cmd], { encoding: 'utf8', env: { PATH: process.env.PATH } }).status).toBe(0);
+  });
+});

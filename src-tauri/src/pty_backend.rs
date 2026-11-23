@@ -119,6 +119,11 @@ impl PtySelection {
         &self.chosen.get_or_init(|| self.choose()).backend
     }
 
+    /// The backend has been chosen (PTY liveness is meaningful from here on).
+    pub fn is_resolved(&self) -> bool {
+        self.chosen.get().is_some()
+    }
+
     fn resolved(&self) -> Option<&Arc<dyn PtyBackend>> {
         self.chosen.get().map(|c| &c.backend)
     }
@@ -786,6 +791,8 @@ pub struct ShellEnvDeps {
     pub claude_hook: Option<String>,
     /// Bundled `bbarit-ctl.mjs` path, if resolved.
     pub ctl_path: Option<String>,
+    /// `BBARIT_TERM_TOKEN` (agent_caller::term_token), if the key could be read or created.
+    pub term_token: Option<String>,
     /// `id -un` (falling back to $USER, then "unknown").
     #[cfg(not(target_os = "windows"))]
     pub username: String,
@@ -816,6 +823,10 @@ pub fn shell_path(nvm_node_bin: &str, home: &str) -> String {
 /// (CommandBuilder inherits it) with the removals and overrides below, applied
 /// in this order — later steps (the ~/.config/octo/.env file, the GitHub
 /// account) can override earlier ones. Errs only for a malformed Windows ssh:// dir.
+/// Keys of `~/.config/octo/.env` (and the app's own environment) that only the app may use:
+/// an agent's `env` must never show them.
+pub const HIDDEN_FROM_TERMINALS: [&str; 1] = ["BBARIT_BOARD_DATABASE_URL"];
+
 pub fn build_shell_command(
     spec: &ShellSpawnSpec,
     deps: &ShellEnvDeps,
@@ -893,7 +904,13 @@ pub fn build_shell_command(
 fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &ShellEnvDeps, term: &str) {
     // Remove inherited Claude Code markers (CLAUDECODE etc.) so Claude runs and saves its
     // transcript inside the tab, and add the session-hook env (docs/CLAUDE_SESSION_HOOK.md).
-    crate::apply_bbarit_terminal_env(cmd, &spec.terminal_id, deps.claude_hook.as_deref());
+    // Also the agent relay caller token (BBARIT_TERM_TOKEN, agent_caller.rs).
+    crate::apply_bbarit_terminal_env(
+        cmd,
+        &spec.terminal_id,
+        deps.claude_hook.as_deref(),
+        deps.term_token.as_deref(),
+    );
     // 색상 비활성 환경에서 앱이 실행돼도 CLI 색이 죽지 않도록 제거
     cmd.env_remove("NO_COLOR");
     cmd.env_remove("COLOR");
@@ -942,6 +959,9 @@ fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &Shell
                 }
                 if let Some(eq_pos) = line.find('=') {
                     let key = line[..eq_pos].trim();
+                    if HIDDEN_FROM_TERMINALS.contains(&key) {
+                        continue;
+                    }
                     let mut value = line[eq_pos + 1..].trim();
                     // strip quotes
                     if (value.starts_with('"') && value.ends_with('"'))
@@ -952,6 +972,12 @@ fn apply_shell_env(cmd: &mut CommandBuilder, spec: &ShellSpawnSpec, deps: &Shell
                     cmd.env(key, value);
                 }
             }
+        }
+
+        // App-only secrets (the team board's database URL) never reach a terminal, even
+        // when the app itself inherited them.
+        for key in HIDDEN_FROM_TERMINALS {
+            cmd.env_remove(key);
         }
 
         if !deps.github_env.is_empty() {
@@ -972,6 +998,7 @@ mod tests {
 
     const HOOK: &str = "/res/claude-hooks/session-start.sh";
     const CTL: &str = "/res/bbarit-ctl.mjs";
+    const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
     fn spec() -> ShellSpawnSpec {
         ShellSpawnSpec {
@@ -987,11 +1014,12 @@ mod tests {
             shell_work_dir: "/work/proj".into(),
             claude_hook: Some(HOOK.into()),
             ctl_path: Some(CTL.into()),
+            term_token: Some(TOKEN.into()),
             username: "alice".into(),
             home: "/Users/alice".into(),
             nvm_node_bin: "/Users/alice/.nvm/versions/node/v22.1.0/bin".into(),
             env_file: Some(
-                "# comment\n\nOPENAI_API_KEY=\"sk-quoted\"\n  EXTRA_SINGLE = 'x y' \nNOT_A_PAIR\n"
+                "# comment\n\nOPENAI_API_KEY=\"sk-quoted\"\n  EXTRA_SINGLE = 'x y' \nNOT_A_PAIR\nBBARIT_BOARD_DATABASE_URL=postgres://u:test@db/x\n"
                     .into(),
             ),
             github_env: if github {
@@ -1007,7 +1035,8 @@ mod tests {
 
     /// Keys the old inline create_shell removed from the inherited app env (macOS/Linux).
     /// GITHUB_TOKEN only when a GitHub account was resolved.
-    const REMOVED_KEYS: [&str; 8] = [
+    const REMOVED_KEYS: [&str; 9] = [
+        "BBARIT_BOARD_DATABASE_URL",
         "CLAUDECODE",
         "CLAUDE_CODE_CHILD_SESSION",
         "CLAUDE_CODE_ENTRYPOINT",
@@ -1025,6 +1054,7 @@ mod tests {
         let mut m: BTreeMap<String, String> = [
             ("BBARIT_TERMINAL_ID", "term-1".to_string()),
             ("BBARIT_BRIDGE_PORT", crate::browser_bridge::BRIDGE_PORT.to_string()),
+            ("BBARIT_TERM_TOKEN", TOKEN.to_string()),
             ("BBARIT_CLAUDE_HOOK", HOOK.to_string()),
             ("PAGER", "cat".into()),
             ("GIT_PAGER", "cat".into()),
@@ -1116,12 +1146,14 @@ mod tests {
         let mut d = deps(false);
         d.claude_hook = None;
         d.ctl_path = None;
+        d.term_token = None;
         d.env_file = None;
         let mut cmd = CommandBuilder::new("/bin/zsh");
         cmd.env_clear();
+        cmd.env("BBARIT_TERM_TOKEN", "inherited");
         apply_shell_env(&mut cmd, &spec(), &d, "xterm-256color");
         let env = env_map(&cmd);
-        for key in ["BBARIT_CLAUDE_HOOK", "BBARIT_CTL", "OPENAI_API_KEY", "GH_TOKEN"] {
+        for key in ["BBARIT_CLAUDE_HOOK", "BBARIT_CTL", "BBARIT_TERM_TOKEN", "OPENAI_API_KEY", "GH_TOKEN"] {
             assert!(!env.contains_key(key), "{key}");
         }
         assert_eq!(env.get("BBARIT_TERMINAL_ID").map(String::as_str), Some("term-1"));

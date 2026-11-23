@@ -27,6 +27,7 @@ Useful source checks:
     cargo test --manifest-path bbarit-agent/Cargo.toml --locked   # ~370 tests, seconds once built
     cargo test --manifest-path src-tauri/Cargo.toml --locked      # ~120 tests; first build ~3 min
     cargo test -p tauri-plugin-mcp-bridge --lib --manifest-path src-tauri/Cargo.toml  # vendored plugin guard
+    cargo test -p board-store --manifest-path src-tauri/Cargo.toml --locked   # board store; BBARIT_TEST_PG_URL (+ BBARIT_TEST_PG_REQUIRED=1) adds PostgreSQL
 
 Build/test gotchas:
 
@@ -34,7 +35,13 @@ Build/test gotchas:
 - `npm run test:run` prints jsdom "HTMLCanvasElement.getContext not implemented"
   stack traces from xterm; they are noise, check the pass/fail summary.
 - ESLint has rules-of-hooks, exhaustive-deps, and no-unused-vars disabled; a
-  clean lint does not mean hook usage is correct.
+  clean lint does not mean hook usage is correct. `react-hooks/use-memo` is on
+  (CI `source` job): dependency arrays must be plain identifiers/members, so
+  compute e.g. `Math.floor(now / 30_000)` into a const first.
+- A new worktree needs `npm ci` before vitest/lint/dev:screen; point cargo at the
+  main checkout's cache with `CARGO_TARGET_DIR=<repo>/src-tauri/target`.
+- CI gitleaks flags hex-looking strings in fixtures; use placeholders such as
+  `tok-of-t1` and the password `test`.
 - src-tauri/src/{pty,gateway,config,shannon}.rs are not in the `mod` tree of
   main.rs; edit main.rs, not those files.
 - New scripts referenced from package.json or tauri resources must be added to
@@ -197,8 +204,29 @@ Build/test gotchas:
 - Status bar DISK uses the walker in src-tauri/src/disk_usage.rs (same bytes as `du`,
   cancellable, skips home/root on auto). `src-tauri/target` grows past 50 GB with
   worktree builds; `cargo clean --manifest-path src-tauri/Cargo.toml` is safe.
-- Gate merges on `gh pr checks <n>` unpiped (a pipe hides its exit code).
+- Gate merges on `gh pr checks <n>` unpiped (a pipe hides its exit code). Right
+  after a push `--watch` can exit before checks start; poll until the exit code
+  is not 8 (pending).
   src/guide/useGuideHost.tauri.test.ts is flaky in CI; rerun before suspecting the PR.
+- board-store: PgStore methods wrap pg::PgOps (runs on a caller's connection, never
+  begins/commits). New PostgreSQL operations go into PgOps first; on any Err the caller
+  rolls back (atomically! helper). The crate is copied by hand into another repository;
+  keep its files free of app-only dependencies.
+- `bbarit-ctl js "…invoke('app_quit_kill_terminals')"` never returns once the app
+  exits; run it in the background and confirm with `pgrep` instead.
+- The board store lives in src-tauri/crates/board-store (workspace default member, no Tauri
+  dependency, features `sqlite` / `pg`); app code opens boards only through
+  `agent_board::local_store` / `pg_store`, which pass the machine name and app version.
+- Squashing a branch with `git reset --soft origin/main` keeps the branch's old tree: rebase
+  onto origin/main first, or the squash silently reverts whatever merged in between.
+- Agent team board: design and stage notes in
+  docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md; app side in
+  src-tauri/src/agent_board/. PostgreSQL tests skip silently unless
+  `BBARIT_TEST_PG_URL` is set (add `BBARIT_TEST_PG_REQUIRED=1` to fail instead);
+  use a throwaway `docker run … postgres:16-alpine` and a fresh schema or
+  container, never DROP/TRUNCATE. Server tables change only through Settings
+  "Create / upgrade tables". Dev builds use `agent-board.dev.{db,secret}` and
+  `agent-board-kept.dev/`.
 - Settings tab ids differ from on-screen labels (`channels` shows as "Secretary"/"비서"); tell users
   the label for their `language` in ~/.config/octo/config.json. i18n keys and state can outlive
   removed UI (Telegram/Discord/Slack have no settings JSX): confirm the JSX renders before saying a

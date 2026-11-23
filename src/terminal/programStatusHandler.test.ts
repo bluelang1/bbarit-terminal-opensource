@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { decideAgentAlert, type AgentAlert } from './agentAlert';
-import { createProgramStatusStore, PROGRAM_STATUS_QUERY_REPLY } from './programStatus';
+import { agentProgramRunning, createProgramStatusStore, PROGRAM_STATUS_QUERY_REPLY } from './programStatus';
 import {
   STALE_PROGRAM_STATUS_MS,
   answerProgramStatusProbe,
@@ -218,5 +218,44 @@ describe('handleShellIntegrationOsc (OSC 133)', () => {
     feed133(h, 'D;abc'); // 잘못된 페이로드는 기록하지 않는다
     expect(h.host.lastCommandExitCode).toBeNull();
     expect(h.host.programStatus?.root?.state).toBe('working'); // B/C/D 는 상태를 건드리지 않는다
+  });
+});
+
+describe('agentProgramRunning (Claude Code exit / restart, measured sequence)', () => {
+  it('is true while Claude reports, false after its clear on exit, true again after a restart', () => {
+    const h = harness();
+    const running = () => agentProgramRunning(h.host.programStatus);
+    expect(running()).toBe(false);
+    h.feed('?');
+    expect(running()).toBe(false); // a probe alone is not an agent report
+    h.feed('state=idle:app=claude-code');
+    expect(running()).toBe(true);
+    h.feed('state=working:app=claude-code');
+    h.feed('state=done:app=claude-code');
+    expect(running()).toBe(true);
+    // /exit: Claude Code sends state=clear (three times) before its resume banner.
+    h.feed('state=working:app=claude-code');
+    h.feed('state=clear');
+    h.feed('state=clear');
+    h.feed('state=clear');
+    expect(running()).toBe(false);
+    expect(h.host.programStatus?.reported).toBe(true); // why idle/done alone was not enough
+    // `claude` typed again in the same tab: new probe, new reports.
+    h.feed('?');
+    expect(running()).toBe(false);
+    h.feed('state=idle:app=claude-code');
+    expect(running()).toBe(true);
+  });
+
+  it('replayed output lands on the same answer (re-attach)', () => {
+    const live = harness();
+    const replay = harness();
+    replay.host.replayingOutput = true;
+    for (const d of ['?', 'state=idle:app=claude-code', 'state=done:app=claude-code', 'state=clear']) { live.feed(d); replay.feed(d); }
+    expect(agentProgramRunning(replay.host.programStatus)).toBe(agentProgramRunning(live.host.programStatus));
+    expect(agentProgramRunning(replay.host.programStatus)).toBe(false);
+    expect(replay.writes).toEqual([]); // no probe reply during replay
+    replay.feed('state=idle:app=claude-code');
+    expect(agentProgramRunning(replay.host.programStatus)).toBe(true);
   });
 });

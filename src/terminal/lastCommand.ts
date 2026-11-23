@@ -90,6 +90,17 @@ const modes = new Map<string, LastCommandMode>();
 const agentStates = new Map<string, AgentTabState>();
 let version = 0;
 const listeners = new Set<() => void>();
+const commitListeners = new Set<(terminalId: string, cmd: string) => void>();
+
+/**
+ * Every committed agent-tab command, also when it repeats the last one (lastCommandOf does not
+ * change then). Only human input and clicked buttons reach this tracker, so a listener sees what
+ * a person submitted (the model limit fallback watches for `/model`).
+ */
+export function subscribeCommittedCommands(fn: (terminalId: string, cmd: string) => void): () => void {
+  commitListeners.add(fn);
+  return () => { commitListeners.delete(fn); };
+}
 
 const pendingOf = (id: string): Pending => {
   let p = pendings.get(id);
@@ -131,6 +142,7 @@ const commit = (id: string, p: Pending): boolean => {
     lastCommands.delete(id);
     return true;
   }
+  if (cmd && isAgent(id)) commitListeners.forEach((fn) => { try { fn(id, cmd); } catch { /* listener errors stay out of input */ } });
   if (!cmd || lastCommands.get(id) === cmd) return false;
   lastCommands.set(id, cmd);
   return true;
@@ -302,6 +314,12 @@ export function noteAgentStatus(terminalId: string, state: AgentTabState, opts?:
   const p = pendingOf(terminalId);
   if (prev === 'blocked') { resetPending(p); return; }
   if (state === 'working' && commit(terminalId, p)) notify();
+}
+
+/** A person has typed text in this tab that is not submitted yet (automatic input must wait). */
+export function hasPendingInput(terminalId: string): boolean {
+  const p = pendings.get(terminalId);
+  return !!p && (p.chars.some((ch) => ch.trim() !== '') || p.unknown);
 }
 
 /** 입력 지우기 버튼 등 — 대기 중인 글을 버린다. */

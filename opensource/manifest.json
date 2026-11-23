@@ -121,6 +121,8 @@
   "extra_files": [
     "src-tauri/resources/claude-hooks/bbarit-session.json",
     "src-tauri/resources/claude-hooks/session-start.sh",
+    "src-tauri/resources/claude-hooks/stop-failure.sh",
+    "src-tauri/resources/claude-hooks/user-prompt-submit.sh",
     "agent-browser-cli/package.json",
     "agent-browser-cli/LICENSE",
     "agent-browser-cli/README.md",
@@ -207,6 +209,7 @@
     "src-tauri/resources/claude-skills/LICENSE",
     "src-tauri/resources/claude-hooks/bbarit-session.json",
     "src-tauri/resources/claude-hooks/session-start.sh",
+    "src-tauri/resources/claude-hooks/user-prompt-submit.sh",
     "src-tauri/static/gateway-chat.html",
     "src-tauri/static/web-terminal.html",
     "public/persona-avatars/icons/individual/bbarit-secretary.png",

@@ -53,3 +53,36 @@ describe('blockedAlertText', () => {
     expect(blockedAlertText('', '', 'auth').body).toBe('로그인 필요');
   });
 });
+
+describe('cleared status display', () => {
+  it('keeps an idle placeholder only when a program asked for 7501 support', async () => {
+    const { clearedStatusDisplay } = await import('./agentAlert');
+    expect(clearedStatusDisplay({ cleared: true, reset: true })).toBe('idle');
+    expect(clearedStatusDisplay({ cleared: true })).toBe('drop');
+    expect(clearedStatusDisplay({ cleared: false, reset: true })).toBeNull();
+  });
+
+  it('does not guess "working" from output right after a start query', async () => {
+    const { displayAgentState, RESET_PLACEHOLDER_MS } = await import('./agentAlert');
+    const placeholder = { state: 'idle' as const, turn: 0, seenTurn: 0, resetAt: 1000 };
+    expect(displayAgentState(placeholder, true, 1000 + RESET_PLACEHOLDER_MS)).toBe('idle');
+    // A program that asked but never reports: back to output-based display.
+    expect(displayAgentState(placeholder, true, 1001 + RESET_PLACEHOLDER_MS)).toBe('working');
+    expect(displayAgentState(undefined, true)).toBe('working');
+    expect(displayAgentState(undefined, false)).toBe('idle');
+    expect(displayAgentState({ state: 'blocked', turn: 1, seenTurn: 0 }, true)).toBe('blocked');
+    expect(displayAgentState({ state: 'done', turn: 1, seenTurn: 1 }, true)).toBe('idle');
+    expect(displayAgentState({ state: 'done', turn: 2, seenTurn: 1 }, false)).toBe('done');
+  });
+
+  it('keeps the last 30 status events per terminal', async () => {
+    const { recordAgentStatusLog, readAgentStatusLog } = await import('./agentAlert');
+    for (let i = 0; i < 35; i++) {
+      recordAgentStatusLog({ terminalId: 'log-t1', state: 'working', turn: i, alert: null, looking: false }, i);
+    }
+    const list = readAgentStatusLog('log-t1') as Array<{ turn: number; reset: boolean }>;
+    expect(list).toHaveLength(30);
+    expect(list[0].turn).toBe(5);
+    expect(list[29].reset).toBe(false);
+  });
+});

@@ -21,9 +21,11 @@ import { WebglAddon } from 'xterm-addon-webgl';
 import { SearchAddon, type ISearchResultChangeEvent } from '@xterm/addon-search';
 import { createTerminalLinkProvider } from './terminal/terminalLinks';
 import { decodeOsc52Payload } from './terminal/osc52';
+import { createSelectionCopyState, type SelectionCopyState } from './terminal/selectionCopy';
 import { writePasteChunked } from './terminal/pasteChunks';
 import { disposeInputGate, setInputGateHost, writeHumanInput } from './terminal/inputGate';
 import {
+  agentProgramRunning,
   createProgramStatusStore,
   dropTransientProgramStatus,
   rollupAgentState,
@@ -38,7 +40,7 @@ import {
   isProgramStatusStale,
   type ProgramStatusChange,
 } from './terminal/programStatusHandler';
-import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, type AgentStatusEventDetail } from './terminal/agentAlert';
+import { AGENT_STATUS_EVENT, decideAgentAlert, isUserLooking, readAgentStatusLog, recordAgentStatusLog, type AgentStatusEventDetail } from './terminal/agentAlert';
 import { probeRestoredPty } from './terminal/restoredPty';
 import { awaitingRestartBanner, clearAwaitingRestart, decsetPrefix, decsetReset, exitedBannerText, isAliveInHolderError, markAwaitingRestart, markRecoveredHandled, omittedBytesLine, planAfterProbe, recoveredPtyFor, recoveredStartPlan, type RecoveredPty } from './terminal/ptyRecovery';
 import { shouldNotifyReady } from './terminal/readyNotify';
@@ -64,6 +66,9 @@ import { enqueueSlackCommandFromKeystrokes } from './terminal/slackMirror';
 import { type GridSize } from './terminal/ptySize';
 import { createResizeSequencer, waitForQuietWrites, browserTimers, type ResizeJob, type ResizeSequencer } from './terminal/resizeSequencer';
 import { clearPendingCommand, dropLastCommand, noteAgentStatus, setLastCommandHost, setLastCommandMode } from './terminal/lastCommand';
+import { applyLaunchDecision, claudeLaunchDecision, noteModelLimitStatus, registerModelLimitTab, setModelLimitHost } from './terminal/modelLimitRuntime';
+import type { LaunchDecision } from './terminal/modelLimitFallback';
+import { personChoseModel } from './terminal/modelLimitFallback';
 import { isInteractiveAgentTerminal } from './terminal/terminalSubmit';
 import { kvGet, kvSet } from './hooks/useKV';
 import { savePromptToLibrary } from './components/PromptLibraryPanel';
@@ -439,21 +444,28 @@ const dispatchAgentStatus = (terminalId: string, store: ProgramStatusStore, extr
   };
   // Last-command tracking in agent tabs commits on the working transition (terminal/lastCommand.ts).
   if (!detail.replaying) noteAgentStatus(terminalId, detail.state, { cleared: detail.cleared });
+  recordAgentStatusLog(detail);
   window.dispatchEvent(new CustomEvent(AGENT_STATUS_EVENT, { detail }));
 };
+// Diagnostics for "the dot shows the wrong state": recent status events per terminal.
+if (typeof window !== 'undefined') (window as any).__bbaritAgentStatusLog = readAgentStatusLog;
 
 /** registerOscHandler(7501) 본체 — 로직은 terminal/programStatusHandler.ts. */
 const handleProgramStatusOsc = (terminalId: string, data: string): boolean => {
   const st = terminalStates.get(terminalId);
   if (!st) return true;
-  return handleProgramStatusOscCore(st, data, {
+  const handled = handleProgramStatusOscCore(st, data, {
     onChange: (change) => {
       const handler = programStatusHandlers.get(terminalId);
       if (handler) handler(change);
       else dispatchAgentStatus(terminalId, change.store);
     },
-    onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore()),
+    onReset: () => dispatchAgentStatus(terminalId, createProgramStatusStore(), { reset: true }),
   });
+  // Model limit fallback: only `state=error` reports of registered Claude tabs, never while
+  // replaying saved output (docs/MODEL_LIMIT_FALLBACK.md).
+  noteModelLimitStatus(terminalId, data, !!st.replayingOutput);
+  return handled;
 };
 
 /**
@@ -519,6 +531,9 @@ export const getTerminalAgentState = (terminalId: string) => {
   return store?.reported ? rollupAgentState(store) : undefined;
 };
 
+/** Claude Code (or another 7501 agent) is running in this tab now — see agentProgramRunning. */
+export const isTerminalAgentRunning = (terminalId: string) => agentProgramRunning(terminalStates.get(terminalId)?.programStatus);
+
 /** 이 터미널의 PTY 가 만들어졌는가(마운트돼 셸이 떴다). */
 export const isTerminalPtyStarted = (terminalId: string) => !!terminalStates.get(terminalId)?.ptyCreated;
 
@@ -527,6 +542,23 @@ setInputGateHost({
   getWriter: (terminalId) => terminalStates.get(terminalId)?.writeToPty ?? null,
   getAgentState: getTerminalAgentState,
   isBracketedPaste: (terminalId) => !!terminalStates.get(terminalId)?.term?.modes?.bracketedPasteMode,
+});
+
+// Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md): 7501 state, replay flag and the last
+// rows of the buffer (only to confirm Claude Code printed "Set model to …" after `/model`).
+setModelLimitHost({
+  getAgentState: getTerminalAgentState,
+  isReplaying: (terminalId) => !!terminalStates.get(terminalId)?.replayingOutput,
+  screenText: (terminalId) => {
+    try {
+      const buf = terminalStates.get(terminalId)?.term?.buffer?.active;
+      if (!buf) return '';
+      const end = buf.baseY + buf.cursorY + 1;
+      const rows: string[] = [];
+      for (let i = Math.max(0, end - 60); i < Math.min(buf.length, end + 20); i++) rows.push(buf.getLine(i)?.translateToString(true) ?? '');
+      return rows.join('\n');
+    } catch { return ''; }
+  },
 });
 
 // Logical line under the cursor (wrapped rows joined). Read when Enter is typed, before the shell
@@ -1457,6 +1489,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
   const lastNativePasteAtRef = useRef(0);
   const pendingPasteFallbackTimerRef = useRef<number | null>(null);
   const lastTerminalSelectionRef = useRef('');
+  const selectionCopyRef = useRef<SelectionCopyState>(createSelectionCopyState());
   const isReadyRef = useRef(false);
   // 마운트마다 새로 만들어지는 ref — writer 재등록 여부를 추적한다.
   const writerRegisteredRef = useRef(false);
@@ -1692,6 +1725,14 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       if (st?.onOutputChunk === handler) st.onOutputChunk = undefined;
     };
   }, [cliType, playBeep, playSoundWhenDone, terminalId]);
+
+  // Model limit fallback: register Claude tabs; a model set by settings (modelId) or flags
+  // (--model) means a person chose it and the app never switches the tab.
+  const limitPersonModel = personChoseModel(modelId, (extraFlags || []).flatMap((f) => String(f).trim().split(/\s+/)));
+  useEffect(() => {
+    if (cliType !== 'claude') return;
+    return registerModelLimitTab(terminalId, { isClaude: true, personModel: limitPersonModel, sessionId: () => claudeSessionIdRef.current });
+  }, [terminalId, cliType, limitPersonModel]);
 
   // OSC 7501 상태 전이 → 알림 결정(decideAgentAlert) + App 으로 상태 이벤트.
   // done 알림은 기존 완료 토스트(octo-task-toast)를 그대로 쓴다.
@@ -3209,8 +3250,21 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       // clipboard. Disposed with the terminal, no manual cleanup needed.
       term.parser.registerOscHandler(52, (data) => {
         const text = decodeOsc52Payload(data);
-        if (text) void writeClipboardTextSafe(text);
+        if (text) {
+          // The program's copy is now the newest one: an older xterm selection
+          // (still on screen or only remembered) must not be copied over it.
+          const stale = !!term.hasSelection();
+          selectionCopyRef.current.programCopied(text, stale);
+          lastTerminalSelectionRef.current = text;
+          if (stale) term.clearSelection();
+          void writeClipboardTextSafe(text);
+        }
         return true;
+      });
+      term.onSelectionChange(() => {
+        const has = !!term.hasSelection();
+        selectionCopyRef.current.selectionChanged(has);
+        if (!has) lastTerminalSelectionRef.current = selectionCopyRef.current.last();
       });
       // OSC 7501 Program Status: Claude Code 의 지원 질의에 답하고 상태 보고를 받는다.
       // 처리는 모듈 함수가 terminalStates 를 보고 하므로 재마운트에도 안전하다.
@@ -3760,6 +3814,17 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           } catch { /* older host or missing resource: launch without the hook */ }
         }
       }
+      // Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md): only for a tab nobody gave a model.
+      // Gives a model when the tab is marked auto-switched or the usage file says the primary
+      // is at its limit; otherwise the launch command stays as it was. Pure: the mark changes
+      // only where the startup command is actually typed (applyLaunchDecision below), never on
+      // a remount or a PTY holder reattach.
+      let limitDecision: LaunchDecision = {};
+      if (cliType === 'claude') {
+        const personModel = !!modelId || hasFlag('--model') || normalizedFlags.some(f => f.startsWith('--model'));
+        try { limitDecision = await claudeLaunchDecision(terminalId, personModel); } catch { limitDecision = {}; }
+      }
+      const limitModel = limitDecision.model ?? null;
 
       const cliCommands: Record<string, string> = {
         claude: (() => {
@@ -3772,6 +3837,8 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // Inject --model if set and not already in flags
           if (modelId && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
             cmd += ` --model ${shellQuoteArg(modelId, argShell)}`;
+          } else if (limitModel && !hasFlag('--model') && !normalizedFlags.some(f => f.startsWith('--model'))) {
+            cmd += ` --model ${shellQuoteArg(limitModel, argShell)}`;
           }
           // Inject --mcp-config if set and not already in flags
           if (mcpConfigPath && !hasFlag('--mcp-config') && !normalizedFlags.some(f => f.startsWith('--mcp-config'))) {
@@ -4168,6 +4235,7 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
           // autoStartedCliType is the once-gate in shouldRunStartupCommand above.
           if (stateBeforeStartup) stateBeforeStartup.autoStartedCliType = cliType;
           startupGatePreset = true;
+          if (cliType === 'claude') applyLaunchDecision(terminalId, limitDecision);
           if (existingRawShell && stateBeforeStartup) stateBeforeStartup.startupRepairAttemptedCliType = cliType;
           const markCliAutoStarted = () => {
             const st = terminalStates.get(terminalId);
@@ -4808,7 +4876,10 @@ export const XTerminal = React.memo(function XTerminal({ terminalId, workDir, is
       try {
         const t = termRef.current as any;
         if (t?.hasSelection?.()) {
-          const sel = (t.getSelection?.() || '') as string;
+          // Only a selection that changed since the last copy: this runs on every
+          // mouse release in the app, and re-copying a selection that is merely
+          // still on screen put old text back over newer copies.
+          const sel = selectionCopyRef.current.takeForAutoCopy((t.getSelection?.() || '') as string);
           if (sel) {
             lastTerminalSelectionRef.current = sel;
             void writeClipboardTextSafe(sel);

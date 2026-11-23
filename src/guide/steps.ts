@@ -1,7 +1,7 @@
 // Getting-started steps. Adding a step = one entry here + guide.step.<id>.* keys
 // in src/i18n/en.ts and ko.ts (+ an illustration in illustrations.tsx).
 
-export type GuideStepId = 'project' | 'ai-terminal' | 'status' | 'keep-running' | 'git-keys' | 'hints' | 'window-pin' | 'pet';
+export type GuideStepId = 'project' | 'ai-terminal' | 'status' | 'keep-running' | 'git-keys' | 'hints' | 'window-pin' | 'team-status' | 'pet';
 
 export interface GuideTarget {
   /** `[data-guide="…"]` on the real control — never a shared class. */
@@ -42,11 +42,14 @@ export const GUIDE_STEPS: GuideStep[] = [
   // Hint mode has no button of its own: the step only explains the shortcut.
   { id: 'hints', ...keys('hints') },
   { id: 'window-pin', ...keys('window-pin'), target: target('window-pin', 'window-pin') },
+  // The toolbar gauge button opens Team status (src/teamStatus); ticked when that tab is seen.
+  { id: 'team-status', ...keys('team-status'), target: target('team-status', 'team-status') },
   { id: 'pet', ...keys('pet'), action: 'pet-tour', macOnly: true },
 ];
 
-export function visibleSteps(isMac: boolean): GuideStep[] {
-  return GUIDE_STEPS.filter(s => isMac || !s.macOnly);
+/** `agentTeam` false (Settings → "Agent team in tabs" off) leaves out the team-status step. */
+export function visibleSteps(isMac: boolean, agentTeam = true): GuideStep[] {
+  return GUIDE_STEPS.filter(s => (isMac || !s.macOnly) && (agentTeam || s.id !== 'team-status'));
 }
 
 export function isGuideStepId(v: unknown): v is GuideStepId {

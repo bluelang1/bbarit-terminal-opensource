@@ -6,6 +6,13 @@
  */
 
 import { DEFAULT_WINDOW_PIN, readWindowPin, type WindowPinState } from '../window/windowPin';
+import { DEFAULT_AGENT_LIMITS, normalizeAgentLimits, type AgentLimits } from '../terminal/agentLimits';
+import { DEFAULT_AGENT_BOARD_CONFIG, normalizeAgentBoardConfig, type AgentBoardConfig } from '../terminal/agentTasks';
+import { DEFAULT_LEAD_PHRASE, agentTeamEnabled, readLeadPhrase } from '../terminal/agentTeamSwitch';
+
+/** config.agents: relay limits plus `board` (team board lease timing, src/terminal/agentTasks.ts)
+ *  and `enabled` (Settings → "Agent team in tabs", src/terminal/agentTeamSwitch.ts; default on). */
+export type AgentsConfig = AgentLimits & { enabled: boolean; leadPhrase: string; board: AgentBoardConfig & Record<string, unknown> };
 
 // ───────────────────────── Sub-types ─────────────────────────
 
@@ -95,6 +102,12 @@ export interface AgentConfig {
   bbaritPersona: string;
   bbaritFlags: string[];
   resumeLastSession: boolean;
+  /** Model limit fallback (docs/MODEL_LIMIT_FALLBACK.md). */
+  claudeLimitFallback: boolean;
+  claudeLimitPrimaryModel: string;
+  claudeLimitFallbackModel: string;
+  /** Usage file written by the user's status line; '' = not used. */
+  claudeLimitUsageFile: string;
   playSoundWhenDone: boolean;
   playOsNotifySound: boolean;
   osNotifySoundName: string;
@@ -394,6 +407,9 @@ export interface OctoConfig {
   regionKeys: boolean;
   /** Window pin: always on top (main + the app's other windows, not the pet) / main follows the active desktop (src/window/windowPin.ts). */
   window: WindowPinState;
+  /** Agent relay limits for `agent run` (src/terminal/agentLimits.ts) and team-board timing
+   *  `agents.board` (src/terminal/agentTasks.ts); no Settings UI yet. */
+  agents: AgentsConfig;
 }
 
 // ───────────────────────── Defaults ─────────────────────────
@@ -441,6 +457,10 @@ export const DEFAULT_AGENT_CONFIG: AgentConfig = {
   bbaritPersona: '',
   bbaritFlags: [],
   resumeLastSession: false,
+  claudeLimitFallback: false,
+  claudeLimitPrimaryModel: 'claude-fable-5-2',
+  claudeLimitFallbackModel: 'opus',
+  claudeLimitUsageFile: '~/.claude/logs/model-usage.json',
   playSoundWhenDone: false,
   playOsNotifySound: true,
   osNotifySoundName: 'Glass',
@@ -543,6 +563,7 @@ export const DEFAULT_CONFIG: OctoConfig = {
   hints: { ...DEFAULT_HINTS_CONFIG },
   regionKeys: true,
   window: { ...DEFAULT_WINDOW_PIN },
+  agents: { enabled: true, leadPhrase: DEFAULT_LEAD_PHRASE, ...DEFAULT_AGENT_LIMITS, board: { ...DEFAULT_AGENT_BOARD_CONFIG } },
 };
 
 // ───────────────────────── Validation & Migration ─────────────────────────
@@ -633,6 +654,12 @@ export function validateConfig(raw: unknown): OctoConfig {
     hints: normalizeHintsConfig(input.hints),
     regionKeys: input.regionKeys !== false,
     window: readWindowPin(input.window),
+    agents: {
+      enabled: agentTeamEnabled(input.agents),
+      leadPhrase: readLeadPhrase(input.agents),
+      ...normalizeAgentLimits(input.agents),
+      board: normalizeAgentBoardConfig((input.agents as { board?: unknown } | undefined)?.board),
+    },
   };
 }
 

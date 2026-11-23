@@ -1,0 +1,773 @@
+//! Stage 3b: the `sync` usage type — the local SQLite file stays the board every command reads
+//! and writes (so everything works offline), and a host worker exchanges rows with a shared
+//! PostgreSQL. Each team has one home machine (the one that created it); only the home writes
+//! its rows, every other machine keeps a read-only copy (a "mirror"; the UI says "other
+//! machines' teams"). Design: docs/superpowers/specs/2026-11-16-agent-team-board-v2-design.md,
+//! "Usage types and sync".
+//!
+//! - Push: `changes` after `pushed_seq` (≤ 500 rows, distinct), rows of teams homed here, one
+//!   server transaction (parents before children, upsert guarded by `row_version`), then
+//!   `pushed_seq` moves and the covered change rows go. Idempotent: a crash before the local
+//!   step only re-sends rows the guard ignores. First enable, re-enable and a backlog over
+//!   50 000 rows send a full snapshot of the home teams instead (in batches).
+//! - Pull: rows of teams homed elsewhere with `pulled_seq < server_seq ≤ watermark`, checked
+//!   like local input (bad rows are skipped and counted), written without `log_change`, posts
+//!   get a local read position. The watermark is read under the server_seq lock taken
+//!   exclusively, while every writer (pushes and direct `postgres`-mode writes) holds it shared
+//!   from drawing a number until commit (pg.rs `v3_sql`), so a row that commits late with a
+//!   lower number is never skipped.
+//! - Machine identity: `board_meta.instance_id` (UUID) of the local file, registered in the
+//!   server's `hosts` on the first sync; a name held by another instance pauses sync.
+//!
+//! All SQL lives in sqlite.rs / pg.rs (sections "Sync"); this file holds the rules, the round,
+//! restore and team takeover. The worker, its status and the Settings commands stay in the app
+//! (src-tauri/src/agent_board/sync.rs); this app instance's id comes in as `instance`.
+
+use super::copy::{self, Cell, Cols, Kind};
+use super::model::*;
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+use super::pg::PgStore;
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+use super::sqlite::SqliteStore;
+use serde_json::{json, Value};
+
+/// Rows per push batch / per table per pull round.
+pub const SYNC_BATCH: i64 = 500;
+/// Batches per round at most (the next round continues).
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+const MAX_BATCHES: usize = 40;
+/// At most this many teams from other machines are kept; the least recently active go.
+pub const MAX_MIRROR_TEAMS: i64 = 200;
+/// Stage 3c: notes waiting for a team on another computer, per team and per computer.
+pub const REMOTE_NOTES_PER_TEAM: i64 = 20;
+pub const REMOTE_NOTES_PER_COMPUTER: i64 = 100;
+/// The home takes at most this many remote notes per sending computer and team per window
+/// (a flood is refused `rate_limited` and cannot push the team's older posts out).
+pub const REMOTE_NOTES_PER_SENDER_WINDOW: i64 = 30;
+pub const REMOTE_NOTE_WINDOW_MS: i64 = 3_600_000;
+/// A sent note the home has not taken for this long is withdrawn and shown as refused (`expired`).
+pub const REMOTE_NOTE_EXPIRE_MS: i64 = 7 * 24 * 3_600_000;
+/// Restore may take over this computer's name from another installation only when that one
+/// was last seen this long ago (a syncing computer refreshes `last_seen` every round, 30 s;
+/// failures back off to at most 5 min).
+pub const RESTORE_TAKEOVER_MS: i64 = 15 * 60_000;
+/// "Take over this team": the home must not have been seen for this long
+/// (`agents.board.adoptAfterHours`, 1–720, default 24).
+pub const ADOPT_AFTER_HOURS_DEFAULT: i64 = 24;
+
+/// Regular round interval; a local write asks for a round this much later.
+pub const SYNC_INTERVAL_MS: i64 = 30_000;
+pub const WRITE_DELAY_MS: i64 = 2_000;
+
+/// Posts as sync exchanges them: `arrival` is each board's own read order, never sent.
+pub const POSTS_SYNC: Cols = &[
+    ("id", Kind::Text), ("team_uid", Kind::Text), ("seq", Kind::Int), ("ts", Kind::Int), ("author_id", Kind::Text),
+    ("author_name", Kind::Text), ("author_cli", Kind::Text), ("author_host", Kind::Text), ("kind", Kind::Text),
+    ("text", Kind::Text), ("task_id", Kind::Text), ("origin_host", Kind::Text), ("updated_at", Kind::Int),
+    ("row_version", Kind::Int), ("deleted_at", Kind::Int),
+];
+
+/// A note sent to a team whose home is another computer, as the outbox holds it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboxNote {
+    pub id: String,
+    pub team_uid: String,
+    pub from_host: String,
+    pub author_id: String,
+    pub author_name: Option<String>,
+    pub author_cli: Option<String>,
+    pub kind: String,
+    pub text: String,
+    pub created_at: i64,
+    /// Home side only: the team is tombstoned on the server.
+    pub team_deleted: bool,
+    /// Home side only: (from_host, from_instance) is a registered computer.
+    pub sender_known: bool,
+}
+
+/// Synced tables, parents before children.
+pub const SYNC_TABLES: [(&str, Cols); 5] =
+    [("teams", copy::TEAMS), ("tasks", copy::TASKS), ("posts", POSTS_SYNC), ("task_deps", copy::DEPS), ("task_events", copy::EVENTS)];
+
+/// The local file's sync facts at the start of a round.
+#[derive(Debug, Clone, Default)]
+pub struct LocalState {
+    pub instance: String,
+    pub full_push: bool,
+    pub waiting: i64,
+    pub pulled_seq: i64,
+    pub skipped: i64,
+    /// Sync must wait for a person: (code, message).
+    pub pause: Option<(&'static str, String)>,
+    /// `name_changed`: the name this file's teams carry.
+    pub old_name: Option<String>,
+}
+
+/// What one pull batch did locally.
+#[derive(Debug, Clone, Default)]
+pub struct PullApplied {
+    pub written: usize,
+    pub skipped: usize,
+    pub dropped: usize,
+    /// Root tab ids of the teams that changed (views refresh them).
+    pub teams: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RoundReport {
+    pub pushed: u64,
+    pub refused: u64,
+    pub pulled: usize,
+    pub skipped: usize,
+    pub teams: Vec<String>,
+    /// Remote notes this home turned into posts this round.
+    pub delivered: usize,
+    /// This computer's teams that another computer took over (root tab ids).
+    pub moved: Vec<String>,
+    /// Every registered computer: (host, last_seen, age by the server's clock).
+    pub hosts: Vec<(String, i64, i64)>,
+    pub server_schema: i64,
+    /// `server_replaced` / `server_restored` when this round found another server (or one
+    /// restored from a backup) and started over.
+    pub server_event: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncError {
+    /// The server cannot be reached or failed (retried with backoff).
+    Offline(String),
+    /// Writers held the server_seq lock for 3 s; the pull is tried again soon.
+    Busy,
+    /// Needs a person: (code, message). Codes: name_taken, name_changed, no_tables,
+    /// server_newer, server_older, local, settings.
+    Paused(&'static str, String),
+}
+
+impl SyncError {
+    pub fn message(&self) -> &str {
+        match self {
+            SyncError::Offline(m) | SyncError::Paused(_, m) => m,
+            SyncError::Busy => "the server is busy with other writes; trying again shortly",
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            SyncError::Offline(_) => "offline",
+            SyncError::Busy => "busy",
+            SyncError::Paused(c, _) => c,
+        }
+    }
+}
+
+// ── Rules (pure) ─────────────────────────────────────────────────────────
+
+/// Why rows of a team were not sent: it lives on another computer now (taken over).
+pub fn moved_message(home: &str) -> String {
+    format!("a team of this computer was taken over by {home}; changes made here for it were not sent")
+}
+
+/// Folder (next to the board file) of the files that keep changes a takeover left unsent.
+/// `.dev` in debug builds, like the board file. At most `sqlite::KEPT_FILES_MAX` (50) files
+/// of `sqlite::KEPT_FILE_MAX_BYTES` (4 MiB) each are kept.
+pub const KEPT_DIR: &str = if cfg!(debug_assertions) { "agent-board-kept.dev" } else { "agent-board-kept" };
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+const REPLACED: &str = "\u{1}replaced";
+
+/// This installation's name was taken over by "Restore my teams" on another installation.
+pub fn replaced_message(host: &str, unsent: i64) -> String {
+    format!("another installation restored the teams of {host} and took this computer's name over; this board file no longer syncs. {unsent} change(s) made here were not sent; they stay in this file")
+}
+
+pub fn collision_message(host: &str) -> String {
+    format!("another computer uses the name {host}; set this computer's name in Settings")
+}
+
+#[cfg(feature = "pg")]
+/// Why sync must wait for the server's tables (None: they match this app).
+pub fn schema_pause(stored: Option<i64>, code: i64) -> Option<(&'static str, String)> {
+    match stored {
+        None => Some(("no_tables", "the server has no board tables yet: press Create / upgrade tables in Settings".to_string())),
+        Some(v) if v > code => {
+            Some(("server_newer", format!("the server's board tables are from a newer app version ({v}, this app knows {code}): update the app")))
+        }
+        Some(v) if v < code && v < super::pg::MIN_SCHEMA_VERSION => Some((
+            "server_older",
+            format!("the server's board tables are at version {v}, this app needs {code}: press Create / upgrade tables in Settings"),
+        )),
+        Some(_) => None,
+    }
+}
+
+/// Delay before the next round: the interval after a success, 5 s doubling to 5 min after
+/// failures.
+pub fn backoff_ms(failures: u32) -> i64 {
+    if failures == 0 {
+        return SYNC_INTERVAL_MS;
+    }
+    let exp = (failures - 1).min(10);
+    (5_000i64 << exp).min(300_000)
+}
+
+/// Where the pull cursor may move after one batch read up to `upto`: below the last row of any
+/// table that hit the batch limit (its next rows are still to come), else `upto`.
+pub fn next_pull_cursor(upto: i64, stats: &[(usize, Option<i64>)], limit: usize) -> i64 {
+    stats.iter().filter(|(n, _)| *n >= limit).filter_map(|(_, last)| *last).fold(upto, i64::min)
+}
+
+pub fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { c.is_ascii_hexdigit() })
+}
+
+/// A one-line value exactly as local input would store it (`clean_label` leaves it unchanged:
+/// no control or format characters, single spaces, trimmed) and at most `max` characters.
+fn is_label(s: &str, max: usize) -> bool {
+    s.chars().count() <= max && clean_label(Some(s), usize::MAX).as_deref() == Some(s)
+}
+
+/// Multi-line text exactly as `clean_multiline` would store it (limits included).
+fn is_block(s: &str, max_chars: usize, max_lines: usize) -> bool {
+    clean_multiline(s, "text", max_chars, max_lines).as_deref() == Ok(s)
+}
+
+/// Byte caps on the JSON columns (local input stays far below them).
+pub const MAX_LABELS_BYTES: usize = 2 * 1024;
+pub const MAX_META_BYTES: usize = 16 * 1024;
+pub const MAX_ARTIFACTS_BYTES: usize = 32 * 1024;
+pub const MAX_EVENT_DATA_BYTES: usize = 16 * 1024;
+
+fn labels_ok(raw: &str) -> bool {
+    if raw.len() > MAX_LABELS_BYTES {
+        return false;
+    }
+    let Ok(Value::Array(items)) = serde_json::from_str::<Value>(raw) else { return false };
+    let mut seen = std::collections::HashSet::new();
+    items.len() <= MAX_LABELS
+        && items.iter().all(|v| v.as_str().is_some_and(|l| is_label(l, MAX_LABEL_CHARS) && seen.insert(l.to_string())))
+}
+
+fn artifacts_ok(raw: &str) -> bool {
+    if raw.len() > MAX_ARTIFACTS_BYTES {
+        return false;
+    }
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Object(m)) => {
+            m.len() <= MAX_ARTIFACTS
+                && m.iter().all(|(k, v)| is_label(k, MAX_ARTIFACT_KEY_CHARS) && v.as_str().is_some_and(|v| v.chars().count() <= MAX_ARTIFACT_VALUE_CHARS && !v.chars().any(|c| c.is_control() || is_format_char(c))))
+        }
+        Ok(Value::Array(a)) => a.is_empty(),
+        _ => false,
+    }
+}
+
+fn json_ok(raw: &str, max_bytes: usize, want: fn(&Value) -> bool) -> bool {
+    raw.len() <= max_bytes && serde_json::from_str::<Value>(raw).is_ok_and(|v| want(&v))
+}
+
+/// A pulled row checked like local input: shapes, ids, state names, the same text rules and
+/// limits as the commands (`clean_label` / `clean_multiline` leave the value unchanged), JSON
+/// shapes and byte caps. Rows that fail are skipped and counted, never written.
+pub fn validate_row(table: &str, cols: Cols, row: &[Cell]) -> Result<(), &'static str> {
+    if row.len() != cols.len() {
+        return Err("wrong number of columns");
+    }
+    for (cell, (_, kind)) in row.iter().zip(cols.iter()) {
+        if matches!((cell, kind), (Cell::Int(_), Kind::Text) | (Cell::Text(_), Kind::Int)) {
+            return Err("wrong column type");
+        }
+    }
+    let get = |n: &str| &row[copy::col_index(cols, n)];
+    let text = |n: &str| get(n).text();
+    let int = |n: &str| get(n).int();
+    let id = |n: &str| text(n).is_some_and(is_uuid);
+    let opt_id = |n: &str| text(n).is_none_or(is_uuid);
+    let line = |n: &str, max: usize| text(n).is_none_or(|s| is_label(s, max));
+    let block = |n: &str, max: usize, lines: usize| text(n).is_none_or(|s| is_block(s, max, lines));
+    if int("row_version").is_none_or(|v| v < 1) || int("updated_at").is_none_or(|v| v < 0) || int("deleted_at").is_some_and(|v| v < 0) {
+        return Err("bad version or time");
+    }
+    if !line("origin_host", 120) {
+        return Err("bad origin host");
+    }
+    // Ids of tabs and actors: one line of at most 256 characters (Actor::from_input).
+    const ID: usize = 256;
+    let ok = match table {
+        "teams" => {
+            id("uid")
+                && text("team").is_some_and(|t| check_team(t).is_ok())
+                && line("name", MAX_NAME_CHARS)
+                && text("home_host").is_some_and(|h| is_label(h, 120))
+                && line("home_instance", ID)
+                && int("last_post_seq").is_some_and(|v| v >= 0)
+                && int("last_task_seq").is_some_and(|v| v >= 0)
+        }
+        "posts" => {
+            id("id")
+                && id("team_uid")
+                && opt_id("task_id")
+                && int("seq").is_some_and(|v| v >= 1)
+                && text("kind").is_some_and(|k| POST_KINDS.contains(&k))
+                && text("text").is_some_and(|t| is_block(t, MAX_TEXT_CHARS, MAX_TEXT_LINES))
+                && line("author_id", ID)
+                && line("author_name", MAX_NAME_CHARS)
+                && line("author_cli", 40)
+                && line("author_host", 120)
+        }
+        "tasks" => {
+            id("id")
+                && id("team_uid")
+                && opt_id("parent_id")
+                && int("seq").is_some_and(|v| v >= 1)
+                && text("title").is_some_and(|t| is_label(t, MAX_TITLE_CHARS))
+                && block("body", MAX_BODY_CHARS, MAX_BODY_LINES)
+                && text("state").is_some_and(|s| TASK_STATES.contains(&s))
+                && int("priority").is_some_and(|p| (0..=MAX_PRIORITY).contains(&p))
+                && int("needs_review").is_some_and(|v| v == 0 || v == 1)
+                && int("attempt").is_some_and(|v| v >= 0)
+                && int("max_attempts").is_some_and(|v| (0..=MAX_MAX_ATTEMPTS).contains(&v))
+                && text("result_checks").is_none_or(|c| CHECKS.contains(&c))
+                // Reasons may carry a short prefix ("rejected: …").
+                && block("blocked_reason", MAX_REASON_CHARS + 20, MAX_TEXT_LINES)
+                && block("last_error", MAX_REASON_CHARS + 20, MAX_TEXT_LINES)
+                && line("result_summary", MAX_SUMMARY_CHARS)
+                && block("result_body", MAX_BODY_CHARS, MAX_BODY_LINES)
+                && line("result_branch", MAX_BRANCH_CHARS)
+                && line("result_commit", MAX_COMMIT_CHARS)
+                && line("result_worktree", MAX_WORKTREE_CHARS)
+                && ["created_by_id", "owner_id", "owner_instance"].iter().all(|n| line(n, ID))
+                && ["created_by_name", "owner_name"].iter().all(|n| line(n, MAX_NAME_CHARS))
+                && ["created_by_host", "owner_host"].iter().all(|n| line(n, 120))
+                && text("labels").is_some_and(labels_ok)
+                && text("meta").is_some_and(|m| json_ok(m, MAX_META_BYTES, Value::is_object))
+                && text("result_artifacts").is_none_or(artifacts_ok)
+        }
+        "task_deps" => id("task_id") && id("depends_on_id") && id("team_uid") && text("task_id") != text("depends_on_id"),
+        "task_events" => {
+            id("id")
+                && id("task_id")
+                && id("team_uid")
+                && int("seq").is_some_and(|v| v >= 0)
+                && text("action").is_some_and(|a| !a.is_empty() && a.len() <= 32 && a.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+                && text("from_state").is_none_or(|s| TASK_STATES.contains(&s))
+                && text("to_state").is_none_or(|s| TASK_STATES.contains(&s))
+                && block("note", MAX_BODY_CHARS, MAX_BODY_LINES)
+                && line("actor_id", ID)
+                && line("actor_name", MAX_NAME_CHARS)
+                && line("actor_host", 120)
+                && text("data").is_none_or(|d| json_ok(d, MAX_EVENT_DATA_BYTES, |v| v.is_object() || v.is_null()))
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("invalid row")
+    }
+}
+
+// ── One round ────────────────────────────────────────────────────────────
+
+/// What a round reports while it runs (the app notes the time on its status line, also when a
+/// later step of the same round fails).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoundStep {
+    /// The push finished (local changes are on the server).
+    Pushed,
+    /// The pull finished.
+    Pulled,
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// One sync round between the local file and the server, as machine `host` and app instance
+/// `instance`: check the server's tables and this machine's name, push (full snapshot when
+/// due), then pull up to the watermark. Never touches rows of teams homed here on the pull side.
+#[allow(clippy::too_many_arguments)]
+pub async fn sync_round(
+    local: &SqliteStore,
+    server: &PgStore,
+    server_id: &str,
+    host: &str,
+    instance: &str,
+    machine: Option<&str>,
+    now: i64,
+    on_step: &(dyn Fn(RoundStep) + Sync),
+) -> Result<RoundReport, SyncError> {
+    let local_err = |e: String| SyncError::Paused("local", format!("the board file on this computer: {e}"));
+    let (sid, h0, m0) = (server_id.to_string(), host.to_string(), machine.map(str::to_string));
+    let st = local.run(move |c, l| super::sqlite::sync_prepare(c, l, &sid, &h0, m0.as_deref(), now)).await.map_err(local_err)?;
+    if let Some((code, msg)) = st.pause.clone() {
+        return Err(SyncError::Paused(code, msg));
+    }
+    let stored = server.stored_schema_version().await.map_err(SyncError::Offline)?;
+    if let Some((code, m)) = schema_pause(stored, super::pg::SCHEMA_VERSION) {
+        return Err(SyncError::Paused(code, m));
+    }
+    let v4 = stored.is_some_and(|v| v >= 4);
+    // Stage 3c: is this the server this file synced with? A rebuilt server at the same address
+    // (new uid) or one restored from a backup (its sequence went back) resets the pull and
+    // sends this computer's teams again.
+    let (server_uid, server_last) = server.sync_identity().await.map_err(SyncError::Offline)?;
+    let event = local.run(move |c, _| super::sqlite::sync_check_server(c, &server_uid, server_last, now)).await.map_err(local_err)?;
+    let st = if event.is_some() {
+        let instance = st.instance.clone();
+        let mut fresh = local.run(|c, _| super::sqlite::sync_state_now(c)).await.map_err(local_err)?;
+        fresh.instance = instance;
+        fresh
+    } else {
+        st
+    };
+    if server.sync_register(host, &st.instance).await.map_err(SyncError::Offline)?.is_some() {
+        if v4 && server.replaced_by_restore(host, &st.instance).await.map_err(SyncError::Offline)? {
+            return Err(SyncError::Paused("replaced", replaced_message(host, st.waiting)));
+        }
+        return Err(SyncError::Paused("name_taken", collision_message(host)));
+    }
+    let mut report = RoundReport { server_schema: stored.unwrap_or(0), server_event: event, ..Default::default() };
+    report.hosts = server.sync_hosts().await.map_err(SyncError::Offline)?.into_iter().map(|(h, _, seen, age)| (h, seen, age)).collect();
+    let kept_dir = local.path().parent().map(|d| d.join(KEPT_DIR));
+    // Stage 3c: a team of this computer that another computer took over while this one was
+    // away becomes a read-only copy before anything is pushed (its unsent changes are counted
+    // as refused, never applied).
+    let h = host.to_string();
+    let mine = local.run(move |c, _| super::sqlite::home_team_uids(c, &h)).await.map_err(local_err)?;
+    if !mine.is_empty() {
+        for (uid, home, ..) in server.team_homes(&mine).await.map_err(SyncError::Offline)? {
+            let Some(home) = home.filter(|h| h != host) else { continue };
+            let dump = server.sync_fetch_teams(None, std::slice::from_ref(&uid)).await.map_err(SyncError::Offline)?;
+            let (u, hm, kd) = (uid.clone(), home.clone(), kept_dir.clone());
+            let n = local.run(move |c, _| super::sqlite::demote_team(c, &u, &hm, &dump, now, kd.as_deref())).await.map_err(local_err)?;
+            report.refused += n as u64;
+            let u = uid.clone();
+            if let Some((team, ..)) = local.run(move |c, _| super::sqlite::team_root_of(c, &u)).await.map_err(local_err)? {
+                report.moved.push(team.clone());
+                report.teams.push(team);
+            }
+        }
+    }
+    // Stage 3c: notes other computers sent to this computer's teams become numbered posts
+    // (before the push, so they leave in this round).
+    if v4 {
+        let notes = server.inbox_pending(host, 100).await.map_err(SyncError::Offline)?;
+        if !notes.is_empty() {
+            let ctx = Ctx { now, host: Some(host.to_string()), instance: instance.to_string() };
+            let (results, teams) = local.run(move |c, l| super::sqlite::inbox_apply(c, l, &notes, &ctx)).await.map_err(local_err)?;
+            server.inbox_mark(&results, now).await.map_err(SyncError::Offline)?;
+            report.delivered += results.iter().filter(|r| r.1 == "delivered").count();
+            report.teams.extend(teams);
+        }
+    }
+    let mut full_done = !st.full_push;
+    if st.full_push {
+        for _ in 0..MAX_BATCHES {
+            let h = host.to_string();
+            let (next, rows) = local.run(move |c, _| super::sqlite::sync_full_batch(c, &h, SYNC_BATCH)).await.map_err(local_err)?;
+            let o = server.sync_push(host, &st.instance, &rows, now).await.map_err(SyncError::Offline)?;
+            note_refused(local, &mut report, o).await.map_err(|e| if e == REPLACED { SyncError::Paused("replaced", replaced_message(host, st.waiting)) } else { local_err(e) })?;
+            let n = next.clone();
+            local.run(move |c, _| super::sqlite::sync_full_done(c, n.as_deref())).await.map_err(local_err)?;
+            if next.is_none() {
+                full_done = true;
+                break;
+            }
+        }
+    }
+    if full_done {
+        for _ in 0..MAX_BATCHES {
+            let h = host.to_string();
+            let Some((upto, rows)) = local.run(move |c, _| super::sqlite::sync_push_batch(c, &h, SYNC_BATCH)).await.map_err(local_err)? else {
+                break;
+            };
+            let o = server.sync_push(host, &st.instance, &rows, now).await.map_err(SyncError::Offline)?;
+            note_refused(local, &mut report, o).await.map_err(|e| if e == REPLACED { SyncError::Paused("replaced", replaced_message(host, st.waiting)) } else { local_err(e) })?;
+            local.run(move |c, _| super::sqlite::sync_push_done(c, upto)).await.map_err(local_err)?;
+        }
+        local.run(move |c, _| super::sqlite::sync_mark_caught_up(c, now)).await.map_err(local_err)?;
+    }
+    on_step(RoundStep::Pushed);
+    if v4 {
+        send_outbox(local, server, host, &st.instance, now).await?;
+    }
+    let upto = server.sync_watermark().await.map_err(SyncError::Offline)?.ok_or(SyncError::Busy)?;
+    let mut after = st.pulled_seq;
+    for _ in 0..MAX_BATCHES {
+        if after >= upto {
+            break;
+        }
+        let (rows, stats) = server.sync_pull(host, after, upto, SYNC_BATCH).await.map_err(SyncError::Offline)?;
+        let cursor = next_pull_cursor(upto, &stats, SYNC_BATCH as usize);
+        let h = host.to_string();
+        let applied = local.run(move |c, l| super::sqlite::sync_apply_pull(c, l, &h, &rows, cursor, now)).await.map_err(local_err)?;
+        report.pulled += applied.written;
+        report.skipped += applied.skipped;
+        report.teams.extend(applied.teams);
+        if cursor <= after {
+            break;
+        }
+        after = cursor;
+    }
+    on_step(RoundStep::Pulled);
+    report.teams.sort();
+    report.teams.dedup();
+    Ok(report)
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// Stage 3c, the sending side of remote notes: queued notes go to the server outbox (its id
+/// keeps a note single however often it is sent), then the outcome of sent ones is read back;
+/// a note the home has not taken for `REMOTE_NOTE_EXPIRE_MS` is withdrawn (only while still
+/// pending on the server) and shown as refused (`expired`).
+async fn send_outbox(local: &SqliteStore, server: &PgStore, host: &str, instance: &str, now: i64) -> Result<(), SyncError> {
+    let local_err = |e: String| SyncError::Paused("local", format!("the board file on this computer: {e}"));
+    let h = host.to_string();
+    let queued = local.run(move |c, _| super::sqlite::outbox_to_send(c, &h, 100)).await.map_err(local_err)?;
+    if !queued.is_empty() {
+        let res = server.outbox_send(instance, &queued, REMOTE_NOTES_PER_TEAM, REMOTE_NOTES_PER_COMPUTER).await.map_err(SyncError::Offline)?;
+        local.run(move |c, _| super::sqlite::outbox_after_send(c, &res, now)).await.map_err(local_err)?;
+    }
+    let sent = local.run(|c, _| super::sqlite::outbox_sent(c)).await.map_err(local_err)?;
+    if sent.is_empty() {
+        return Ok(());
+    }
+    for (id, _) in sent.iter().filter(|(_, at)| now - at >= REMOTE_NOTE_EXPIRE_MS) {
+        if server.outbox_withdraw(id, now).await.map_err(SyncError::Offline)? {
+            let id = id.clone();
+            local.run(move |c, _| super::sqlite::outbox_mark_refused(c, &id, "expired")).await.map_err(local_err)?;
+        }
+    }
+    let ids: Vec<String> = sent.into_iter().map(|(i, _)| i).collect();
+    let states = server.outbox_states(&ids).await.map_err(SyncError::Offline)?;
+    local.run(move |c, _| super::sqlite::outbox_apply_states(c, &states, &ids)).await.map_err(local_err)?;
+    Ok(())
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+async fn note_refused(local: &SqliteStore, report: &mut RoundReport, o: super::pg::PushOutcome) -> Result<(), String> {
+    if o.replaced {
+        return Err(REPLACED.to_string());
+    }
+    report.pushed += o.written;
+    report.refused += o.refused;
+    if o.refused > 0 {
+        let (n, reason) = (o.refused, o.reason);
+        local.run(move |c, _| super::sqlite::sync_note_refused(c, n, reason.as_deref())).await?;
+    }
+    Ok(())
+}
+
+/// A refusal the Settings page translates: JSON `{ code, vars, message }` (message in English
+/// for logs and other callers).
+pub fn refusal(code: &str, vars: Value, message: &str) -> String {
+    json!({ "code": code, "vars": vars, "message": message }).to_string()
+}
+
+#[cfg(feature = "pg")]
+pub fn server_schema_refusal(stored: Option<i64>, need: i64) -> Option<String> {
+    match stored {
+        Some(v) if v > super::pg::SCHEMA_VERSION => Some(refusal("server_newer", json!({}), "the server's board tables are from a newer app version: update the app")),
+        Some(v) if v >= need => None,
+        _ => Some(refusal("upgrade_tables", json!({ "need": need }), "the server's board tables need an upgrade: press Create / upgrade tables in Settings")),
+    }
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// What "Restore my teams from the server" would bring down for computer `host`: live teams
+/// homed on that name with their live tasks and notes, whether the name must be taken over from
+/// another installation (its last-seen age and whether the guard allows it), and how many
+/// local changes of those teams are still unsent (restore is refused while there are any).
+pub async fn restore_preview(local: &SqliteStore, server: &PgStore, host: &str, now: i64) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, super::pg::MIN_SCHEMA_VERSION) {
+        return Err(r);
+    }
+    let (teams, tasks, notes) = server.restore_counts(host).await?;
+    let mine = local.run(|c, _| super::sqlite::sync_instance(c)).await?;
+    let _ = now;
+    let holder = server.sync_hosts().await?.into_iter().find(|(h, ..)| h == host);
+    let takeover = holder.as_ref().filter(|(_, inst, ..)| *inst != mine).map(|(_, _, seen, age)| {
+        json!({ "lastSeen": seen, "ageMs": age, "minAgeMs": RESTORE_TAKEOVER_MS, "allowed": *age >= RESTORE_TAKEOVER_MS })
+    });
+    let uids = server.teams_homed_on(host).await?;
+    let unsent = local.run(move |c, _| super::sqlite::sync_unsent_for(c, &uids)).await?;
+    Ok(json!({ "host": host, "teams": teams, "tasks": tasks, "notes": notes, "takeover": takeover, "unsent": unsent }))
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// Restore (after the person confirmed the preview): refused while changes of those teams wait
+/// here; a name held by another installation moves to this one only with `takeover` and only
+/// when that one was silent for `RESTORE_TAKEOVER_MS` (guarded on the server); then the rows
+/// come down (row_version guard) and the teams are this computer's again.
+pub async fn restore_teams(local: &SqliteStore, server: &PgStore, host: &str, takeover: bool, now: i64) -> Result<Value, String> {
+    let pre = restore_preview(local, server, host, now).await?;
+    if pre["teams"].as_i64() == Some(0) {
+        return Err(refusal("nothing", json!({ "host": host }), &format!("the server has no teams homed on {host}")));
+    }
+    let unsent = pre["unsent"].as_i64().unwrap_or(0);
+    if unsent > 0 {
+        return Err(refusal("unsent", json!({ "n": unsent }), &format!("{unsent} change(s) of these teams on this computer were not sent yet; sync first")));
+    }
+    let mine = local.run(|c, _| super::sqlite::sync_instance(c)).await?;
+    if !pre["takeover"].is_null() {
+        let mins = RESTORE_TAKEOVER_MS / 60_000;
+        if !takeover {
+            return Err(refusal("takeover_needed", json!({ "host": host }), &format!("another installation holds the name {host}; confirm taking it over")));
+        }
+        let old = server.sync_hosts().await?.into_iter().find(|(h, ..)| h == host).map(|(_, i, ..)| i).unwrap_or_default();
+        let v4 = server.stored_schema_version().await?.is_some_and(|v| v >= 4);
+        if !server.take_over_host(host, &old, &mine, RESTORE_TAKEOVER_MS, v4).await? {
+            return Err(refusal(
+                "host_alive",
+                json!({ "host": host, "minutes": mins }),
+                &format!("the computer named {host} synced less than {mins} minutes ago; restore only replaces a computer that is gone"),
+            ));
+        }
+    } else if server.sync_register(host, &mine).await?.is_some() {
+        return Err(refusal("host_alive", json!({ "host": host, "minutes": RESTORE_TAKEOVER_MS / 60_000 }), &collision_message(host)));
+    }
+    let dump = server.sync_fetch_teams(Some(host), &[]).await?;
+    let h = host.to_string();
+    local.run(move |c, _| super::sqlite::restore_apply(c, &h, &dump, now)).await.map_err(|e| match e.strip_prefix("unsent:") {
+        Some(n) => refusal("unsent", json!({ "n": n.parse::<i64>().unwrap_or(0) }), &format!("{n} change(s) of these teams were not sent yet; sync first")),
+        None => e,
+    })
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// What "Take over this team" shows for the copy of root tab `team`: name, home, the server's
+/// row_version, the home's last-seen time and age, the threshold and whether it is met.
+pub async fn adopt_preview(local: &SqliteStore, server: &PgStore, team: &str, host: &str, now: i64, min_age: i64) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, 4) {
+        return Err(r);
+    }
+    let t = team.to_string();
+    let Some((uid, name, _, _)) = local.run(move |c, _| super::sqlite::mirror_of(c, &t)).await? else {
+        return Err(refusal("not_copy", json!({}), "this team is not a copy of another computer's team here"));
+    };
+    let _ = now;
+    let Some((_, Some(home), version, None, age, seen)) = server.team_homes(std::slice::from_ref(&uid)).await?.into_iter().next() else {
+        return Err(refusal("team_gone", json!({}), "the team is no longer on the server"));
+    };
+    if home == host {
+        return Err(refusal("already_home", json!({}), "this team already lives on this computer; sync to see it"));
+    }
+    // Age by the server's clock since the latest of the home's last sync and the team's last
+    // change (the same rule the takeover transaction checks).
+    Ok(json!({
+        "team": team, "teamName": name, "uid": uid, "home": home, "version": version,
+        "lastSeen": seen, "ageMs": age, "adoptAfterMs": min_age, "allowed": age >= min_age,
+    }))
+}
+
+#[cfg(all(feature = "sqlite", feature = "pg"))]
+/// "Take over this team" (after the person confirmed the preview's team, home and version):
+/// one guarded server transaction moves the home here; the team's rows come down as the server
+/// has them and it is this computer's team from then on.
+#[allow(clippy::too_many_arguments)]
+pub async fn adopt_team(
+    local: &SqliteStore,
+    server: &PgStore,
+    host: &str,
+    instance: &str,
+    team: &str,
+    uid: &str,
+    home: &str,
+    version: i64,
+    now: i64,
+    min_age: i64,
+) -> Result<Value, String> {
+    if let Some(r) = server_schema_refusal(server.stored_schema_version().await?, 4) {
+        return Err(r);
+    }
+    let (t, h) = (team.to_string(), host.to_string());
+    if local.run(move |c, _| super::sqlite::has_own_team(c, &t, &h)).await? {
+        return Err(refusal("same_team_here", json!({}), "this computer already has a team for the same tab"));
+    }
+    match server.adopt_team(uid, home, version, host, instance, min_age).await? {
+        Ok(_) => {}
+        Err((code, msg)) => return Err(refusal(code, json!({ "home": home, "hours": min_age / 3_600_000 }), &msg)),
+    }
+    let dump = server.sync_fetch_teams(None, &[uid.to_string()]).await?;
+    let (u, h) = (uid.to_string(), host.to_string());
+    local.run(move |c, _| super::sqlite::adopt_apply(c, &u, &h, &dump, now)).await
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "pg"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_from_five_seconds_to_five_minutes() {
+        assert_eq!(backoff_ms(0), 30_000);
+        assert_eq!(backoff_ms(1), 5_000);
+        assert_eq!(backoff_ms(2), 10_000);
+        assert_eq!(backoff_ms(7), 300_000);
+        assert_eq!(backoff_ms(60), 300_000);
+    }
+
+    #[test]
+    fn pull_cursor_stops_below_a_table_that_hit_the_limit() {
+        assert_eq!(next_pull_cursor(100, &[(3, Some(40)), (0, None)], 500), 100);
+        assert_eq!(next_pull_cursor(100, &[(500, Some(40)), (2, Some(90)), (500, Some(70))], 500), 40);
+        assert_eq!(next_pull_cursor(100, &[], 500), 100);
+    }
+
+    #[test]
+    fn schema_versions_pause_with_what_to_do() {
+        assert!(schema_pause(None, 3).unwrap().1.contains("Create / upgrade tables"));
+        assert_eq!(schema_pause(Some(4), 3).unwrap().0, "server_newer");
+        assert!(schema_pause(Some(2), 3).unwrap().1.contains("version 2, this app needs 3"));
+        assert_eq!(schema_pause(Some(3), 3), None);
+        // A version-3 server keeps 3b sync going under a version-4 app (remote notes and
+        // takeovers wait for "Create / upgrade tables").
+        assert_eq!(schema_pause(Some(3), 4), None);
+        assert_eq!(schema_pause(Some(2), 4).unwrap().0, "server_older");
+        assert_eq!(collision_message("mac-a"), "another computer uses the name mac-a; set this computer's name in Settings");
+        assert_eq!(read_only_message("mac-a"), "this team lives on mac-a; it is read-only here");
+    }
+
+    fn team_row(uid: &str, team: &str, home: &str) -> Vec<Cell> {
+        let mut row = vec![Cell::Null; copy::TEAMS.len()];
+        let set = |row: &mut Vec<Cell>, n: &str, c: Cell| row[copy::col_index(copy::TEAMS, n)] = c;
+        set(&mut row, "uid", Cell::Text(uid.into()));
+        set(&mut row, "team", Cell::Text(team.into()));
+        set(&mut row, "home_host", Cell::Text(home.into()));
+        for n in ["created_at", "last_post_seq", "last_task_seq", "last_activity_at", "updated_at"] {
+            set(&mut row, n, Cell::Int(0));
+        }
+        set(&mut row, "row_version", Cell::Int(1));
+        row
+    }
+
+    #[test]
+    fn pulled_rows_are_checked_like_local_input() {
+        let uid = "01900000-0000-7000-8000-000000000001";
+        assert!(validate_row("teams", copy::TEAMS, &team_row(uid, "t1", "mac-a")).is_ok());
+        assert!(validate_row("teams", copy::TEAMS, &team_row("not-a-uuid", "t1", "mac-a")).is_err());
+        assert!(validate_row("teams", copy::TEAMS, &team_row(uid, "bad team id!", "mac-a")).is_err());
+        assert!(validate_row("teams", copy::TEAMS, &team_row(uid, "t1", "")).is_err());
+        assert!(validate_row("teams", copy::TEAMS, &team_row(uid, "t1", "mac\u{202E}a")).is_err());
+        let mut wrong_type = team_row(uid, "t1", "mac-a");
+        wrong_type[copy::col_index(copy::TEAMS, "row_version")] = Cell::Text("1".into());
+        assert!(validate_row("teams", copy::TEAMS, &wrong_type).is_err());
+        assert!(validate_row("teams", copy::TEAMS, &team_row(uid, "t1", "mac-a")[1..]).is_err());
+
+        let mut post = vec![Cell::Null; POSTS_SYNC.len()];
+        let set = |row: &mut Vec<Cell>, n: &str, c: Cell| row[copy::col_index(POSTS_SYNC, n)] = c;
+        set(&mut post, "id", Cell::Text("01900000-0000-7000-8000-000000000002".into()));
+        set(&mut post, "team_uid", Cell::Text(uid.into()));
+        for n in ["seq", "ts", "updated_at", "row_version"] {
+            set(&mut post, n, Cell::Int(1));
+        }
+        set(&mut post, "kind", Cell::Text("note".into()));
+        set(&mut post, "text", Cell::Text("line one\nline two".into()));
+        assert!(validate_row("posts", POSTS_SYNC, &post).is_ok());
+        let mut bad = post.clone();
+        set(&mut bad, "kind", Cell::Text("shout".into()));
+        assert!(validate_row("posts", POSTS_SYNC, &bad).is_err());
+        let mut bad = post.clone();
+        set(&mut bad, "text", Cell::Text("x".repeat(MAX_BODY_CHARS + 1)));
+        assert!(validate_row("posts", POSTS_SYNC, &bad).is_err());
+        let mut bad = post.clone();
+        set(&mut bad, "text", Cell::Text("bell\u{7}".into()));
+        assert!(validate_row("posts", POSTS_SYNC, &bad).is_err());
+    }
+}
