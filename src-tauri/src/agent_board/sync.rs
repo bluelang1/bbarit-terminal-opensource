@@ -332,6 +332,7 @@ pub async fn agent_board_sync_status() -> Result<Value, String> {
 /// Settings → "Sync now": one round right away; the result is the new status.
 #[tauri::command]
 pub async fn agent_board_sync_now() -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("syncing with PostgreSQL")?;
     let sel = super::read_selection();
     if sel.mode.mode != BoardMode::Sync {
         return Err("sync is off: choose \"Both (sync)\" first".into());
@@ -356,6 +357,7 @@ pub async fn agent_board_sync_now() -> Result<Value, String> {
 /// and the other machines keep them.
 #[tauri::command]
 pub async fn agent_board_remove_mirrors() -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("removing mirrored teams")?;
     if super::read_selection().mode.mode == BoardMode::Sync {
         return Err(refusal("sync_on", json!({}), "turn sync off first (usage type \"SQLite only\"); while syncing, other computers' teams are kept up to date"));
     }
@@ -376,6 +378,7 @@ pub async fn agent_board_remove_mirrors() -> Result<Value, String> {
 /// left without one). The Settings page saves `agents.board.hostName` only after this said yes.
 #[tauri::command]
 pub async fn agent_board_check_host_name(name: String) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("checking the machine name on PostgreSQL")?;
     let wanted = name.trim();
     if super::env_host().is_some() {
         return Err(refusal("env_set", json!({}), "BBARIT_BOARD_HOST is set: it decides this computer's name"));
@@ -450,6 +453,7 @@ fn clean_err3c(e: String) -> String {
 /// Settings → "Restore my teams from the server": the preview (nothing changes).
 #[tauri::command]
 pub async fn agent_board_restore_preview() -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("restoring from PostgreSQL")?;
     let sel = super::read_selection();
     let (server, store) = parts3c(&sel)?;
     let _one = ROUND.lock().await;
@@ -459,6 +463,7 @@ pub async fn agent_board_restore_preview() -> Result<Value, String> {
 /// Settings → "Restore my teams from the server", after the person confirmed the preview.
 #[tauri::command]
 pub async fn agent_board_restore(takeover: bool) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("restoring from PostgreSQL")?;
     let sel = super::read_selection();
     let (server, store) = parts3c(&sel)?;
     let _one = ROUND.lock().await;
@@ -470,6 +475,7 @@ pub async fn agent_board_restore(takeover: bool) -> Result<Value, String> {
 /// Team status → "Take over this team": the preview for a copy (nothing changes).
 #[tauri::command]
 pub async fn agent_board_adopt_preview(team: String) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("adopting a team")?;
     let sel = super::read_selection();
     let (server, store) = parts3c(&sel)?;
     let _one = ROUND.lock().await;
@@ -479,6 +485,7 @@ pub async fn agent_board_adopt_preview(team: String) -> Result<Value, String> {
 /// Team status → "Take over this team", with the team, home and version the person confirmed.
 #[tauri::command]
 pub async fn agent_board_adopt(team: String, uid: String, home: String, version: i64) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("adopting a team")?;
     let sel = super::read_selection();
     let (server, store) = parts3c(&sel)?;
     let _one = ROUND.lock().await;
@@ -493,6 +500,7 @@ pub async fn agent_board_adopt(team: String, uid: String, home: String, version:
 /// (waiting to be delivered, or refused with a code). Local only; never creates the file.
 #[tauri::command]
 pub async fn agent_board_outbox(team: String) -> Result<Vec<Value>, String> {
+    super::remote::refuse_in_server_mode("the sync outbox")?;
     let path = super::db_path()?;
     if super::read_selection().uses_postgres() || !path.exists() {
         return Ok(Vec::new());
@@ -504,6 +512,7 @@ pub async fn agent_board_outbox(team: String) -> Result<Vec<Value>, String> {
 /// Team status: a person dismisses a refused note.
 #[tauri::command]
 pub async fn agent_board_outbox_dismiss(id: String) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("the sync outbox")?;
     let path = super::db_path()?;
     if !path.exists() {
         return Ok(json!({ "removed": 0 }));

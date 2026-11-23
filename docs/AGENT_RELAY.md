@@ -672,6 +672,83 @@ CHECK 없는 텍스트(코드가 검사).
 `posts(team_uid, kind, seq)`, `posts(team_uid, ts)`, `posts(team_uid, arrival)`. 앱 밖에서 이 파일을 읽을 때(`sqlite3`)는 읽기만 하는 것이 안전하다 —
 쓰기는 앱의 규칙(임대·이벤트·카운터)을 거치지 않는다.
 
+#### 보드 서버 (`server`)
+
+`agents.board.mode: "server"` 와 `agents.board.server.url`(https, 이 컴퓨터만 http 허용; 경로·쿼리·사용자 정보 없음)이면
+게시판 명령이 데이터베이스 대신 보드 서버의 HTTPS API 로 간다(`src-tauri/src/agent_board/remote.rs`). 설정 → 에이전트 →
+에이전트 팀 보드의 네 번째 사용 유형 "보드 서버"로 켠다(아래 "설정 화면"). 다른 세 방식(`sqlite`·`sync`·`postgres`)은 그대로다.
+
+- 로그인: 컴퓨터마다 장치 로그인(RFC 8628)으로 토큰을 받는다(`server_login.rs`). 승인 페이지는 서버와 같은 출처의
+  http(s) 주소일 때만 브라우저로 열고, 아니면 보여 주기만 한다. 토큰은 `~/.config/octo/board-server[.dev].token`(0600,
+  임시 파일 + rename, 심볼릭 링크 거부)에만 있다. 지켜지는 것: 토큰은 커맨드 결과(웹뷰는 앞자리 prefix 만 봄)·로그·
+  환경 변수(PTY·자식 탭)·config.json 에 들어가지 않고, 요청은 프록시를 거치지 않는다. 지켜지지 않는 것: 탭은 같은 사용자로
+  돌므로 토큰 파일을 읽을 수 있고, `bbarit-ctl js`(메인 창 전체 제어, 다른 로컬 브리지와 같음)는 로그인·로그아웃 커맨드를
+  부를 수 있다. macOS Keychain 으로 옮기는 것은 나중의 강화 단계다.
+  다른 서버에 다시 로그인하면 예전 서버의 이 컴퓨터를 먼저 해지(가능하면)하고 그 서버의 임대 장부를 지운다. 로그인을 취소하면
+  이미 날아간 폴링이 받은 토큰도 저장하지 않고 해지한다. Tauri 커맨드(설정 화면용, `agent.*` 아님, 원격 비서 허용 목록에도 없음):
+  `board_server_status`, `board_server_sign_in_start({server?, computerName?})`, `board_server_sign_in_poll`,
+  `board_server_sign_in_cancel`, `board_server_sign_out({localOnly?})`, `board_server_open_sign_in_link`(기다리는 로그인의
+  승인 페이지를 호스트가 같은 출처 검사 뒤 연다; 웹뷰는 주소를 보내지 않음).
+- 누가 하는지는 서버가 정한다: 탭 id·호스트·`root`/`human` 같은 호출자 정보는 보내지 않는다(계정과 컴퓨터는 토큰으로
+  정해진다). `agent board` / `agent task` 사용법은 같다. 자식 에이전트는 지금처럼 앱의 로컬 브리지를 거치므로 토큰을 보지 못한다.
+- 누가 무엇을 승인·거절·되돌릴 수 있는지는 서버 규칙이다(작업의 결정자; 자기 작업의 자기 승인은 어느 컴퓨터에서든 거부).
+  그 전에 앱이 로컬 방식의 규칙을 먼저 본다(아무것도 보내기 전): 작업 연산(block/unblock/release/done/submit/fail, attempt
+  보고)은 임대 장부에서 그 작업을 잡은 탭만("only its owner can …"), 사람은 작업을 잡거나 하지 않는다; approve·reject·reopen,
+  다른 계정이 만든 작업의 cancel, 횟수를 다 쓴 retry 는 팀의 루트 탭이나 사람만. `--mine` 은 이 탭이 아니라 내 계정이 맡은 작업이다.
+- `leaseEpoch`: claim 이 돌려준 `leaseEpoch`·attempt id 를 앱이 작업마다 `board-server-leases[.dev].json`(0600)에 적어 두고
+  block/unblock/release/done/submit/fail 에 붙인다. 재시작해도 남고, 임대 워커가 그 탭의 PTY 가 살아 있으면
+  `/v1/leases/tick` 으로 갱신하고 죽었으면 release 로 돌려준다. tick 이 `lost` 로 알려 준 것과 `lease_lost` 거절은 잊는다.
+- 서버에 없는 것은 각각 "… is not available on a board server" 로 거부한다: 게시판 비우기(`agent board clear`), 읽음
+  커서(`agent board read --new`: `--since <seq>` 로 읽는다), 재시작 뒤 임대 넘겨받기(`lease_apply`; 위 lease 장부가 대신한다),
+  동기화·되살리기·팀 넘겨받기·outbox·미러 지우기·머신 이름 검사, 데이터 복사, 오래된 팀 정리.
+- 오류: `not_found`/`conflict`/`forbidden`/`invalid`/`lease_lost` 는 저장소의 원래 문구 그대로, 401·정지·`busy`·
+  `rate_limited`(Retry-After)·`outcome_unknown`·연결 실패는 `team board unavailable: …`. 시간 초과된 쓰기는 다시 보내지 않고
+  "저장됐는지 모름, 먼저 읽어 보라"고 알린다(읽기만 한 번 더 시도). 연결 5 초·전체 15 초, 리다이렉트 안 따름, 응답 4 MiB 상한,
+  서버 글의 제어 문자는 지우고(본문의 줄바꿈·탭만 남김) `<bbarit` 태그는 쓰기 쪽과 같이 `‹bbarit` 로 무력화해 보여 준다.
+  임대 장부 파일이 깨졌으면 `.corrupt-<ms>` 로 옮겨 두고 알린다(덮어쓰지 않음).
+- 설정 화면(`src/components/BoardServerSettings.tsx`, 상태 모양은 `agentBoardStorage.ts`):
+  - 사용 유형 "보드 서버"를 고르면 먼저 묻는다(이 컴퓨터·PostgreSQL 의 팀은 그 자리에 남고 서버로 복사하지 않음). 다른
+    유형으로 바꿀 때는 늘 화면 안의 확인 상자로 묻고, 로그인돼 있으면 "로그아웃하고 바꾸기"/"로그인은 남기고 바꾸기"를
+    고르게 한다(로그아웃이 실패하면 바꾸지 않음). 이 유형에서는 호스트가 거부하는 컴퓨터 이름·동기화·데이터 복사·오래된 팀
+    정리를 숨긴다. PostgreSQL 연결 칸은 다른 유형에서처럼 남는다("PostgreSQL만"으로 옮기기 전에 채워야 하므로).
+  - 서버 주소는 "저장"을 눌러야 `agents.board.server.url` 에 들어간다(Rust `check_server_url` 과 같은 규칙으로 입력 중에
+    검사하고 출처만 저장). 주소가 저장되지 않았으면 로그인 버튼이 잠긴다.
+  - 로그인: `board_server_sign_in_start` → 코드(크게, 복사 버튼, 화면 읽기 프로그램에는 한 글자씩), 승인 페이지 주소(서버와
+    같은 출처일 때만 "승인 페이지 열기", 호스트 커맨드가 연다), 호스트가 브라우저를 열지 못했으면 그 안내, 남은 시간, 취소. 폴링은 호스트가 준
+    `interval`·`retryInMs` 대로 setTimeout 을 하나씩 잇는다(0.5–60 초로 자름; setInterval 아님). 끝나거나 취소하거나 화면을
+    떠나면 멈추고, 기다리는 중(또는 시작하는 중)에 떠나면 호스트의 로그인도 취소한다. 거절·만료·오류는 "다시 시도".
+    로그인이 시작되거나 기다리는 동안에는 주소 저장이 잠긴다. 남은 시간은 `role=timer`(알림 없음)이다.
+  - 로그인 상태: 계정·역할·컴퓨터·토큰 앞자리(전체 토큰은 웹뷰에 오지 않음)·서버·이 컴퓨터가 맡은 작업 수. 주소가 로그인한
+    서버와 다르면(`serverMatches` false) 두 주소와 "그 주소로 로그인" 버튼, 계정 정지는 날짜와 함께. "로그아웃"(서버에서
+    이 컴퓨터를 해지, 맡은 작업은 놓임)과 "이 컴퓨터에서만 로그아웃"(`localOnly`, 서버에 닿지 않을 때) 모두 확인 뒤 실행한다.
+  - `board_server_status` 는 서버에 `/v1/me` 를 물으므로 폴링하지 않는다(열 때, 주소가 바뀔 때, 로그인·로그아웃 뒤, 상태 줄의
+    새로고침 버튼).
+  - `agents.board.server` 는 `config.patch` 로 바꿀 수 없다.
+- 변경 스트림(`src-tauri/src/agent_board/stream.rs`): 앱 전체에 구독 하나(tokio 작업, 앱 시작 때 띄움)가 `GET /v1/stream`
+  (Server-Sent Events, 토큰은 Authorization 헤더에만)을 연다. `remote::active()` 가 클라이언트를 주고 "탭으로 에이전트 팀 쓰기"가
+  켜져 있을 때만 돌고, 이것은 3 초마다 `spawn_blocking` 으로 확인한다(config.json·토큰 파일을 async 스레드에서 읽지 않음).
+  그래서 로그아웃·주소 변경·사용 유형 변경은 약 3 초 안에 연결을 끊고, 로그인하면 약 3 초 안에 붙는다.
+  - 이어 받기: 받은 마지막 `id`(heartbeat 의 `id` 포함, 숫자만)를 `Last-Event-ID` 로 보낸다. 주소가 바뀌면 처음부터.
+    id 없는 `reset` 은 이어 받을 id 를 지운다. id 없이 다시 붙으면(서버가 머리부터 보냄) 열린 보기 전체를 한 번 다시 읽게
+    한다. 주소가 바뀌면 `retry:` 힌트도 지운다.
+  - 다시 연결: 실패가 이어지면 1→2→4… 초(±20 % 흔들기, 최대 60 초). 연결이 30 초 넘게 열려 있었거나 이벤트 id 를 하나라도
+    받았을 때만 건강한 연결로 보고 대기를 1 초 단계로 되돌린다(그 밖의 끊김은 대기가 계속 늘어난다: 한 바이트 보내고 닫는
+    서버에 빠르게 다시 붙지 않음). `retry:` 힌트(최대 60 초)가 더 길면 그것을 쓴다. 429/503 은 `Retry-After`(최대 10 분)와
+    대기 단계 중 긴 쪽(최소 1 초; `Retry-After` 가 없으면 대기 단계), 403(계정 정지)은 10 분 뒤, 401 은 로그인이 바뀔 때까지
+    다시 붙지 않는다. 65 초 동안 한 바이트도 없으면(서버 heartbeat 는 약 20 초) 끊고 다시 붙는다. 연결 5 초, 헤더까지 15 초, 전체 시간 제한 없음,
+    리다이렉트·프록시 없음. 한 줄·한 이벤트 64 KiB 가 넘으면 끊고 id 로 이어 받는다.
+  - 알림: 이벤트의 `data.team`(저장소가 받는 팀 id 모양만)만 읽고, 팀마다 500 ms 에 한 번 Tauri 이벤트 `octo-agent-board`
+    `{team, action: "server"}` 를 낸다(첫 변경은 바로, 그 창 안의 나머지는 창이 끝날 때 한 번). `reset` 은 `{team: ""}`(모든 팀).
+    한 창 안에 서로 다른 팀이 64 개를 넘으면 `{team: ""}` 한 번을 내고 그 창이 끝날 때까지 팀을 기억하지 않는다(그 사이 변경이
+    있었으면 창이 끝날 때 `{team: ""}` 한 번 더). 기억하는 팀 수는 64 개를 넘지 않는다.
+    본문·토큰은 웹뷰로 가지 않는다.
+  - 프런트엔드: App 이 그 이벤트를 `forwardHostBoardEvent`(`src/terminal/agentBoard.ts`)로 창 이벤트로 바꾸고, `useTeamBoard`·
+    `useTeamWatch`·`useSyncStatus` 가 자기 로더로 다시 읽는다. 폴링은 남는 대비책이고 이 방식에서만 느려진다(팀 보기 30 초,
+    배지 45 초; 다른 방식은 10 초·15 초 그대로). 팀 보기는 첫 읽기가 끝난 뒤 타이머를 시작하고 간격을 기다릴 때마다 다시
+    물으므로, 사용 유형을 알게 되어도 효과가 다시 돌거나 두 번 읽지 않는다.
+  - 시험: `stream_tests.rs`(loopback axum SSE 목 서버: 이어 받기 헤더, 끊김 뒤 대기 증가, Retry-After 0·없음, 한 바이트 뒤 닫기,
+    연결 중 닫힌 뒤 401, 무응답, 403, 앱 종료, 로그아웃 때 멈춤, 401 뒤 새 로그인 기다림, reset, 디바운스, 팀 100 개)와 `src/teamStatus/serverStream.test.tsx`. 실제 보드 서버와는 확인하지 않았다.
+
 ### 알려진 한계
 
 - 제한은 링크 기준이다. 사용자가 손으로 연 탭이나 `term create` 로 만든 탭은 세지 않는다. 앱을 다시 켜면 링크는

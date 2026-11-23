@@ -37,6 +37,9 @@ pub enum BoardMode {
     Sync,
     /// Commands read and write the PostgreSQL server directly.
     Postgres,
+    /// Commands go to a board server over HTTPS (`agents.board.server.url`); the computer signs
+    /// in once and the server decides who acts. The app side lives in src/agent_board/remote.rs.
+    Server,
 }
 
 impl BoardMode {
@@ -45,6 +48,7 @@ impl BoardMode {
             BoardMode::Sqlite => "sqlite",
             BoardMode::Sync => "sync",
             BoardMode::Postgres => "postgres",
+            BoardMode::Server => "server",
         }
     }
 }
@@ -56,7 +60,7 @@ pub struct ModeChoice {
     pub warning: Option<String>,
 }
 
-/// `agents.board.mode` (`sqlite` | `sync` | `postgres`); when it is missing or empty the
+/// `agents.board.mode` (`sqlite` | `sync` | `postgres` | `server`); when it is missing or empty the
 /// older `backend` key (`sqlite` | `postgres`) is read as the same-named mode. Anything else
 /// is SQLite with a warning (never a silent switch to a server).
 pub fn parse_mode(board: Option<&Value>) -> ModeChoice {
@@ -73,6 +77,7 @@ pub fn parse_mode(board: Option<&Value>) -> ModeChoice {
             "sqlite" => ok(BoardMode::Sqlite),
             "sync" => ok(BoardMode::Sync),
             "postgres" | "postgresql" => ok(BoardMode::Postgres),
+            "server" => ok(BoardMode::Server),
             other => ModeChoice {
                 mode: BoardMode::Sqlite,
                 warning: Some(format!("unknown agents.board.mode \"{}\": using sqlite", short(other))),
@@ -90,6 +95,18 @@ pub fn parse_mode(board: Option<&Value>) -> ModeChoice {
         };
     }
     ok(BoardMode::Sqlite)
+}
+
+/// `agents.board.server.url` (trimmed; empty when missing). Nothing secret lives in config.json:
+/// the sign-in token is kept in its own file (src/agent_board/server_login.rs). The address is
+/// checked where it is used (https, or http only to this computer).
+pub fn server_url_from_board(board: Option<&Value>) -> String {
+    board
+        .and_then(|b| b.get("server"))
+        .and_then(|s| s.get("url"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 fn short(s: &str) -> String {
@@ -500,6 +517,14 @@ mod tests {
         assert_eq!(bad.mode, BoardMode::Sqlite, "sync is a mode, not a backend");
         assert!(bad.warning.is_some());
         assert_eq!(m(json!({ "mode": 3 })).mode, BoardMode::Sqlite);
+        assert_eq!(m(json!({ "mode": "server" })).mode, BoardMode::Server);
+        assert_eq!(BoardMode::Server.as_str(), "server");
+        let bad = m(json!({ "backend": "server" }));
+        assert_eq!(bad.mode, BoardMode::Sqlite, "server is a mode, not a backend");
+        assert!(bad.warning.is_some());
+        assert_eq!(server_url_from_board(Some(&json!({ "server": { "url": " https://board.example.invalid " } }))), "https://board.example.invalid");
+        assert_eq!(server_url_from_board(Some(&json!({ "server": { "url": 5 } }))), "");
+        assert_eq!(server_url_from_board(None), "");
     }
 
     #[test]

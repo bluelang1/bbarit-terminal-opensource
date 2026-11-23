@@ -3,6 +3,8 @@
 // Test connection, Create / upgrade tables (shows the statements before running them),
 // Copy data in a direction the person picks, Clean up old teams on the server (count first,
 // then a confirmation) and a status line. Rendered in the agent tab of SettingsPanel.
+// The fourth usage type, "Board server", has its own section (BoardServerSettings.tsx); in that
+// type the controls the host refuses there (sync, machine name, Copy data, Clean up) are hidden.
 //
 // The connection fields are a draft: nothing reaches config.json (and so the live store)
 // until Apply, so a half-typed host never becomes the board. Test / Create / Copy / Clean up
@@ -15,6 +17,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core';
 import { useConfig } from '../config/ConfigContext';
 import { emitAgentBoardEvent } from '../terminal/agentBoard';
 import { useSyncStatus } from '../teamStatus/source';
+import { BoardServerSettings, useBoardServer } from './BoardServerSettings';
 import { useTranslation, type TranslationKey } from '../i18n';
 import {
   BOARD_MODES,
@@ -28,8 +31,10 @@ import {
   parsePgDraft,
   pgLabel,
   readBoardMode,
+  readBoardModeSetting,
   sameDraft,
   type BoardMode,
+  type BoardModeSetting,
   type BoardPgSettings,
   type NextStep,
   type PgDraft,
@@ -44,9 +49,9 @@ import {
 } from '../terminal/agentBoardStorage';
 
 interface BoardStatus {
-  mode: BoardMode;
+  mode: BoardModeSetting;
   modeWarning?: string | null;
-  backend: 'sqlite' | 'postgres';
+  backend: 'sqlite' | 'postgres' | 'server';
   envOverride: boolean;
   passwordSaved: boolean;
   passwordFor?: string | null;
@@ -57,6 +62,8 @@ interface BoardStatus {
   counts?: { teams: number; posts: number; tasks: number };
   lastError?: { at: number; error: string } | null;
   error?: string;
+  /** Usage type `server`: the configured address (no network read). */
+  server?: { server?: string };
 }
 
 interface MigratePlan {
@@ -77,11 +84,14 @@ interface CopyResult {
 
 type CopyFrom = 'sqlite' | 'postgres';
 
-const MODE_KEYS: Record<BoardMode, [TranslationKey, TranslationKey]> = {
+const MODE_KEYS: Record<BoardModeSetting, [TranslationKey, TranslationKey]> = {
   sqlite: ['settings.agentBoard.mode.sqlite', 'settings.agentBoard.mode.sqlite.desc'],
   sync: ['settings.agentBoard.mode.sync', 'settings.agentBoard.mode.sync.desc'],
   postgres: ['settings.agentBoard.mode.postgres', 'settings.agentBoard.mode.postgres.desc'],
+  server: ['settings.agentBoard.mode.server', 'settings.agentBoard.mode.server.desc'],
 };
+
+const MODE_CHOICES: readonly BoardModeSetting[] = [...BOARD_MODES, 'server'];
 
 const NEXT_KEYS: Record<NextStep, TranslationKey> = {
   checkConnection: 'settings.agentBoard.next.checkConnection',
@@ -126,6 +136,18 @@ export function AgentBoardSettings() {
   const { t } = useTranslation();
   const board = (config.agents?.board ?? {}) as Record<string, unknown>;
   const mode = readBoardMode(board);
+  // `server` (board server): its own section; leaving it always asks first (and offers to sign
+  // out while signed in), so the usage type is never dropped silently.
+  const modeSetting = readBoardModeSetting(board);
+  const serverMode = modeSetting === 'server';
+  const serverCfg = (board.server && typeof board.server === 'object' ? board.server : {}) as Record<string, unknown>;
+  const savedServerUrl = typeof serverCfg.url === 'string' ? serverCfg.url : '';
+  const boardServer = useBoardServer(serverMode, savedServerUrl);
+  const [leaveAsk, setLeaveAsk] = useState<BoardMode | null>(null);
+  const leaveFirst = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (leaveAsk !== null) leaveFirst.current?.focus();
+  }, [leaveAsk]);
   const saved = normalizeBoardPg(board.postgres);
   const savedDraft = draftFromPg(saved);
   const [draft, setDraft] = useState<PgDraft>(savedDraft);
@@ -188,7 +210,8 @@ export function AgentBoardSettings() {
       });
   }, []);
 
-  const statusKey = `${mode}|${savedKey}`;
+  // The raw usage type: SQLite ↔ Board server both read as `sqlite` in `mode`.
+  const statusKey = `${modeSetting}|${savedKey}`;
   useEffect(() => {
     const timer = window.setTimeout(refresh, 800);
     return () => window.clearTimeout(timer);
@@ -213,17 +236,59 @@ export function AgentBoardSettings() {
     setMessage({ ok: true, lines: [t('settings.agentBoard.pg.applied')] });
   };
 
-  const setMode = (next: BoardMode) => {
-    if (next === 'postgres' && !envOverride && (dirty || savedMissing.length > 0)) {
-      setMessage({ ok: false, lines: [t(dirty ? 'settings.agentBoard.mode.applyFirst' : 'settings.agentBoard.mode.fieldsMissing')] });
-      return;
-    }
+  const writeMode = (next: BoardModeSetting) =>
     updateConfig((prev) => {
       const b: typeof prev.agents.board = { ...prev.agents.board, mode: next };
       delete b.backend;
       return { ...prev, agents: { ...prev.agents, board: b } };
     });
+
+  const setMode = (next: BoardModeSetting) => {
+    if (next === modeSetting) return;
+    if (next === 'server') {
+      // Nothing is copied: local (or PostgreSQL) teams stay where they are.
+      if (!window.confirm(t('settings.agentBoard.mode.serverEnter'))) return;
+      setLeaveAsk(null);
+      writeMode('server');
+      return;
+    }
+    if (next === 'postgres' && !envOverride && (dirty || savedMissing.length > 0)) {
+      setMessage({ ok: false, lines: [t(dirty ? 'settings.agentBoard.mode.applyFirst' : 'settings.agentBoard.mode.fieldsMissing')] });
+      return;
+    }
+    if (serverMode) {
+      // Leaving the board server: ask first (and offer to sign out while signed in).
+      setLeaveAsk(next);
+      return;
+    }
+    writeMode(next);
   };
+
+  const saveServerUrl = (origin: string) =>
+    updateConfig((prev) => {
+      const old = prev.agents.board.server;
+      const server = { ...(old && typeof old === 'object' ? (old as Record<string, unknown>) : {}), url: origin };
+      return { ...prev, agents: { ...prev.agents, board: { ...prev.agents.board, server } } };
+    });
+
+  const leave = (signOut: boolean) =>
+    leaveAsk &&
+    run('leave', async () => {
+      const next = leaveAsk;
+      if (signOut) {
+        try {
+          await invoke('board_server_sign_out', { localOnly: false });
+        } catch (e) {
+          // Nothing changes when the server could not be asked (the person decides again).
+          setLeaveAsk(null);
+          boardServer.reload();
+          throw e;
+        }
+      }
+      setLeaveAsk(null);
+      writeMode(next);
+      if (signOut) setMessage({ ok: true, lines: [t('settings.agentBoard.server.signedOutNow')] });
+    });
 
   const run = async <T,>(label: string, fn: () => Promise<T>): Promise<T | null> => {
     // One action at a time (a second click while one runs does nothing).
@@ -334,6 +399,7 @@ export function AgentBoardSettings() {
   const statusLine = (() => {
     if (!status) return statusError ? t('settings.agentBoard.status.failed') : '…';
     const parts: string[] = [];
+    if (status.backend === 'server') return fillText(t('settings.agentBoard.status.server'), { server: status.server?.server || '-' });
     parts.push(status.backend === 'postgres' ? fillText(t('settings.agentBoard.status.postgres'), { target: status.target ?? '' }) : t('settings.agentBoard.status.sqlite'));
     if (status.schemaVersion != null) parts.push(fillText(t('settings.agentBoard.status.schema'), { v: status.schemaVersion }));
     else if (status.backend === 'postgres' && !status.error) parts.push(t('settings.agentBoard.status.noTables'));
@@ -473,9 +539,9 @@ export function AgentBoardSettings() {
           {t('settings.agentBoard.usage')}
         </span>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} role="radiogroup" aria-labelledby={`${ID}-usage`}>
-          {BOARD_MODES.map((m) => (
+          {MODE_CHOICES.map((m) => (
             <label key={m} htmlFor={`${ID}-mode-${m}`} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', cursor: 'pointer', fontWeight: 'normal' }}>
-              <input id={`${ID}-mode-${m}`} type="radio" name={`${ID}-mode`} checked={mode === m} onChange={() => setMode(m)} style={{ marginTop: 3 }} />
+              <input id={`${ID}-mode-${m}`} type="radio" name={`${ID}-mode`} checked={modeSetting === m} disabled={busy === 'leave'} onChange={() => setMode(m)} style={{ marginTop: 3 }} />
               <span>
                 <span style={{ fontWeight: 600 }}>{t(MODE_KEYS[m][0])}</span>
                 <span className="setting-description" style={{ display: 'block' }}>
@@ -486,12 +552,55 @@ export function AgentBoardSettings() {
           ))}
         </div>
       </div>
+      {leaveAsk !== null && (
+        <div style={{ ...monoBox, fontFamily: 'inherit', fontSize: 12 }} role="alertdialog"
+          aria-label={t('settings.agentBoard.usage')}
+          data-testid="agent-board-server-leave"
+          onKeyDown={(e) => {
+            if (e.key === 'Escape' && !busyRef.current) {
+              e.stopPropagation();
+              setLeaveAsk(null);
+            }
+          }}
+        >
+          <div style={{ color: WARN }}>{t('settings.agentBoard.mode.serverLeave')}</div>
+          {boardServer.status?.signedIn && (
+            <div style={{ color: WARN, marginTop: 4 }}>
+              {fillText(t('settings.agentBoard.mode.serverLeaveSignedIn'), { server: boardServer.status.signedInServer ?? '-', n: boardServer.status.heldTasks })}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 6, marginTop: 6, flexWrap: 'wrap' }}>
+            {boardServer.status?.signedIn ? (
+              <>
+                <button ref={leaveFirst} type="button" className="btn-secondary" disabled={disabled} onClick={() => leave(true)}>
+                  {busy === 'leave' ? t('settings.agentBoard.working') : t('settings.agentBoard.mode.serverLeaveSignOut')}
+                </button>
+                <button type="button" className="btn-secondary" disabled={disabled} onClick={() => leave(false)}>
+                  {t('settings.agentBoard.mode.serverLeaveKeep')}
+                </button>
+              </>
+            ) : (
+              <button ref={leaveFirst} type="button" className="btn-secondary" disabled={disabled} onClick={() => leave(false)}>
+                {t('settings.agentBoard.mode.serverLeaveYes')}
+              </button>
+            )}
+            <button type="button" className="btn-secondary" disabled={disabled} onClick={() => setLeaveAsk(null)}>
+              {t('settings.agentBoard.cancel')}
+            </button>
+          </div>
+        </div>
+      )}
       {status?.modeWarning && (
         <span className="setting-description" style={{ display: 'block', color: WARN }}>
           {t('settings.agentBoard.mode.unknown')}
         </span>
       )}
 
+      {serverMode && (
+        <BoardServerSettings server={boardServer} savedUrl={savedServerUrl} onSaveUrl={saveServerUrl} defaultComputer={sync?.host ?? ''} />
+      )}
+
+      {!serverMode && (
       <div className="setting-item">
         <label htmlFor={`${ID}-host-name`} style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.hostName')}</label>
         {sync?.hostSource === 'env' ? (
@@ -506,8 +615,9 @@ export function AgentBoardSettings() {
         )}
         <span className="setting-description">{fillText(t('settings.agentBoard.hostName.desc'), { system: sync?.hostSource === 'system' ? sync.host : '-' })}</span>
       </div>
+      )}
 
-      {(mode === 'sync' || otherTeams > 0) && (
+      {!serverMode && (mode === 'sync' || otherTeams > 0) && (
         <div className="setting-item" data-testid="agent-board-sync" style={{ alignItems: 'flex-start' }}>
           <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.sync.title')}</span>
           <span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -723,6 +833,7 @@ export function AgentBoardSettings() {
         </div>
       )}
 
+      {!serverMode && (
       <div className="setting-item" style={{ marginTop: 10, alignItems: 'flex-start' }}>
         <span id={`${ID}-copy`} style={{ fontWeight: 600, fontSize: 13 }}>
           {t('settings.agentBoard.copy')}
@@ -744,7 +855,9 @@ export function AgentBoardSettings() {
         </span>
         <span className="setting-description">{t('settings.agentBoard.copy.desc')}</span>
       </div>
+      )}
 
+      {!serverMode && (
       <div className="setting-item">
         <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.cleanup')}</span>
         <button type="button" className="btn-secondary" disabled={!canRun} onClick={askCleanup}>
@@ -752,7 +865,8 @@ export function AgentBoardSettings() {
         </button>
         <span className="setting-description">{t('settings.agentBoard.cleanup.desc')}</span>
       </div>
-      {cleanupAsk && (
+      )}
+      {cleanupAsk && !serverMode && (
         <div style={{ ...monoBox, fontFamily: 'inherit', fontSize: 12 }} role="alertdialog" aria-label={t('settings.agentBoard.cleanup')}>
           <div style={{ color: WARN }}>{fillText(t('settings.agentBoard.cleanup.confirm'), { n: cleanupAsk.count, target: pgLabel(cleanupAsk.pg) })}</div>
           <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
@@ -776,7 +890,16 @@ export function AgentBoardSettings() {
         <span style={{ fontWeight: 600, fontSize: 13 }}>{t('settings.agentBoard.status')}</span>
         <span>
           {statusLine}
-          <button type="button" className="btn-secondary" style={{ marginLeft: 8 }} disabled={disabled} onClick={refresh}>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginLeft: 8 }}
+            disabled={disabled}
+            onClick={() => {
+              refresh();
+              if (serverMode) boardServer.reload();
+            }}
+          >
             {t('settings.agentBoard.status.refresh')}
           </button>
         </span>

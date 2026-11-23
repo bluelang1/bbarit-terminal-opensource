@@ -11,6 +11,19 @@ export type BoardMode = 'sqlite' | 'sync' | 'postgres';
 
 export const BOARD_MODES: readonly BoardMode[] = ['sqlite', 'sync', 'postgres'];
 
+/**
+ * Every usage type config.json may hold: the three above plus `server` (a board server over
+ * HTTPS, src-tauri/src/agent_board/remote.rs; Settings → src/components/BoardServerSettings.tsx).
+ */
+export type BoardModeSetting = BoardMode | 'server';
+
+/** `readBoardMode`, but `server` stays `server` (as in Rust `parse_mode`). */
+export function readBoardModeSetting(board: unknown): BoardModeSetting {
+  const b = (board && typeof board === 'object' ? board : {}) as Record<string, unknown>;
+  const mode = typeof b.mode === 'string' ? b.mode.trim().toLowerCase() : '';
+  return mode === 'server' ? 'server' : readBoardMode(board);
+}
+
 export const SSL_MODES = ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'] as const;
 export type SslMode = (typeof SSL_MODES)[number];
 
@@ -87,7 +100,7 @@ export function missingPgFields(pg: BoardPgSettings): Array<'host' | 'database' 
  * Config paths agents may neither read nor change through `config.get` / `config.patch`.
  * `agents.enabled` / `agents.leadPhrase` are Settings → Agent team (src/terminal/agentTeamSwitch.ts).
  */
-export const PROTECTED_CONFIG_PATHS = ['agents.enabled', 'agents.leadPhrase', 'agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.hostName', 'agents.board.adoptAfterHours'] as const;
+export const PROTECTED_CONFIG_PATHS = ['agents.enabled', 'agents.leadPhrase', 'agents.board.mode', 'agents.board.backend', 'agents.board.postgres', 'agents.board.server', 'agents.board.hostName', 'agents.board.adoptAfterHours'] as const;
 
 function splitPath(path: string): string[] {
   return path.split('.').map((k) => k.trim()).filter((k) => k.length > 0);
@@ -472,4 +485,168 @@ export function groupTeamsByHome<T extends { mirror?: boolean; homeHost?: string
   const others: T[] = [];
   for (const t of teams) (t.mirror ? others : mine).push(t);
   return { mine, others };
+}
+
+// ── Board server (usage type `server`, src-tauri/src/agent_board/server_login.rs) ──
+
+/** Why a board server address is refused (the same rules as Rust `check_server_url`). */
+export type ServerUrlError = 'empty' | 'invalid' | 'https' | 'userinfo' | 'path';
+
+function loopbackHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  return h === 'localhost' || h === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+/**
+ * The board server's origin (`https://host[:port]`) from an address as typed: https, or http
+ * only to this computer; no user name, password, path, query or fragment.
+ */
+export function checkServerUrl(raw: string): { ok: true; origin: string } | { ok: false; error: ServerUrlError } {
+  const text = raw.trim();
+  if (!text) return { ok: false, error: 'empty' };
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return { ok: false, error: 'invalid' };
+  }
+  if (url.protocol === 'http:') {
+    if (!loopbackHost(url.hostname)) return { ok: false, error: 'https' };
+  } else if (url.protocol !== 'https:') {
+    return { ok: false, error: 'invalid' };
+  }
+  if (!url.hostname) return { ok: false, error: 'invalid' };
+  if (url.username || url.password) return { ok: false, error: 'userinfo' };
+  const afterHost = text.replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '');
+  if (!(url.pathname === '/' || url.pathname === '') || url.search || url.hash || /[?#]/.test(afterHost)) return { ok: false, error: 'path' };
+  return { ok: true, origin: url.origin };
+}
+
+/** Whether the approval page may be opened in a browser: http(s) on exactly the server's origin. */
+export function sameOriginLink(link: string, serverOrigin: string): boolean {
+  try {
+    const u = new URL(link);
+    return (u.protocol === 'https:' || u.protocol === 'http:') && u.origin === serverOrigin;
+  } catch {
+    return false;
+  }
+}
+
+/** `board_server_status` (never the token; only its first characters). */
+export interface BoardServerStatus {
+  mode: string;
+  /** The configured address (its origin when it is valid). */
+  server: string;
+  /** Why the configured address cannot be used (host text). */
+  serverError: string | null;
+  signedIn: boolean;
+  /** The server this computer is signed in to. */
+  signedInServer: string | null;
+  /** False when the configured address is not the server this computer is signed in to. */
+  serverMatches: boolean;
+  nickname: string;
+  computer: string;
+  tokenPrefix: string | null;
+  role: string | null;
+  suspended: boolean;
+  suspendedUntil: string | null;
+  /** Tasks this computer holds on that server (lease book). */
+  heldTasks: number;
+  error: string | null;
+  signInPending: boolean;
+}
+
+export function normalizeBoardServerStatus(raw: unknown): BoardServerStatus | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === 'string' ? v : '');
+  const opt = (v: unknown) => (typeof v === 'string' && v ? v : null);
+  return {
+    mode: text(r.mode),
+    server: text(r.server),
+    serverError: opt(r.serverError),
+    signedIn: r.signedIn === true,
+    signedInServer: opt(r.signedInServer),
+    serverMatches: r.serverMatches !== false,
+    nickname: text(r.nickname),
+    computer: text(r.computer),
+    tokenPrefix: opt(r.tokenPrefix),
+    role: opt(r.role),
+    suspended: r.suspended === true,
+    suspendedUntil: opt(r.suspendedUntil),
+    heldTasks: typeof r.heldTasks === 'number' && Number.isFinite(r.heldTasks) ? r.heldTasks : 0,
+    error: opt(r.error),
+    signInPending: r.signInPending === true,
+  };
+}
+
+/** `board_server_sign_in_start`: what to show while the browser approval is waited for. */
+export interface ServerSignInStart {
+  server: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string | null;
+  expiresIn: number;
+  interval: number;
+  opened: boolean;
+}
+
+export function normalizeSignInStart(raw: unknown): ServerSignInStart | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const n = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
+  if (typeof r.userCode !== 'string' || !r.userCode || typeof r.verificationUri !== 'string' || !r.verificationUri) return null;
+  return {
+    server: typeof r.server === 'string' ? r.server : '',
+    userCode: r.userCode,
+    verificationUri: r.verificationUri,
+    verificationUriComplete: typeof r.verificationUriComplete === 'string' && r.verificationUriComplete ? r.verificationUriComplete : null,
+    expiresIn: n(r.expiresIn, 600),
+    interval: n(r.interval, 5),
+    opened: r.opened === true,
+  };
+}
+
+/** `board_server_sign_in_poll`. */
+export type ServerSignInPoll =
+  | { state: 'pending'; retryInMs: number }
+  | { state: 'signed_in'; nickname: string; computer: string; server: string; replaced: { server: string; revoked: boolean } | null }
+  | { state: 'denied' | 'expired' | 'error' | 'cancelled' | 'idle'; message: string };
+
+/** Shortest and longest wait between two sign-in polls, whatever the host says. */
+export const SIGN_IN_POLL_MIN_MS = 500;
+export const SIGN_IN_POLL_MAX_MS = 60_000;
+
+export function normalizeSignInPoll(raw: unknown): ServerSignInPoll {
+  const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === 'string' ? v : '');
+  switch (r.state) {
+    case 'pending': {
+      const ms = typeof r.retryInMs === 'number' && Number.isFinite(r.retryInMs) ? r.retryInMs : 5000;
+      return { state: 'pending', retryInMs: Math.min(SIGN_IN_POLL_MAX_MS, Math.max(SIGN_IN_POLL_MIN_MS, ms)) };
+    }
+    case 'signed_in': {
+      const rep = r.replaced && typeof r.replaced === 'object' ? (r.replaced as Record<string, unknown>) : null;
+      return {
+        state: 'signed_in',
+        nickname: text(r.nickname),
+        computer: text(r.computer),
+        server: text(r.server),
+        replaced: rep && typeof rep.server === 'string' ? { server: rep.server, revoked: rep.revoked === true } : null,
+      };
+    }
+    case 'denied':
+    case 'expired':
+    case 'cancelled':
+    case 'idle':
+      return { state: r.state, message: text(r.message) };
+    default:
+      return { state: 'error', message: text(r.message) || 'unexpected answer' };
+  }
+}
+
+/** `m:ss` for a countdown (never negative). */
+export function formatRemaining(ms: number): string {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }

@@ -32,8 +32,8 @@ export interface StatusPoller {
 }
 
 export interface StatusPollerOptions {
-  /** Shortest wait between polls (default 5 s). */
-  baseMs?: number;
+  /** Shortest wait between polls (default 5 s); a function is asked before every wait. */
+  baseMs?: number | (() => number);
   now?: () => number;
 }
 
@@ -72,7 +72,8 @@ export function createStatusPoller(
     return queued;
   };
 
-  const schedule = (delayMs: number = nextStatusPollDelay(lastDurationMs, baseMs)) => {
+  const base = () => (typeof baseMs === 'function' ? baseMs() : baseMs);
+  const schedule = (delayMs: number = nextStatusPollDelay(lastDurationMs, base())) => {
     if (stopped) return;
     timer = setTimeout(tick, delayMs);
   };

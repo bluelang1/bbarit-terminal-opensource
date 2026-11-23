@@ -14,7 +14,9 @@
 //! - `sqlite`: the SQLite engine (all SQL for it), file `~/.config/octo/agent-board[.dev].db`;
 //! - `pg`: the PostgreSQL engine (all SQL for it), tables in a configured schema;
 //! - `config`: usage type (`agents.board.mode`), connection settings, password file,
-//!   redaction; `copy`: "Copy data" between the engines; `admin`: the Settings commands.
+//!   redaction; `copy`: "Copy data" between the engines; `admin`: the Settings commands;
+//! - `remote` / `server_login` (app side): the `server` mode, where every command goes to a
+//!   board server over HTTPS (no store here), and its sign-in.
 //!
 //! This file holds the board's Tauri commands (no SQL here), the store selection (re-read
 //! from config.json, the environment and the password file on every command, so a change in
@@ -25,6 +27,9 @@
 
 pub mod admin;
 pub use board_store::{config, model, pg, sqlite, store};
+pub mod remote;
+pub mod server_login;
+pub mod stream;
 pub mod sync;
 
 pub use model::*;
@@ -185,6 +190,8 @@ pub struct Selection {
     pub settings: config::PgSettings,
     pub env_url: Option<String>,
     pub password: Option<config::Secret>,
+    /// `agents.board.server.url` (checked where it is used, remote.rs).
+    pub server_url: String,
 }
 
 pub fn read_selection() -> Selection {
@@ -195,6 +202,7 @@ pub fn read_selection() -> Selection {
         settings: config::PgSettings::from_board(board),
         env_url: crate::get_env_value(config::URL_ENV).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()),
         password: secret_path().ok().and_then(|p| config::read_secret(&p)),
+        server_url: config::server_url_from_board(board),
     }
 }
 
@@ -263,6 +271,15 @@ fn track<T>(r: Result<T, String>) -> Result<T, String> {
 /// App start: drop teams idle for 30 days — on the local SQLite file only (a shared
 /// PostgreSQL board is cleaned only from Settings). Never creates the database.
 pub fn prune_on_start() {
+    if remote::server_mode() {
+        // Claims kept from the last run: the lease worker renews or hands them back.
+        if let Ok(Some(r)) = remote::active() {
+            if !r.book.entries(&r.session.server).is_empty() {
+                note_holding();
+            }
+        }
+        return;
+    }
     if read_selection().uses_postgres() {
         return;
     }
@@ -279,6 +296,9 @@ pub fn prune_on_start() {
 
 #[tauri::command]
 pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.post(team.trim(), &post).await);
+    }
     let sync_mode = read_selection().mode.mode == config::BoardMode::Sync;
     let res = track(
         async {
@@ -301,6 +321,9 @@ pub async fn agent_board_post(team: String, post: PostInput) -> Result<Value, St
 
 #[tauri::command]
 pub async fn agent_board_read(team: String, query: Option<ReadQuery>) -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.read(team.trim(), &query.unwrap_or_default()).await);
+    }
     track(async { current_store()?.read(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await }.await)
 }
 
@@ -308,6 +331,9 @@ pub async fn agent_board_read(team: String, query: Option<ReadQuery>) -> Result<
 /// and its badges list teams before anything else, and must not leave a file behind).
 #[tauri::command]
 pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.teams().await);
+    }
     if !read_selection().uses_postgres() && !db_path()?.exists() {
         return Ok(Vec::new());
     }
@@ -316,6 +342,7 @@ pub async fn agent_board_teams() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 pub async fn agent_board_clear(team: String) -> Result<Value, String> {
+    remote::refuse_in_server_mode("clearing a team board")?;
     let res = track(async { current_store()?.clear(team.trim().to_string(), ctx()).await }.await)?;
     sync::note_local_write();
     Ok(res)
@@ -324,6 +351,9 @@ pub async fn agent_board_clear(team: String) -> Result<Value, String> {
 /// This instance id, host name and backend (the App plans leases with them).
 #[tauri::command]
 pub async fn agent_board_info() -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return Ok(r.info());
+    }
     let store = track(current_store())?;
     Ok(json!({
         "instance": instance_id(),
@@ -387,6 +417,15 @@ fn audit_released(released: &Value, event: &str, reason: &str) {
 /// hidden or occluded), release those whose PTY is gone. A failed release keeps the holder
 /// listed, so the next tick tries again and never renews it.
 async fn lease_worker_tick(lease_ms: i64) -> Result<(), String> {
+    if let Some(r) = remote::active()? {
+        let exiting = EXITING.load(Ordering::SeqCst);
+        let (released, holding) = r.lease_tick(lease_ms, exiting, pty_ready(), &pty_alive).await?;
+        audit_released(&json!({ "released": released }), "task_auto_release", "owner tab is gone");
+        if !holding {
+            HOLDING.store(false, Ordering::SeqCst);
+        }
+        return Ok(());
+    }
     let store = current_store()?;
     let instance = instance_id().to_string();
     let holders = store.lease_holders(instance.clone()).await?;
@@ -445,7 +484,19 @@ pub fn start_lease_worker(
 // ── Commands (tasks) ─────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) -> Result<Value, String> {
+pub async fn agent_task_write(team: String, actor: ActorInput, op: Value) -> Result<Value, String> {
+    let parsed: TaskOpInput = serde_json::from_value(op.clone()).map_err(|e| format!("invalid args `op` for command `agent_task_write`: {e}"))?;
+    if let Some(r) = track(remote::active())? {
+        // The server decides who acts; the tab id and the root/person flags stay here (the lease
+        // book's owner tab and the local modes' app-side rules, remote::Remote::precheck).
+        let caller = remote::Caller { tab: &actor.id, root: actor.root, human: actor.human };
+        let res = track(r.task_write_as(team.trim(), &parsed, &op, caller).await)?;
+        if matches!(res["task"]["state"].as_str(), Some("claimed" | "blocked")) {
+            note_holding();
+        }
+        return Ok(res);
+    }
+    let op = parsed;
     let c = ctx();
     let actor = Actor::from_input(&actor, c.host.as_deref())?;
     let res = track(async { current_store()?.task_write(team.trim().to_string(), op, actor, c).await }.await)?;
@@ -458,11 +509,17 @@ pub async fn agent_task_write(team: String, actor: ActorInput, op: TaskOpInput) 
 
 #[tauri::command]
 pub async fn agent_task_list(team: String, query: Option<TaskListQuery>) -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.task_list(team.trim(), &query.unwrap_or_default()).await);
+    }
     track(async { current_store()?.task_list(team.trim().to_string(), query.unwrap_or_default(), ctx()).await }.await)
 }
 
 #[tauri::command]
 pub async fn agent_task_show(team: String, task: i64, history: Option<bool>, stale_ms: Option<i64>) -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.task_show(team.trim(), task, history.unwrap_or(false), stale_ms).await);
+    }
     track(async { current_store()?.task_show(team.trim().to_string(), task, history.unwrap_or(false), stale_ms, ctx()).await }.await)
 }
 
@@ -470,6 +527,9 @@ pub async fn agent_task_show(team: String, task: i64, history: Option<bool>, sta
 /// A viewer command, not an `agent.*` UI command, so `bbarit-ctl` cannot reach it.
 #[tauri::command]
 pub async fn agent_board_team_events(team: String, query: Option<EventsQuery>) -> Result<Value, String> {
+    if let Some(r) = track(remote::active())? {
+        return track(r.team_events(team.trim(), &query.unwrap_or_default()).await);
+    }
     track(async { current_store()?.team_events(team.trim().to_string(), query.unwrap_or_default(), Some(board_host().to_string())).await }.await)
 }
 
@@ -481,6 +541,12 @@ pub async fn agent_task_release_owner(owner_id: String, reason: Option<String>) 
         return Ok(json!({ "released": [] }));
     }
     let reason = clean_label(reason.as_deref(), 200).unwrap_or_else(|| "owner tab closed".to_string());
+    if let Some(r) = track(remote::active())? {
+        // The tasks this computer claimed for that tab (the lease book), each with its epoch.
+        let res = json!({ "released": track(r.release_tab(&owner_id, &reason).await)? });
+        audit_released(&res, "task_auto_release", &reason);
+        return Ok(res);
+    }
     let res = track(
         async {
             current_store()?
@@ -497,6 +563,11 @@ pub async fn agent_task_release_owner(owner_id: String, reason: Option<String>) 
 /// creates the database (an app start must not leave a board file behind).
 #[tauri::command]
 pub async fn agent_task_held_on_host() -> Result<Vec<Value>, String> {
+    if remote::server_mode() {
+        // Nothing to adopt: the lease book keeps this computer's claims across a restart and
+        // the lease worker renews or hands them back by their tab's PTY.
+        return Ok(Vec::new());
+    }
     if !read_selection().uses_postgres() && !db_path()?.exists() {
         return Ok(Vec::new());
     }
@@ -505,6 +576,7 @@ pub async fn agent_task_held_on_host() -> Result<Vec<Value>, String> {
 
 #[tauri::command]
 pub async fn agent_task_lease_apply(adopt: Vec<LeaseItem>, release: Vec<LeaseItem>, lease_ms: Option<i64>) -> Result<Value, String> {
+    remote::refuse_in_server_mode("adopting or releasing leases after a restart")?;
     let res = track(
         async {
             current_store()?

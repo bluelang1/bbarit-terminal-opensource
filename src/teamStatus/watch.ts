@@ -12,6 +12,8 @@ import type { TeamBoardSource } from './source';
 /** At most this many teams (most recently active first) are read for badges. */
 export const WATCH_MAX_TEAMS = 12;
 export const WATCH_EVENT_DEBOUNCE_MS = 500;
+/** Badge poll in board server mode, where the server's change stream announces changes. */
+export const SERVER_WATCH_POLL_MS = 45_000;
 
 export interface TeamWatch {
   teams: string[];
@@ -43,7 +45,7 @@ export function watchKey(w: TeamWatch): string {
   return w.teams.map((tm) => `${tm}:${(w.needs.get(tm) || []).map((i) => i.key).join(',')}`).join('|');
 }
 
-export function useTeamWatch(source: TeamBoardSource, enabled: boolean, staleMs: number, pollMs = 15_000): TeamWatch {
+export function useTeamWatch(source: TeamBoardSource, enabled: boolean, staleMs: number, pollMs: number = 15_000): TeamWatch {
   const sourceRef = useRef(source);
   sourceRef.current = source;
   const staleRef = useRef(staleMs);
