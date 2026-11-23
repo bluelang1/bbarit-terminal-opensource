@@ -199,6 +199,10 @@ Build/test gotchas:
   worktree builds; `cargo clean --manifest-path src-tauri/Cargo.toml` is safe.
 - Gate merges on `gh pr checks <n>` unpiped (a pipe hides its exit code).
   src/guide/useGuideHost.tauri.test.ts is flaky in CI; rerun before suspecting the PR.
+- Settings tab ids differ from on-screen labels (`channels` shows as "Secretary"/"비서"); tell users
+  the label for their `language` in ~/.config/octo/config.json. i18n keys and state can outlive
+  removed UI (Telegram/Discord/Slack have no settings JSX): confirm the JSX renders before saying a
+  screen exists.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
