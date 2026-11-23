@@ -10519,6 +10519,8 @@ fn main() {
                 }
                 // Board sync (usage type "Both (sync)"): a host task; idle in the other modes.
                 agent_board::sync::start_sync_worker(app.handle().clone());
+                // Board server mode: the server's change stream refreshes open team views (idle otherwise).
+                agent_board::stream::start_stream_worker(app.handle().clone());
 
                 if std::env::var_os("BBARIT_DISABLE_BUNDLED_SKILLS_INSTALL").is_none() {
                     // Ship bundled SEO/GEO skills to this user's ~/.claude/skills (every installed copy).
@@ -10642,6 +10644,12 @@ fn main() {
             agent_board::agent_task_held_on_host,
             agent_board::agent_task_lease_apply,
             agent_board::admin::agent_board_settings_status,
+            agent_board::server_login::board_server_status,
+            agent_board::server_login::board_server_sign_in_start,
+            agent_board::server_login::board_server_sign_in_poll,
+            agent_board::server_login::board_server_sign_in_cancel,
+            agent_board::server_login::board_server_open_sign_in_link,
+            agent_board::server_login::board_server_sign_out,
             agent_board::admin::agent_board_pg_test,
             agent_board::admin::agent_board_pg_migrate,
             agent_board::admin::agent_board_copy,

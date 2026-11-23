@@ -47,6 +47,18 @@ export function emitAgentBoardEvent(detail: AgentBoardEventDetail, target: Event
   } catch { /* a viewer refresh hint only */ }
 }
 
+/**
+ * The host's Tauri event `octo-agent-board` (`{team, action}`: the sync worker, or the board
+ * server's change stream with `action: "server"`; `team: ""` = every team) as the window event
+ * views listen for. Only the team id is taken from the payload. True when one was sent.
+ */
+export function forwardHostBoardEvent(payload: unknown, target: EventTarget = window): boolean {
+  const team = payload && typeof payload === 'object' ? (payload as { team?: unknown }).team : undefined;
+  if (typeof team !== 'string' || (team !== '' && !isValidTeamId(team))) return false;
+  emitAgentBoardEvent({ team, action: 'sync' }, target);
+  return true;
+}
+
 /** Subscribe to board changes; returns the unsubscribe function. */
 export function onAgentBoardChange(listener: (detail: AgentBoardEventDetail) => void, target: EventTarget = window): () => void {
   const handler = (ev: Event) => {

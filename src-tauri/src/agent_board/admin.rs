@@ -48,6 +48,13 @@ pub async fn agent_board_settings_status() -> Result<Value, String> {
         "host": board_host(),
         "lastError": last_error().map(|(at, e)| json!({ "at": at, "error": e })),
     });
+    if sel.mode.mode == config::BoardMode::Server {
+        // No database here: the board server and this computer's sign-in (never the token).
+        out["backend"] = json!("server");
+        let (token, leases) = (super::server_login::token_path()?, super::server_login::leases_path()?);
+        out["server"] = super::server_login::status_value("server", &sel.server_url, &token, &leases, false).await;
+        return Ok(out);
+    }
     if sel.uses_postgres() {
         out["codeVersion"] = json!(super::pg::SCHEMA_VERSION);
         match sel.pg_target() {
@@ -120,6 +127,7 @@ pub async fn agent_board_pg_migrate(postgres: Option<Value>, apply: Option<bool>
 /// teams it does not have are copied). The source is never changed; nothing is deleted.
 #[tauri::command]
 pub async fn agent_board_copy(from: String, merge: Option<bool>, postgres: Option<Value>) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("Copy data")?;
     let pg = BoardStore::Pg(super::pg_store(target_from(postgres)?));
     let path = db_path()?;
     let (source, target, to) = match from.trim() {
@@ -147,6 +155,7 @@ pub use super::store::copy_between;
 /// with older tombstones). `apply` false: only count the teams it would retire.
 #[tauri::command]
 pub async fn agent_board_pg_cleanup(postgres: Option<Value>, apply: Option<bool>) -> Result<Value, String> {
+    super::remote::refuse_in_server_mode("cleaning up old teams")?;
     let store = super::pg_store(target_from(postgres)?);
     if !apply.unwrap_or(false) {
         let n = super::pg::timed(super::pg::CALL_TIMEOUT, store.stale_count(now_ms(), STALE_AFTER_MS)).await?;

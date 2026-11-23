@@ -8,6 +8,7 @@ import {
   normalizeBoardPg,
   protectedConfigRefusal,
   readBoardMode,
+  readBoardModeSetting,
   redactProtectedConfig,
 } from './agentBoardStorage';
 
@@ -170,5 +171,22 @@ describe('review gaps', () => {
     expect(sameDraft(d, { ...d })).toBe(true);
     expect(sameDraft(d, { ...d, host: 'other' })).toBe(false);
     expect(pgLabel({ ...DEFAULT_BOARD_PG, host: 'db', database: 'x', user: 'u' })).toBe('u@db:5432/x');
+  });
+});
+
+describe('board server mode setting', () => {
+  it('keeps server as server (the Rust host reads it the same way)', () => {
+    expect(readBoardModeSetting({ mode: ' Server ' })).toBe('server');
+    expect(readBoardModeSetting({ mode: 'sync' })).toBe('sync');
+    expect(readBoardModeSetting({ backend: 'server' })).toBe('sqlite');
+    expect(readBoardMode({ mode: 'server' })).toBe('sqlite');
+  });
+  it('protects agents.board.server from config.patch', () => {
+    expect(isProtectedConfigPath('agents.board.server')).toBe(true);
+    expect(isProtectedConfigPath('agents.board.server.url')).toBe(true);
+    expect(isProtectedConfigPath('agents.board.mode')).toBe(true);
+    const kept = keepProtectedConfig({ agents: { board: { server: { url: 'https://board.example.invalid' }, mode: 'server' } } } as never, { agents: { board: {} } } as never) as { agents: { board: Record<string, unknown> } };
+    expect(kept.agents.board.server).toEqual({ url: 'https://board.example.invalid' });
+    expect(kept.agents.board.mode).toBe('server');
   });
 });

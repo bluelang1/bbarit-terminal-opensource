@@ -200,15 +200,15 @@ import { agentWorktreeBaseDir, parseWorktreeRequest, prepareAgentWorktree } from
 import { agentDepth, createAgentRunReservations, normalizeAgentLimits } from './terminal/agentLimits';
 import { buildAgentRelayLogEntry, type AgentRelayLogInput } from './terminal/agentRelayLog';
 import { verifyAgentCaller, type CallerDecision, type CallerKeyInfo } from './terminal/agentCaller';
-import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, onAgentBoardChange, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
-import { isProtectedConfigPath, keepProtectedConfig, protectedConfigRefusal, redactProtectedConfig } from './terminal/agentBoardStorage';
+import { boardPostTeam, canClearBoard, canPostKind, emitAgentBoardEvent, forwardHostBoardEvent, onAgentBoardChange, formatBoardRead, isValidTeamId, parseBoardKind, parseBoardReadRequest, parseTaskNumber, planBoardRead, sanitizeBoardText, teamRootOf, type BoardPost } from './terminal/agentBoard';
+import { isProtectedConfigPath, keepProtectedConfig, protectedConfigRefusal, readBoardModeSetting, redactProtectedConfig } from './terminal/agentBoardStorage';
 import { TASK_WRITE_SUBS, buildTaskOp, formatTaskList, formatTaskShow, formatTaskWrite, normalizeAgentBoardConfig, parseTaskListRequest, planStartupLeases, planTaskRead, planTaskWrite, taskAuditFields, type HeldTask, type TaskOp, type TaskWriteResult } from './terminal/agentTasks';
 import type { ScheduledJob } from './scheduler/scheduler';
 import { loadSchedulerJobs, saveSchedulerJobs, computeNextRun, createJob as createSchedulerJob, parseNaturalSchedule, describeSchedule, normalizeLoadedSchedulerJobs } from './scheduler/scheduler';
 import { createStatusPoller } from './git/statusPoll';
 import './teamStatus/teamStatus.css';
 import { badgeCount, badgeLabel, badgeSeverity, badgeText, limitUsage, needsYou, projectTeams, teamMemberIds, teamStatusSurface, type NeedsYouItem } from './teamStatus/model';
-import { useTeamWatch } from './teamStatus/watch';
+import { SERVER_WATCH_POLL_MS, useTeamWatch } from './teamStatus/watch';
 import { POPOUT_EVENT, POPOUT_LABEL, POPOUT_SIZE, contextKey, newPopoutToken, popoutUrl, serveRequest, type PopoutContext } from './teamStatus/popout';
 import type { ActionResult, HumanTaskSub, TeamBoardSource } from './teamStatus/source';
 import type { TeamMember } from './teamStatus/TeamStatusView';
@@ -6206,7 +6206,9 @@ Office project scaffold created by BBARIT Terminal.
   };
   // Badges: read while relay children exist or the Team status tab is open (never for the
   // Dashboard tab alone). The hook re-renders only when a badge-relevant key changes.
-  const teamWatch = useTeamWatch(teamBoardSource, agentTeamOn && (!!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open), boardConfig().staleMinutes * 60_000);
+  // Board server mode: the change stream refreshes the badges; the poll is only a slower fallback.
+  const boardServerMode = readBoardModeSetting(appConfig.agents?.board) === 'server';
+  const teamWatch = useTeamWatch(teamBoardSource, agentTeamOn && (!!relayChildKey || (showDashboard && gaugeTab === 'team') || teamPopout.open), boardConfig().staleMinutes * 60_000, boardServerMode ? SERVER_WATCH_POLL_MS : undefined);
   const teamMembersOf = (team: string): TeamMember[] => teamMemberIds(agentLinksRef.current, team).map((id) => {
     const term = findTerminalAnywhere(id);
     const link = agentLinksRef.current.get(id);
@@ -6289,14 +6291,12 @@ Office project scaffold created by BBARIT Terminal.
     if (popoutCtxRef.current && isTauri()) void tauriEmitTo(POPOUT_LABEL, POPOUT_EVENT.ctx, popoutCtxRef.current).catch(() => {});
   };
   useEffect(() => { sendPopoutCtx(); }, [popoutCtxKey]);
-  // Board sync (Rust sync worker) announces teams of other machines that changed as the Tauri
-  // event `octo-agent-board`; views listen for the window event of the same name.
+  // Board sync (Rust sync worker) and the board server's change stream (agent_board/stream.rs)
+  // announce changed teams as the Tauri event `octo-agent-board`; views listen for the window
+  // event of the same name and re-read through their own loaders.
   useEffect(() => {
     if (!isTauri()) return;
-    const off = tauriListen<{ team?: unknown }>('octo-agent-board', (e) => {
-      const team = e.payload?.team;
-      if (typeof team === 'string') emitAgentBoardEvent({ team, action: 'sync' });
-    });
+    const off = tauriListen<unknown>('octo-agent-board', (e) => { forwardHostBoardEvent(e.payload); });
     return () => { void off.then((f) => f()).catch(() => {}); };
   }, []);
   useEffect(() => {

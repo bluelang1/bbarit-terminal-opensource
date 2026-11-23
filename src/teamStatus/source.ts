@@ -125,10 +125,16 @@ export async function loadTeamBoard(source: TeamBoardSource, team: string, now: 
   }
 }
 
+/** Poll of the team view in board server mode (the server's change stream announces changes;
+ * this is the fallback while it is down). */
+export const SERVER_POLL_MS = 30_000;
+
 /**
  * Live board data for one team: read on open and on team change, again on every
- * `octo-agent-board` event for that team (local writes), and by a slow poll for writes from
- * other machines (createStatusPoller: never overlapping, backs off on a slow board).
+ * `octo-agent-board` event for that team (local writes, sync, the board server's change
+ * stream), and by a slow poll for writes from other machines (createStatusPoller: never
+ * overlapping, backs off on a slow board); slower in board server mode (`info.mode`, read by the
+ * poller before every wait, so learning the mode never restarts the effect or reads twice).
  * The effect is keyed on the team id string; the source lives in a ref.
  */
 export function useTeamBoard(source: TeamBoardSource, team: string, opts: { pollMs?: number; now?: () => number } = {}): TeamBoardState & { refresh: () => void } {
@@ -138,7 +144,8 @@ export function useTeamBoard(source: TeamBoardSource, team: string, opts: { poll
   nowRef.current = opts.now ?? Date.now;
   const [state, setState] = useState<TeamBoardState>({ teams: [], info: null, snapshot: null, refusals: [], error: null, loading: true });
   const pollerRef = useRef<{ refresh: (o?: { fresh?: boolean }) => Promise<void> } | null>(null);
-  const pollMs = opts.pollMs ?? 10_000;
+  const pollMsRef = useRef(10_000);
+  pollMsRef.current = opts.pollMs ?? (state.info?.mode === 'server' ? SERVER_POLL_MS : 10_000);
 
   useEffect(() => {
     let alive = true;
@@ -157,10 +164,10 @@ export function useTeamBoard(source: TeamBoardSource, team: string, opts: { poll
         loading: false,
       }));
     };
-    const poller = createStatusPoller(run, { baseMs: pollMs });
+    const poller = createStatusPoller(run, { baseMs: () => pollMsRef.current });
     pollerRef.current = poller;
-    void poller.refresh();
-    poller.start();
+    // The timer starts after the first read, so its first wait already knows the usage type.
+    void poller.refresh().then(() => { if (alive) poller.start(); });
     const off = onAgentBoardChange((d) => {
       // A sync change without a team (other computers' teams removed) refreshes the list too.
       if (!team || d.team === team || (d.action === 'sync' && !d.team)) void poller.refresh({ fresh: true });
@@ -171,7 +178,7 @@ export function useTeamBoard(source: TeamBoardSource, team: string, opts: { poll
       poller.stop();
       if (pollerRef.current === poller) pollerRef.current = null;
     };
-  }, [team, pollMs]);
+  }, [team]);
 
   return { ...state, refresh: () => { void pollerRef.current?.refresh({ fresh: true }); } };
 }
