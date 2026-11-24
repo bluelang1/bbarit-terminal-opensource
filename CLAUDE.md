@@ -227,6 +227,10 @@ Build/test gotchas:
   container, never DROP/TRUNCATE. Server tables change only through Settings
   "Create / upgrade tables". Dev builds use `agent-board.dev.{db,secret}` and
   `agent-board-kept.dev/`.
+- Settings tab ids differ from on-screen labels (`channels` shows as "Secretary"/"비서"); tell users
+  the label for their `language` in ~/.config/octo/config.json. i18n keys and state can outlive
+  removed UI (Telegram/Discord/Slack have no settings JSX): confirm the JSX renders before saying a
+  screen exists.
 
 The source allowlist is opensource/manifest.json. The exporter creates fresh
 source directories and archives without Git history. It does not publish.
