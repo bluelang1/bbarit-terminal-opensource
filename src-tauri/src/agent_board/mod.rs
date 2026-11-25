@@ -28,6 +28,7 @@
 pub mod admin;
 pub use board_store::{config, model, pg, sqlite, store};
 pub mod remote;
+pub mod runner;
 pub mod server_login;
 pub mod stream;
 pub mod sync;
