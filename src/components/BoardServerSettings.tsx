@@ -3,10 +3,12 @@
 // login (code + approval page, polled at the pace the host gives in `retryInMs`), the signed-in
 // account and computer, and sign-out. The host commands are src-tauri/src/agent_board/
 // server_login.rs (`board_server_*`); the token never reaches the webview, only its prefix.
+// Below it, the runner for a board server (BoardRunnerSettings.tsx).
 
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { useTranslation, type TranslationKey } from '../i18n';
+import { BoardRunnerSettings } from './BoardRunnerSettings';
 import {
   SIGN_IN_POLL_MIN_MS,
   checkServerUrl,
@@ -113,9 +115,13 @@ interface Props {
   onSaveUrl: (origin: string) => void;
   /** The name the host uses when the computer name is left empty. */
   defaultComputer: string;
+  /** `agents.board.server.runnerPath` as saved. */
+  runnerPath: string;
+  /** Saves `agents.board.server.runnerPath` (checked by the host first, or empty). */
+  onSaveRunnerPath: (path: string) => void;
 }
 
-export function BoardServerSettings({ server, savedUrl, onSaveUrl, defaultComputer }: Props) {
+export function BoardServerSettings({ server, savedUrl, onSaveUrl, defaultComputer, runnerPath, onSaveRunnerPath }: Props) {
   const { t } = useTranslation();
   const { status, statusError, reload } = server;
 
@@ -612,6 +618,8 @@ export function BoardServerSettings({ server, savedUrl, onSaveUrl, defaultComput
       <span className="setting-description" role="note" style={{ display: 'block', marginTop: 6 }}>
         {t('settings.agentBoard.server.different')}
       </span>
+
+      <BoardRunnerSettings savedPath={runnerPath} onSavePath={onSaveRunnerPath} savedServerUrl={savedUrl} />
     </div>
   );
 }

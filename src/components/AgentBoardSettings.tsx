@@ -18,6 +18,7 @@ import { useConfig } from '../config/ConfigContext';
 import { emitAgentBoardEvent } from '../terminal/agentBoard';
 import { useSyncStatus } from '../teamStatus/source';
 import { BoardServerSettings, useBoardServer } from './BoardServerSettings';
+import { RUNNER_PATH_KEY, readRunnerPath } from '../terminal/boardRunner';
 import { useTranslation, type TranslationKey } from '../i18n';
 import {
   BOARD_MODES,
@@ -142,6 +143,7 @@ export function AgentBoardSettings() {
   const serverMode = modeSetting === 'server';
   const serverCfg = (board.server && typeof board.server === 'object' ? board.server : {}) as Record<string, unknown>;
   const savedServerUrl = typeof serverCfg.url === 'string' ? serverCfg.url : '';
+  const savedRunnerPath = readRunnerPath(serverCfg);
   const boardServer = useBoardServer(serverMode, savedServerUrl);
   const [leaveAsk, setLeaveAsk] = useState<BoardMode | null>(null);
   const leaveFirst = useRef<HTMLButtonElement | null>(null);
@@ -268,6 +270,13 @@ export function AgentBoardSettings() {
     updateConfig((prev) => {
       const old = prev.agents.board.server;
       const server = { ...(old && typeof old === 'object' ? (old as Record<string, unknown>) : {}), url: origin };
+      return { ...prev, agents: { ...prev.agents, board: { ...prev.agents.board, server } } };
+    });
+
+  const saveRunnerPath = (path: string) =>
+    updateConfig((prev) => {
+      const old = prev.agents.board.server;
+      const server = { ...(old && typeof old === 'object' ? (old as Record<string, unknown>) : {}), [RUNNER_PATH_KEY]: path };
       return { ...prev, agents: { ...prev.agents, board: { ...prev.agents.board, server } } };
     });
 
@@ -597,7 +606,7 @@ export function AgentBoardSettings() {
       )}
 
       {serverMode && (
-        <BoardServerSettings server={boardServer} savedUrl={savedServerUrl} onSaveUrl={saveServerUrl} defaultComputer={sync?.host ?? ''} />
+        <BoardServerSettings server={boardServer} savedUrl={savedServerUrl} onSaveUrl={saveServerUrl} defaultComputer={sync?.host ?? ''} runnerPath={savedRunnerPath} onSaveRunnerPath={saveRunnerPath} />
       )}
 
       {!serverMode && (
